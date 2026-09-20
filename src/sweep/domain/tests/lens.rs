@@ -46,8 +46,21 @@ fn lens_pair_suspended(counterpart: Location) -> RelationShape {
     }
 }
 
+/// A deterministic id for a fixture root path — the tally now keys on root
+/// id, not path, so two calls naming the same path must agree on one id, and
+/// two different paths must not collide on the same id, exactly as real
+/// roots guarantee.
+fn root_id_for(root_path: &str) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    root_path.hash(&mut hasher);
+    (hasher.finish() % 1_000_000) as i64
+}
+
 /// A place standing on a suspended root — the first sink axis.
 fn on_suspended_root(mut f: StructuralFinding, root_path: &str) -> StructuralFinding {
+    f.subject.root_id = root_id_for(root_path);
     f.subject.root_path = root_path.to_string();
     f.subject_suspended = true;
     f
@@ -64,7 +77,7 @@ fn evidence_on_suspended_root(rel: &str, gain_bytes: u64, root_path: &str) -> St
         0,
         FindingNature::Verify,
         lens_pair_suspended(Location {
-            root_id: 9,
+            root_id: root_id_for(root_path),
             root_path: root_path.to_string(),
             rel_prefix: "parked".to_string(),
         }),
@@ -75,7 +88,7 @@ fn tally<'a>(ranked: &'a RankedSweep, root_path: &str) -> &'a SuspendedRootTally
     ranked
         .suspended
         .iter()
-        .find(|t| t.root_path == root_path)
+        .find(|t| t.parked.root_path == root_path)
         .unwrap_or_else(|| panic!("no tally for {root_path}"))
 }
 
@@ -908,7 +921,7 @@ fn suspended_tallies_are_ordered_by_root_path() {
     let paths: Vec<&str> = ranked
         .suspended
         .iter()
-        .map(|t| t.root_path.as_str())
+        .map(|t| t.parked.root_path.as_str())
         .collect();
     assert_eq!(paths, ["/rs-a", "/rs-z"]);
 }

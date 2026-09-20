@@ -580,7 +580,7 @@ mod tests {
 
         // Verify actually unsuspended in DB
         let roots = repo::root::fetch_all(&conn).unwrap();
-        assert!(roots[0].is_active());
+        assert!(!roots[0].is_suspended());
     }
 
     #[test]

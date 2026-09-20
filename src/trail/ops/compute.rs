@@ -335,6 +335,43 @@ fn group_extractions_by_decision(
     map
 }
 
+/// Where a removed origin root's story is bound now, for every root an
+/// extraction row cites that the live index no longer knows — the same
+/// repair `trail show`'s `drew from:` lines and the composition card already
+/// carry for a cited origin (`ops::show::compute_show`,
+/// `ops::composition::compute_composition`), which `--jsonl`'s raw
+/// extraction rows had no fact for at all.
+///
+/// Never a suspended bit: an extraction row states what happened, never what
+/// stands today (the historical-line law, `render::RootStanding::AsItWasThen`
+/// — the same reason `trail show` and `crossings` carry no such mark for a
+/// cited origin). A live root's `root_removed` is derived by the caller
+/// straight off `live_root_paths`, cheaply and without a query; only a
+/// removed root's retirement needs one, so this fetches one lookup per
+/// distinct removed root, never per row.
+pub fn retired_origin_books(
+    conn: &Connection,
+    extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    live_root_paths: &HashSet<String>,
+) -> Result<HashMap<String, String>> {
+    let mut removed_paths: Vec<&str> = extractions
+        .values()
+        .flatten()
+        .map(|row| row.root_path.as_str())
+        .filter(|path| !live_root_paths.contains(*path))
+        .collect();
+    removed_paths.sort_unstable();
+    removed_paths.dedup();
+
+    let mut retired_books = HashMap::new();
+    for path in removed_paths {
+        if let Some(retired) = crate::retire::find_retirement_covering_path(conn, path)? {
+            retired_books.insert(path.to_string(), retired.book_display);
+        }
+    }
+    Ok(retired_books)
+}
+
 /// The single root containing every prefix of this view, when there is one.
 ///
 /// `None` for a global view (no prefixes), a view spanning several roots, and

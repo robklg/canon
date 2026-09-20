@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
 use crate::core::domain;
+use crate::core::domain::resolution::standing_first;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
@@ -15,7 +16,7 @@ use crate::core::ops::scope::classify_all;
 use crate::expr::{apply_filters, Filter, UsedStatus};
 use crate::survey::domain::analysis::{
     classify_location, count_only_here, discover_scopes_by_root, find_unique_object_ids,
-    standing_first, LocationKind, ScopeLocation,
+    LocationKind, ScopeLocation,
 };
 use crate::survey::domain::object_index::{ArchivePresence, ObjectIndex};
 
@@ -347,9 +348,18 @@ pub fn compute_survey(
         // Whether going to look here means opening a door. Read from what
         // stands at the place rather than from the discovered scope's root,
         // so a `--other` location the user named answers the same way a
-        // discovered one does.
-        let location_is_parked =
-            !at_location.is_empty() && at_location.iter().all(|s| s.root_suspended);
+        // discovered one does. The "non-empty and every copy behind a closed
+        // door" law is `only_on_suspended`'s; this is the second caller,
+        // routed through it rather than re-typing its body over `&[&Source]`.
+        let location_is_parked = domain::resolution::only_on_suspended(
+            &at_location
+                .iter()
+                .map(|s| domain::object::ArchiveCopy {
+                    root_id: s.root_id,
+                    root_suspended: !s.is_active(),
+                })
+                .collect::<Vec<_>>(),
+        );
 
         // Complementary content and classification (only with affinity enabled)
         let (complementary_count, only_here_count, kind, complementary_paths) = if params

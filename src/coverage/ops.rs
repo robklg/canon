@@ -44,8 +44,16 @@ pub struct CoverageStats {
     /// behind a door: marked, never leading.
     pub archived_only_parked: ParkedEvidence,
     /// The fleet the roots are named against — kept beside the evidence so
-    /// the display layer resolves nothing.
-    archive_roots: Vec<Root>,
+    /// the display layer resolves nothing. Public like every other field on
+    /// this result type (`CoverageStats` itself already escapes the
+    /// subsystem as `compute_per_root`'s return type, so a narrower
+    /// `pub(super)` here would not change what can actually reach it): the
+    /// interface composes the printed suffix itself
+    /// (`ParkedEvidence::bulleted_clause`), a one-consumer, screen-only
+    /// composition that belongs there rather than behind an ops method —
+    /// that claim is about where the *composition* lives, not about this
+    /// field's own visibility.
+    pub archive_roots: Vec<Root>,
 }
 
 impl CoverageStats {
@@ -98,12 +106,6 @@ impl CoverageStats {
     /// no longer hide inside this number.
     pub fn unarchived(&self) -> i64 {
         self.coverable_sources() - self.archived_sources
-    }
-
-    /// The archived line's trailing qualifier, or `None` when nothing here
-    /// rests solely behind a door.
-    pub fn only_parked_segment(&self) -> Option<String> {
-        self.archived_only_parked.segment(&self.archive_roots)
     }
 }
 
@@ -241,9 +243,14 @@ pub fn compute_per_root(
     include: &IncludeSet,
 ) -> Result<(Vec<CoverageStats>, CoverageStats, UsedStatus, usize)> {
     let all_roots = repo::root::fetch_all(conn)?;
-    let roots: Vec<&Root> = all_roots
-        .iter()
-        .filter(|r| r.is_active())
+    // Routed through the fleet partition rather than a bare `!is_suspended()`
+    // filter: behaviour is unchanged — the ratified wide-view silence still
+    // applies — but the parked half is now typed `ParkedRoot` data rather
+    // than discarded outright, so a future statement has it on hand instead
+    // of re-deriving it.
+    let (open, _parked) = crate::core::domain::root::open_roots(&all_roots);
+    let roots: Vec<&Root> = open
+        .into_iter()
         .filter(|r| include.includes_archived() || r.is_source())
         .collect();
 
@@ -493,7 +500,10 @@ mod tests {
         );
         assert_eq!(stats.archived_only_parked.count, 1);
         assert_eq!(
-            stats.only_parked_segment().unwrap(),
+            stats
+                .archived_only_parked
+                .segment(&stats.archive_roots)
+                .unwrap(),
             "1 only on suspended /arc-parked"
         );
     }
@@ -516,7 +526,10 @@ mod tests {
 
         assert_eq!(stats.archived_sources, 1);
         assert_eq!(stats.archived_only_parked.count, 0);
-        assert!(stats.only_parked_segment().is_none());
+        assert!(stats
+            .archived_only_parked
+            .segment(&stats.archive_roots)
+            .is_none());
     }
 
     #[test]
@@ -576,7 +589,10 @@ mod tests {
             framed.archived_only_parked.count, 0,
             "the frame has not looked everywhere, so it claims nothing"
         );
-        assert!(framed.only_parked_segment().is_none());
+        assert!(framed
+            .archived_only_parked
+            .segment(&framed.archive_roots)
+            .is_none());
 
         // Unframed, the same world answers — truthfully, with a live copy.
         let whole = compute_stats(&mut conn, &refs, None, &roots).unwrap();

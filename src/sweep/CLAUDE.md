@@ -29,9 +29,9 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   live-preferred counterpart choice decides which place a finding *cites as evidence*, and
   `Coverage.suspended_locations` *counts* locations — neither orders anything, which is the property
   the law is about, and no more should be claimed for them. The count is inert; the citation is
-  destructive, because the losing scope survives only as a `ContextRelation` carrying `location` and
-  `size_pct`, so a later lens cannot recompute the discarded witness's pair statement or its
-  `class`.
+  destructive, because the losing scope survives only as a `ContextRelation` — carrying `location`,
+  `size_pct` and its own `location_suspended` bit — so a later lens cannot recompute the discarded
+  witness's pair statement or its `class`.
 - **The disjointness invariant** is the correctness heart: emission at the maximal subject
   (emit-and-stop at the lifting tolerance), never ancestor-descendant pairs — "A/photos is 100%
   inside A" must stay structurally unreachable. LCA subtraction makes matched weight
@@ -306,10 +306,14 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   drive, and custody stands — suspending never un-archives. What the closed door withdraws is the
   board's willingness to *invite* an action, not the truth of the claim, and no wording on this
   surface may conflate the two.
-- **No in-entry suspension furniture.** With both axes in force no shown entry can have a parked root
-  on either side, so `counterpart_line` and `print_hub` carry no suspended branch and `HubEntry` no
-  `counterpart_suspended` field. Suspension is stated on the footer's own lines and, for scattered
-  evidence, as a location count; nowhere else.
+- **No in-entry furniture for the two demoting axes.** With both axes in force no *shown subject or
+  counterpart* can have a parked root on either side, so `counterpart_line` and `print_hub` carry no
+  suspended branch and `HubEntry` no `counterpart_suspended` field. Suspension is stated on the
+  footer's own lines and, for scattered evidence, as a location count. **A context relation is
+  different** — it is neither sunk nor demoted (see above), so it is the one shown-entry shape that
+  *does* carry its own marker: `sweep/cli.rs`'s context line prints
+  `crate::core::domain::root::suspended_marker(ctx.location_suspended)` beside a context location's
+  path (`a_context_relation_names_its_own_parked_root`).
 - **The suspended footer**: one line per suspended root, never one per reason — the user thinks in
   the act they performed. Grammar `<root> suspended — not ranked: <causes> · <way back>`, the two
   causes running in parallel and differing by one word (*on it* / *with copies on it*), each

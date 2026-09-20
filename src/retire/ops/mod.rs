@@ -44,13 +44,43 @@ pub const SHELF_DIR: &str = "retired";
 /// belongs to the other absence, where there is genuinely no shelf to bind to.
 fn parked_shelf_refusal(
     outcome: &crate::core::ops::receipt::LedgerRootOutcome,
-    parked: &[String],
+    parked: &[crate::core::domain::root::ParkedRoot],
 ) -> String {
+    let paths: Vec<String> = parked.iter().map(|p| p.root_path.clone()).collect();
     format!(
         "Retirement needs an archive root to hold the record — every archive root is suspended ({}). To open one: {}",
-        parked.join(", "),
+        crate::core::domain::root::capped_root_names(&paths).as_list(),
         outcome.unsuspend_hint().unwrap_or_default()
     )
+}
+
+/// The entry gate named above: the shelf's own precondition, raised as a
+/// refusal rather than merely stated. `shelf_blocker` answers the same
+/// question for a *reading*, which must state without stopping — this is the
+/// act's own door, and the two causes earn different error classes: no
+/// archive root at all is a real misconfiguration and wears `Error:`; every
+/// archive root suspended is the user's own closed door and does not, so it
+/// carries the same sentence out as a [`crate::core::domain::root::DoorRefused`]
+/// instead. `Ok(())` when a shelf stands.
+pub fn validate_retire_target(
+    roots: &[crate::core::domain::root::Root],
+    config: &crate::core::domain::config::LedgerConfig,
+) -> anyhow::Result<()> {
+    let outcome = crate::core::ops::receipt::resolve_ledger_root(roots, config);
+    match &outcome {
+        crate::core::ops::receipt::LedgerRootOutcome::Found { .. } => Ok(()),
+        crate::core::ops::receipt::LedgerRootOutcome::NoArchiveRoot => {
+            anyhow::bail!(
+                "Retirement needs an archive root to hold the record — no archive root is registered. To remove the root without binding its story: canon roots rm"
+            )
+        }
+        crate::core::ops::receipt::LedgerRootOutcome::AllArchiveRootsSuspended { roots } => Err(
+            crate::core::domain::root::DoorRefused::fleetwide(parked_shelf_refusal(
+                &outcome, roots,
+            ))
+            .into(),
+        ),
+    }
 }
 
 mod ceremony;

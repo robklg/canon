@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::core::domain::format_count;
+use crate::core::domain::root::DoorVerb;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
@@ -34,7 +35,7 @@ pub fn run(
     let archive_label: Option<String> = archive_target.as_ref().map(|target| {
         let spec = archive_spec.unwrap_or_default();
         match &target.parked {
-            Some(_) => format!("{spec} (suspended)"),
+            Some(_) => format!("{spec}{}", crate::core::domain::root::ROOT_SUSPENDED_MARKER),
             None => spec.to_string(),
         }
     });
@@ -106,7 +107,7 @@ fn display_compact_scoped(stats: &CoverageStats, scope: &ResolvedScope) {
     };
     // Compact is one line on stdout by design and carries no scope header,
     // so the boundary's set-asides go to stderr rather than going unsaid.
-    crate::scope::eprint_scope_set_asides(scope);
+    crate::scope::eprint_scope_set_asides(scope, DoorVerb::SetAside);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let _ = print_compact_line(&mut handle, &label, stats, true);
@@ -179,6 +180,21 @@ fn print_compact_line<W: std::io::Write>(
     )
 }
 
+/// What the archived line adds when part of the count rests solely behind a
+/// closed door — nothing at all when it does not.
+///
+/// The registry's testifying clause, at the surface a user reads before
+/// deciding a drive can go: parking never un-archives, so the number is
+/// unchanged and the qualifier trails it rather than replacing it. A
+/// one-consumer, screen-only composition, so it stays here rather than
+/// behind an ops method — `stats.archived_only_parked`/`stats.archive_roots`
+/// are kept beside each other for exactly this call.
+fn only_parked_suffix(stats: &CoverageStats) -> String {
+    stats
+        .archived_only_parked
+        .bulleted_clause(&stats.archive_roots)
+}
+
 fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: Option<&str>) {
     {
         let stdout = std::io::stdout();
@@ -234,19 +250,6 @@ fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: O
     } else {
         println!("  Unarchived:      {:>8}", format_count(stats.unarchived()));
     }
-}
-
-/// What the archived line adds when part of the count rests solely behind a
-/// closed door — nothing at all when it does not.
-///
-/// The registry's testifying clause, at the surface a user reads before
-/// deciding a drive can go: parking never un-archives, so the number is
-/// unchanged and the qualifier trails it rather than replacing it.
-fn only_parked_suffix(stats: &CoverageStats) -> String {
-    stats
-        .only_parked_segment()
-        .map(|segment| format!(" · {segment}"))
-        .unwrap_or_default()
 }
 
 fn display_per_root_stats(

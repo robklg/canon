@@ -489,6 +489,15 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   them are reachable: the timeline holds them directly above for the transitioned section, the
   origin door for the origins section. `MultiOrigin` is deliberately **not** relabelled — it names
   no root, and making it parallel would mean coining a wording for a line nothing asked about.
+  **Origin lines order standing-first** (`core::domain::resolution::standing_first`, the
+  **stated-never-headlined** law), then files descending, then the tie-break above — a parked
+  origin never leads the card on weight alone. `MultiOrigin` names no root and so has no door to
+  answer for, reading as open for this key. **The cap (`CARD_ORIGIN_CAP`) can still put a parked
+  origin past the fold** — the ordering does not promise visibility on its own, only that a shown
+  origin is never out-ranked by a closed door — but the card's remainder line counts every
+  omission unconditionally ("… and N more origins"), so the pause is still stated, never silent;
+  it reads live each run, so an unsuspended root's origin simply reappears above the fold on the
+  next read rather than staying misfiled in a frozen record.
 - **`arrival unrecorded` names an absence and no cause.** Those sources are tracked — indexed,
   present, counted in the header above; what is missing is the record of how they arrived, and the
   row cannot say why, predating recording being one of several indistinguishable reasons.

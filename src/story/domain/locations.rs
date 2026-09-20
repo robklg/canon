@@ -55,8 +55,19 @@ impl LocationAggregate {
 /// common node. If that node is strictly below a base, it alone is the
 /// answer (the widest honest one-line where — fan-out beneath it is shape,
 /// not information). Otherwise emit its branch groups, each chain-collapsed
-/// to where it first branches or holds files, ordered by weight then path,
-/// capped with a counted remainder.
+/// to where it first branches or holds files, **selected** for the cap by
+/// weight then path and returned in that same order — standing never
+/// decides which locations earn a slot, nor how the returned list is
+/// ordered, since this same aggregate feeds the book's Reference voicing,
+/// which is never rewritten and so can never be allowed to depend, in
+/// membership *or* in order, on which doors happened to be closed the
+/// afternoon it was bound. The **stated-never-headlined** law (a parked
+/// entry never leads) is applied only at render time, in
+/// `story::ops::render::fmt_locations`, gated on `Voicing::Judgment` exactly
+/// like the door marker beside it — this function stays voicing-blind by
+/// construction, so there is nowhere here a reorder could leak in. The
+/// plain form's locations carry no standing (all unmarked, see below), so
+/// this key never applies to it regardless.
 /// The plain form, for callers whose locations carry no standing: an act's
 /// recorded destinations, which are a past-tense line about where content
 /// went, and the comparison keys built from them. Every entry comes back
@@ -132,6 +143,15 @@ fn aggregate_impl(
 
     let top = collapse(0);
     let top_path = tree.path(top);
+    // Selection order only — weight then path, never standing, and this
+    // order is what the aggregate returns: no reorder happens anywhere in
+    // this function. Which locations earn a cap slot, and what order they
+    // come back in, must never depend on bind-time door status, because
+    // this same aggregate feeds the book's Reference voicing, which is
+    // never rewritten — a stray reorder here would be as much a bind-time
+    // claim as a missing location, even with no marker printed beside it.
+    // `story::ops::render::fmt_locations` is where voicing exists, and it is
+    // the only place standing may reorder anything, gated on `Voicing::Judgment`.
     let branch_groups = |top: u32| -> Vec<LocationCount> {
         let mut groups: Vec<LocationCount> = Vec::new();
         if direct[top as usize] > 0 {
@@ -179,7 +199,8 @@ fn aggregate_impl(
         };
     }
 
-    // Vacuous common node: emit its branch groups instead.
+    // Vacuous common node: emit its branch groups instead, weight-selected
+    // and left in weight order — never reordered by standing here.
     let mut groups = branch_groups(top);
     let omitted_locations = groups.len().saturating_sub(cap);
     groups.truncate(cap);
@@ -286,6 +307,43 @@ mod tests {
     }
 
     #[test]
+    fn cap_membership_never_depends_on_standing_only_weight() {
+        // 4 entries, cap 3. The parked entry outweighs the lightest live
+        // one, so a standing-aware *selection* would have pushed it out of
+        // a cap slot and into the counted remainder for no reason but its
+        // root's suspension — exactly the leak the book-facing aggregate
+        // must never carry, since the same `LocationAggregate` also feeds
+        // the Reference voicing, which is never rewritten and so can never
+        // be allowed to depend on which doors were closed at bind time.
+        // Selection is weight-only: the parked entry still earns its slot,
+        // and standing only reorders the survivors for display.
+        let out = aggregate_locations_expanded(
+            &[
+                ("/arc/a", 40, false),
+                ("/arc/b", 30, true),
+                ("/arc/c", 20, false),
+                ("/arc/d", 5, false),
+            ],
+            &["/arc"],
+            3,
+        );
+        let paths: Vec<&str> = out.locations.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(out.omitted_locations, 1);
+        assert!(
+            paths.contains(&"/arc/b"),
+            "the parked entry must still earn its cap slot by weight: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"/arc/d"),
+            "the lightest entry, not the parked one, is what the cap should drop: {paths:?}"
+        );
+        // The survivors come back in weight order, exactly as selected —
+        // display order (standing-first) is render-time work, tested at
+        // `story::ops::render::fmt_locations` instead, not here.
+        assert_eq!(paths, vec!["/arc/a", "/arc/b", "/arc/c"]);
+    }
+
+    #[test]
     fn ordering_is_weight_then_path() {
         let out = agg(
             &[("/archive/b", 10), ("/archive/a", 10), ("/archive/c", 20)],
@@ -389,6 +447,26 @@ mod tests {
             !merged.suspended,
             "a live copy under the entry means nothing needs opening"
         );
+    }
+
+    #[test]
+    fn the_aggregate_itself_stays_weight_ordered_regardless_of_standing() {
+        // This function is voicing-blind by construction (see its own doc):
+        // the stated-never-headlined law's *ordering* half is render-time
+        // work, in `story::ops::render::fmt_locations`, gated on
+        // `Voicing::Judgment`. A heavier parked entry ("/arc/b", 20 files)
+        // outranks a lighter live one here, on weight alone — reordering it
+        // is exactly what this layer must never do, since the book's
+        // Reference voicing reads this same, unreordered aggregate.
+        let out = aggregate_locations_expanded(
+            &[("/arc/a", 5, false), ("/arc/b", 20, true)],
+            &["/arc"],
+            3,
+        );
+        let paths: Vec<&str> = out.locations.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(paths, vec!["/arc/b", "/arc/a"]);
+        assert!(out.locations[0].suspended);
+        assert!(!out.locations[1].suspended);
     }
 
     #[test]

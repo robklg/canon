@@ -204,14 +204,17 @@ fn a_parked_archive_fleet_leaves_the_shelf_out_of_view_not_absent() {
     let shelf = archive.path().join(SHELF_DIR);
     place_book(&shelf, "gone-2026-08-02", "/gone", 3980);
     let archive_path = archive.path().to_string_lossy().to_string();
-    insert_test_root(&conn, &archive_path, "archive", true);
+    let archive_id = insert_test_root(&conn, &archive_path, "archive", true);
 
     let listing = compute_shelf_listing(&conn, &LedgerConfig::default()).unwrap();
 
     assert_eq!(
         listing.shelf,
         crate::core::ops::receipt::LedgerRootOutcome::AllArchiveRootsSuspended {
-            roots: vec![archive_path.clone()],
+            roots: vec![crate::core::domain::root::ParkedRoot {
+                root_id: archive_id,
+                root_path: archive_path.clone(),
+            }],
         }
     );
     assert_eq!(listing.shelf_path(), None);

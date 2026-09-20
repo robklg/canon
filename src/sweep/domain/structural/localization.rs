@@ -69,6 +69,12 @@ pub enum RelationShape {
 pub struct ContextRelation {
     pub location: Location,
     pub size_pct: f64,
+    /// Whether the location stands on a root the user has closed the door
+    /// on — plain engine data, mirroring `counterpart_suspended` and
+    /// `suspended_locations` beside it. A context relation may cite a parked
+    /// place; testimony, stated and never headlined, so the field is carried
+    /// rather than filtered.
+    pub location_suspended: bool,
 }
 
 /// A subject with its relation shape resolved.
@@ -349,6 +355,7 @@ fn localize_one(
             } else {
                 0.0
             },
+            location_suspended: roots[sc.root_idx].suspended,
         })
         .collect();
 

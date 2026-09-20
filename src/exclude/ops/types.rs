@@ -248,6 +248,6 @@ pub(super) fn object_source_info(s: &Source) -> ObjectSourceInfo {
     ObjectSourceInfo {
         path: s.path(),
         is_archive: s.is_from_role("archive"),
-        is_suspended: s.root_suspended,
+        is_suspended: !s.is_active(),
     }
 }

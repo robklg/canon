@@ -1,8 +1,8 @@
 # roots/ — the command surface over the shared root and note nouns
 
 `canon roots list/rm/comment/suspend/unsuspend`. **Three strata, no domain** — a deliberate
-absence: roots' domain logic lives on `Root` itself (`is_suspended`/`is_active`/`matches_scope`),
-shared by every subsystem, rather than manufactured into a `roots/domain.rs` to fill a template.
+absence: roots' domain logic lives on `Root` itself (`is_suspended`/`matches_scope`), shared by
+every subsystem, rather than manufactured into a `roots/domain.rs` to fill a template.
 
 Sealed behind a barrel of `list`/`remove`/`set_comment`/`suspend`/`unsuspend`, consumed by
 `main.rs`, plus `plan_remove` and `remove_root_data`, which retirement's ceremony reaches across

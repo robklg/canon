@@ -137,7 +137,7 @@ pub fn compile_book(
         &story.stamp_families,
     );
     let posture = derive_posture(
-        story.root.suspended,
+        story.root.is_suspended(),
         story.reachable,
         story.root.last_scanned_at,
     );
@@ -637,7 +637,7 @@ fn write_meta(
             path: &story.root.path,
             role: &story.root.role,
             comment: story.root.comment.as_deref(),
-            suspended: story.root.suspended,
+            suspended: story.root.is_suspended(),
             first_indexed: story.first_indexed.map(iso_utc),
             last_scan: story.root.last_scanned_at.map(iso_utc),
             compiled_at: iso_utc(params.now),

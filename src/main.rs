@@ -847,20 +847,68 @@ fn resolve_canon_home(flag: Option<&Path>) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The channel a [`crate::core::domain::root::DoorRefused`] surfacing from
+/// deep inside a command's own operations belongs on — the same channel that
+/// command's own scope statements already use, so a door met early (at the
+/// argument-scope boundary, already routed through `scope::open_door` inside
+/// [`run`]) and one met later (inside an operation, carried out of it as a
+/// `DoorRefused`) read as the same kind of refusal rather than switching
+/// streams partway through one run.
+///
+/// **Only the commands this story's own charter named are routed here; the
+/// wildcard arm is today's status quo (stderr), preserved rather than
+/// guessed at for everything else.** This is a deliberate narrowing, not a
+/// claim of completeness: several commands not named above *do* reach this
+/// same catch with a `DoorRefused` raised from deep inside an op (`compare`,
+/// `survey --other`, `exclude duplicates` — all three through
+/// `core::ops::scope::refuse_parked_locations`), and today fall through to
+/// the wildcard's stderr even though each of those commands' own scope
+/// statement already prints on stdout. Wiring the remaining raise sites in
+/// is named future work, not silently out of scope.
+fn door_channel_for(command: &Commands) -> scope::DoorChannel {
+    match command {
+        // Effectful — the established channel for every other effectful
+        // command's own scope statement (`facts delete`, `exclude
+        // set/clear/set-object`, `cluster generate`'s own set-aside line).
+        Commands::Scan { .. } | Commands::Apply { .. } => scope::DoorChannel::Stdout,
+        Commands::Cluster { action } => match action {
+            ClusterAction::Generate { .. } | ClusterAction::Refresh { .. } => {
+                scope::DoorChannel::Stdout
+            }
+            ClusterAction::Status { .. } => scope::DoorChannel::Stderr,
+        },
+        // The ceremony's own printing is already on stdout throughout
+        // (`retire/cli.rs`'s target-door refusal, its readiness report); the
+        // shelf-precondition refusal (`validate_retire_target`) joins it.
+        Commands::Roots {
+            action: Some(RootsAction::Retire { .. }),
+            ..
+        } => scope::DoorChannel::Stdout,
+        _ => scope::DoorChannel::Stderr,
+    }
+}
+
 /// The front door.
 ///
 /// Errors are rendered here rather than by `Result`'s own reporting, for one
 /// reason: **a refusal that is itself a legitimate answer must not wear an
 /// `Error:` prefix**. A closed door is that case exactly — the user shut it,
 /// and being told so is the answer to the question they asked — so a
-/// [`DoorRefused`] anywhere in the chain is stated as it stands. Everything
-/// else is a real failure and renders exactly as before.
+/// [`DoorRefused`] anywhere in the chain is stated as it stands, **on the
+/// dispatched command's own class channel** ([`door_channel_for`]) rather
+/// than unconditionally on stderr. Everything else is a real failure and
+/// renders exactly as before.
 fn main() -> std::process::ExitCode {
-    match run() {
+    let cli = Cli::parse();
+    let channel = door_channel_for(&cli.command);
+    match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             match err.downcast_ref::<crate::core::domain::root::DoorRefused>() {
-                Some(refusal) => eprintln!("{refusal}"),
+                Some(refusal) => match channel {
+                    scope::DoorChannel::Stdout => println!("{refusal}"),
+                    scope::DoorChannel::Stderr => eprintln!("{refusal}"),
+                },
                 None => eprintln!("Error: {err:?}"),
             }
             std::process::ExitCode::FAILURE
@@ -868,9 +916,8 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run() -> Result<()> {
+fn run(cli: Cli) -> Result<()> {
     let command_line = std::env::args().collect::<Vec<_>>().join(" ");
-    let cli = Cli::parse();
 
     let canon_home = resolve_canon_home(cli.canon_home.as_deref())?;
     if canon_home.exists() && !canon_home.is_dir() {
@@ -1907,7 +1954,7 @@ mod tests {
         assert!(parked.pause_line().ends_with(&expected));
 
         let receipt_hint = core::ops::receipt::LedgerRootOutcome::AllArchiveRootsSuspended {
-            roots: vec!["/mnt/d1".to_string()],
+            roots: vec![parked.clone()],
         }
         .unsuspend_hint();
         assert_eq!(receipt_hint.as_deref(), Some(expected.as_str()));

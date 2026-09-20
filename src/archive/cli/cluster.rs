@@ -12,7 +12,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
-use crate::core::domain::root::{DoorVerb, ParkedRoot, RefusedAct};
+use crate::core::domain::root::{DoorVerb, ParkedRoot, RefusedAct, RefusedActs};
 use crate::core::domain::scope::ScopeResolution;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::scope::{
@@ -833,10 +833,10 @@ fn manifest_door_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
             // unreachable — and stated as a filter rather than an unwrap, so
             // an impossible door is silently not stated rather than a panic in
             // a read-only report.
-            let act = RefusedAct::of(
-                !door.places.is_empty(),
-                door.destination || door.origin.is_some(),
-            )?;
+            let act = RefusedAct::of(RefusedActs {
+                refresh: !door.places.is_empty(),
+                apply: door.destination || door.origin.is_some(),
+            })?;
             let what = if !door.places.is_empty() {
                 let paths: Vec<&str> = door.places.iter().map(String::as_str).collect();
                 crate::scope::place_reach(&paths)
@@ -849,10 +849,10 @@ fn manifest_door_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
         })
         .collect();
 
-    let union = RefusedAct::of(
-        doors.iter().any(|d| !d.places.is_empty()),
-        doors.iter().any(|d| d.destination || d.origin.is_some()),
-    )
+    let union = RefusedAct::of(RefusedActs {
+        refresh: status.refresh_meets_a_door(),
+        apply: status.apply_meets_a_door(),
+    })
     .unwrap_or(RefusedAct::Apply);
     crate::scope::closed_door_reaches(
         &stated,

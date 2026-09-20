@@ -164,30 +164,62 @@ pub struct ScanStats {
 impl ScanStats {
     /// Fold one root's counts into a running total.
     ///
-    /// Every counter a walk produces is added here, and the fields are
-    /// enumerated beside the struct that declares them — a scan of several
-    /// roots reports one summary, and a counter that reaches the per-root
-    /// result but not this fold is computed correctly and then dropped on the
-    /// floor. The hash pass's five counters are deliberately absent: the pass
-    /// runs once, after every root, so they are carried rather than folded —
-    /// by `carry_hash_pass` below, which is guarded the same way for the same
+    /// Every counter a walk produces is added here, destructured with no
+    /// `..` rest — a scan of several roots reports one summary, and a
+    /// counter that reaches the per-root result but not this fold is
+    /// computed correctly and then dropped on the floor. Rest-less is what
+    /// makes that build-enforced rather than remembered: a field added to
+    /// `ScanStats` fails to compile here until someone decides whether it
+    /// folds or is carried. The hash pass's five counters are deliberately
+    /// bound and discarded (`_`), never folded: the pass runs once, after
+    /// every root, so they are carried rather than folded — by
+    /// `carry_hash_pass` below, which is guarded the same way for the same
     /// reason.
     pub fn absorb(&mut self, root: &ScanStats) {
-        self.scanned += root.scanned;
-        self.new += root.new;
-        self.updated += root.updated;
-        self.moved += root.moved;
-        self.unchanged += root.unchanged;
-        self.missing += root.missing;
-        self.disconnected += root.disconnected;
-        self.skipped += root.skipped;
-        self.missing_detection_skipped += root.missing_detection_skipped;
-        self.hardlink_companions += root.hardlink_companions;
-        self.moves_unverified += root.moves_unverified;
-        self.walk_errors += root.walk_errors;
-        self.lookup_failures += root.lookup_failures;
-        self.symlinks_skipped += root.symlinks_skipped;
-        self.special_skipped += root.special_skipped;
+        let ScanStats {
+            scanned,
+            new,
+            updated,
+            moved,
+            unchanged,
+            missing,
+            disconnected,
+            skipped,
+            // The hash pass's five counters, deliberately not folded here:
+            // they are a fact about what stands at scan's end, not a
+            // per-root tally, and are carried instead by `carry_hash_pass`
+            // below. Named rather than `..`-rested, so a field added to
+            // either half of `ScanStats` forces a decision about which fold
+            // it belongs to instead of silently landing in neither.
+            hashed: _,
+            unexpected_hash_changes: _,
+            unhashed: _,
+            unhashed_unreadable: _,
+            missing_detection_skipped,
+            hardlink_companions,
+            moves_unverified,
+            walk_errors,
+            lookup_failures,
+            symlinks_skipped,
+            special_skipped,
+            hash_backlog: _,
+        } = root;
+
+        self.scanned += scanned;
+        self.new += new;
+        self.updated += updated;
+        self.moved += moved;
+        self.unchanged += unchanged;
+        self.missing += missing;
+        self.disconnected += disconnected;
+        self.skipped += skipped;
+        self.missing_detection_skipped += missing_detection_skipped;
+        self.hardlink_companions += hardlink_companions;
+        self.moves_unverified += moves_unverified;
+        self.walk_errors += walk_errors;
+        self.lookup_failures += lookup_failures;
+        self.symlinks_skipped += symlinks_skipped;
+        self.special_skipped += special_skipped;
     }
 
     /// Carry the hash pass's answer into the totals.

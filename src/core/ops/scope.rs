@@ -131,8 +131,8 @@ impl ResolvedScope {
 /// What the scope boundary found: something to work on, or a closed door.
 ///
 /// **The fact that a place is parked is derived once, here, as data** — never
-/// re-detected from `current_dir()` or from an `is_active()` filter applied to
-/// a root a caller was already handed. Checking the door as a filter partway
+/// re-detected from `current_dir()` or from an `is_suspended()` filter applied
+/// to a root a caller was already handed. Checking the door as a filter partway
 /// down the pipeline removes the parked place from the answer, and a removed
 /// thing cannot be stated: that is what made a closed door read as a false
 /// empty, a silent widening, or a global act from a place the user had shut.

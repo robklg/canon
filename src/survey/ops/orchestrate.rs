@@ -134,24 +134,30 @@ pub fn run_survey(
     // counts them — the interim refusal existed only because, while the
     // index filtered them out, an answer here would have been a zero where
     // content stands.
-    let archive_root_id = match orchestration.archive {
+    //
+    // `RootLookup` already hands over the `ParkedRoot` for a closed door;
+    // the label is built from it directly rather than discarding it for a
+    // bare id and re-finding the root three lines later to ask
+    // `is_suspended()` again.
+    let (archive_root_id, archive_label) = match orchestration.archive {
         Some(ref spec) => {
             match crate::core::ops::scope::parse_root_spec(&all_roots, spec, Some("archive"))? {
-                crate::core::ops::scope::RootLookup::Found(id) => Some(id),
-                crate::core::ops::scope::RootLookup::Parked(parked) => Some(parked.root_id),
+                crate::core::ops::scope::RootLookup::Found(id) => {
+                    let root = all_roots.iter().find(|r| r.id == id).unwrap();
+                    (Some(id), Some(format!("in {}", root.path)))
+                }
+                crate::core::ops::scope::RootLookup::Parked(parked) => (
+                    Some(parked.root_id),
+                    Some(format!(
+                        "in {}{}",
+                        parked.root_path,
+                        crate::core::domain::root::ROOT_SUSPENDED_MARKER
+                    )),
+                ),
             }
         }
-        None => None,
+        None => (None, None),
     };
-    let archive_label = archive_root_id.map(|id| {
-        let root = all_roots.iter().find(|r| r.id == id).unwrap();
-        let marker = if root.is_suspended() {
-            " (suspended)"
-        } else {
-            ""
-        };
-        format!("in {}{marker}", root.path)
-    });
 
     let root_ids: Vec<i64> = all_roots.iter().map(|r| r.id).collect();
     let all_sources = crate::core::repo::source::batch_fetch_by_roots(conn, &root_ids)?;

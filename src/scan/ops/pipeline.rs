@@ -1050,7 +1050,7 @@ fn reconcile_pathless_file(
         // not reach in and relocate a row out of it. Nominations from there are
         // dropped rather than counted — the parked root's story is unchanged,
         // and this root's report is accurate without mentioning it.
-        .filter(|source| !source.root_suspended)
+        .filter(|source| source.is_active())
         .map(|source| {
             let old_path = check_old_path(&source);
             MoveCandidate { source, old_path }

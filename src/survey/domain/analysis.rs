@@ -172,24 +172,6 @@ pub fn find_unique_object_ids(
         .collect()
 }
 
-/// The standing key, spoken once: a place behind a door the user closed
-/// never leads a list of places to go.
-///
-/// Survey's conjugation of the **suspension citation-evidence split** — the
-/// law the sweep owns, which decides which place is *cited* as evidence and
-/// never what the evidence says. The sweep picks one citation and survey
-/// ranks many, so the two consume this key through different operations and
-/// share no code; what they must share is the key itself, and inside survey
-/// that is here rather than at each of the four lists that sort by it.
-///
-/// Always the **head** of a comparison — the relation orders within
-/// standing, never across it, because a list's first line is its headline
-/// and testimony is stated, never headlined.
-/// Verified by `survey_never_leads_with_a_parked_location`.
-pub fn standing_first(a: bool, b: bool) -> std::cmp::Ordering {
-    a.cmp(&b)
-}
-
 /// Classification of a related location.
 /// Variant order defines sort priority (lowest first): Superset → Lead → Subset → Mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -237,7 +219,7 @@ pub fn discover_scopes_by_root(sources: &[&Source]) -> Vec<ScopeLocation> {
     for source in sources {
         let entry = by_root.entry(&source.root_path).or_default();
         entry.0.push(&source.rel_path);
-        entry.1 = source.root_suspended;
+        entry.1 = !source.is_active();
     }
 
     let mut results = Vec::new();

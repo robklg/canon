@@ -382,7 +382,7 @@ mod tests {
         assert!(!subject_prefixes(&report).contains(&("/r1".to_string(), "big".to_string())));
         assert_eq!(report.suspended.len(), 1);
         let tally = &report.suspended[0];
-        assert_eq!(tally.root_path, "/r2");
+        assert_eq!(tally.parked.root_path, "/r2");
         // One line, both causes: `/r2` is entirely matched, so it stands as a
         // place on the parked root itself, and `/r1/big` is a place whose
         // copies are on it. Each counted once, on the one root.
@@ -435,7 +435,7 @@ mod tests {
             "the cap trims a board the set-aside has already left"
         );
         assert_eq!(capped.suspended.len(), 1);
-        assert_eq!(capped.suspended[0].root_path, "/rs");
+        assert_eq!(capped.suspended[0].parked.root_path, "/rs");
         assert_eq!(capped.suspended[0].places_on_it, 1);
         assert_eq!(capped.suspended[0].places_with_copies_on_it, 1);
     }
@@ -458,7 +458,7 @@ mod tests {
         // ...nor the live place whose evidence stands on it.
         assert!(!subject_prefixes(&all).contains(&("/r2".to_string(), "heavy-copy".to_string())));
         assert_eq!(all.suspended.len(), 1);
-        assert_eq!(all.suspended[0].root_path, "/rs");
+        assert_eq!(all.suspended[0].parked.root_path, "/rs");
     }
 
     #[test]

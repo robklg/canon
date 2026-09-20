@@ -67,11 +67,18 @@ hold by construction rather than by care (`agreement_law_place_sums_fold_to_the_
 
 **One where-derivation** (`aggregate_locations`): fewest legible prefixes over the bases (known
 root paths), legible = strictly below a base; a vacuous common node ("in the archive" answers
-nothing) splits into chain-collapsed branch groups, weight-ordered, capped with a counted
-remainder. Covered-where uses `aggregate_locations_expanded` (one-step hub descent when the branch
-groups fit the cap whole); destinations keep the coarse answer — the arrow states a choice, the
-scatter is what nobody chose. **Two wordings at the interface, never mixed**: `→` = recorded
-destination (the user chose it); `copies stand in` = observed coverage (nobody chose it).
+nothing) splits into chain-collapsed branch groups, **selected** for the cap by weight then path
+and returned in that same order — standing decides neither membership nor order here, since this
+aggregate also feeds the book's Reference voicing and a book is never rewritten, so no reorder may
+happen anywhere below `ops/render.rs`. **Display order is `fmt_locations`'s own job**, gated on
+`Voicing::Judgment` exactly like the door marker beside it: only there does `standing_first` (the
+**stated-never-headlined** law, owned at `core::domain::resolution`) reorder the already-selected
+survivors — the plain form's locations carry no standing, so the key ties and changes nothing even
+under `Judgment`. Covered-where uses `aggregate_locations_expanded` (one-step hub descent when the
+branch groups fit the cap whole); destinations keep the coarse answer — the arrow states a choice,
+the scatter is what nobody chose. **Two wordings at the interface, never mixed**: `→` = recorded
+destination (the user chose it); `copies stand in` =
+observed coverage (nobody chose it).
 
 **A where-line says which of its places is behind a closed door**: `LocationCount.suspended`,
 true when every copy the entry accounts for stands on a parked root. The mark belongs to the
@@ -127,10 +134,13 @@ one) — wordings differ *by voicing* at match sites, never by consumer accident
 lines (`N files, S · chosen for the archive → dest`), plain diction (*let go* = excluded,
 *preserved by copies in the archive* = covered, *no known copy in the archive* = unresolved), no
 bind-time claims, no standing vocabulary, no handoffs, no moved/copied split (the dossier keeps
-it), **and no door markers**: `fmt_locations` takes the voicing and marks only under `Judgment`,
-because which doors were closed on a given afternoon is precisely a bind-time claim, and a book
-is never rewritten — the marker would outlive the pause it describes
-(`the_bound_reading_never_marks_a_door`). The archived-standing line, `no decision here` and `nothing stands here now` are judgment
+it), **no door markers**, and **no standing-derived order**: `fmt_locations` takes the voicing and
+both marks and reorders only under `Judgment`, reading `Reference`'s locations back in the
+selection's own weight order unchanged, because which doors were closed on a given afternoon is
+precisely a bind-time claim whether it shows as a symbol or as a sequence, and a book is never
+rewritten — either one would outlive the pause it describes
+(`the_bound_reading_never_marks_a_door`, `reference_voicing_never_reorders_by_standing`). The
+archived-standing line, `no decision here` and `nothing stands here now` are judgment
 furniture — **dropped, never re-worded**: "still standing here" is exactly the bind-time claim the
 ever-axis forswears. Always full: the place cap is structurally unreachable in a book.
 

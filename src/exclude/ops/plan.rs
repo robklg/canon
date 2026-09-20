@@ -87,15 +87,12 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
 /// contract from finding visible sources.
 pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<ExcludeClearPlan> {
     let roots = repo::root::fetch_all(conn)?;
-    // Every active root, archive role included: single-target set accepts an
+    // Every open root, archive role included: single-target set accepts an
     // archive-role source, so an exclusion can stand there — and whatever set
     // can reach, clear must be able to undo. A role filter here would strand
     // those exclusions permanently.
-    let root_ids: Vec<i64> = roots
-        .iter()
-        .filter(|r| r.is_active())
-        .map(|r| r.id)
-        .collect();
+    let (open, _parked) = crate::core::domain::root::open_roots(&roots);
+    let root_ids: Vec<i64> = open.into_iter().map(|r| r.id).collect();
 
     if root_ids.is_empty() {
         return Ok(ExcludeClearPlan {

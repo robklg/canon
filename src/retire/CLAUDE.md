@@ -63,9 +63,12 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   bookless removal stays `roots rm`; with every archive root **suspended** the shelf and its
   books stand where they stood, so the way back is `canon roots unsuspend` and only that, and the
   destructive door is not offered
-  (`validate_names_a_parked_archive_fleet_and_offers_only_unsuspend`). `plan_bind` speaks the
-  same two causes as the backstop for a root parked between gate and bind, and the parked
-  sentence is spelled once for both doors (`ops::parked_shelf_refusal`).
+  (`validate_names_a_parked_archive_fleet_and_offers_only_unsuspend`). The entry gate itself
+  (`validate_retire_target`) raises the same two causes as errors of **different classes**: no
+  archive root at all is a real misconfiguration and wears `Error:`; every suspended is the
+  user's own closed door and carries out as a `DoorRefused` instead, undecorated.
+  `plan_bind` speaks the same two causes as the backstop for a root parked between gate and bind,
+  and the parked sentence is spelled once for both doors (`ops::parked_shelf_refusal`).
 - **Retirement opens the door first, and the two permits split at `--dry-run`.** A parked
   *target* is refused before any bind, by name and with the way back, and records nothing — the
   ceremony is an act, and the door is exactly what protects what is behind it. **On a real run the subject's own

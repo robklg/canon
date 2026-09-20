@@ -95,9 +95,9 @@ pub fn run(
 
     // If --all, get all root paths (excluding suspended, optionally filtered by role)
     let paths_to_scan: Vec<PathBuf> = if all_roots {
-        let filtered: Vec<&crate::core::domain::root::Root> = roots
-            .iter()
-            .filter(|r| r.is_active())
+        let (open_roots_for_all, _) = crate::core::domain::root::open_roots(&roots);
+        let filtered: Vec<&crate::core::domain::root::Root> = open_roots_for_all
+            .into_iter()
             .filter(|r| match role {
                 Some(role_filter) => r.role == role_filter,
                 None => true,
@@ -541,8 +541,8 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
     if let Some((id, root_path, role, _)) = resolve_root_path_any(&all_roots, &scope)? {
         // Look up suspension status from cached roots
         let root = all_roots.iter().find(|r| r.id == id);
-        let suspended = root.map(|r| r.is_suspended()).unwrap_or(false);
-        let suspended_str = if suspended { " (suspended)" } else { "" };
+        let parked = root.and_then(|r| r.parked());
+        let suspended_str = crate::core::domain::root::suspended_marker(parked.is_some());
 
         if scope.to_string_lossy() == root_path {
             println!(
@@ -563,10 +563,10 @@ pub fn find_candidates(db: &Db, scope_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Get active root paths for candidate discovery
-    let root_paths: Vec<PathBuf> = all_roots
-        .iter()
-        .filter(|r| r.is_active())
+    // Get open root paths for candidate discovery
+    let (open_for_candidates, _) = crate::core::domain::root::open_roots(&all_roots);
+    let root_paths: Vec<PathBuf> = open_for_candidates
+        .into_iter()
         .map(|r| PathBuf::from(&r.path))
         .collect();
 

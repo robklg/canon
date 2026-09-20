@@ -42,7 +42,7 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     if let Some(comment) = &report.root.comment {
         lines.push(format!("  comment        {comment}"));
     }
-    if report.root.is_suspended() {
+    if report.root.parked().is_some() {
         lines.push("  suspended      yes".to_string());
     }
     lines.push(format!(
@@ -90,9 +90,11 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
             "{} archived from here",
             format_count(account.archived_standing)
         );
-        if let Some(segment) = account.archived_standing_only_parked.segment(&report.roots) {
-            archived.push_str(&format!(" ({segment})"));
-        }
+        archived.push_str(
+            &account
+                .archived_standing_only_parked
+                .parenthetical(&report.roots),
+        );
         parts.push(archived);
     }
     // The claim's own qualifier, in the closing totals: what a reader
@@ -100,9 +102,7 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     // find out. Judgment voice only — `story_lines` is `canon roots story`,
     // and the bound reading composes its own frame.
     let mut covered = format!("{} covered", format_count(account.covered));
-    if let Some(segment) = account.covered_only_parked.segment(&report.roots) {
-        covered.push_str(&format!(" ({segment})"));
-    }
+    covered.push_str(&account.covered_only_parked.parenthetical(&report.roots));
     parts.push(covered);
     parts.push(format!("{} excluded", format_count(account.excluded)));
     if account.contentless > 0 {
@@ -554,15 +554,35 @@ pub fn fmt_locations(agg: &LocationAggregate, voicing: Voicing) -> String {
     // engine stops.
     let mark = |l: &LocationCount| {
         if l.suspended && voicing == Voicing::Judgment {
-            " (suspended)"
+            crate::core::domain::root::ROOT_SUSPENDED_MARKER
         } else {
             ""
         }
     };
-    let mut out = if agg.locations.len() == 1 && agg.omitted_locations == 0 {
-        format!("{}{}", agg.locations[0].path, mark(&agg.locations[0]))
+    // The stated-never-headlined law's *ordering* half lives here, gated on
+    // the same `Voicing::Judgment` check as the marker above and for the
+    // same reason: `agg.locations` itself is voicing-blind, weight-ordered
+    // selection (`aggregate_locations`'s own doc), so a closed door can
+    // decide neither membership nor order there. Reordering is this
+    // function's own job, over a local copy, so the bound reading — which
+    // never reaches this branch — reads the aggregate's own weight order
+    // exactly as returned, matching the book's ever-axis (no bind-time
+    // claim of any kind, not even an unmarked one).
+    let ordered: Vec<&LocationCount> = if voicing == Voicing::Judgment {
+        let mut refs: Vec<&LocationCount> = agg.locations.iter().collect();
+        refs.sort_by(|a, b| {
+            crate::core::domain::resolution::standing_first(a.suspended, b.suspended)
+                .then_with(|| b.files.cmp(&a.files))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        refs
     } else {
-        agg.locations
+        agg.locations.iter().collect()
+    };
+    let mut out = if ordered.len() == 1 && agg.omitted_locations == 0 {
+        format!("{}{}", ordered[0].path, mark(ordered[0]))
+    } else {
+        ordered
             .iter()
             .map(|l| format!("{} ({}){}", l.path, format_count(l.files), mark(l)))
             .collect::<Vec<_>>()
@@ -1377,6 +1397,39 @@ mod tests {
         assert_has_line(
             &lines,
             "2 covered — copies stand in /archive/live (1), /archive/parked (1) (suspended)",
+        );
+    }
+
+    #[test]
+    fn judgment_voicing_orders_a_parked_entry_after_a_lighter_live_one() {
+        // fmt_locations is where the stated-never-headlined law's ordering
+        // half lives (the aggregate itself is voicing-blind and stays in
+        // weight order — see `aggregate_locations`'s own doc). A weight-only
+        // rendering would put the heavier parked entry first; Judgment must
+        // not.
+        let mut agg = locations(&[("/arc/b", 20), ("/arc/a", 5)]);
+        agg.locations[0].suspended = true; // "/arc/b", the heavier one
+        let out = fmt_locations(&agg, Voicing::Judgment);
+        let b_pos = out.find("/arc/b").unwrap();
+        let a_pos = out.find("/arc/a").unwrap();
+        assert!(a_pos < b_pos, "the parked entry must not lead: {out}");
+    }
+
+    #[test]
+    fn reference_voicing_never_reorders_by_standing() {
+        // The book's own guarantee: not only no marker (see the next test),
+        // but no reordering either — the same aggregate that would print
+        // "/arc/a, /arc/b" under Judgment (weight-reordered to put the live
+        // entry first) prints in the aggregate's own weight order under
+        // Reference, unmoved by which entry is parked.
+        let mut agg = locations(&[("/arc/b", 20), ("/arc/a", 5)]);
+        agg.locations[0].suspended = true;
+        let out = fmt_locations(&agg, Voicing::Reference);
+        let b_pos = out.find("/arc/b").unwrap();
+        let a_pos = out.find("/arc/a").unwrap();
+        assert!(
+            b_pos < a_pos,
+            "the bound reading must keep the aggregate's own weight order: {out}"
         );
     }
 

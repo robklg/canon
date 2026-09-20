@@ -93,6 +93,32 @@ pub fn partition_prefixes_by_role(prefixes: &[String], roots: &[Root]) -> RolePa
     partition
 }
 
+/// Partition a fleet of roots by whether its door is open.
+///
+/// **The one spelling of "which roots are open."** Every site that used to
+/// filter a `roots` vector it was already holding with `is_active()` or
+/// `is_suspended()` partitions here instead: the parked half comes back as
+/// data — one [`ParkedRoot`] per closed door, [`Root::parked`]'s sole
+/// constructor — rather than being discarded the way a bare filter throws
+/// it away. A caller that only ever wanted the open half still gets it, at
+/// `.0`; what changes is that the other half stops being silently lost.
+///
+/// Pure: openness is a property of the `Root` the caller already holds, so
+/// nothing here re-derives it from disk or re-fetches from the database.
+/// Role is not consulted — a caller wanting only source or archive roots
+/// filters before or after, same as it always did.
+pub fn open_roots(roots: &[Root]) -> (Vec<&Root>, Vec<ParkedRoot>) {
+    let mut open = Vec::new();
+    let mut parked = Vec::new();
+    for root in roots {
+        match root.parked() {
+            Some(p) => parked.push(p),
+            None => open.push(root),
+        }
+    }
+    (open, parked)
+}
+
 pub fn find_containing_root(
     canonical_path: &str,
     roots: &[Root],
@@ -183,10 +209,70 @@ impl ParkedRoot {
     }
 }
 
+/// The established marker for a root the user has closed the door on. Not a
+/// door *statement* — no verb, no way back: the marker is testimony, and the
+/// registry's testifying clause is stated, never headlined. One spelling for
+/// every surface that tags a cited place with the door behind it.
+pub const ROOT_SUSPENDED_MARKER: &str = " (suspended)";
+
+/// `ROOT_SUSPENDED_MARKER` when `suspended`, the empty string otherwise.
+pub fn suspended_marker(suspended: bool) -> &'static str {
+    if suspended {
+        ROOT_SUSPENDED_MARKER
+    } else {
+        ""
+    }
+}
+
 /// Above this many named roots a testimony segment collapses to a count.
 /// The door statement's cap, reused for the same reason: a qualifier that
 /// names twenty roots stops qualifying and starts shouting.
 const TESTIMONY_ROOTS_NAMED_CAP: usize = 3;
+
+/// A list of closed-door root paths, named up to the testimony cap or
+/// counted above it — the one spelling behind every door-adjacent sentence
+/// that lists more than one root, so a sentence naming several closed roots
+/// never disagrees with another about when to stop naming and start
+/// counting. Sorted and deduped first.
+pub enum RootNaming {
+    /// At or under the cap: every path, sorted, comma-joined.
+    Named(String),
+    /// Over the cap: how many, not which.
+    Counted(usize),
+}
+
+impl RootNaming {
+    /// As a bare list: `/a, /b` or `4 suspended roots`.
+    pub fn as_list(&self) -> String {
+        match self {
+            RootNaming::Named(names) => names.clone(),
+            RootNaming::Counted(n) => format!("{n} suspended roots"),
+        }
+    }
+
+    /// As the qualifier's own phrase: `suspended /a, /b` or `4 suspended
+    /// roots` — the `Counted` arm already carries the word, so it is not
+    /// repeated.
+    pub fn as_suspended_phrase(&self) -> String {
+        match self {
+            RootNaming::Named(names) => format!("suspended {names}"),
+            RootNaming::Counted(n) => format!("{n} suspended roots"),
+        }
+    }
+}
+
+/// Cap, sort and dedupe a set of closed-door root paths for a sentence that
+/// lists them.
+pub fn capped_root_names(root_paths: &[String]) -> RootNaming {
+    let mut paths: Vec<&str> = root_paths.iter().map(String::as_str).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    if paths.len() > TESTIMONY_ROOTS_NAMED_CAP {
+        RootNaming::Counted(paths.len())
+    } else {
+        RootNaming::Named(paths.join(", "))
+    }
+}
 
 /// What a claim says about resting **solely** on copies behind closed doors:
 /// `<count> only on suspended <roots>`.
@@ -212,14 +298,7 @@ pub fn only_on_suspended_segment(count: i64, root_paths: &[String]) -> Option<St
     if count <= 0 || root_paths.is_empty() {
         return None;
     }
-    let mut paths: Vec<&str> = root_paths.iter().map(String::as_str).collect();
-    paths.sort_unstable();
-    paths.dedup();
-    let where_ = if paths.len() > TESTIMONY_ROOTS_NAMED_CAP {
-        format!("{} suspended roots", paths.len())
-    } else {
-        format!("suspended {}", paths.join(", "))
-    };
+    let where_ = capped_root_names(root_paths).as_suspended_phrase();
     Some(format!("{count} only on {where_}"))
 }
 
@@ -303,14 +382,31 @@ impl RefusedAct {
 
     /// The act, or acts, a caller has found at one door. `None` where neither
     /// is turned away, so a caller cannot state a door with nothing behind it.
-    pub fn of(refresh: bool, apply: bool) -> Option<Self> {
-        match (refresh, apply) {
+    ///
+    /// Takes [`RefusedActs`], not a bare `(bool, bool)`: two same-typed
+    /// positional booleans are silently transposable at a call site — swap
+    /// which is which and the compiler cannot tell — and one of this
+    /// function's own callers falls back `.unwrap_or(RefusedAct::Apply)` on
+    /// `None`, which would make a transposed pair read as a *different*
+    /// wrong act rather than fail loudly. Named fields close that.
+    pub fn of(acts: RefusedActs) -> Option<Self> {
+        match (acts.refresh, acts.apply) {
             (true, true) => Some(RefusedAct::RefreshAndApply),
             (true, false) => Some(RefusedAct::Refresh),
             (false, true) => Some(RefusedAct::Apply),
             (false, false) => None,
         }
     }
+}
+
+/// The two doors [`RefusedAct::of`] asks about, named so a caller cannot
+/// transpose which bool answers which question.
+#[derive(Debug, Clone, Copy)]
+pub struct RefusedActs {
+    /// Would `cluster refresh` be refused here?
+    pub refresh: bool,
+    /// Would `apply` be refused here?
+    pub apply: bool,
 }
 
 /// A refusal that is itself a legitimate answer: the door was closed.
@@ -325,9 +421,13 @@ impl RefusedAct {
 /// out through the ordinary error channel and is recognised at the front
 /// door, which states it as it stands.
 ///
-/// It cannot hold a free string: the sentence comes from
-/// [`ParkedRoot::door_line`], so a refusal raised from an operation and one
-/// printed by a command are the same sentence by construction.
+/// It cannot hold a caller-typed string: the sentence comes from
+/// [`ParkedRoot::door_line`] (a place refused by name), or — for a refusal
+/// about the fleet rather than one place, such as nowhere at all to bind
+/// a book — from an established whole-fleet composer built on
+/// [`capped_root_names`]/[`RootNaming`], never hand-assembled at the call
+/// site. Either way a refusal raised from an operation and one printed by a
+/// command are the same sentence by construction.
 #[derive(Debug)]
 pub struct DoorRefused {
     line: String,
@@ -343,6 +443,28 @@ impl DoorRefused {
     /// The whole place, named as itself — the commonest `what` there is.
     pub fn at(root: &ParkedRoot, verb: DoorVerb) -> Self {
         Self::new(root, verb, &root.root_path)
+    }
+
+    /// Several doors at once, already composed — an act (apply's origin end)
+    /// that can draw from more than one closed root in the same run. Takes
+    /// lines already built by `closed_door_reaches`/`closed_door_lines`
+    /// rather than a second composition of its own, so a multi-door refusal
+    /// reads exactly as the interface would have printed it by hand.
+    pub fn from_lines(lines: Vec<String>) -> Self {
+        Self {
+            line: lines.join("\n"),
+        }
+    }
+
+    /// A refusal about the fleet rather than one named place — nowhere at
+    /// all left to act, every candidate behind a closed door. Takes the
+    /// sentence already composed by the caller's own established
+    /// whole-fleet formatter (the `capped_root_names`/`RootNaming` family),
+    /// never a string assembled at the call site: the door is still closed
+    /// and the answer is still legitimate, so it carries out the same way a
+    /// per-place refusal does, undecorated by `Error:`.
+    pub fn fleetwide(sentence: String) -> Self {
+        Self { line: sentence }
     }
 }
 
@@ -442,11 +564,6 @@ impl Root {
         self.suspended
     }
 
-    /// Check if this root is active (not suspended).
-    pub fn is_active(&self) -> bool {
-        !self.suspended
-    }
-
     /// This root as a closed door, or `None` if its door is open.
     ///
     /// The only constructor of [`ParkedRoot`]: speaking of a place as parked
@@ -464,8 +581,6 @@ impl Root {
     }
 
     /// Check if this root has the "archive" role.
-    // Part of the domain model API but not currently used. Kept for API completeness.
-    #[allow(dead_code)]
     pub fn is_archive(&self) -> bool {
         self.role == "archive"
     }
@@ -645,24 +760,6 @@ mod tests {
     }
 
     #[test]
-    fn is_active_when_not_suspended() {
-        let root = Root {
-            suspended: false,
-            ..make_root()
-        };
-        assert!(root.is_active());
-    }
-
-    #[test]
-    fn is_active_when_suspended() {
-        let root = Root {
-            suspended: true,
-            ..make_root()
-        };
-        assert!(!root.is_active());
-    }
-
-    #[test]
     fn is_source_true() {
         let root = Root {
             role: "source".to_string(),
@@ -698,6 +795,39 @@ mod tests {
             ..make_root()
         };
         assert!(!root.is_archive());
+    }
+
+    // ========================================================================
+    // open_roots() — the fleet partition
+    // ========================================================================
+
+    #[test]
+    fn open_roots_partitions_open_from_parked() {
+        let open_root = make_root_with(1, "/open", "source");
+        let mut parked_root = make_root_with(2, "/parked", "source");
+        parked_root.suspended = true;
+
+        let roots = vec![open_root, parked_root];
+        let (open, parked) = open_roots(&roots);
+
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].path, "/open");
+        assert_eq!(parked.len(), 1);
+        assert_eq!(
+            parked[0],
+            ParkedRoot {
+                root_id: 2,
+                root_path: "/parked".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn open_roots_of_an_all_open_fleet_leaves_parked_empty() {
+        let roots = vec![make_root_with(1, "/a", "source")];
+        let (open, parked) = open_roots(&roots);
+        assert_eq!(open.len(), 1);
+        assert!(parked.is_empty());
     }
 
     #[test]
@@ -836,6 +966,43 @@ mod tests {
         assert_eq!(
             only_on_suspended_segment(4, &noisy).unwrap(),
             "4 only on suspended /arc1, /arc2"
+        );
+    }
+
+    // ========================================================================
+    // RefusedAct::of() tests — the named-field mapping a transposed bool pair
+    // could otherwise silently read as a different, wrong act.
+    // ========================================================================
+
+    #[test]
+    fn refused_act_of_reads_refresh_and_apply_by_name_not_position() {
+        assert_eq!(
+            RefusedAct::of(RefusedActs {
+                refresh: true,
+                apply: false,
+            }),
+            Some(RefusedAct::Refresh)
+        );
+        assert_eq!(
+            RefusedAct::of(RefusedActs {
+                refresh: false,
+                apply: true,
+            }),
+            Some(RefusedAct::Apply)
+        );
+        assert_eq!(
+            RefusedAct::of(RefusedActs {
+                refresh: true,
+                apply: true,
+            }),
+            Some(RefusedAct::RefreshAndApply)
+        );
+        assert_eq!(
+            RefusedAct::of(RefusedActs {
+                refresh: false,
+                apply: false,
+            }),
+            None
         );
     }
 }

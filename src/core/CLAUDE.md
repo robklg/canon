@@ -81,7 +81,7 @@ two consumers were counted. The membership criteria below apply to everything el
 
 - **`domain::resolution`** — `ResolutionAccount`, `StandingBucket`, `AbsentBucket`,
   `classify_present`, `classify_absent`, `build_account`, `unresolved_remainder`,
-  `only_on_suspended`, `ParkedEvidence`. Shared
+  `only_on_suspended`, `ParkedEvidence`, `standing_first`. Shared
   substrate `retire`'s readiness gate, `story`'s place lens and `sweep`'s root-nearness term
   each independently compute over; no subsystem owns it, which is exactly why it is here.
   `retire`'s own verdict (`Readiness`, derived *from* this account) and its book-compile fate
@@ -96,6 +96,23 @@ two consumers were counted. The membership criteria below apply to everything el
     carries one per claim rather than pooling them, and `build_account` takes the copies map
     rather than a set of ids, a set being unable to say where the evidence stands. A statement,
     never a refusal: no verb, no way back.
+  - **The stated-never-headlined law** (`standing_first`) — a place behind a closed door never
+    leads a list of places to go. `standing_first` itself only orders. A capped consumer owes the
+    "still appears" half itself, starting with membership: selecting which entries earn a cap slot
+    by weight, never standing, so a closed door cannot decide membership, is unconditional —
+    every named consumer does this regardless of what it does next. What differs is what a
+    consumer owes *after* selection: a voicing that may carry no bind-time claim at all never
+    calls this function on the selected survivors (story's covered-where line, feeding a book
+    that is never rewritten and so cannot tolerate even an order derived from today's doors); a
+    voicing that may state order calls this function to reorder only those survivors, gated at
+    the render layer rather than inside selection (story's own Judgment voicing, the same
+    aggregate's other reader); a live, recomputed view instead sorts standing-first and counts
+    every omission unconditionally, so a demoted place is stated rather than silent even though
+    it can fall out of a cap (survey's four location lists, the trail composition card's
+    origins). See the function's own doc for the worked split and which each named consumer
+    chose. The sweep's live-preferred counterpart choice answers the same law through a different,
+    filtering mechanism instead — a losing parked scope forfeits its citation rather
+    than sorting behind — so it shares the law, not the function.
   - **The remainder projection** (`unresolved_remainder`) is the readiness review's own
     measure of what is left on a root, computed where the archived-from-here evidence is
     *not* on hand. It routes through `classify_present`, so this is **one law with two call

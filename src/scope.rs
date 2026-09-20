@@ -9,46 +9,74 @@ use std::io::Write;
 use crate::core::domain::root::{DoorVerb, ParkedPath, ParkedRoot, WayBack};
 use crate::core::ops::scope::{ClosedDoor, ResolvedScope};
 
+/// The one scope-statement type behind every printer below: what a resolved
+/// scope owes its reader, read uniformly rather than at exactly one printer
+/// while its neighbours stay silent about a fact `ResolvedScope` already
+/// carries. A caller's own scope line (the report commands' "Label: /path",
+/// the list commands' "scope: /path", or none at all for the ceremony
+/// channels) leads; everything after it is one composition — the closed-door
+/// pause a remembering view stands behind, the places a view set aside
+/// behind a door, and the sourceless paths beside them.
+struct ScopeStatement {
+    header: Vec<String>,
+    body: Vec<String>,
+}
+
+impl ScopeStatement {
+    fn compose(header: Vec<String>, scope: &ResolvedScope, verb: DoorVerb) -> Self {
+        let mut body: Vec<String> = parked_pause(&scope.pause).into_iter().collect();
+        body.extend(closed_door_lines(&scope.parked, verb, false));
+        body.extend(
+            scope
+                .set_aside
+                .iter()
+                .map(|path| format!("no sources known at {path} — skipped")),
+        );
+        ScopeStatement { header, body }
+    }
+
+    fn write(&self, handle: &mut impl Write) {
+        for line in self.header.iter().chain(self.body.iter()) {
+            let _ = writeln!(handle, "{line}");
+        }
+    }
+}
+
 /// Print scope header for report commands (stdout).
 ///
 /// Always prints — shows "Label: /path" when scoped, "Label: all roots" when global.
 /// For multiple paths (≤2): "Label: /path1, /path2"
 /// For multiple paths (>2): one per line indented.
-/// Set-aside paths follow the scope itself.
+/// The pause, the parked doors and the set-aside paths follow the scope itself.
 pub fn print_report_scope(handle: &mut impl Write, label: &str, scope: &ResolvedScope) {
-    if scope.is_global() {
-        let _ = writeln!(handle, "{label}: all roots");
+    let header = if scope.is_global() {
+        vec![format!("{label}: all roots")]
     } else if scope.prefixes.len() == 1 {
-        let _ = writeln!(handle, "{label}: {}", scope.prefixes[0]);
+        vec![format!("{label}: {}", scope.prefixes[0])]
     } else if scope.prefixes.len() <= 2 {
-        let _ = writeln!(handle, "{label}: {}", scope.prefixes.join(", "));
+        vec![format!("{label}: {}", scope.prefixes.join(", "))]
     } else {
-        let _ = writeln!(handle, "{label}:");
-        for p in &scope.prefixes {
-            let _ = writeln!(handle, "  {p}");
-        }
-    }
-    write_parked(handle, scope, DoorVerb::SetAside);
-    write_set_asides(handle, &scope.set_aside);
+        let mut lines = vec![format!("{label}:")];
+        lines.extend(scope.prefixes.iter().map(|p| format!("  {p}")));
+        lines
+    };
+    ScopeStatement::compose(header, scope, DoorVerb::SetAside).write(handle);
 }
 
 /// Print scope header for list/data commands (stderr handle).
 ///
 /// Only prints when scoped — "scope: /path". Silent when global, except that
-/// set-aside paths are stated whenever there are any.
+/// the pause, the parked doors and set-aside paths are stated whenever there
+/// are any.
 pub fn print_list_scope(handle: &mut impl Write, scope: &ResolvedScope) {
-    if !scope.is_global() {
-        if scope.prefixes.len() == 1 {
-            let _ = writeln!(handle, "scope: {}", scope.prefixes[0]);
-        } else {
-            let _ = writeln!(handle, "scope: {}", scope.prefixes.join(", "));
-        }
-    }
-    if let Some(line) = parked_pause(&scope.pause) {
-        let _ = writeln!(handle, "{line}");
-    }
-    write_parked(handle, scope, DoorVerb::SetAside);
-    write_set_asides(handle, &scope.set_aside);
+    let header = if scope.is_global() {
+        Vec::new()
+    } else if scope.prefixes.len() == 1 {
+        vec![format!("scope: {}", scope.prefixes[0])]
+    } else {
+        vec![format!("scope: {}", scope.prefixes.join(", "))]
+    };
+    ScopeStatement::compose(header, scope, DoorVerb::SetAside).write(handle);
 }
 
 /// State what the scope boundary set aside, ahead of any ceremony display —
@@ -58,17 +86,15 @@ pub fn print_list_scope(handle: &mut impl Write, scope: &ResolvedScope) {
 pub fn print_scope_set_asides(scope: &ResolvedScope, verb: DoorVerb) {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    write_parked(&mut handle, scope, verb);
-    write_set_asides(&mut handle, &scope.set_aside);
+    ScopeStatement::compose(Vec::new(), scope, verb).write(&mut handle);
 }
 
 /// State what the scope boundary set aside on stderr, for display paths
 /// that carry no scope line of their own — a compact or machine-shaped
 /// stdout stays exactly what it is, and the skip is still said.
-pub fn eprint_scope_set_asides(scope: &ResolvedScope) {
+pub fn eprint_scope_set_asides(scope: &ResolvedScope, verb: DoorVerb) {
     let mut handle = std::io::stderr().lock();
-    write_parked(&mut handle, scope, DoorVerb::SetAside);
-    write_set_asides(&mut handle, &scope.set_aside);
+    ScopeStatement::compose(Vec::new(), scope, verb).write(&mut handle);
 }
 
 /// Where a command states its scope — and therefore where it states a closed
@@ -312,13 +338,6 @@ pub fn write_closed_door(handle: &mut impl Write, door: &ClosedDoor, verb: DoorV
     write_set_asides(handle, &door.sourceless);
 }
 
-/// State the parked places a scope proceeded past, in the set-aside position.
-pub fn write_parked(handle: &mut impl Write, scope: &ResolvedScope, verb: DoorVerb) {
-    for line in closed_door_lines(&scope.parked, verb, false) {
-        let _ = writeln!(handle, "{line}");
-    }
-}
-
 /// The one spelling of a set-aside line. A path Canon knows no sources for
 /// is named and marked skipped — never dropped, never counted as run.
 ///
@@ -505,6 +524,31 @@ mod tests {
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "Coverage: /live\n/mnt/d1 suspended — set aside: /mnt/d1/photos · canon roots unsuspend path:/mnt/d1\n"
+        );
+    }
+
+    /// The pause is read at every printer built on [`ScopeStatement`], not
+    /// only `print_list_scope` — a report command reached by a remembering
+    /// view must state the door it stands behind exactly as a list command
+    /// does, from the one composition both now share.
+    #[test]
+    fn print_report_scope_states_the_pause_too() {
+        let scope = ResolvedScope {
+            prefixes: vec!["/live".to_string()],
+            set_aside: Vec::new(),
+            parked: Vec::new(),
+            pause: vec![ParkedRoot {
+                root_id: 1,
+                root_path: "/archive".to_string(),
+            }],
+            from_cwd: false,
+            auto_include_archived: false,
+        };
+        let mut buf = Vec::new();
+        print_report_scope(&mut buf, "Coverage", &scope);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "Coverage: /live\n/archive suspended · canon roots unsuspend path:/archive\n"
         );
     }
 

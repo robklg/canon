@@ -19,7 +19,7 @@
 //!
 //! // Filter with domain predicates
 //! let active_sources: Vec<_> = roots.iter()
-//!     .filter(|r| r.is_active())
+//!     .filter(|r| !r.is_suspended())
 //!     .filter(|r| r.is_source())
 //!     .collect();
 //! ```
@@ -47,7 +47,7 @@ pub(crate) fn root_from_row(row: &rusqlite::Row) -> rusqlite::Result<Root> {
 /// Fetch all roots.
 ///
 /// Returns roots ordered by ID. No filtering is applied — callers should use
-/// domain predicates like `is_active()`, `is_source()`, etc. to filter.
+/// domain predicates like `is_suspended()`, `is_source()`, etc. to filter.
 pub fn fetch_all(conn: &Connection) -> Result<Vec<Root>> {
     let sql = format!("SELECT {ROOT_COLUMNS} FROM roots ORDER BY id");
     let mut stmt = conn.prepare(&sql)?;
@@ -171,7 +171,7 @@ mod tests {
         // Use domain predicates to filter
         let active_sources: Vec<_> = roots
             .iter()
-            .filter(|r| r.is_active())
+            .filter(|r| !r.is_suspended())
             .filter(|r| r.is_source())
             .collect();
 

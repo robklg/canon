@@ -6,7 +6,7 @@
 //! story). Notes interleave as the thinking between the actions, visually
 //! distinct — a thought must never read as an act.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -101,7 +101,16 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
         // Scope goes to stderr on this branch only: stdout under --jsonl
         // carries nothing but the event stream.
         crate::scope::print_list_scope(&mut std::io::stderr(), &resolved);
-        print_jsonl(&result)?;
+        // A cited origin's standing — the same fact `trail show`'s `drew
+        // from:` lines and the composition card already state, which a
+        // machine consumer had no field for.
+        let live_root_paths: HashSet<String> = roots_map.values().map(|r| r.path.clone()).collect();
+        let retired_books = ops::compute::retired_origin_books(
+            db.conn(),
+            &result.extractions_all,
+            &live_root_paths,
+        )?;
+        print_jsonl(&result, &live_root_paths, &retired_books)?;
     } else {
         print_human(
             &result,
@@ -177,7 +186,18 @@ pub fn run_crossings(db: &mut Db, args: CrossingsArgs) -> Result<TrailExit> {
         // full row data, so a decision serialises identically wherever it
         // was surfaced from.
         crate::scope::print_list_scope(&mut std::io::stderr(), &resolved);
-        print_crossings_jsonl(&result.decisions, &result.extractions_all)?;
+        let live_root_paths: HashSet<String> = all_roots.iter().map(|r| r.path.clone()).collect();
+        let retired_books = ops::compute::retired_origin_books(
+            db.conn(),
+            &result.extractions_all,
+            &live_root_paths,
+        )?;
+        print_crossings_jsonl(
+            &result.decisions,
+            &result.extractions_all,
+            &live_root_paths,
+            &retired_books,
+        )?;
     } else {
         print_crossings(&result, &resolved, &params);
     }

@@ -4,9 +4,11 @@
 use std::collections::HashMap;
 
 use crate::core::domain::format_count;
+use crate::core::domain::resolution::standing_first;
+use crate::core::domain::root::DoorVerb;
 use crate::core::ops::scope::ResolvedScope;
 use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
-use crate::survey::domain::analysis::{standing_first, ScopeLocation};
+use crate::survey::domain::analysis::ScopeLocation;
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
 
 /// `1 empty file` / `N empty files`, thousands-separated — the noun agrees
@@ -117,7 +119,7 @@ pub(super) struct HeaderScope<'a> {
 /// bare stream and carries no header — the stream on stdout stays exactly
 /// what was asked for, and what was skipped is still said.
 pub(super) fn eprint_set_asides(header: &HeaderScope<'_>) {
-    crate::scope::eprint_scope_set_asides(header.scope);
+    crate::scope::eprint_scope_set_asides(header.scope, DoorVerb::SetAside);
     write_archive_side_set_asides(&mut std::io::stderr().lock(), header.archive_set_aside);
 }
 
@@ -228,11 +230,7 @@ pub(super) fn print_notes_section(ctx: &SurveyNoteContext, scope_rel_path: &str,
 /// being offered as evidence rather than blocking anything. Stated, never
 /// headlined — the ordering beside it is the other half of that rule.
 fn door_marker(suspended: bool) -> &'static str {
-    if suspended {
-        " (suspended)"
-    } else {
-        ""
-    }
+    crate::core::domain::root::suspended_marker(suspended)
 }
 
 pub(super) fn print_archive_section(

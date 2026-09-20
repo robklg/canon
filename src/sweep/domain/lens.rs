@@ -12,7 +12,7 @@ use super::structural::{
 };
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::resolution::unresolved_remainder;
-use crate::core::domain::root::Root;
+use crate::core::domain::root::{ParkedRoot, Root};
 use crate::core::domain::source::Source;
 
 /// The leaderboard as the reduction lens ranks it: findings sharing a
@@ -297,7 +297,7 @@ impl Default for LensParams {
 /// count of distinct recoverable bytes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuspendedRootTally {
-    pub root_path: String,
+    pub parked: ParkedRoot,
     /// Places standing on this root.
     pub places_on_it: usize,
     /// Places elsewhere whose evidence stands on this root.
@@ -459,15 +459,19 @@ pub fn reduction_lens(
     // means a hub that would have formed and then lost members never forms:
     // its aggregates are born correct rather than recomputed, and the board
     // is identical to one computed with the parked findings absent.
-    let mut tallies: HashMap<String, SuspendedRootTally> = HashMap::new();
+    let mut tallies: HashMap<i64, SuspendedRootTally> = HashMap::new();
     let mut claimable: Vec<StructuralFinding> = Vec::new();
     for finding in sweep.findings {
         if finding.subject_suspended {
-            let t = tally(&mut tallies, &finding.subject.root_path);
+            let t = tally(
+                &mut tallies,
+                finding.subject.root_id,
+                &finding.subject.root_path,
+            );
             t.places_on_it += 1;
             t.gain_bytes_on_it += finding.gain_bytes;
-        } else if let Some(root) = parked_evidence_root(&finding).map(str::to_string) {
-            let t = tally(&mut tallies, &root);
+        } else if let Some(root) = parked_evidence_root(&finding) {
+            let t = tally(&mut tallies, root.root_id, &root.root_path);
             t.places_with_copies_on_it += 1;
             t.gain_bytes_with_copies_on_it += finding.gain_bytes;
         } else {
@@ -479,7 +483,7 @@ pub fn reduction_lens(
         "no ranked place waits on a closed door"
     );
     let mut suspended: Vec<SuspendedRootTally> = tallies.into_values().collect();
-    suspended.sort_by(|a, b| a.root_path.cmp(&b.root_path));
+    suspended.sort_by(|a, b| a.parked.root_path.cmp(&b.parked.root_path));
 
     let mut entries: Vec<LeaderboardEntry> = Vec::new();
 
@@ -878,13 +882,17 @@ fn parent_coverage(
 }
 
 fn tally<'a>(
-    tallies: &'a mut HashMap<String, SuspendedRootTally>,
+    tallies: &'a mut HashMap<i64, SuspendedRootTally>,
+    root_id: i64,
     root_path: &str,
 ) -> &'a mut SuspendedRootTally {
     tallies
-        .entry(root_path.to_string())
+        .entry(root_id)
         .or_insert_with(|| SuspendedRootTally {
-            root_path: root_path.to_string(),
+            parked: ParkedRoot {
+                root_id,
+                root_path: root_path.to_string(),
+            },
             places_on_it: 0,
             places_with_copies_on_it: 0,
             gain_bytes_on_it: 0,
@@ -897,14 +905,12 @@ fn tally<'a>(
 /// so the coverage arm is unreachable by construction — it yields `None`
 /// rather than panicking, and the assertion pins the implication.
 ///
-/// Returning the root rather than a bool is deliberate: one function answers
-/// both "does this place leave the board?" and "which root explains it?", so
-/// the two can never disagree.
-fn parked_evidence_root(f: &StructuralFinding) -> Option<&str> {
+/// Returning the located root rather than a bool is deliberate: one function
+/// answers both "does this place leave the board?" and "which root explains
+/// it?", so the two can never disagree.
+fn parked_evidence_root(f: &StructuralFinding) -> Option<&Location> {
     match (f.nature, &f.shape) {
-        (FindingNature::Verify, RelationShape::Pair { counterpart, .. }) => {
-            Some(&counterpart.root_path)
-        }
+        (FindingNature::Verify, RelationShape::Pair { counterpart, .. }) => Some(counterpart),
         (FindingNature::Verify, RelationShape::Coverage { .. }) => {
             debug_assert!(false, "Verify implies a pair shape");
             None

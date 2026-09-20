@@ -9,7 +9,7 @@ use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::RegisteredFate;
 use crate::core::domain::format::{cap_path, format_count, format_size};
-use crate::core::domain::root::Root;
+use crate::core::domain::root::{Root, ROOT_SUSPENDED_MARKER};
 use crate::core::ops::scope::ResolvedScope;
 use crate::trail::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect, ScopeMatch};
@@ -24,8 +24,11 @@ use crate::trail::ops::crossings::{
 use crate::trail::ops::show::ShowExtraction;
 use crate::trail::{TrailResult, TrailView};
 
-/// The trail's header line: where it looked, when, and — behind a closed
-/// door — the pause.
+/// This door's header line: where it looked, when, and — behind a closed
+/// door — the pause. Shared by both callers that open a scope door on
+/// `resolved` — the scope-lens listing (`print_human`) and the crossings
+/// door (`print_crossings`) — so the scope-part wording and the pause
+/// wording are spoken once between them, not re-derived per door.
 ///
 /// **The pause is read from the scope, never from the rows.** It is a
 /// property of the place being read at, so it is stated whether or not the
@@ -33,13 +36,18 @@ use crate::trail::{TrailResult, TrailView};
 /// whether the place was named or stood in. A reader deducing the door from
 /// a row that might not be there is exactly the silence the closed door is
 /// supposed to end.
-fn trail_header(scope_part: &str, time_label: Option<&str>, resolved: &ResolvedScope) -> String {
+fn trail_header(heading: &str, resolved: &ResolvedScope, time_label: Option<&str>) -> String {
+    let scope_part = if resolved.is_global() {
+        "all roots".to_string()
+    } else {
+        resolved.prefixes.join(", ")
+    };
     let pause = crate::scope::parked_pause(&resolved.pause)
         .map(|line| format!(" — {line}"))
         .unwrap_or_default();
     match time_label {
-        Some(label) => format!("Decision trail: {scope_part} — {label}{pause}"),
-        None => format!("Decision trail: {scope_part}{pause}"),
+        Some(label) => format!("{heading}: {scope_part} — {label}{pause}"),
+        None => format!("{heading}: {scope_part}{pause}"),
     }
 }
 
@@ -53,12 +61,7 @@ pub(super) fn print_human(
     card: Option<&CompositionCard>,
     long: bool,
 ) {
-    let scope_part = if resolved.is_global() {
-        "all roots".to_string()
-    } else {
-        resolved.prefixes.join(", ")
-    };
-    println!("{}", trail_header(&scope_part, time_label, resolved));
+    println!("{}", trail_header("Decision trail", resolved, time_label));
 
     let view_root = result.view_root.as_deref();
 
@@ -311,15 +314,7 @@ pub(super) fn print_crossings(
     resolved: &ResolvedScope,
     params: &CrossingsParams,
 ) {
-    let scope_part = if resolved.is_global() {
-        "all roots".to_string()
-    } else {
-        resolved.prefixes.join(", ")
-    };
-    let pause = crate::scope::parked_pause(&resolved.pause)
-        .map(|line| format!(" — {line}"))
-        .unwrap_or_default();
-    println!("Crossings: {scope_part}{pause}");
+    println!("{}", trail_header("Crossings", resolved, None));
 
     for section in &result.sections {
         println!();
@@ -1226,7 +1221,7 @@ fn format_origin_line(line: &OriginLine) -> Vec<String> {
         OriginLine::FromRoot {
             root_path,
             root_removed,
-            root_suspended,
+            parked,
             retired_book,
             from_within,
             files,
@@ -1246,7 +1241,7 @@ fn format_origin_line(line: &OriginLine) -> Vec<String> {
                     retired_book.as_deref(),
                     *root_removed,
                     RootStanding::AsItStandsNow {
-                        suspended: *root_suspended,
+                        suspended: parked.is_some(),
                     },
                 ),
                 &format!(
@@ -1687,11 +1682,6 @@ pub(super) enum RootStanding {
     /// record of what happened, which no present standing qualifies.
     AsItWasThen,
 }
-
-/// The established marker for a root the user has closed the door on. Not a
-/// door *statement* — no verb, no way back: the line is testimony, and the
-/// registry's testifying clause is stated, never headlined.
-const ROOT_SUSPENDED_MARKER: &str = " (suspended)";
 
 /// What an origin location's own line says about the root behind it, one
 /// spelling for every surface that names an origin.
@@ -3969,7 +3959,7 @@ mod tests {
         OriginLine::FromRoot {
             root_path: root_path.to_string(),
             root_removed,
-            root_suspended: false,
+            parked: None,
             retired_book: None,
             from_within: false,
             files,
@@ -3987,7 +3977,7 @@ mod tests {
             OriginLine::FromRoot {
                 root_path,
                 root_removed,
-                root_suspended,
+                parked,
                 from_within,
                 files,
                 bytes,
@@ -3998,7 +3988,7 @@ mod tests {
             } => OriginLine::FromRoot {
                 root_path,
                 root_removed,
-                root_suspended,
+                parked,
                 retired_book: Some(book.to_string()),
                 from_within,
                 files,
@@ -4052,7 +4042,7 @@ mod tests {
     fn format_origin_line_from_within_says_elsewhere_in_the_root() {
         let ts = local_ts_on("2026-05-12");
         let line = OriginLine::FromRoot {
-            root_suspended: false,
+            parked: None,
             root_path: "/archive".to_string(),
             root_removed: false,
             retired_book: None,
@@ -4129,7 +4119,7 @@ mod tests {
         // displace each other.
         let ts = local_ts_on("2026-05-12");
         let line = OriginLine::FromRoot {
-            root_suspended: false,
+            parked: None,
             root_path: "/archive".to_string(),
             root_removed: true,
             retired_book: None,
@@ -4251,7 +4241,7 @@ mod tests {
             } => OriginLine::FromRoot {
                 root_path,
                 root_removed,
-                root_suspended: false,
+                parked: None,
                 retired_book,
                 from_within: true,
                 files,
@@ -5248,16 +5238,25 @@ mod tests {
         };
 
         assert_eq!(
-            trail_header("/mnt/d1/photos", None, &parked),
+            trail_header("Decision trail", &parked, None),
             "Decision trail: /mnt/d1/photos — /mnt/d1 suspended · canon roots unsuspend path:/mnt/d1"
         );
         // The time lens carries it too — both labels, one line.
-        assert!(trail_header("/mnt/d1/photos", Some("today"), &parked)
+        assert!(trail_header("Decision trail", &parked, Some("today"))
             .contains("— today — /mnt/d1 suspended · "));
+
+        // The crossings door shares the same composition, under its own
+        // heading — one spelling of the scope-part and pause wording, not a
+        // second one re-derived per door.
+        let decision_trail_line = trail_header("Decision trail", &parked, None);
+        assert_eq!(
+            trail_header("Crossings", &parked, None),
+            decision_trail_line.replacen("Decision trail", "Crossings", 1)
+        );
 
         parked.pause = Vec::new();
         assert_eq!(
-            trail_header("/mnt/d1/photos", None, &parked),
+            trail_header("Decision trail", &parked, None),
             "Decision trail: /mnt/d1/photos"
         );
     }
@@ -5281,9 +5280,12 @@ mod tests {
                 last_at,
                 ..
             } => OriginLine::FromRoot {
+                parked: Some(crate::core::domain::root::ParkedRoot {
+                    root_id: 1,
+                    root_path: root_path.clone(),
+                }),
                 root_path,
                 root_removed,
-                root_suspended: true,
                 retired_book,
                 from_within,
                 files,

@@ -18,7 +18,7 @@ use syn::{Attribute, ItemUse, Macro, Meta, Path as SynPath, UseTree};
 
 mod common;
 
-use common::collect_rs_files;
+use common::{collect_rs_files, is_externalised_test_file, production_text};
 
 // ============================================================================
 // Layers
@@ -1663,74 +1663,11 @@ fn the_containment_probe_is_spelled_only_inside_the_path_law() {
 
 // ============================================================================
 // Two censuses over the production tree
+//
+// The production/test split (`production_text`, `is_externalised_test_file`)
+// moved to `common` when the closed-door conformance pass's suspension-read
+// census became its second consumer.
 // ============================================================================
-
-/// One file's production text: every line outside a `#[cfg(test)]` module.
-///
-/// The test modules are **blanked, not deleted**, so a line's number stays its
-/// number and a census can say where it read something. Modules nest — a repo
-/// stratum with `source`/`root`/`fact` submodules carries a test module inside
-/// each — so the walk recurses rather than cutting at the first attribute the
-/// way the SQL scan above can afford to within one stratum.
-///
-/// Externalised test files — a stratum's own `tests/` directory, per the
-/// fixture-sharing criterion — carry no `#[cfg(test)]` at all and are excluded
-/// by path instead, at each census's walk.
-fn production_text(file_label: &str, raw: &str) -> String {
-    let file = syn::parse_file(raw).unwrap_or_else(|e| panic!("failed to parse {file_label}: {e}"));
-    let mut ranges = Vec::new();
-    test_mod_line_ranges(&file.items, &mut ranges);
-    raw.lines()
-        .enumerate()
-        .map(|(idx, line)| {
-            let line_no = idx + 1;
-            if ranges
-                .iter()
-                .any(|(from, to)| line_no >= *from && line_no <= *to)
-            {
-                ""
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The line ranges every `#[cfg(test)]` module occupies, at any depth.
-fn test_mod_line_ranges(items: &[syn::Item], out: &mut Vec<(usize, usize)>) {
-    for item in items {
-        let syn::Item::Mod(item_mod) = item else {
-            continue;
-        };
-        if item_mod.attrs.iter().any(is_cfg_test) {
-            let span = item.span();
-            out.push((span.start().line, span.end().line));
-            continue;
-        }
-        if let Some((_, inner)) = &item_mod.content {
-            test_mod_line_ranges(inner, out);
-        }
-    }
-}
-
-/// A `#[cfg(test)]` attribute, however the predicate inside it is spelled.
-fn is_cfg_test(attr: &Attribute) -> bool {
-    match &attr.meta {
-        Meta::List(list) => list.path.is_ident("cfg") && list.tokens.to_string().contains("test"),
-        _ => false,
-    }
-}
-
-/// True for a file that is test scaffolding by placement: a `tests/` directory
-/// inside a stratum, where the fixture-sharing criterion externalises a corpus
-/// several files share. The directory name is the whole signal, so a
-/// production module may not be called `tests`.
-fn is_externalised_test_file(rel: &str) -> bool {
-    let mut components: Vec<&str> = rel.split('/').collect();
-    components.pop();
-    components.contains(&"tests")
-}
 
 // ----------------------------------------------------------------------------
 // The `decompose` call-site census

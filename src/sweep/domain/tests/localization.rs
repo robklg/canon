@@ -332,10 +332,12 @@ fn a_live_scope_wins_the_counterpart_choice_over_a_suspended_one() {
     }
     // The parked scope loses the citation, not its testimony: it stays on a
     // context line. Suspension decides which place is cited, never what the
-    // evidence says.
+    // evidence says — and the context line itself carries the door, so a
+    // parked place is never cited bare.
     assert_eq!(ls.context.len(), 1);
     assert_eq!(ls.context[0].location.root_path, "/r0-other");
     assert_eq!(ls.context[0].location.rel_prefix, "k");
+    assert!(ls.context[0].location_suspended);
 }
 
 #[test]
@@ -385,7 +387,7 @@ fn the_sink_still_fires_when_no_live_scope_qualifies() {
     );
     assert!(ranked.entries.is_empty());
     assert_eq!(ranked.suspended.len(), 1);
-    assert_eq!(ranked.suspended[0].root_path, "/r0-other");
+    assert_eq!(ranked.suspended[0].parked.root_path, "/r0-other");
     assert_eq!(ranked.suspended[0].places_with_copies_on_it, 1);
 }
 

@@ -31,17 +31,18 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
         None => None,
     };
 
-    // Apply domain predicates for filtering
-    let filtered_roots: Vec<&Root> = all_roots
-        .iter()
-        .filter(|r| {
-            // Filter by suspended status
-            if suspended_only {
-                r.is_suspended()
-            } else {
-                r.is_active()
-            }
-        })
+    // The "which roots are open" question routes through the fleet
+    // partition rather than a bare `!is_suspended()` filter; "give me the
+    // closed ones" (`--suspended`) is the complementary query, not a second
+    // spelling of the same one, and stays its own predicate.
+    let (open, _parked) = crate::core::domain::root::open_roots(&all_roots);
+    let by_suspension: Vec<&Root> = if suspended_only {
+        all_roots.iter().filter(|r| r.is_suspended()).collect()
+    } else {
+        open
+    };
+    let filtered_roots: Vec<&Root> = by_suspension
+        .into_iter()
         .filter(|r| {
             // Filter by scope if provided
             match &scope_str {

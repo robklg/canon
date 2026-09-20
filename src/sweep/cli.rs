@@ -207,12 +207,12 @@ fn suspended_lines(tallies: &[SuspendedRootTally]) -> Vec<(String, Vec<String>)>
     tallies
         .iter()
         .map(|t| {
-            let way_back = WayBack::unsuspend(&t.root_path);
+            let way_back = t.parked.way_back();
             let argv = way_back.argv().to_vec();
             (
                 format!(
                     "{} suspended — not ranked: {} · {}",
-                    t.root_path,
+                    t.parked.root_path,
                     causes_phrase(
                         Cause {
                             places: t.places_on_it,
@@ -380,11 +380,7 @@ fn print_finding(
         residual_phrase(finding)
     );
     for ctx in &finding.context {
-        println!(
-            "    also {} inside {}",
-            pct(ctx.size_pct),
-            abs_path(&ctx.location)
-        );
+        println!("{}", context_line(ctx));
     }
     print_excluded_context(&finding.subject, report, "    ");
     print_notes(&finding.subject, report, "    ", None);
@@ -849,6 +845,18 @@ fn pct(fraction: f64) -> String {
     format!("{:.0}%", fraction * 100.0)
 }
 
+/// A context relation's own line — the one shown-entry shape that carries a
+/// suspension marker (`sweep/CLAUDE.md`'s "no in-entry furniture" bullet
+/// names why a context relation is the exception to that rule).
+fn context_line(ctx: &crate::sweep::domain::structural::ContextRelation) -> String {
+    format!(
+        "    also {} inside {}{}",
+        pct(ctx.size_pct),
+        abs_path(&ctx.location),
+        crate::core::domain::root::suspended_marker(ctx.location_suspended)
+    )
+}
+
 fn counted_phrase(count: usize, noun: &str) -> String {
     let plural = if count == 1 { "" } else { "s" };
     format!("{} {noun}{plural}", format_count(count))
@@ -988,6 +996,27 @@ mod tests {
         assert_eq!(argv.last().unwrap(), "/Volumes/My Drive/old backup/photos");
     }
 
+    #[test]
+    fn a_context_relation_names_its_own_parked_root() {
+        // The one shown-entry shape with its own marker
+        // (`sweep/CLAUDE.md`'s "no in-entry furniture" bullet names the
+        // exception): a context relation is neither sunk nor demoted, so it
+        // is stated in place rather than only counted on the footer.
+        use crate::sweep::domain::structural::ContextRelation;
+        let open = ContextRelation {
+            location: loc("/live", "photos"),
+            size_pct: 0.4,
+            location_suspended: false,
+        };
+        let parked = ContextRelation {
+            location: loc("/arc", "photos"),
+            size_pct: 0.6,
+            location_suspended: true,
+        };
+        assert!(!context_line(&open).contains("suspended"));
+        assert!(context_line(&parked).contains("suspended"));
+    }
+
     /// A source root at `/r<id>`, and one of its rows. Second use is where
     /// duplication is extracted: two tests here build boards out of real
     /// `Root`/`Source` values, and a second hand-spelled copy of a struct with
@@ -1050,7 +1079,12 @@ mod tests {
         gain_copies: u64,
     ) -> SuspendedRootTally {
         SuspendedRootTally {
-            root_path: root_path.to_string(),
+            // These tests read the footer's text, never a root id — a fixed
+            // placeholder is enough.
+            parked: crate::core::domain::root::ParkedRoot {
+                root_id: 0,
+                root_path: root_path.to_string(),
+            },
             places_on_it: on_it,
             places_with_copies_on_it: copies,
             gain_bytes_on_it: gain_on_it,

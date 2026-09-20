@@ -726,9 +726,9 @@ const LAWS: &[Law] = &[
         record: "2026-08-29",
     },
     Law {
-        name: "suspension citation-evidence split",
-        owner: "sweep/domain/structural/localization.rs",
-        verifier: "a_live_scope_wins_the_counterpart_choice_over_a_suspended_one",
+        name: "stated-never-headlined",
+        owner: "core/domain/resolution.rs",
+        verifier: "standing_first_orders_the_open_place_before_the_parked_one",
         reach: Reach::Canon,
         authority: Authority::Searched,
         record: "2026-08-29",

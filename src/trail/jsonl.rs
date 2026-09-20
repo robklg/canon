@@ -2,7 +2,7 @@
 //! contract, one typed object per line, view-independent (a decision
 //! serializes identically wherever it was surfaced from).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use anyhow::Result;
@@ -47,6 +47,19 @@ struct JsonExtraction<'a> {
     destination: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     disposition: Option<&'static str>,
+    /// Whether this row's origin root is no longer known to the live index —
+    /// the same fact `trail show`'s `drew from:` lines and the composition
+    /// card already state for a cited origin, which a machine consumer had
+    /// no field for. A field, not a sentence: never `origin_marker`'s
+    /// composed English, and never a suspended bit — an extraction row
+    /// records what happened, not what stands today (the historical-line
+    /// law).
+    root_removed: bool,
+    /// Where a removed origin root's story is bound now, when it was
+    /// retired. `None` for a live root or a plain `roots rm` (no bound
+    /// story to point at).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retired_book: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -69,7 +82,11 @@ pub(super) struct JsonRetiredScopeEvent<'a> {
     pub(super) decision_id: i64,
 }
 
-fn json_extractions(rows: Option<&[DecisionExtraction]>) -> Option<Vec<JsonExtraction<'_>>> {
+fn json_extractions<'a>(
+    rows: Option<&'a [DecisionExtraction]>,
+    live_root_paths: &HashSet<String>,
+    retired_books: &'a HashMap<String, String>,
+) -> Option<Vec<JsonExtraction<'a>>> {
     rows.map(|rows| {
         rows.iter()
             .map(|r| JsonExtraction {
@@ -79,17 +96,28 @@ fn json_extractions(rows: Option<&[DecisionExtraction]>) -> Option<Vec<JsonExtra
                 bytes: r.bytes,
                 destination: &r.destination_path,
                 disposition: r.disposition.map(|d| d.as_str()),
+                root_removed: !live_root_paths.contains(&r.root_path),
+                retired_book: retired_books.get(&r.root_path).map(String::as_str),
             })
             .collect()
     })
 }
 
-pub(super) fn print_jsonl(result: &TrailResult) -> Result<()> {
+pub(super) fn print_jsonl(
+    result: &TrailResult,
+    live_root_paths: &HashSet<String>,
+    retired_books: &HashMap<String, String>,
+) -> Result<()> {
     let events: Box<dyn Iterator<Item = &TimelineEvent>> = match &result.view {
         TrailView::Recent(events) => Box::new(events.iter()),
         TrailView::Days(days) => Box::new(days.iter().flat_map(|d| d.events.iter())),
     };
-    print_events(events, &result.extractions_all)
+    print_events(
+        events,
+        &result.extractions_all,
+        live_root_paths,
+        retired_books,
+    )
 }
 
 /// The crossings door's machine output: **filter-only**. The same events, the
@@ -99,11 +127,17 @@ pub(super) fn print_jsonl(result: &TrailResult) -> Result<()> {
 pub(super) fn print_crossings_jsonl(
     decisions: &[Decision],
     extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    live_root_paths: &HashSet<String>,
+    retired_books: &HashMap<String, String>,
 ) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     for decision in decisions {
-        writeln!(handle, "{}", decision_json(decision, extractions)?)?;
+        writeln!(
+            handle,
+            "{}",
+            decision_json(decision, extractions, live_root_paths, retired_books)?
+        )?;
     }
     Ok(())
 }
@@ -111,12 +145,16 @@ pub(super) fn print_crossings_jsonl(
 fn print_events<'a>(
     events: impl Iterator<Item = &'a TimelineEvent>,
     extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    live_root_paths: &HashSet<String>,
+    retired_books: &HashMap<String, String>,
 ) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     for event in events {
         let json = match event {
-            TimelineEvent::Decision(d) => decision_json(d, extractions)?,
+            TimelineEvent::Decision(d) => {
+                decision_json(d, extractions, live_root_paths, retired_books)?
+            }
             TimelineEvent::Note(n) => serde_json::to_string(&JsonNoteEvent {
                 r#type: "note",
                 created_at: n.created_at,
@@ -136,6 +174,8 @@ fn print_events<'a>(
 fn decision_json(
     d: &Decision,
     extractions: &HashMap<i64, Vec<DecisionExtraction>>,
+    live_root_paths: &HashSet<String>,
+    retired_books: &HashMap<String, String>,
 ) -> Result<String> {
     Ok(serde_json::to_string(&JsonDecisionEvent {
         r#type: "decision",
@@ -152,7 +192,11 @@ fn decision_json(
         summary: d.summary.as_deref(),
         receipt_root_id: d.receipt_root_id,
         receipt_rel_path: d.receipt_rel_path.as_deref(),
-        extractions: json_extractions(extractions.get(&d.id).map(Vec::as_slice)),
+        extractions: json_extractions(
+            extractions.get(&d.id).map(Vec::as_slice),
+            live_root_paths,
+            retired_books,
+        ),
     })?)
 }
 
@@ -273,7 +317,7 @@ mod tests {
             summary: None,
             receipt_root_id: None,
             receipt_rel_path: None,
-            extractions: json_extractions(Some(&[row])),
+            extractions: json_extractions(Some(&[row]), &HashSet::new(), &HashMap::new()),
         })
         .unwrap();
         assert!(json.contains(r#""extractions":[{"root":"/vol/photos""#));
@@ -282,6 +326,56 @@ mod tests {
         assert!(json.contains(r#""bytes":3900000"#));
         assert!(json.contains(r#""destination":"/archive/2016/Italy""#));
         assert!(json.contains(r#""disposition":"retained""#));
+        // This fixture supplies no live roots at all, so the origin reads
+        // removed by construction — the two dedicated tests below are the
+        // ones pinning the live/removed distinction itself.
+        assert!(json.contains(r#""root_removed":true"#));
+        assert!(!json.contains("retired_book"));
+    }
+
+    #[test]
+    fn jsonl_extraction_states_a_live_origins_standing_too() {
+        let row = crate::core::domain::extraction::DecisionExtraction {
+            decision_id: 61,
+            root_id: 1,
+            root_path: "/vol/photos".to_string(),
+            rel_prefix: "2016/italy".to_string(),
+            files: 47,
+            bytes: Some(3_900_000),
+            destination_root_id: Some(9),
+            destination_path: "/archive/2016/Italy".to_string(),
+            disposition: Some(OriginDisposition::Retained),
+        };
+        let live = HashSet::from(["/vol/photos".to_string()]);
+        let json =
+            serde_json::to_string(&json_extractions(Some(&[row]), &live, &HashMap::new())).unwrap();
+        assert!(json.contains(r#""root_removed":false"#));
+        assert!(!json.contains("retired_book"));
+    }
+
+    #[test]
+    fn jsonl_extraction_names_a_removed_origins_book() {
+        let row = crate::core::domain::extraction::DecisionExtraction {
+            decision_id: 61,
+            root_id: 1,
+            root_path: "/vol/gone".to_string(),
+            rel_prefix: String::new(),
+            files: 3,
+            bytes: Some(300),
+            destination_root_id: Some(9),
+            destination_path: "/archive/2016".to_string(),
+            disposition: Some(OriginDisposition::Retained),
+        };
+        let retired_books =
+            HashMap::from([("/vol/gone".to_string(), "/archive/retired/gone".to_string())]);
+        let json = serde_json::to_string(&json_extractions(
+            Some(&[row]),
+            &HashSet::new(),
+            &retired_books,
+        ))
+        .unwrap();
+        assert!(json.contains(r#""root_removed":true"#));
+        assert!(json.contains(r#""retired_book":"/archive/retired/gone""#));
     }
 
     /// The crossings door emits **the same event**, from the same
@@ -350,7 +444,8 @@ mod tests {
             );
         }
 
-        let from_crossings = decision_json(&decision, &extractions).unwrap();
+        let from_crossings =
+            decision_json(&decision, &extractions, &HashSet::new(), &HashMap::new()).unwrap();
         assert!(from_crossings.contains(r#""type":"decision""#));
         assert!(from_crossings.contains(r#""destination":"/archive/2016""#));
         // No field the crossings view might have been tempted to add.

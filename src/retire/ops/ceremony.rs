@@ -61,7 +61,10 @@ pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<B
             "Retirement needs an archive root to hold the record — no archive root is registered"
         ),
         LedgerRootOutcome::AllArchiveRootsSuspended { roots } => {
-            bail!("{}", super::parked_shelf_refusal(&outcome, roots))
+            return Err(crate::core::domain::root::DoorRefused::fleetwide(
+                super::parked_shelf_refusal(&outcome, roots),
+            )
+            .into())
         }
     };
     let shelf = PathBuf::from(&ledger_root_path).join(SHELF_DIR);

@@ -13,7 +13,7 @@ use super::fs::{finalize_file, write_file_incomplete};
 use crate::core::domain::config::{LedgerConfig, ReceiptLayout};
 use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::fate::RegisteredFate;
-use crate::core::domain::root::Root;
+use crate::core::domain::root::{open_roots, ParkedRoot, Root};
 
 /// Reference to a receipt file on disk, stored in the decision record.
 pub struct ReceiptRef {
@@ -233,10 +233,12 @@ pub enum LedgerRootOutcome {
     /// No archive root is registered at all.
     NoArchiveRoot,
     /// Archive roots are registered and every one of them is suspended.
-    /// Their paths, lowest root id first — the same order the resolver
-    /// would have picked from.
+    /// Lowest root id first — the same order the resolver would have picked
+    /// from. Carried as `ParkedRoot`, not bare paths, so a hint or a
+    /// sentence about them goes through the one door vocabulary rather than
+    /// re-deriving a way back from a string.
     AllArchiveRootsSuspended {
-        roots: Vec<String>,
+        roots: Vec<ParkedRoot>,
     },
 }
 
@@ -246,16 +248,24 @@ impl LedgerRootOutcome {
     /// columns explains its own gap instead of leaving a reader to guess
     /// (the consumption-readiness ADR's self-explaining gaps). `None` when a
     /// root was found and a receipt is owed after all.
+    ///
+    /// The parked list is named through the domain's own cap
+    /// (`capped_root_names`) — the same rule the door statement and the
+    /// testimony segment use, so this sentence never lists more roots than
+    /// either of those would.
     pub fn unplaceable_reason(&self) -> Option<String> {
         match self {
             Self::Found { .. } => None,
             Self::NoArchiveRoot => {
                 Some("receipt not written: no archive root is registered".to_string())
             }
-            Self::AllArchiveRootsSuspended { roots } => Some(format!(
-                "receipt not written: every archive root is suspended ({})",
-                roots.join(", ")
-            )),
+            Self::AllArchiveRootsSuspended { roots } => {
+                let paths: Vec<String> = roots.iter().map(|p| p.root_path.clone()).collect();
+                Some(format!(
+                    "receipt not written: every archive root is suspended ({})",
+                    crate::core::domain::root::capped_root_names(&paths).as_list()
+                ))
+            }
         }
     }
 
@@ -266,26 +276,29 @@ impl LedgerRootOutcome {
     pub fn unsuspend_hint(&self) -> Option<String> {
         match self {
             Self::Found { .. } | Self::NoArchiveRoot => None,
-            Self::AllArchiveRootsSuspended { roots } => roots
-                .first()
-                .map(|p| crate::core::domain::root::WayBack::unsuspend(p).display()),
+            Self::AllArchiveRootsSuspended { roots } => {
+                roots.first().map(|p| p.way_back().display())
+            }
         }
     }
 }
 
 /// Resolve which archive root holds non-targeted receipts.
 ///
-/// Uses `config.root` if it names an active archive root; otherwise the lowest-id
-/// active archive root. With neither available the outcome carries *which*
-/// absence it is — the caller states that cause rather than assuming one.
-/// Suspended archive roots are skipped deliberately: a receipt is not written
-/// into a root the user has closed.
+/// Uses `config.root` if it names an open archive root; otherwise the
+/// lowest-id open archive root. With neither available the outcome carries
+/// *which* absence it is — the caller states that cause rather than
+/// assuming one. Suspended archive roots are skipped deliberately: a
+/// receipt is not written into a root the user has closed — routed through
+/// the fleet partition ([`open_roots`]) rather than a fourth
+/// `!is_suspended()` filter, so the parked half is `ParkedRoot`s from the
+/// one constructor rather than paths this function would otherwise have to
+/// re-derive a way back from.
 pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> LedgerRootOutcome {
+    let archive_roots: Vec<Root> = roots.iter().filter(|r| r.is_archive()).cloned().collect();
+    let (open, mut parked) = open_roots(&archive_roots);
     if let Some(configured) = config.root {
-        if let Some(r) = roots
-            .iter()
-            .find(|r| r.id == configured && r.is_active() && r.is_archive())
-        {
+        if let Some(r) = open.iter().find(|r| r.id == configured) {
             return LedgerRootOutcome::Found {
                 root_id: r.id,
                 root_path: r.path.clone(),
@@ -294,24 +307,17 @@ pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> LedgerRootO
         // Configured root is invalid (missing, suspended, or not an archive) —
         // fall through to the default rather than failing.
     }
-    if let Some(r) = roots
-        .iter()
-        .filter(|r| r.is_active() && r.is_archive())
-        .min_by_key(|r| r.id)
-    {
+    if let Some(r) = open.iter().min_by_key(|r| r.id) {
         return LedgerRootOutcome::Found {
             root_id: r.id,
             root_path: r.path.clone(),
         };
     }
-    let mut parked: Vec<&Root> = roots.iter().filter(|r| r.is_archive()).collect();
     if parked.is_empty() {
         return LedgerRootOutcome::NoArchiveRoot;
     }
-    parked.sort_by_key(|r| r.id);
-    LedgerRootOutcome::AllArchiveRootsSuspended {
-        roots: parked.into_iter().map(|r| r.path.clone()).collect(),
-    }
+    parked.sort_by_key(|p| p.root_id);
+    LedgerRootOutcome::AllArchiveRootsSuspended { roots: parked }
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +604,13 @@ mod tests {
         }
     }
 
+    fn parked(id: i64, path: &str) -> ParkedRoot {
+        ParkedRoot {
+            root_id: id,
+            root_path: path.to_string(),
+        }
+    }
+
     #[test]
     fn test_resolve_ledger_root_none_when_no_archive() {
         let roots = vec![mk_root(1, "source", false)];
@@ -620,7 +633,7 @@ mod tests {
         assert_eq!(
             resolve_ledger_root(&roots, &LedgerConfig::default()),
             LedgerRootOutcome::AllArchiveRootsSuspended {
-                roots: vec!["/root2".to_string(), "/root3".to_string()],
+                roots: vec![parked(2, "/root2"), parked(3, "/root3")],
             }
         );
     }
@@ -638,7 +651,7 @@ mod tests {
         assert_eq!(
             resolve_ledger_root(&roots, &cfg),
             LedgerRootOutcome::AllArchiveRootsSuspended {
-                roots: vec!["/root1".to_string(), "/root2".to_string()],
+                roots: vec![parked(1, "/root1"), parked(2, "/root2")],
             }
         );
     }
@@ -653,7 +666,7 @@ mod tests {
         );
         assert_eq!(
             LedgerRootOutcome::AllArchiveRootsSuspended {
-                roots: vec!["/a".to_string(), "/b".to_string()],
+                roots: vec![parked(1, "/a"), parked(2, "/b")],
             }
             .unplaceable_reason(),
             Some("receipt not written: every archive root is suspended (/a, /b)".to_string())
@@ -669,7 +682,7 @@ mod tests {
         assert_eq!(LedgerRootOutcome::NoArchiveRoot.unsuspend_hint(), None);
         assert_eq!(
             LedgerRootOutcome::AllArchiveRootsSuspended {
-                roots: vec!["/a".to_string(), "/b".to_string()],
+                roots: vec![parked(1, "/a"), parked(2, "/b")],
             }
             .unsuspend_hint(),
             Some("canon roots unsuspend path:/a".to_string())

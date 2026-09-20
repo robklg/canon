@@ -85,11 +85,14 @@ pub fn compute_composition(
     // Keyed the same way and for the same reason. The card is a present-tense
     // statement, so an origin still in the index but behind a door the user
     // closed is a fact about *this* place now — not a claim about the past,
-    // which is why the historical surfaces beside it carry no such mark.
-    let parked_root_paths: HashSet<String> = roots
-        .iter()
-        .filter(|r| r.is_suspended())
-        .map(|r| r.path.clone())
+    // which is why the historical surfaces beside it carry no such mark. The
+    // fleet partition hands back the closed doors as `ParkedRoot` data rather
+    // than a bare marker, so the card can carry the way back, not merely the
+    // fact that one exists.
+    let (_open, parked) = crate::core::domain::root::open_roots(&roots);
+    let parked_roots: HashMap<String, crate::core::domain::root::ParkedRoot> = parked
+        .into_iter()
+        .map(|p| (p.root_path.clone(), p))
         .collect();
 
     // A removed origin root that was retired points at its book — the origin
@@ -120,7 +123,7 @@ pub fn compute_composition(
         &decisions,
         &extractions_by_decision,
         &live_root_paths,
-        &parked_root_paths,
+        &parked_roots,
         &retired_books,
         prefixes,
     );

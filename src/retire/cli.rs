@@ -39,7 +39,8 @@ pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
         // that, and name the door — never "there is no shelf", which is a
         // different world and sends the reader looking for a different fix.
         (LedgerRootOutcome::AllArchiveRootsSuspended { roots }, _) => {
-            let parked = roots.join(", ");
+            let paths: Vec<String> = roots.iter().map(|p| p.root_path.clone()).collect();
+            let parked = crate::core::domain::root::capped_root_names(&paths).as_list();
             let way_back = listing.shelf.unsuspend_hint().unwrap_or_default();
             if listing.lines.is_empty() {
                 println!(
@@ -186,9 +187,7 @@ pub fn retire(
         // act alone, which is why a reading states it at the end instead of
         // stopping on it: a rehearsal that refuses on the act's preconditions
         // denies the one thing a rehearsal is for.
-        if let Some(reason) = super::ops::shelf_blocker(&roots, config) {
-            anyhow::bail!("{reason}");
-        }
+        super::ops::validate_retire_target(&roots, config)?;
     }
 
     let story = crate::core::ops::root_story::fetch_root_story(conn, root_id)?;
@@ -456,10 +455,7 @@ fn rests_behind_a_door(
     evidence: &crate::core::domain::resolution::ParkedEvidence,
     roots: &[Root],
 ) -> String {
-    evidence
-        .segment(roots)
-        .map(|segment| format!("; {segment}"))
-        .unwrap_or_default()
+    evidence.semicolon_clause(roots)
 }
 
 fn print_review(review: &super::ops::ReadinessReview) {
@@ -477,7 +473,7 @@ fn print_review(review: &super::ops::ReadinessReview) {
     }
     println!(
         "  suspended      {}",
-        if review.root.is_suspended() {
+        if review.root.parked().is_some() {
             "yes"
         } else {
             "no"

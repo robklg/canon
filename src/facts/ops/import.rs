@@ -156,7 +156,7 @@ pub fn process_record(
     // legitimate. So this record is set aside and counted, and the root is
     // never touched — including the object link and the fact promotion below,
     // which is why this stands ahead of every one of them.
-    if source.root_suspended {
+    if !source.is_active() {
         state.stats.skipped_suspended += 1;
         return Ok(outcome);
     }

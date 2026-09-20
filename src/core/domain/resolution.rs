@@ -227,6 +227,44 @@ impl ParkedEvidence {
             .collect();
         only_on_suspended_segment(self.count, &paths)
     }
+
+    /// The claim's segment as a trailing parenthetical: `" (N only on
+    /// suspended <roots>)"`, or empty when nothing rests behind a door.
+    ///
+    /// One of three attachment shapes a caller wants: a claim sentence
+    /// already carries its own words, and this qualifier rides at the end of
+    /// it in parentheses. The others are [`ParkedEvidence::semicolon_clause`]
+    /// and [`ParkedEvidence::bulleted_clause`].
+    pub fn parenthetical(&self, roots: &[Root]) -> String {
+        self.segment(roots)
+            .map(|segment| format!(" ({segment})"))
+            .unwrap_or_default()
+    }
+
+    /// The claim's segment as a trailing semicolon-joined clause:
+    /// `"; N only on suspended <roots>"`, or empty when nothing rests behind
+    /// a door. The second of three attachment shapes —
+    /// [`ParkedEvidence::parenthetical`] and [`ParkedEvidence::bulleted_clause`]
+    /// are the others.
+    pub fn semicolon_clause(&self, roots: &[Root]) -> String {
+        self.segment(roots)
+            .map(|segment| format!("; {segment}"))
+            .unwrap_or_default()
+    }
+
+    /// The claim's segment as a trailing bulleted clause: `" · N only on
+    /// suspended <roots>"`, or empty when nothing rests behind a door.
+    ///
+    /// The third attachment shape: coverage's own reading, a middle-dot
+    /// separator distinct from both the parenthetical and the semicolon
+    /// clause. Named rather than left as a call-site `format!` for the same
+    /// reason those two were minted — a caller composing the separator by
+    /// hand can mistype it or forget to gate on `None`.
+    pub fn bulleted_clause(&self, roots: &[Root]) -> String {
+        self.segment(roots)
+            .map(|segment| format!(" · {segment}"))
+            .unwrap_or_default()
+    }
 }
 
 /// Whether a claim grounded on these archive copies rests **solely** behind
@@ -243,6 +281,43 @@ impl ParkedEvidence {
 /// a headline.
 pub fn only_on_suspended(copies: &[ArchiveCopy]) -> bool {
     !copies.is_empty() && copies.iter().all(|copy| copy.root_suspended)
+}
+
+/// The **stated-never-headlined** law: a place behind a door the user closed
+/// never leads a list of places to go.
+///
+/// Ordering, not filtering — *this function* never drops a place, it only
+/// says a closed one never sorts ahead of an open one on weight alone,
+/// always the **head** of a comparison so everything else a list orders by
+/// (weight, path, ids) applies *within* standing, never across it, because a
+/// list's first line is its headline. **This function alone does not make
+/// "still appears" true**: a consumer that also caps a list owes that half
+/// itself — selecting which entries earn a cap slot by weight (never
+/// standing, so a closed door can never decide membership) before calling
+/// here to order only the survivors, or stating the omission as a count
+/// where a cap could otherwise make a closed-door entry silently vanish
+/// (`story::domain::locations::aggregate_locations`'s selection, capped by
+/// weight alone and left in that order, paired with
+/// `story::ops::render::fmt_locations`'s render-time call here — gated on
+/// `Voicing::Judgment` — is the worked example of the split living in two
+/// files, one voicing-blind and one voicing-aware, exactly because the same
+/// selection also feeds a voicing that must never call here at all; a
+/// present-tense list that merely counts its remainder, like the trail
+/// composition card, satisfies "stated" through the count itself, the same
+/// disposition the closed-door registry already grants elsewhere).
+///
+/// Canon-reach: several subsystems independently rank lists of cited
+/// locations and each must answer this the same way, or the same place reads
+/// as led in one view and trailing in its neighbour for no reason a user
+/// caused. Consumers that call this function: survey's four location lists,
+/// story's covered-where line, the trail composition card's origin lines.
+/// The sweep's live-preferred counterpart choice answers the same law by a
+/// **different, filtering** mechanism — a losing parked scope forfeits the
+/// citation outright rather than sorting behind — so it shares the law, not
+/// this function; see `sweep/CLAUDE.md`'s own "computed always, ranked
+/// never" section for why ordering was not the right shape there.
+pub fn standing_first(a_suspended: bool, b_suspended: bool) -> std::cmp::Ordering {
+    a_suspended.cmp(&b_suspended)
 }
 
 /// Deleted iff the stamp is Observe-family — the trail's presence-axis rule:
@@ -780,6 +855,63 @@ mod tests {
         assert!(!only_on_suspended(&[]));
     }
 
+    // ========================================================================
+    // The three attachment shapes — each pinned at its own separator, not
+    // only at a consuming call site. A call site's own test can pin a shape
+    // by accident and lose that coverage the moment it is rewritten to
+    // assert on `segment()` instead of the composed string; owning the pin
+    // here keeps it independent of which call site a future edit touches.
+    // ========================================================================
+
+    fn evidence_root(id: i64, path: &str) -> Root {
+        Root {
+            id,
+            path: path.to_string(),
+            role: "archive".to_string(),
+            comment: None,
+            last_scanned_at: None,
+            suspended: true,
+        }
+    }
+
+    fn one_parked_claim() -> (ParkedEvidence, Vec<Root>) {
+        let evidence = ParkedEvidence {
+            count: 1,
+            roots: vec![7],
+        };
+        (evidence, vec![evidence_root(7, "/arc-parked")])
+    }
+
+    #[test]
+    fn parenthetical_wraps_the_segment_in_parens() {
+        let (evidence, roots) = one_parked_claim();
+        assert_eq!(
+            evidence.parenthetical(&roots),
+            " (1 only on suspended /arc-parked)"
+        );
+        assert_eq!(ParkedEvidence::default().parenthetical(&roots), "");
+    }
+
+    #[test]
+    fn semicolon_clause_joins_the_segment_with_a_semicolon() {
+        let (evidence, roots) = one_parked_claim();
+        assert_eq!(
+            evidence.semicolon_clause(&roots),
+            "; 1 only on suspended /arc-parked"
+        );
+        assert_eq!(ParkedEvidence::default().semicolon_clause(&roots), "");
+    }
+
+    #[test]
+    fn bulleted_clause_joins_the_segment_with_a_middle_dot() {
+        let (evidence, roots) = one_parked_claim();
+        assert_eq!(
+            evidence.bulleted_clause(&roots),
+            " · 1 only on suspended /arc-parked"
+        );
+        assert_eq!(ParkedEvidence::default().bulleted_clause(&roots), "");
+    }
+
     #[test]
     fn the_account_counts_what_each_claim_rests_on() {
         // Two rows covered and one archived from here. Of them, one covered
@@ -839,5 +971,16 @@ mod tests {
         assert_eq!(account.contentless, 1);
         assert_eq!(account.covered_only_parked.count, 0);
         assert_eq!(account.archived_standing_only_parked.count, 0);
+    }
+
+    #[test]
+    fn standing_first_orders_the_open_place_before_the_parked_one() {
+        use std::cmp::Ordering;
+        // Open before parked, whatever the weight beside it — the ordering
+        // a caller composes this ahead of every other sort key with.
+        assert_eq!(standing_first(false, true), Ordering::Less);
+        assert_eq!(standing_first(true, false), Ordering::Greater);
+        assert_eq!(standing_first(false, false), Ordering::Equal);
+        assert_eq!(standing_first(true, true), Ordering::Equal);
     }
 }

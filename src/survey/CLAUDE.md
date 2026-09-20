@@ -92,13 +92,15 @@ both sides (`survey_counts_parked_evidence_on_the_outward_side`,
 `the_selection_side_still_sets_parked_sources_aside`).
 
 **Every cited place says whether reaching it means opening a door**, all-or-nothing:
-`LocationResult.suspended` is true when every source Canon knows there stands on a parked root.
-One copy on an open root and nothing needs opening, so a mark would raise a question the place
-does not pose. Read **from what stands at the place**, not from a discovered scope's root, which
-is what lets a `--other` location answer the same way a discovered one does. A discovered location lies in
-one root, so the *every* and *any* readings coincide there; a `--other` location is a path the
-user chose and can contain several roots, which is where the two readings part and the rule earns
-its keep (`an_other_location_spanning_two_standings_is_unmarked`).
+`LocationResult.suspended` is true when every source *in the population survey already fetched for
+the place* (`at_location` — non-excluded, non-contentless, hashed, role-appropriate for the mode in
+force; not literally every source Canon knows there) stands on a parked root. One copy on an open
+root and nothing needs opening, so a mark would raise a question the place does not pose. Read
+**from what stands at the place**, not from a discovered scope's root, which is what lets a
+`--other` location answer the same way a discovered one does. A discovered location lies in one
+root, so the *every* and *any* readings coincide there; a `--other` location is a path the user
+chose and can contain several roots, which is where the two readings part and the rule earns its
+keep (`an_other_location_spanning_two_standings_is_unmarked`).
 `render::door_marker` is the one spelling **for cited locations** — the summary's two lists and
 every `--detail` view, so a place cannot be marked in one and bare in the other; the frame label
 (`ops/orchestrate.rs`) composes its own, being a label rather than a location. Testimony either
@@ -113,12 +115,12 @@ only key the lists share.** Below it each sorts on its own measure — the break
 sources at the location, its detail view on selection-side sources archived there — so the two can
 legitimately disagree about which live place leads. What they may not disagree about is whether a
 place is marked, or whether a parked one leads at all. A list's first line is its headline, and
-testimony is *stated, never headlined*. This is a conformance to the **suspension
-citation-evidence split**, not a rule of survey's own: that law binds Canon-wide and already
-bound survey, so realising it here is delivery of a grant, not a new one. The sweep picks one
-citation and survey ranks many, so the two consume the key through different operations and
-share no code; what is shared is the law, and each surface carries its own pin. **Inside** survey
-the key is spelled once — `domain::analysis::standing_first`, the head of all four comparisons —
+testimony is *stated, never headlined*. This is a conformance to **stated-never-headlined**, not
+a rule of survey's own: that law binds Canon-wide and already bound survey, so realising it here
+is delivery of a grant, not a new one. The sweep picks one citation and survey ranks many, so the
+two consume the key through different operations and share no code; what is shared is the law,
+owned at `core::domain::resolution::standing_first`, and each surface carries its own pin.
+**Inside** survey every list reaches it through the one import, the head of all four comparisons —
 so a fifth list cannot restate it differently. `--other` keeps the
 user's own order; the marker still states each place.
 

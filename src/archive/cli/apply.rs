@@ -13,7 +13,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
-use crate::core::domain::root::{DoorVerb, ParkedRoot};
+use crate::core::domain::root::{DoorRefused, DoorVerb, ParkedRoot};
 use crate::core::domain::scope::DecisionScope;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
@@ -192,11 +192,9 @@ pub fn run(
     // that this never reaches — the same standing every pre-transfer refusal
     // here leaves. Exit 1 with no `Error:` prefix: nothing went wrong.
     if let Some(parked) = archive_root.parked() {
-        eprintln!(
-            "{}",
-            parked.door_line(DoorVerb::Refused, crate::scope::DESTINATION_REACH)
+        return Err(
+            DoorRefused::new(&parked, DoorVerb::Refused, crate::scope::DESTINATION_REACH).into(),
         );
-        std::process::exit(1);
     }
     let archive_root_path = &archive_root.path;
 
@@ -228,13 +226,11 @@ pub fn run(
             .into_iter()
             .map(|(root, n)| (root, DoorVerb::Refused, crate::scope::origin_reach(n)))
             .collect();
-        for line in crate::scope::closed_door_reaches(
+        let lines = crate::scope::closed_door_reaches(
             &doors,
             (DoorVerb::Refused, &crate::scope::origin_reach(total)),
-        ) {
-            eprintln!("{line}");
-        }
-        std::process::exit(1);
+        );
+        return Err(DoorRefused::from_lines(lines).into());
     }
 
     // Show summary and confirm (unless --yes)

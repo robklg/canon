@@ -15,6 +15,8 @@ use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::path::path_is_under;
+use crate::core::domain::resolution::standing_first;
+use crate::core::domain::root::ParkedRoot;
 
 use super::placement::{classify_row, RowAspect};
 
@@ -37,13 +39,13 @@ pub enum OriginLine {
         root_path: String,
         /// Whether the origin root is still known to the live index.
         root_removed: bool,
-        /// Whether the origin root is one the user has closed the door on.
+        /// The door the user has closed on the origin root, if it is closed.
         ///
         /// Present-tense, like the card itself: content still stands there
         /// and the origin claim is unchanged, but going to look means
         /// opening a door. Mutually exclusive with `root_removed` by
         /// construction — a root the index no longer knows has no door.
-        root_suspended: bool,
+        parked: Option<ParkedRoot>,
         /// Where a removed origin root's story lives now, when it was
         /// retired: the bound book's display path. `None` for a live root or
         /// for a plain `roots rm` (no bound story to point at).
@@ -86,6 +88,16 @@ impl OriginLine {
         match self {
             OriginLine::FromRoot { files, .. } => *files,
             OriginLine::MultiOrigin { files, .. } => *files,
+        }
+    }
+
+    /// Whether this line stands behind a closed door — the ordering's
+    /// stated-never-headlined key. `MultiOrigin` names no root, so it has no
+    /// door to answer for and reads as open.
+    fn suspended(&self) -> bool {
+        match self {
+            OriginLine::FromRoot { parked, .. } => parked.is_some(),
+            OriginLine::MultiOrigin { .. } => false,
         }
     }
 
@@ -275,9 +287,11 @@ fn contains_view(root_path: &str, prefixes: &[String]) -> bool {
 ///
 /// `prefixes` is the viewed scope, used only to tell a real origin from this
 /// place itself (see the rearrangement guard below).
-/// `parked_root_paths` names the roots whose door the user has closed —
-/// keyed by path like `live_root_paths`, and read for the same reason: what
-/// stands here now, and what reaching it would take.
+/// `parked_roots` carries the roots whose door the user has closed — keyed
+/// by path like `live_root_paths`, and read for the same reason: what
+/// stands here now, and what reaching it would take. The value is the
+/// `ParkedRoot` itself (not a bare marker) so an origin line can state the
+/// way back, not merely that a door exists.
 /// `retired_books` maps an origin root's snapshot path to the display path of
 /// the book its story was bound into — a DB read, so ops looks it up and
 /// passes it in, exactly as it already does for `live_root_paths`. A path
@@ -288,7 +302,7 @@ pub fn build_card(
     decisions: &HashMap<i64, Decision>,
     extractions_by_decision: &HashMap<i64, Vec<DecisionExtraction>>,
     live_root_paths: &HashSet<String>,
-    parked_root_paths: &HashSet<String>,
+    parked_roots: &HashMap<String, ParkedRoot>,
     retired_books: &HashMap<String, String>,
     prefixes: &[String],
 ) -> CompositionCard {
@@ -433,7 +447,7 @@ pub fn build_card(
         // Decided from the group key, so a root removed and re-added can't be
         // called removed on the strength of whichever stale row merged first.
         let root_removed = !live_root_paths.iter().any(|p| p == &root_path);
-        let root_suspended = parked_root_paths.contains(&root_path);
+        let parked = parked_roots.get(&root_path).cloned();
         // Gated on removal for the same reason `show`'s `drew from:` gates
         // it: a bound-but-unreleased retirement leaves its artifact
         // reference recorded while the root stays fully indexed, and a live
@@ -446,7 +460,7 @@ pub fn build_card(
         origins.push(OriginLine::FromRoot {
             root_path,
             root_removed,
-            root_suspended,
+            parked,
             retired_book,
             from_within: acc.from_within,
             files: acc.files,
@@ -457,8 +471,8 @@ pub fn build_card(
         });
     }
     origins.sort_by(|a, b| {
-        b.files()
-            .cmp(&a.files())
+        standing_first(a.suspended(), b.suspended())
+            .then(b.files().cmp(&a.files()))
             .then(a.tie_break().cmp(&b.tie_break()))
     });
     // Standings first, then gaps: a gap is an exception and belongs after
@@ -581,7 +595,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/Volumes/sd", "/archive"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -616,7 +630,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -625,7 +639,7 @@ mod tests {
             OriginLine::FromRoot {
                 root_path,
                 root_removed,
-                root_suspended: _,
+                parked: _,
                 retired_book: _,
                 from_within,
                 files,
@@ -663,7 +677,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -698,7 +712,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -801,7 +815,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -837,7 +851,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &["/archive/2020".to_string()],
         );
@@ -864,7 +878,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &["/archive/2020".to_string()],
         );
@@ -894,7 +908,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &["/archive/2020".to_string()],
         );
@@ -944,7 +958,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -981,7 +995,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a", "/vol/b", "/Volumes/sd", "/archive"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1023,7 +1037,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive", "/vol/a", "/Volumes/sd"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1044,7 +1058,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1064,7 +1078,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1092,7 +1106,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1121,7 +1135,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1157,7 +1171,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1215,7 +1229,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/archive"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1245,7 +1259,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1286,7 +1300,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1332,7 +1346,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1355,7 +1369,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1376,7 +1390,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1405,7 +1419,7 @@ mod tests {
             &decisions,
             &extractions,
             &live,
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1448,7 +1462,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1477,7 +1491,7 @@ mod tests {
             &decisions,
             &HashMap::new(),
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1504,13 +1518,52 @@ mod tests {
             &decisions,
             &extractions,
             &live,
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
         assert_eq!(card.origins.len(), 2);
         assert_eq!(card.origins[0].files(), 50);
         assert_eq!(card.origins[1].files(), 5);
+    }
+
+    #[test]
+    fn a_parked_origin_never_leads_even_carrying_more_weight() {
+        // The stated-never-headlined law, applied to the card's own origin
+        // lines: a heavier parked origin does not outrank a lighter live
+        // one. A files-only comparator would put the parked root
+        // ("/vol/big", 50 files) first.
+        let d1 = mk_decision(1, "apply", 100);
+        let d2 = mk_decision(2, "apply", 200);
+        let groups = HashMap::from([(Some(1), bucket(5, 500)), (Some(2), bucket(50, 5_000))]);
+        let decisions = HashMap::from([(1, d1), (2, d2)]);
+        let extractions = HashMap::from([
+            (1, vec![mk_extraction(1, 7, "/vol/small")]),
+            (2, vec![mk_extraction(2, 8, "/vol/big")]),
+        ]);
+        let live = live(&["/vol/a", "/vol/b", "/vol/small", "/vol/big"]);
+        let parked = HashMap::from([(
+            "/vol/big".to_string(),
+            ParkedRoot {
+                root_id: 8,
+                root_path: "/vol/big".to_string(),
+            },
+        )]);
+
+        let card = build_card(
+            &groups,
+            &decisions,
+            &extractions,
+            &live,
+            &parked,
+            &HashMap::new(),
+            &view(),
+        );
+        assert_eq!(card.origins.len(), 2);
+        assert_eq!(card.origins[0].files(), 5);
+        assert!(!card.origins[0].suspended());
+        assert_eq!(card.origins[1].files(), 50);
+        assert!(card.origins[1].suspended());
     }
 
     #[test]
@@ -1525,7 +1578,7 @@ mod tests {
             &decisions,
             &extractions,
             &HashSet::new(),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1550,7 +1603,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]), // live under some other id now
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
@@ -1580,7 +1633,7 @@ mod tests {
             &decisions,
             &extractions,
             &live(&["/vol/a"]),
-            &HashSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &view(),
         );
