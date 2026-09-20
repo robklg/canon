@@ -17,7 +17,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
-use crate::expr::Unmeasured;
+use crate::expr::{Pattern, Unmeasured};
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
 /// This prevents race conditions when opening the file in an editor
@@ -92,8 +92,10 @@ impl LockFile {
     /// absent field — and they take different answers, so the question is
     /// asked of the **file**, which can tell them apart. No header at all
     /// means the lock predates the field. A header whose scope is empty means
-    /// the manifest recorded no scope, so there was nothing to measure from
-    /// and no refresh will change that.
+    /// the lock was built while the manifest declared no scope that confirmed,
+    /// so there was nothing to measure from then — a refresh changes that
+    /// exactly when the manifest has since come to declare one that does,
+    /// which is the decision table's question, not this file's.
     ///
     /// A header whose scope is *not* empty leaves no unmeasured entries at
     /// all — and that rests on one fact, which is why it is worth naming:
@@ -110,18 +112,53 @@ impl LockFile {
             Some(_) => Unmeasured::NoScopeRecorded,
         }
     }
+
+    /// Whether the pattern places files relative to a scope this lock cannot
+    /// place them from.
+    ///
+    /// The one fact that tells the two expansion failures apart, and they take
+    /// opposite advice: a scope the manifest lacks is repaired by scoping it
+    /// or by `{source.rel_path}`, a fact no source carries only by the fact.
+    /// Both commands that meet the state read it, so it is asked once, here,
+    /// and of the **whole file** — like the reason above it. Two things follow.
+    /// The pattern half is the language facility's own reading
+    /// (`Pattern::names_scope_rel_path`), never the refusal's wording. And the
+    /// lock half is the lock's, never a run's: `apply --root` carries a subset
+    /// of the entries, and a predicate computed over a subset could answer
+    /// differently from the file it was cut from, leaving the two commands
+    /// naming opposite remedies for one manifest
+    /// (`a_pattern_needing_a_scope_is_asked_of_the_whole_lock`).
+    pub fn pattern_needs_a_scope_it_lacks(&self, pattern: &Pattern) -> bool {
+        pattern.names_scope_rel_path() && self.entries.iter().any(|e| e.scope_rel_path.is_none())
+    }
 }
 
-/// Read and parse a lock file (JSONL: a header line, then one entry per line).
+/// Read and parse a lock file (JSONL: a header line, then one entry per line),
+/// or `None` where there is no lock file beside the manifest at all.
 ///
 /// The first line is tried as a header and, failing that, read as an entry —
 /// which is what recognises a lock written before headers existed. The two
 /// shapes cannot be confused: a header line has no `id`, and an entry line has
 /// no `lock_version`, so each fails the other's required fields.
-pub fn read_lock_file(lock_path: &Path) -> Result<LockFile> {
+///
+/// **Absence is not unreadability, and only absence is `None`.** A lock that
+/// is not there is an ordinary state of a manifest — a zero-match refresh
+/// takes the lock away and records the empty hash — so a reader that could
+/// only fail would make the commonest state of an empty manifest look like a
+/// broken one. Every other failure stays an error: a file that is empty, one
+/// whose lines will not parse, one that cannot be opened for any reason but
+/// its absence. What each caller *does* about `None` is its own disposition,
+/// the same way an absent header is.
+pub fn read_lock_file(lock_path: &Path) -> Result<Option<LockFile>> {
     use std::io::{BufRead, BufReader};
-    let lock_file = std::fs::File::open(lock_path)
-        .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
+    let lock_file = match std::fs::File::open(lock_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::from(e))
+                .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))
+        }
+    };
     let mut lines = BufReader::new(lock_file).lines().enumerate();
 
     let mut header = None;
@@ -152,7 +189,7 @@ pub fn read_lock_file(lock_path: &Path) -> Result<LockFile> {
         );
     }
 
-    Ok(LockFile { header, entries })
+    Ok(Some(LockFile { header, entries }))
 }
 
 #[cfg(test)]
@@ -211,7 +248,9 @@ mod tests {
 
         // Read back through the reader production uses, so the header split
         // and the entry parse are exercised as a pair.
-        let read = read_lock_file(&lock_path).unwrap();
+        let read = read_lock_file(&lock_path)
+            .unwrap()
+            .expect("the lock was just written");
         let header = read
             .header
             .expect("a freshly written lock carries a header");
@@ -229,7 +268,8 @@ mod tests {
     }
 
     /// A zero-byte lock is a file that never finished being written, not one
-    /// "written before Canon recorded where each file goes". A reader states
+    /// "built before lock files recorded the scopes they were built from". A
+    /// reader states
     /// what it observes rather than a cause it cannot know — the same rule the
     /// provenance spine applies to empty receipt columns.
     #[test]
@@ -266,10 +306,56 @@ mod tests {
         )
         .unwrap();
 
-        let read = read_lock_file(&lock_path).unwrap();
+        let read = read_lock_file(&lock_path)
+            .unwrap()
+            .expect("the file is there; only its header is not");
         assert!(read.header.is_none(), "an old lock declares no header");
         assert_eq!(read.entries.len(), 2, "no entry is eaten by the header try");
         assert_eq!(read.entries[0].id, 1);
         assert!(read.entries[0].scope_rel_path.is_none());
+    }
+
+    fn measured(scope_rel_path: Option<&str>) -> LockEntry {
+        LockEntry {
+            id: 1,
+            root_id: 10,
+            path: "/photos/a.jpg".to_string(),
+            device: 100,
+            inode: 200,
+            size: 5000,
+            mtime: 1700000000,
+            partial_hash: "abc123".to_string(),
+            object_id: Some(42),
+            hash_type: Some("sha256".to_string()),
+            hash_value: Some("deadbeef".to_string()),
+            scope_rel_path: scope_rel_path.map(str::to_string),
+        }
+    }
+
+    /// **Which remedy a failed expansion takes is the lock's answer, asked of
+    /// the whole file.** Both halves are exercised: a pattern that does not
+    /// name the scope key never needs a scope, however the lock stands; one
+    /// that does needs it exactly where some entry carries no measurement.
+    /// The last case is the one a per-run subset would get wrong — the
+    /// measured entry alone says no, the file says yes.
+    #[test]
+    fn a_pattern_needing_a_scope_is_asked_of_the_whole_lock() {
+        use crate::expr::parse_pattern;
+        let scoped = parse_pattern("{scope.rel_path}").unwrap();
+        let unscoped = parse_pattern("{source.rel_path}").unwrap();
+        let lock = |entries: Vec<LockEntry>| LockFile {
+            header: None,
+            entries,
+        };
+
+        assert!(!lock(vec![measured(None)]).pattern_needs_a_scope_it_lacks(&unscoped));
+        assert!(!lock(vec![measured(Some("a.jpg"))]).pattern_needs_a_scope_it_lacks(&scoped));
+        assert!(!lock(Vec::new()).pattern_needs_a_scope_it_lacks(&scoped));
+        assert!(lock(vec![measured(None)]).pattern_needs_a_scope_it_lacks(&scoped));
+        assert!(
+            lock(vec![measured(Some("a.jpg")), measured(None)])
+                .pattern_needs_a_scope_it_lacks(&scoped),
+            "one unmeasured entry anywhere in the file is the file's answer"
+        );
     }
 }

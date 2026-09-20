@@ -368,8 +368,8 @@ becomes a `DecisionScope`.
 
 The type is **infallible on purpose** and stays so: it classifies into six registers —
 `scopes()` / `set_aside()` / `unrooted()` / `parked()` / `recorded()` / `measured_from()`, with
-`selection()` a *reading* of the first — and never fails, because every failure mode is a
-caller's own disposition.
+`selection()` and `kept_nothing()` *readings* over them — and never fails, because every failure
+mode is a caller's own disposition.
 `resolve_recorded_scope`'s `Result` carries *infrastructure* failure (a SQL error) and nothing
 else. Every register is derived from one list of `PrefixOutcome`s through a **single assembly
 site**, `from_outcomes`, which is also the type's only constructor: what each register means is
@@ -392,9 +392,18 @@ naming a place Canon cannot confirm from dragging the measurement, so the surviv
 correctly instead of being pulled up a level. `recorded()` still carries every line — healed as
 far as it could be, verbatim past that — because a refresh writes the user's own file back and
 must not narrow it on their behalf. That partition is the scope-boundary honesty policy's shape
-at a second door, which had neither half; the policy's terminal rule (a scope that kept nothing
-must never look like a narrowing) is raised by `cluster refresh` through the same
-`no_sources_known` sentence the argument door uses.
+at a second door, which had neither half; the policy's **terminal rule** — a scope that kept
+nothing must never look like a narrowing — is `kept_nothing()`, spoken here beside the registers
+it reads rather than at the command that refuses on it, because it has a second reader that
+refuses nothing: `cluster refresh` raises it through the same `no_sources_known` sentence the
+argument door uses, and `cluster status` consults it before naming a refresh, a report that
+named one it turns away being the defect the second reader was found as
+(`the_terminal_rule_fires_only_where_something_was_set_aside`). An **all-unrooted** scope is
+deliberately not the rule's case, and neither is a **parked** one — the door is its own refusal
+with its own way back, so which of the two a caller states where both hold is the caller's
+precedence, not the predicate's. Both readers being in one subsystem today does not make this a
+subsystem's predicate: it is the argument door's own rule at the second door, and its two
+siblings live in `core::ops::scope`.
 
 **`measured_from()` is the register the vantage folds**, and the one place the grain is read.
 Every confirmed prefix contributes exactly one `DirectoryLocation`; a set-aside, unrooted or

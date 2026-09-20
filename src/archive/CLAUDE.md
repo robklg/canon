@@ -196,15 +196,13 @@ The dispositions differ by what each command is about to do, and none of them is
 - **`apply` does not read the recorded scope at all**, and carries no unrooted refusal. A line that
   resolved to nothing never entered the lock, so it moved neither the files nor the record; the
   refusal apply *does* carry is the old-lock one above.
-- **`cluster status` carries both categories out** on `ManifestStatus.unrooted_scope` and
-  `set_aside_scope` and lets the interface print them; `all_accounted_for()` is untouched, since its
-  claim is about source files and is still true. Its **next-step hint** names the way forward
-  *unless apply cannot run at all* — two states, and never an unresolvable scope line:
-  `lock_predates_measurement` gets the rebuild (narrowed again at the manifest door, below), and
-  `pattern_unexpandable` gets **no step**, because no one command supplies what a pattern is
-  missing; the report states the reasons in their own block instead, which is what makes the
-  silence honest. Whether there is a step is never the scope's business: a manifest with nothing
-  pending has no step to offer.
+- **`cluster status` carries every category out** on `ManifestStatus` and lets the interface print
+  them: `unrooted_scope` and `set_aside_scope`, and — because a report must name no act that would
+  be turned away — `scope_kept_nothing` and `scope_confirms_nothing`, the two halves of the
+  recorded scope the decision table reads. `all_accounted_for()` is untouched, since its claim is
+  about source files and is still true. Whether there is a **next step** is never the scope's
+  business: a manifest with nothing pending has no step to offer, and that gate is the interface's
+  own. *Which* step it is belongs to the table below.
 
 The recorded-scope resolution itself, and its pins, live in `src/core/CLAUDE.md`.
 
@@ -246,13 +244,14 @@ source stands now, and a lock is a snapshot of where it stood.
 - **A step is withheld exactly where that step's own act meets a door**, and **the two acts meet
   different doors**: `apply` transfers from the lock's entries into the destination and reads no
   recorded scope, while `cluster refresh` re-queries from that scope and is stopped by neither a
-  parked entry nor a parked destination. Two derivations, `apply_meets_a_door` and
-  `refresh_meets_a_door`, so the interface never re-tests the causes
+  parked entry nor a parked destination. Both are rows of the decision table below, so the
+  interface never re-tests the causes
   (`a_step_is_withheld_exactly_where_its_own_act_meets_the_door`). One qualification: `apply` asks
   its origin door on the entries `--root` left it, while the report asks over all of them, so a
   *narrowed* apply can run where the report offered nothing.
 - **A next step is offered where it is the act that brings an apply within reach**; otherwise the
-  door's own way back is the step. Parked entries with an open scope and destination are that case
+  cause that withheld it owes the way back, and only a **door** discharges that by itself — its
+  line carries `canon roots unsuspend`. Parked entries with an open scope and destination are that case
   — a rebuild leaves them out and the apply runs. A parked destination is not, whatever else is
   closed: no rebuild changes where the files are going, and printing one under a
   parked-destination line reads as if a refresh addressed it. Narrower than the bullet above,
@@ -294,6 +293,153 @@ test spans both sides, reading generate's output back through the parser, and a 
 the other does not follow is a test failure rather than silent rot. **One assembly, every rewrite**:
 `assemble_manifest()` composes the whole document — header, Cluster Summary, Notes, TOML body, fact
 help — for generation and for *both* refresh arms, and the round-trip test covers both.
+
+## The status decision table
+
+*Can `apply` run at all, and can `cluster refresh`* is one question with one owner:
+`domain.rs`'s `ManifestStanding`, whose rows are the `Obstacle` enum. It was a nest of booleans
+inside `cluster status`'s next-step hint, listing four causes where `apply` refuses on more — so
+the report invited the one command that refuses, in four separate ways.
+
+- **Each row stops exactly one act**, and which one is the enum's own doc table: the lock's three
+  states, the pattern's, and the two ends' doors stop `apply`; the recorded scope's door and the
+  source-existence policy's terminal rule stop `cluster refresh`.
+  `ManifestStatus::next_step` and `refresh_refused_by` are **projections** into it, never
+  derivations beside it (`the_table_holds_every_row_once`, `each_row_stops_the_act_the_table_names`).
+  A projection is carried only where production asks for it: a bare "could the refresh run" was
+  minted, lost its last caller to the richer question below, and came out rather than standing as a
+  second spelling of it.
+- **The refusal answers with its cause, because the two causes leave the reader differently
+  placed.** `refresh_refused_by` names the door or the terminal rule, in the order `cluster
+  refresh` itself refuses in, and its `None` is exactly `can_run(Act::Refresh)`
+  (`the_refresh_refusal_agrees_with_the_predicate`). A door announces itself with the act that
+  opens it; a scope that kept nothing announces itself as `no sources known at <p> — skipped`,
+  which names no act at all — so a remedy falling silent at the first leaves the reader holding
+  something and at the second leaves them holding nothing.
+- **Two cells are unrepresentable; the third only looks like them.** `LockStanding` is an enum
+  because two of a lock's three claims are about a file somebody *read*: with no lock there is no
+  hash to mismatch and no header to be missing, so those pairs cannot be posed at all. "No lock
+  *and* an unexpandable pattern" reads like a third and is not — `pattern_expands` sits beside the
+  enum, so the pair is constructible and only `compute_manifest_status`'s derivation keeps it from
+  arising. Both halves are pinned where they hold: the shape's
+  (`a_manifest_with_no_lock_raises_exactly_one_obstacle`, which poses the constructible pair
+  rather than assuming it away) and the derivation's
+  (`an_absent_lock_is_a_state_the_read_states`, over a real manifest whose pattern cannot expand
+  and whose lock was removed).
+- **A rebuild is named where it would run and would clear every obstacle in the apply's way.** One
+  row answers conditionally: a pattern that will not expand is cleared only where the lock predates
+  the measurement *and* the recorded scope confirms something to measure from — otherwise the
+  rebuild changes the stated reason and nothing else
+  (`a_rebuild_that_supplies_no_measurement_is_not_a_step`). The expansion failure's own text
+  names no remedy at all, by the expression facility's own rule — it sees the lock's reason and
+  never the manifest's, so the remedy is this table's to give or withhold and the report does
+  not contradict itself one paragraph apart. **Declared open**: the table cannot tell whether
+  the pattern *also* names a fact nothing supplies, so where a rebuild would supply the
+  measurement it answers "clears" without knowing.
+- **What the table does not enforce**, named rather than discovered: `apply`'s further refusals —
+  a non-archive destination, an escaping `base_dir`, unhashed entries, every preflight finding —
+  are not raised from it. Each row's doc names the `apply` site that enforces it; a new apply
+  refusal with no row is not build-refused.
+- **An absent lock is a state, not a failure.** `read_lock_file` returns `None` for a file that is
+  not there and an error for every other failure — absence is not unreadability. Canon writes the
+  state itself: a zero-match refresh removes the lock and records the empty hash, so the report
+  states which of the two absences it is, from the manifest's own record, and reads on
+  (`an_absent_lock_is_a_state_the_read_states`, `an_unreadable_lock_is_still_an_error`); the two
+  sentences themselves are `each_absent_lock_is_named_by_its_own_cause`'s, since naming the wrong
+  one sends the reader to the act that cannot help. `apply`
+  refuses by name instead: it exists to act and cannot.
+- **One spelling for the remedies naming a command.** `cli.rs` owns `refresh_command`,
+  `apply_command`, `rebuild_remedy`, `no_lock_remedy`, `source_lost_remedy`,
+  `scan_or_edit_scope`, `scope_kept_nothing_way_back` and `adjust_pattern_remedy`. The **quoting belongs to the spelling**, not
+  to each sentence — but the
+  quoting itself belongs to neither: `core::domain::format::shell_quote` owns it, and
+  `ops/plan.rs` already ran manifest paths through it for this very command. A local spelling
+  handling only spaces emitted an unbalanced quote for a path carrying an apostrophe, so the rule
+  is *route through the owner*, and the pin walks both shapes
+  (`every_remedy_quotes_a_path_that_needs_it`). That pin sees only the sentences it is handed,
+  which is a rung too low for a defect that arrived twice: three `canon apply --resume` lines
+  pasted a path of their own where no pin reached them. So the bypass is refused structurally as
+  well — every spelling of one of these commands with something pasted into it lives in `cli.rs`,
+  and there are exactly three
+  (`a_command_is_spelled_with_a_path_only_where_it_is_quoted`, matched both directions). `source_lost_remedy` takes a
+  `RefreshStanding` and asks *would a refresh run, and if not, why* — the two refusals are kept
+  apart because **only a door states its own way back**, in the line that announces it; a scope
+  that kept nothing is announced with no act at all, so that arm names the same pair `cluster
+  refresh` itself prints when it refuses for the same reason
+  (`the_source_lost_remedy_gives_each_refusal_its_own_way_back`). `Unasked` is `apply`'s: apply carries out a
+  lock already built and checks it still holds, resolving no recorded scope, and a manifest may
+  record none — so its remedies speak about the lock, and a refresh named from there that is
+  turned away is answered by the refresh, which states its own outcome and the acts for it.
+  `no_lock_remedy` asks a
+  different question the manifest *does* answer — which of the two absences this is — because a
+  manifest whose last refresh matched nothing is sent to a refresh that matches nothing again,
+  a fixed point rather than a remedy
+  (`a_lock_that_matched_nothing_is_not_sent_back_to_the_same_query`). `rebuild_remedy` asks
+  nothing: all three of its callers are apply's, all `Unasked` by construction.
+  **`scan_or_edit_scope` offers two acts, not one**: a set-aside path is a folder Canon has no
+  sources under, and nothing on disk tells an unscanned folder from a wrong one — so the scan
+  leads, naming the very paths the report has just skipped, and the scope edit follows
+  (`a_scope_that_kept_nothing_is_offered_the_scan_before_the_edit`). At `cluster status` the pair
+  is led by a sentence binding it to the skipped line, and lead and pair together are one answer,
+  `scope_kept_nothing_way_back`, read at both of the report's sites — its next step and the
+  source-lost remedy; at `cluster refresh` the pair stands alone: the refusal prints it under its
+  own `no sources known at …`, where a lead repeats what the reader just read, while the report
+  prints it at its foot, below a summary ending `All source files accounted for.` — true of the
+  lock's sources, silent about the scope, and read as their subject unless a line says otherwise.
+  The spellings that stay outside `refresh_command` each name a placeholder or speak from a
+  stratum an interface composition cannot reach, and are listed rather than counted — the list is
+  prose-held, since the structural pin above refuses only a spelling that pastes a path, which
+  none of these does: `ops/plan.rs`'s staleness remedy and its unhashed-sources precondition (an
+  operations stratum); `apply`'s recovery recipes, whose spellings name `<manifest>` and paste
+  nothing, so there is nothing to quote; `ops/generate.rs`'s manifest header, which writes the
+  command into every manifest as a line to *learn*; `domain.rs`'s version-gate refusal, which
+  names `--edit <manifest>` for a manifest that will not parse, from the domain stratum; and
+  `cli/cluster.rs`'s generate-collision message, which names the command as the alternative to
+  `--force`.
+- **A withheld step still answers.** Where no act brings an apply within reach, the reader holds a
+  cause and no act — honest only where the cause was announced with its own way back, which a
+  closed door is and the others are not. Which sentence each owes is the table's, not the
+  report's: `owed_way_back` ranks the causes once, a scope that kept nothing outranking a pattern
+  that cannot expand because it is *why* the pattern has nothing to measure from, and the report
+  matches its three answers with no rest arm
+  (`a_withheld_step_is_never_left_without_an_answer`, walked over every shape the table can take,
+  every input varied, the one pair construction rules out skipped by name). **The claim reaches the table's answers and no further**: the
+  interface's outermost gate — nothing pending, or a source lost, or a destination of the wrong
+  size — returns before the table is asked, and a report stopped there names no act. For a lost
+  source the line above has already said to check the volume; for a wrong-sized destination
+  nothing has, and `apply --resume` on the same manifest holds the look-before-deleting guidance
+  the report withholds. That gap is the gate's, older than the table, and stands.
+  The pattern arm and `apply`'s pattern refusal are one composition, `adjust_pattern_remedy`, so
+  wherever both reach it they say the same words. They do not always both reach it: `apply`
+  refuses a lock without a header before it evaluates the pattern, so on a lock that predates
+  the measurement `apply` says to rebuild, while the report asks the table. The table's rule for
+  the **pattern row** is a conjunction: a rebuild clears an unexpandable pattern only where the
+  pattern needs a scope the lock lacks *and* the recorded scope confirms something to measure
+  from; the lock's own rows (no header, hash mismatch, a lost lock) and parked origins are
+  cleared by a rebuild as before, so a header-less lock under a pattern that expands is still
+  sent to the rebuild. A pattern failing for a fact is cleared by no rebuild whatever the lock's
+  age, and there the age is stated on the `Lock:` line instead, in the words `apply`'s refusal
+  will use (`a_locks_age_is_stated_on_its_own_line`) — a raised obstacle the step does not
+  answer is never left unspoken. Each is right at its own grain, and the rebuild `apply` names
+  arrives at the report's answer one step later.
+  **Two pattern failures, two opposite remedies**: a pattern placing files relative to a scope
+  the **lock** was built without is repaired by `{source.rel_path}` or by declaring a scope and
+  refreshing, and never by checking fact coverage — the scope key is not a fact, so no import
+  supplies it; a pattern naming a fact no source carries is repaired only by the fact. The
+  condition is the lock's, never the manifest's: a manifest may declare a scope its lock has not
+  seen, and there the rebuild is the step — the table reads the same lock answer to decide it
+  (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`; the table once read the header's
+  presence instead and told such a manifest it declared none). Which failure it is is the
+  lock's answer, `ops/manifest.rs`'s `LockFile::pattern_needs_a_scope_it_lacks`, asked once of
+  the whole file at both commands and never of the run's `--root` subset, which could answer
+  differently from the file it was cut from
+  (`a_pattern_needing_a_scope_is_asked_of_the_whole_lock`), and carried into the table as its
+  own input; its pattern half comes off
+  `expr::Pattern::names_scope_rel_path`, the facility's own reading of the pattern, never off the
+  refusal's wording — a caller matching on either would hold a second copy of a language rule
+  (`a_pattern_that_cannot_expand_names_the_edit_and_no_command`, which asserts each answer absent
+  from the other's arm). Where both fail at once the scope answer leads, the scope having to be
+  settled either way.
 
 ## Conventions
 

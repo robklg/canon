@@ -77,15 +77,40 @@ Destination current contents (/Volumes/Archive/sorted):
   2024/
 ```
 
-**A lock file written before Canon recorded where each file goes:**
+**No lock file beside the manifest:**
 
-Apply carries out a lock file. Where each file lands is settled in that lock when the
-manifest is generated or refreshed, not read from `meta.scope` at apply time. A lock
-written by an earlier version of Canon does not carry that, so apply refuses before it
-plans and transfers nothing:
+Apply carries out a lock file, so a manifest without one refuses before it plans. There are two
+ways to arrive here and they take opposite remedies, told apart by the `lock_hash` the manifest
+records. A lock file that has gone while the manifest still names its hash is rebuilt:
 
 ```
-Error: This lock file was written before Canon recorded where each file goes.
+Error: No lock file beside this manifest: manifest.lock
+Nothing was moved. Rebuild it: canon cluster refresh manifest.toml
+```
+
+A refresh whose query matched nothing removes the lock and empties `lock_hash`. Refreshing again
+would match nothing again, so the way forward is a different selection:
+
+```
+Error: No lock file beside this manifest: manifest.lock
+Nothing was moved. The last refresh matched nothing, so there is no lock to carry across.
+Edit the query or scope in the manifest, then canon cluster refresh manifest.toml to select again.
+```
+
+A lock file that exists but cannot be read — empty, or with a line that does not parse — is a
+different answer and says so. [`cluster status`](cluster.md) states either absence and reads on,
+since its job is to say what state the manifest is in; it refuses on an unreadable lock like
+apply does.
+
+**A lock file built before lock files recorded the scopes they were built from:**
+
+Apply carries out a lock file. The scopes a lock was built from are recorded in it when the
+manifest is generated or refreshed, with each entry's path measured from them; apply reads
+those and never `meta.scope`. A lock written by an earlier version of Canon carries neither,
+so apply refuses before it plans and transfers nothing:
+
+```
+Error: This lock file was built before lock files recorded the scopes they were built from.
 Nothing was moved. Rebuild it: canon cluster refresh manifest.toml
 ```
 
@@ -106,18 +131,24 @@ does not reach apply. See [`cluster`](cluster.md).
 
 **A pattern that cannot expand:**
 
-`{scope.rel_path}` has no value for a manifest that records no scope: one generated with
-`--global`, or with filters and no path. Apply reports the failure per source and transfers
-nothing:
+`{scope.rel_path}` has no value over a lock built while the manifest recorded no scope: one
+generated with `--global`, or with filters and no path. Apply reports the failure per source,
+says what the pattern needs, and transfers nothing:
 
 ```
 Error: 2 sources failed pattern expansion:
-  /Volumes/Photos/2016/IMG_0001.jpg: scope.rel_path is not available: the manifest records no scope
+  /Volumes/Photos/2016/IMG_0001.jpg: scope.rel_path is not available: the selected sources were not scoped
+  /Volumes/Photos/2016/IMG_0002.jpg: scope.rel_path is not available: the selected sources were not scoped
+
+The pattern places files relative to the scopes declared in the manifest, and this lock records none.
+Use {source.rel_path} to keep each file's own folders, or add paths to meta.scope and refresh.
+Error: Aborting due to pattern expansion failures
 ```
 
-A refresh does not help here: the manifest has no scope to rebuild from. Scope the manifest,
-or use `{source.rel_path}`. `cluster status` names no next step in this state, for the same
-reason.
+Apply prints this whatever `meta.scope` says now, because it reads the lock and not the scope.
+While the manifest records no scope, a refresh does not help — there is nothing to measure from
+— and `cluster status` ends with the same two lines. Once a path with sources is in `meta.scope`,
+the refresh is what measures the lock, and `cluster status` names it instead.
 
 **Progress before anything moves:**
 
@@ -204,7 +235,7 @@ left. At the destination end no rebuild helps — the files are going there eith
 way.
 
 **Pre-flight checks** (mandatory). These run once the lock file has been read: a lock
-written before Canon recorded where each file goes refuses before any of them.
+built before lock files recorded the scopes they were built from refuses before any of them.
 
 1. **Blocked destination directories** - If a file stands where a destination directory has to go, apply refuses the whole run before transferring anything, naming the file and the destinations it blocks. This check also runs with `--resume`: a file in the way is not evidence of an earlier run's progress. Move or rename the file, or edit the pattern.
 

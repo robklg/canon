@@ -96,11 +96,31 @@ pub fn run(
     }
 
     // Read the JSONL lock file: the header it settled, and its entries.
-    let lock = manifest::read_lock_file(&lock_path)?;
+    //
+    // An absent lock is an ordinary state rather than a broken file — a
+    // refresh whose query matched nothing takes the lock away and records the
+    // empty hash — so it is refused by name here instead of arriving as a
+    // failed open. `cluster status` states the same absence and reads on;
+    // apply is an act, cannot act, and says so.
+    //
+    // **And it says which absence**, from the same record the report reads it
+    // from, because the two take opposite remedies. A lock that has gone is
+    // rebuilt by a refresh. A manifest whose last refresh matched nothing has
+    // no lock *because* the query found nothing, so a refresh runs, matches
+    // nothing again, and leaves the user exactly where they were — the one
+    // shape of wrong advice worse than none, since it does not even change
+    // the reason.
+    let Some(lock) = manifest::read_lock_file(&lock_path)? else {
+        bail!(
+            "No lock file beside this manifest: {}\n\
+             Nothing was moved. {}",
+            lock_path.display(),
+            super::no_lock_remedy(config_path.as_ref(), &config.meta.lock_hash),
+        );
+    };
     // Why an entry might carry no measurement — asked of the file, which can
     // tell the two causes apart, rather than left to a refusal to guess.
     let unmeasured = lock.unmeasured_reason();
-    let sources = lock.entries;
 
     // Validate lock file hash matches config
     let actual_hash = crate::core::ops::fs::compute_full_hash(&lock_path)?;
@@ -108,9 +128,10 @@ pub fn run(
         bail!(
             "Lock file hash mismatch: expected {}, got {}\n\
              The lock file may have been modified or does not belong to this config.\n\
-             Run `cluster refresh` to regenerate the lock file.",
+             {}",
             first_chars(&config.meta.lock_hash, 16),
-            first_chars(&actual_hash, 16)
+            first_chars(&actual_hash, 16),
+            super::rebuild_remedy(config_path.as_ref()),
         );
     }
 
@@ -120,6 +141,10 @@ pub fn run(
     let pattern = parse_pattern(&config.output.pattern)
         .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
     let needed_keys = extract_fact_keys(&pattern);
+    // Asked of the whole lock, before `--root` cuts it down: which remedy a
+    // failed expansion takes is the manifest's fact, not this run's.
+    let pattern_needs_a_scope_it_lacks = lock.pattern_needs_a_scope_it_lacks(&pattern);
+    let sources = lock.entries;
 
     // Cache all root paths (single query via repo layer)
     let roots = repo::root::fetch_all(conn)?;
@@ -147,9 +172,9 @@ pub fn run(
     // stands and name the way back.
     let Some(header) = lock.header else {
         bail!(
-            "This lock file was written before Canon recorded where each file goes.\n\
-             Nothing was moved. Rebuild it: canon cluster refresh {}",
-            config_path.display()
+            "This lock file was {}.\nNothing was moved. {}",
+            super::LOCK_PREDATES_MEASUREMENT,
+            super::rebuild_remedy(config_path.as_ref()),
         );
     };
     // Nothing checks that the header's scopes actually contain the entries,
@@ -274,6 +299,7 @@ pub fn run(
             pattern: &pattern,
             needed_keys: &needed_keys,
             unmeasured,
+            pattern_needs_a_scope_it_lacks,
             root_paths: &root_paths,
             archive_root_id: config.output.archive_root_id,
             base_dir_rel: &config.output.base_dir,
@@ -308,30 +334,40 @@ pub fn run(
                 eprintln!("  ... and {} more", plan.resume_source_lost.len() - 10);
             }
             eprintln!();
-            eprintln!("Check if the source volume is connected. If files are truly lost,");
-            eprintln!(
-                "refresh the manifest: canon cluster refresh {}",
-                config_path.display()
-            );
+            // No set-aside list: apply resolves no recorded scope, which is
+            // what `Unasked` says. The arm that would read it is unreachable
+            // from here.
+            for line in super::source_lost_remedy(
+                config_path.as_ref(),
+                super::RefreshStanding::Unasked,
+                &[],
+            ) {
+                eprintln!("{line}");
+            }
             bail!("Aborting due to missing source files in resume mode");
         }
 
         if !plan.resume_size_mismatches.is_empty() {
             eprintln!(
-                "Resume failed: {} destination files have wrong size.",
+                "Resume failed: {} destination files are not the size the lock records.",
                 plan.resume_size_mismatches.len()
             );
             eprintln!();
             for (path, expected, actual) in plan.resume_size_mismatches.iter().take(10) {
-                eprintln!("  {path} (expected {expected} bytes, found {actual} bytes)");
+                eprintln!("  {path} (lock records {expected} bytes, found {actual} bytes)");
             }
             if plan.resume_size_mismatches.len() > 10 {
                 eprintln!("  ... and {} more", plan.resume_size_mismatches.len() - 10);
             }
             eprintln!();
+            // Canon does not know why the size differs, so it does not say. A
+            // half-written copy and a file someone edited on purpose look the
+            // same from here, and only one of them is safe to delete.
+            eprintln!("Look at these files before deleting any of them: a file may have been");
+            eprintln!("edited rather than half-copied. Delete the ones that are partial copies,");
             eprintln!(
-                "Delete the corrupt file and retry: canon apply --resume {}",
-                config_path.display()
+                "then retry: {}",
+                super::apply_command(config_path.as_ref(), true)
             );
             bail!("Aborting due to size mismatches in resume mode");
         }
@@ -352,12 +388,10 @@ pub fn run(
         if v.expansion_failures.len() > 10 {
             eprintln!("  ... and {} more", v.expansion_failures.len() - 10);
         }
-        // No cause is asserted: a pattern fails to expand for a missing fact,
-        // and equally for a scope the manifest does not record, and the lines
-        // above already carry each source's own reason. Naming one cause here
-        // sends half the readers to a command that cannot help them.
-        eprintln!("\nAdjust the pattern in your manifest, or supply what it names.");
-        eprintln!("Use 'canon facts' to check coverage for a pattern that names facts.");
+        eprintln!();
+        for line in super::adjust_pattern_remedy(v.pattern_needs_a_scope_it_lacks) {
+            eprintln!("{line}");
+        }
         bail!("Aborting due to pattern expansion failures");
     }
 
@@ -417,7 +451,6 @@ pub fn run(
     }
 
     if !v.missing_sources.is_empty() {
-        let manifest_display = config_path.display();
         eprintln!(
             "Preflight failed: {} source files are missing.",
             v.missing_sources.len()
@@ -431,7 +464,10 @@ pub fn run(
         }
         eprintln!();
         eprintln!("Source files have changed since the manifest was generated.");
-        eprintln!("Refresh the manifest: canon cluster refresh {manifest_display}");
+        eprintln!(
+            "Refresh the manifest: {}",
+            super::refresh_command(config_path.as_ref())
+        );
         bail!("Aborting due to missing source files");
     }
 
@@ -654,7 +690,7 @@ pub fn run(
         // This site reports on a run that already moved files, so its retry is
         // not the other two sites' retry: a plain re-apply would collide with
         // everything this run placed and be sent here anyway.
-        eprintln!("  canon apply --resume {}", lock_path.display());
+        eprintln!("  {}", super::apply_command(&lock_path, true));
     }
 
     // Summary output
@@ -666,8 +702,10 @@ pub fn run(
     }
 
     if result.interrupted {
-        let manifest_display = config_path.display();
-        eprintln!("Resume with: canon apply --resume {manifest_display}");
+        eprintln!(
+            "Resume with: {}",
+            super::apply_command(config_path.as_ref(), true)
+        );
         // Update query planner statistics after bulk changes
         eprintln!("Updating query statistics...");
         db.run_analyze()?;
@@ -1236,10 +1274,13 @@ mod tests {
 
             let text = fs::read_to_string(&self.manifest).unwrap();
             let config: crate::archive::domain::ManifestConfig = toml::from_str(&text).unwrap();
-            let lock = manifest::read_lock_file(&self.manifest.with_extension("lock")).unwrap();
+            let lock = manifest::read_lock_file(&self.manifest.with_extension("lock"))
+                .unwrap()
+                .expect("the fixture writes a lock");
             let pattern = parse_pattern(&config.output.pattern).unwrap();
             let needed_keys = extract_fact_keys(&pattern);
             let unmeasured = lock.unmeasured_reason();
+            let pattern_needs_a_scope_it_lacks = lock.pattern_needs_a_scope_it_lacks(&pattern);
             let entries: Vec<&LockEntry> = lock.entries.iter().collect();
 
             let conn = self.db.conn_mut();
@@ -1255,6 +1296,7 @@ mod tests {
                     pattern: &pattern,
                     needed_keys: &needed_keys,
                     unmeasured,
+                    pattern_needs_a_scope_it_lacks,
                     root_paths: &root_paths,
                     archive_root_id: config.output.archive_root_id,
                     base_dir_rel: &config.output.base_dir,
@@ -1648,17 +1690,19 @@ mod tests {
     }
 
     /// C4b — an absent measurement has **two** causes and they take different
-    /// answers. A manifest that records no scope measures nothing — correctly,
-    /// there is nothing to measure from — so its entries carry no
-    /// `scope_rel_path` in a perfectly current lock. Refusing that with the
-    /// old-lock message would assert a cause Canon cannot know and prescribe a
-    /// refresh that rebuilds the same lock, leaving the user in a loop.
+    /// answers. A lock built while the manifest declared no scope measures
+    /// nothing — correctly, there was nothing to measure from — so its entries
+    /// carry no `scope_rel_path` in a perfectly current lock. Refusing that
+    /// with the old-lock message would assert a cause Canon cannot know; and
+    /// the cause is the lock's, not the manifest's, which may declare a scope
+    /// since — a refresh then measures the lock, which is the report's to
+    /// name.
     ///
     /// Reached by two ordinary actions: generating unscoped (`--global`, or
     /// filters alone) and then editing the pattern, or emptying `meta.scope`
     /// and refreshing — which is exactly what the new rule tells a user to do.
     #[test]
-    fn an_unscoped_manifest_says_so_rather_than_blaming_the_lock() {
+    fn an_unmeasured_lock_names_its_cause_not_its_age() {
         let mut f = fixture("tree", &["proj-v1"], |_| vec![]);
         f.set_pattern("{scope.rel_path}");
 
@@ -1675,8 +1719,8 @@ mod tests {
 
         for (_, reason) in f.expansion_failures() {
             assert!(
-                reason.contains("records no scope"),
-                "the cause must be the manifest, not the lock's age: {reason}"
+                reason.contains("were not scoped"),
+                "the cause is the lock as built, not its age and not the manifest: {reason}"
             );
             assert!(
                 !reason.contains("cluster refresh"),

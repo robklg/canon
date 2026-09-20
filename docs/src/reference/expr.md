@@ -35,8 +35,10 @@ A path Canon cannot resolve, under no known root or with no known sources under 
 
 `{scope.rel_path}` is unanswerable in two cases, and they take different answers:
 
-- **The manifest records no scope** — with `--global`, or with filters and no path. There is nothing to measure from, and no refresh will give the manifest a scope. Scope the manifest, or use `{source.rel_path}`.
-- **The lock file was written before Canon recorded the measurement.** Apply refuses it outright and names `cluster refresh` as the way back.
+- **The selected sources were not scoped** — the lock was built with `--global`, or with filters and no path, so there was nothing to measure from. Declare a scope in `meta.scope` and refresh, and the lock is measured from it; or use `{source.rel_path}`.
+- **The lock file was built before lock files recorded the scopes they were built from.** Apply refuses it outright, whatever the pattern says. Rebuild the lock with `cluster refresh`.
+
+Neither refusal names a remedy in its own text: the message says which of the two cases you are in, and what to do about it depends on the manifest's wider state, which this message cannot see. The remedy comes from the command you ran. Where no rebuild would help, the remedy is one pair of sentences that both `apply` and `cluster status` print: use `{source.rel_path}` or scope the manifest — never check fact coverage, since `{scope.rel_path}` is not a fact and no import would supply it. Which act `cluster status` names, and when it names the rebuild instead of the remedy, is decided from the manifest's whole state and described on the [`cluster`](../commands/archive/cluster.md) page; `apply` checks the lock's header before the pattern and resolves no scope of its own, so a lock written before the measurement gets *rebuild the lock* from `apply`, and a refresh `apply` names can still be turned away on a scope question — which the refresh answers itself, naming what to do.
 
 There is no fallback destination in either case.
 
@@ -109,7 +111,7 @@ If sources are missing required facts, you can:
 ## Common Patterns
 
 ```toml
-# Preserve structure below the manifest's scope
+# Preserve structure below the scopes declared in the manifest
 pattern = "{scope.rel_path}"
 
 # Preserve structure below each source's root

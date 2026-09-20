@@ -460,6 +460,36 @@ impl ScopeResolution {
                 .collect(),
         )
     }
+
+    /// Whether this scope **kept nothing** — the source-existence policy's
+    /// terminal rule at the manifest door, where *a scope that kept nothing
+    /// must never look like a narrowing*.
+    ///
+    /// **Here because the law is here, not because consumers were counted.**
+    /// Both readers are `archive` today — `cluster refresh` raises it,
+    /// `cluster status` reports the act it withholds on account of it — so the
+    /// ≥2-subsystem measure does not admit it. What does is the other entry
+    /// path: this file owns the recorded-scope resolution law, and the
+    /// source-existence policy's terminal rule is that law's own arm at the
+    /// manifest door, the argument door's arm being spoken in
+    /// `core::ops::scope`. A predicate held in a subsystem while its two
+    /// siblings sit in core is the drift the doctrine refuses. Two spellings
+    /// would also let a report invite the very refresh this turns away, which
+    /// is the defect it was found as.
+    ///
+    /// An **all-unrooted** scope is deliberately not this case. It kept
+    /// nothing either, but a refresh is the way back from a manifest naming a
+    /// root that is gone, so refusing it would strand the user; it selects
+    /// nothing rather than everything, so continuing costs only the lock the
+    /// manifest no longer describes.
+    ///
+    /// A **parked** line is not this case either, and for a different reason:
+    /// the door is its own refusal with its own way back, and a second cause
+    /// stated over it would be false. Which of the two a caller states where
+    /// both hold is the caller's precedence, not this predicate's.
+    pub fn kept_nothing(&self) -> bool {
+        self.resolved.is_empty() && !self.set_aside.is_empty()
+    }
 }
 
 /// Recover a scope row's root path from its decision's display paths.
@@ -825,6 +855,57 @@ mod scope_resolution_tests {
         ]);
         assert!(resolution.measured_from().is_empty());
         assert!(resolution.scopes().is_empty());
+    }
+
+    /// **The terminal rule's five shapes, beside its owner.** A scope that
+    /// kept nothing must never look like a narrowing — but only where there
+    /// was something to keep. An **all-unrooted** scope is deliberately not
+    /// this case, because a refresh is the way back from a manifest naming a
+    /// root that is gone; a **parked** one is not either, because the door is
+    /// its own refusal with its own way back. An empty recorded scope is not
+    /// this case at all: nothing was recorded, so nothing was kept from.
+    #[test]
+    fn the_terminal_rule_fires_only_where_something_was_set_aside() {
+        let set_aside =
+            PrefixOutcome::SetAside(DecisionScope::new(1, "/R".to_string(), "gone".to_string()));
+
+        assert!(
+            ScopeResolution::from_outcomes(vec![set_aside.clone()]).kept_nothing(),
+            "rooted, and the index knows nothing under it"
+        );
+        assert!(
+            !ScopeResolution::from_outcomes(vec![PrefixOutcome::Unrooted(
+                "/elsewhere".to_string()
+            )])
+            .kept_nothing(),
+            "a refresh is the way back from a root that is gone"
+        );
+        assert!(
+            !ScopeResolution::from_outcomes(vec![PrefixOutcome::Parked(
+                DecisionScope::new(1, "/R".to_string(), "shut".to_string()),
+                ParkedRoot {
+                    root_id: 1,
+                    root_path: "/R".to_string(),
+                },
+            )])
+            .kept_nothing(),
+            "the door states its own cause; a second one over it would be false"
+        );
+        assert!(
+            !ScopeResolution::from_outcomes(vec![]).kept_nothing(),
+            "nothing recorded is not nothing kept"
+        );
+        assert!(
+            !ScopeResolution::from_outcomes(vec![
+                PrefixOutcome::Confirmed(
+                    DecisionScope::new(1, "/R".to_string(), "live".to_string()),
+                    ScopeGrain::Directory,
+                ),
+                set_aside,
+            ])
+            .kept_nothing(),
+            "one line survived, so the run is a narrowing and says so"
+        );
     }
 
     /// A7 — an unrooted prefix is read back to a user against their own file,

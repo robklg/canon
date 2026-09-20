@@ -3,7 +3,10 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::archive::domain::{parse_manifest_allow, parse_manifest_config, ManifestConfig};
+use crate::archive::domain::{
+    parse_manifest_allow, parse_manifest_config, LockStanding, ManifestConfig, NextStep,
+    OwedWayBack, RefreshRefusal,
+};
 use crate::archive::ops::generate::{
     ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteRefreshParams,
 };
@@ -184,15 +187,7 @@ pub fn generate(
         }
     }
 
-    // Only spaces are quoted here. A path carrying a quote or a shell
-    // metacharacter produces a suggestion that will not run as printed.
-    let path_str = output_path.display().to_string();
-    let escaped = if path_str.contains(' ') {
-        format!("'{path_str}'")
-    } else {
-        path_str
-    };
-    eprintln!("\nTo apply: canon apply {escaped}");
+    eprintln!("\nTo apply: {}", super::apply_command(output_path, false));
 
     Ok(())
 }
@@ -334,7 +329,7 @@ fn refresh_with_editor(
     // `cluster status` already use for the same sentences — the skip and the
     // outcome it qualifies belong on one stream. What is said, and in which
     // order, is `scope_statements`' decision; this only prints it.
-    let refusing = doors.is_empty() && refresh_must_refuse(&scope);
+    let refusing = doors.is_empty() && scope.kept_nothing();
     {
         use std::io::Write as _;
         let _ = std::io::stdout()
@@ -359,6 +354,15 @@ fn refresh_with_editor(
         std::process::exit(1);
     }
 
+    // This refusal is itself a legitimate answer — the recorded scope named
+    // places Canon knows no sources under, and saying so *is* the answer — so
+    // by the root register's rule it should exit 1 without the `Error:` prefix
+    // a raised error wears, exactly as the door arm above it does. It does not
+    // yet. The door arm gets there by calling `std::process::exit` from inside
+    // this function, which no test can reach without dying with it; the shape
+    // that works is a typed refusal returned to `main`, as `survey` and
+    // `trail` do. That mints a type and changes a pinned barrel, so it is
+    // recorded rather than done here.
     if refusing {
         bail!(
             "{}\n\
@@ -366,7 +370,7 @@ fn refresh_with_editor(
              {}",
             no_sources_known(scope.set_aside()),
             config_path.display(),
-            super::edit_then_refresh(config_path)
+            super::scan_or_edit_scope(config_path, scope.set_aside()).join("\n")
         );
     }
 
@@ -604,81 +608,36 @@ fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) 
 
 /// The step that moves this manifest forward, or nothing when there is none.
 ///
-/// **Whether** there is a step does not depend on the recorded scope: it is
-/// files still to transfer, and nothing lost or wrong. That gate is outermost
-/// on purpose. A manifest with nothing pending has no next step to take, and
-/// one with content missing has just been told to check the volume before
-/// refreshing — advising a refresh in either state clears the lock and gains
-/// nothing, and in the second it contradicts the line above it.
+/// **Whether** there is anything to say at all is this function's own
+/// question, and the only one it is: files still to transfer, and nothing lost
+/// or wrong. That gate is outermost on purpose. A manifest with nothing
+/// pending has no next step to take, and one with content missing has just
+/// been told to check the volume before refreshing — advising a refresh in
+/// either state clears the lock and gains nothing, and in the second it
+/// contradicts the line above it.
 ///
-/// **Which** step it is depends on one thing only: whether `apply` can run at
-/// all. A report must never name the one command that cannot — and naming a
-/// remedy that will not work is the same fault wearing a different word. Two
-/// states are read here, and they take different answers. **A third is known
-/// and not read**: a lock whose hash no longer matches the manifest, which
-/// `apply` refuses by name, pointing at the rebuild this function already
-/// knows how to print. `lock_hash_valid` reaches the header warning above and
-/// stops there. That gap predates the door work and is recorded rather than
-/// closed here, because repairing it is a behaviour change of its own and
-/// belongs in its own commit — but the claim is written out so the next reader
-/// is not misled into counting two.
+/// The gate's third arm — a destination of the wrong size — has no such
+/// justification and is older than the table below. A report stopped there
+/// names no act, and nothing above it has said one either; `apply --resume`
+/// on the same manifest holds the look-before-deleting guidance. A standing
+/// gap of the gate, stated here rather than closed, so that the table's claim
+/// of always answering is read at its true reach: the table is never asked.
 ///
-/// - a lock written **before the measurement was recorded in it**, which
-///   `apply` refuses outright whatever the pattern says. A refresh rebuilds
-///   the lock and the run proceeds, so that is the step.
-/// - a **pattern that does not expand**, which `apply` collects and aborts on
-///   before it transfers anything. Here there is **no step**: what a pattern
-///   needs — a fact nothing supplies, a scope the manifest does not record —
-///   is not something any one command gives it, and naming a refresh would be
-///   the same fault in a different word. Silence is the honest answer, the
-///   same one a manifest with content missing gets — and it is only honest
-///   because the report says what failed a few lines above, in its own block.
-///   Do not make this branch silent without that block: the per-entry table
-///   shows a fixed status word and never the reason.
+/// **Which** step it is is not decided here at all. It is
+/// `archive::domain::ManifestStanding::next_step`'s, over the table of what
+/// stops each act — which is where the rows are enumerated, where the
+/// unreachable cells are named, and where the rule that a step is offered only
+/// where it brings an apply within reach is stated. This function turns that
+/// answer into the two words a user reads, and the one thing it still decides
+/// is the apply's own wording: plain, or a resume where part of the lock has
+/// already landed. That is a question about counts, not about acts.
 ///
-/// A scope line that resolves to nothing is deliberately **not** such a state.
-/// It once was, because `apply` used to refuse an unrooted prefix; now the
-/// measurement and the recorded scope are both settled in the lock without it,
-/// so applying is exactly the right next step — and sending the user to a
-/// refresh that would preserve the line verbatim only loops them. The line is
-/// still stated above; it is not a blocker.
-///
-/// **A closed door withholds the steps that meet it, and only those** — and
-/// the two acts this can name meet different doors, which is why there are two
-/// predicates rather than one. An **apply** invitation is withheld by a parked
-/// lock entry or a parked destination, its two ends, and *not* by a parked
-/// scope line: apply carries out a lock and reads no recorded scope. A
-/// **rebuild** pointer names `cluster refresh`, which only a parked scope line
-/// turns away. Either predicate used for both keeps a command that still works
-/// from the user who needs it — the same fault in the other direction, and each
-/// edge has been the defect once. Where a step is withheld, the way back was
-/// stated with the door itself, above.
-///
-/// **A next step is offered where it is the act that brings an apply within
-/// reach** — not wherever an act would run. That is the narrower of two
-/// readings and the one the user reads: where a lock holds entries behind a
-/// door, a rebuild is exactly the act that clears them and lets the apply go,
-/// so it is offered; where the *destination* is closed, no rebuild changes
-/// anything about where the files are going, so the door's own way back is the
-/// whole answer and this stays silent. The wider reading ("name none that
-/// would be turned away, withhold none that would run") would print the
-/// rebuild under a parked-destination line, where it reads as if a refresh
-/// addressed the destination.
-///
-/// **The narrowing reaches only what this report knows, never what a query
-/// will match.** A parked destination is knowable: no rebuild moves it, so the
-/// pointer is withheld on a structural fact. What a rebuild would *select* is
-/// not — a refresh re-queries the open world, which holds content this lock
-/// has never seen, so a lock standing wholly behind doors may still rebuild
-/// into a perfectly applicable one. A predicate over the lock answers the wrong
-/// way in both directions: it invites a rebuild that empties a partly-applied
-/// lock, whose entries have left the source root for the archive, and it
-/// withholds one that would have found new content.
-/// Where the answer needs the selection, this report does not have it, and
-/// naming the act that runs is the honest move — the refresh states its own
-/// outcome, and a lock is a pure function of the query, the scope and the
-/// index, so a rebuild that finds nothing costs a `roots unsuspend` and
-/// another refresh.
+/// **`NextStep::None` is not silence**, and which sentence it is instead is
+/// the table's too. Where no act brings the apply within reach, the cause that
+/// withheld it still owes the reader something, and only a closed door
+/// discharges that by itself — its line carries `canon roots unsuspend`. What
+/// the others owe is `owed_way_back`'s answer, read here and printed: this
+/// function neither re-tests the causes nor ranks them.
 fn write_next_step(
     handle: &mut impl Write,
     status: &status_ops::ManifestStatus,
@@ -687,40 +646,90 @@ fn write_next_step(
     if status.pending == 0 || !status.all_accounted_for() {
         return;
     }
-    if status.pattern_unexpandable && !status.lock_predates_measurement {
-        return;
-    }
-    if status.lock_predates_measurement || status.apply_meets_a_door() {
-        // The apply is out of reach, and a rebuild is the step where it brings
-        // the apply back — **spoken once, for both reasons the apply can be out
-        // of reach**, because the two meet the same two conditions and a rule
-        // spelled at two emitters is a rule one emitter can be missing.
-        //
-        // Reaching here at all means a rebuild addresses *something*: this
-        // branch is entered by a lock predating the measurement or by a door
-        // apply meets, and the destination clause below is what removes the
-        // third case. What a rebuild cannot clear: a door of the refresh's own,
-        // and a parked destination — which no rebuild moves, so the door's own
-        // way back is the whole answer there.
-        if !status.refresh_meets_a_door() && status.parked_destination.is_none() {
+    match status.next_step() {
+        NextStep::None => {
+            let lines = match status.owed_way_back() {
+                OwedWayBack::Stated => Vec::new(),
+                OwedWayBack::ScanOrEditScope => {
+                    super::scope_kept_nothing_way_back(manifest_path, &status.set_aside_scope)
+                }
+                OwedWayBack::AdjustPattern => {
+                    super::adjust_pattern_remedy(status.pattern_needs_a_scope_it_lacks)
+                }
+            };
+            if !lines.is_empty() {
+                let _ = writeln!(handle);
+                for line in lines {
+                    let _ = writeln!(handle, "{line}");
+                }
+            }
+        }
+        NextStep::Rebuild => {
             let _ = writeln!(handle);
             let _ = writeln!(
                 handle,
-                "To rebuild the lock: canon cluster refresh {}",
-                manifest_path.display()
+                "To rebuild the lock: {}",
+                super::refresh_command(manifest_path)
             );
         }
-        return;
+        NextStep::Apply => {
+            let _ = writeln!(handle);
+            if status.at_destination > 0 {
+                let _ = writeln!(
+                    handle,
+                    "To complete: {}",
+                    super::apply_command(manifest_path, true)
+                );
+            } else {
+                let _ = writeln!(
+                    handle,
+                    "To apply: {}",
+                    super::apply_command(manifest_path, false)
+                );
+            }
+        }
     }
-    let _ = writeln!(handle);
-    if status.at_destination > 0 {
-        let _ = writeln!(
-            handle,
-            "To complete: canon apply --resume {}",
-            manifest_path.display()
-        );
-    } else {
-        let _ = writeln!(handle, "To apply: canon apply {}", manifest_path.display());
+}
+
+/// The report's `Lock:` line, from the one shape that carries what the read
+/// found.
+///
+/// **An absence is stated rather than failed on** — the report's whole job is
+/// to say what state a manifest is in, and "there is no lock" is a state Canon
+/// itself writes: a refresh whose query matched nothing takes the lock away
+/// and records the empty hash. Which of the two absences it is comes from the
+/// manifest's own record, so the sentence names a cause it can actually know,
+/// and the two causes take opposite remedies at `apply`
+/// (`cli.rs`’s `no_lock_remedy`) — a report naming the wrong one would send the
+/// reader to the act that cannot help.
+///
+/// **A lock's age is stated on this line too.** `apply` refuses a lock
+/// written before the measurement whatever the pattern says, and the report
+/// used to say so only through the pattern — a per-entry reason that appears
+/// only where the pattern reads the scope. Where it does not, the reader met
+/// the refusal at `apply` for a cause the report never mentioned. The age is a
+/// standing of the lock, so it belongs beside its count, in the words the
+/// refusal will use (`a_locks_age_is_stated_on_its_own_line`).
+fn lock_line(lock: LockStanding, entry_count: usize) -> String {
+    match lock {
+        LockStanding::Absent {
+            manifest_names_a_hash: false,
+        } => "Lock: none — the last refresh matched nothing.".to_string(),
+        LockStanding::Absent {
+            manifest_names_a_hash: true,
+        } => "Lock: none — the manifest names a lock file that is not there.".to_string(),
+        LockStanding::Read {
+            carries_measurement: false,
+            ..
+        } => format!(
+            "Lock: {} entries — {}",
+            format_count(entry_count),
+            super::LOCK_PREDATES_MEASUREMENT
+        ),
+        LockStanding::Read {
+            carries_measurement: true,
+            ..
+        } => format!("Lock: {} entries", format_count(entry_count)),
     }
 }
 
@@ -849,27 +858,20 @@ fn manifest_door_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
         })
         .collect();
 
+    // The collapsed line's verb is the union of the acts the doors above name,
+    // read off the doors themselves rather than re-tested against the status.
+    // A door is the only thing this line may speak of: a refresh turned away
+    // by the sourceless terminal rule is turned away by no door, and naming it
+    // here would put a false cause in the sentence.
     let union = RefusedAct::of(RefusedActs {
-        refresh: status.refresh_meets_a_door(),
-        apply: status.apply_meets_a_door(),
+        refresh: doors.iter().any(|d| !d.places.is_empty()),
+        apply: doors.iter().any(|d| d.destination || d.origin.is_some()),
     })
     .unwrap_or(RefusedAct::Apply);
     crate::scope::closed_door_reaches(
         &stated,
         (DoorVerb::WouldRefuse(union), "this manifest reaches them"),
     )
-}
-
-/// Whether a refresh must refuse: the source-existence policy's terminal rule
-/// at the manifest door — a scope that kept nothing must never look like a
-/// narrowing.
-///
-/// An all-unrooted scope is deliberately not this case. It kept nothing
-/// either, but a refresh is the way back from a manifest naming a root that is
-/// gone, and it selects nothing rather than everything, so continuing costs
-/// the user only the lock their own manifest no longer describes.
-fn refresh_must_refuse(scope: &ScopeResolution) -> bool {
-    scope.scopes().is_empty() && !scope.set_aside().is_empty()
 }
 
 /// The one spelling of an unrooted scope prefix, shared by the two commands
@@ -883,7 +885,7 @@ fn write_unrooted_scope(handle: &mut impl Write, unrooted: &[String]) {
     for path in unrooted {
         let _ = writeln!(
             handle,
-            "no known root at {path} — kept in the manifest, no destination measures from it"
+            "no known root at {path} — kept in the manifest; no files come from it, and it does not shape where other files land"
         );
     }
 }
@@ -910,10 +912,18 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
     println!("Manifest: {}", status.manifest_path);
     println!("Destination: {}", status.dest_display);
     println!("Pattern: {}", status.pattern);
-    if !status.lock_hash_valid {
+    // The lock's own line, composed rather than printed so which sentence
+    // each standing gets is a value a test can read — the rest of this
+    // function speaks straight to the terminal and is unpinned, and a
+    // discrimination the user reads must not inherit that.
+    if let LockStanding::Read {
+        hash_matches: false,
+        ..
+    } = status.lock
+    {
         eprintln!("Warning: lock file hash mismatch — manifest may be out of sync.");
     }
-    println!("Lock: {} entries", format_count(status.lock_entry_count));
+    println!("{}", lock_line(status.lock, status.lock_entry_count));
     // Stated on stdout, this command's own scope channel — a report's scope
     // belongs beside its header, not on a side channel.
     //
@@ -1056,9 +1066,13 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         );
     }
 
-    // Safety assessment
+    // Safety assessment. Over an empty lock the claim is vacuous, so it is
+    // not made: a line saying every file is accounted for, above nothing,
+    // reads as a claim about files that do not exist.
     if status.all_accounted_for() {
-        println!("All source files accounted for.");
+        if status.lock_entry_count > 0 {
+            println!("All source files accounted for.");
+        }
     } else {
         if status.source_lost > 0 {
             println!();
@@ -1078,23 +1092,24 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
                 );
             }
             println!();
-            // Two lines of one sentence, so they stand or fall together —
-            // the remedy is the half that carries the meaning, and the lead
-            // without it trails off mid-thought. It is withheld exactly where
-            // a refresh would be turned away, its own act's door and no other:
-            // the next step's *destination* narrowing does not reach here,
-            // because this remedy is about a lock that names files the world
-            // has lost, and bringing it in line is worth doing whether or not
-            // the archive is open. The way back was stated with the door
-            // itself, above.
-            if status.refresh_meets_a_door() {
-                println!("Check if the source volume is connected.");
-            } else {
-                println!("Check if the source volume is connected. If files are truly lost,");
-                println!(
-                    "refresh the manifest: canon cluster refresh {}",
-                    manifest_path.display()
-                );
+            // Composed where its twin in `apply`'s resume path is composed,
+            // because it is one sentence — the two once stood apart, one of
+            // them consulting the refresh's standing and one not.
+            //
+            // The standing asked for is the whole of it, not the door alone:
+            // a recorded scope that kept nothing turns the refresh away with
+            // no door in sight. And it is this remedy's *own* act that is
+            // asked about, no other — the next step's destination narrowing
+            // does not reach here, because this is about a lock naming files
+            // the world has lost, and bringing it in line is worth doing
+            // whether or not the archive is open.
+            let refresh = match status.refresh_refused_by() {
+                None => super::RefreshStanding::Runs,
+                Some(RefreshRefusal::Door) => super::RefreshStanding::DoorClosed,
+                Some(RefreshRefusal::ScopeKeptNothing) => super::RefreshStanding::ScopeKeptNothing,
+            };
+            for line in super::source_lost_remedy(manifest_path, refresh, &status.set_aside_scope) {
+                println!("{line}");
             }
         }
         if status.size_mismatch > 0 {
@@ -1194,11 +1209,16 @@ mod tests {
     /// in production every count is derived from `entries`, so a fixture whose
     /// two halves disagree is a state that cannot occur, and it would go on
     /// passing silently the day this writer starts reading entries.
+    ///
+    /// `lock` is taken whole rather than as a "cannot apply" flag, so every
+    /// state a lock can be in is expressible here — a hash that no longer
+    /// matches included, which the older writer hard-coded true and so could
+    /// not pose the question a report got wrong.
     fn status_with(
         pending: usize,
         at_destination: usize,
         source_lost: usize,
-        cannot_apply: bool,
+        lock: LockStanding,
     ) -> status_ops::ManifestStatus {
         let entry = |i: usize, status: status_ops::EntryStatus| status_ops::StatusEntry {
             source_path: format!("/photos/f{i}.jpg"),
@@ -1222,27 +1242,114 @@ mod tests {
                 .map(|(i, st)| entry(i, st))
                 .collect();
 
-        status_ops::ManifestStatus {
+        let mut status = status_ops::ManifestStatus {
             manifest_path: "m.toml".to_string(),
             dest_display: "/archive".to_string(),
             pattern: "{filename}".to_string(),
             lock_entry_count: entries.len(),
-            lock_hash_valid: true,
+            lock,
             entries,
             at_destination,
             pending,
             source_lost,
             size_mismatch: 0,
             source_still_present: 0,
+            // Every one of these five is filled below, through the one
+            // funnel, so nothing here is read as the shape they end up in.
             unrooted_scope: Vec::new(),
             set_aside_scope: Vec::new(),
             parked_scope: Vec::new(),
+            scope_kept_nothing: false,
+            scope_confirms_nothing: false,
             parked_entries: Vec::new(),
             parked_destination: None,
-            lock_predates_measurement: cannot_apply,
             pattern_unexpandable: false,
             expansion_failures: Vec::new(),
+            pattern_needs_a_scope_it_lacks: false,
             expansion_failure_count: 0,
+        };
+        // The ordinary manifest, so a row that is not about the scope poses no
+        // question about it; a row that is calls `with_scope` itself. Set
+        // through the one funnel rather than in the literal above, so the
+        // default shape is derived rather than agreed with `with_scope` by
+        // hand — which is the drift the funnel exists to close.
+        with_scope(&mut status, RecordedScope::AllConfirmed);
+        status
+    }
+
+    /// What a manifest's recorded scope came to, as the **five** registers a
+    /// `ManifestStatus` carries — set together, the way
+    /// `compute_manifest_status` derives them from one `ScopeResolution`.
+    ///
+    /// A writer that set them one at a time could pose states the resolution
+    /// cannot produce — a line set aside while the scope is said to have kept
+    /// something, or every line unrooted while the scope is said to confirm —
+    /// and a pin resting on one of those asserts nothing about production.
+    /// This is the same reason `lock` is taken whole rather than as a flag.
+    ///
+    /// The parked register travels beside the shape rather than inside it:
+    /// it is orthogonal to whether the *other* lines confirmed — a closed
+    /// root's remainder is never asked about, so a parked line neither
+    /// confirms nor is set aside — and every shape below can carry one.
+    #[derive(Clone)]
+    enum RecordedScope {
+        /// Nothing recorded. A rebuild has nothing to measure from.
+        Nothing,
+        /// Every line confirmed: the ordinary manifest.
+        AllConfirmed,
+        /// Lines carried, none confirmed, at least one of them set aside —
+        /// the source-existence policy's terminal rule's own shape.
+        KeptNothing(Vec<String>),
+        /// Lines carried, none confirmed, every one of them under no known
+        /// root. Deliberately not the terminal rule's case.
+        AllUnrooted(Vec<String>),
+        /// At least one line confirmed, beside lines that were not.
+        SomeConfirmed {
+            set_aside: Vec<String>,
+            unrooted: Vec<String>,
+        },
+    }
+
+    fn with_scope(status: &mut status_ops::ManifestStatus, scope: RecordedScope) {
+        with_scope_and_doors(status, scope, Vec::new())
+    }
+
+    fn with_scope_and_doors(
+        status: &mut status_ops::ManifestStatus,
+        scope: RecordedScope,
+        parked: Vec<crate::core::domain::root::ParkedPath>,
+    ) {
+        let (set_aside, unrooted, confirms_nothing) = match scope {
+            RecordedScope::Nothing => (Vec::new(), Vec::new(), true),
+            RecordedScope::AllConfirmed => (Vec::new(), Vec::new(), false),
+            RecordedScope::KeptNothing(set_aside) => (set_aside, Vec::new(), true),
+            RecordedScope::AllUnrooted(unrooted) => (Vec::new(), unrooted, true),
+            RecordedScope::SomeConfirmed {
+                set_aside,
+                unrooted,
+            } => (set_aside, unrooted, false),
+        };
+        status.scope_kept_nothing = confirms_nothing && !set_aside.is_empty();
+        status.scope_confirms_nothing = confirms_nothing;
+        status.set_aside_scope = set_aside;
+        status.unrooted_scope = unrooted;
+        status.parked_scope = parked;
+    }
+
+    /// A lock that is there and in order — the state every row that is not
+    /// about the lock wants.
+    fn sound_lock() -> LockStanding {
+        LockStanding::Read {
+            hash_matches: true,
+            carries_measurement: true,
+        }
+    }
+
+    /// A lock written before the measurement was recorded in it.
+    fn old_lock() -> LockStanding {
+        LockStanding::Read {
+            hash_matches: true,
+            carries_measurement: false,
         }
     }
 
@@ -1265,12 +1372,12 @@ mod tests {
     #[test]
     fn a_lock_apply_would_refuse_never_points_at_apply() {
         assert_eq!(
-            next_step(&status_with(2, 0, 0, true)),
+            next_step(&status_with(2, 0, 0, old_lock())),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n"
         );
         // The same, where the run would otherwise be told to resume.
         assert_eq!(
-            next_step(&status_with(1, 1, 0, true)),
+            next_step(&status_with(1, 1, 0, old_lock())),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n"
         );
     }
@@ -1280,11 +1387,11 @@ mod tests {
     #[test]
     fn a_lock_apply_can_run_still_points_at_apply() {
         assert_eq!(
-            next_step(&status_with(2, 0, 0, false)),
+            next_step(&status_with(2, 0, 0, sound_lock())),
             "\nTo apply: canon apply m.toml\n"
         );
         assert_eq!(
-            next_step(&status_with(1, 1, 0, false)),
+            next_step(&status_with(1, 1, 0, sound_lock())),
             "\nTo complete: canon apply --resume m.toml\n"
         );
     }
@@ -1297,21 +1404,65 @@ mod tests {
     ///
     /// And there is no *other* command to name in its place: a refresh does
     /// not give a pattern the fact or the scope it is missing, so offering one
-    /// would be the same fault in a different word. The rows above already say
-    /// what failed for each source.
+    /// would be the same fault in a different word.
+    ///
+    /// **What is named instead is the edit**, in the words `apply` uses for
+    /// the same state. The rows above say what failed for each source, which
+    /// is a cause and not an act; leaving it there made the two commands
+    /// answer one state two ways, `apply` telling the reader what to change
+    /// and the report that sent them to `apply` saying nothing.
+    ///
+    /// **And which edit depends on which failure**, walked here in both
+    /// directions. The scope key is not a fact, so a manifest with no scope
+    /// must never be sent to check fact coverage; a pattern naming a fact no
+    /// source carries must never be told to scope the manifest. Each answer is
+    /// asserted absent from the other's arm, because a remedy that is merely
+    /// present is not thereby the right one.
     #[test]
-    fn a_pattern_that_cannot_expand_offers_no_step_at_all() {
+    fn a_pattern_that_cannot_expand_names_the_edit_and_no_command() {
         for (pending, at_destination) in [(2, 0), (1, 1)] {
-            let mut status = status_with(pending, at_destination, 0, false);
-            status.pattern_unexpandable = true;
-            assert_eq!(next_step(&status), "", "pending={pending}");
+            for needs_a_scope in [false, true] {
+                let mut status = status_with(pending, at_destination, 0, sound_lock());
+                status.pattern_unexpandable = true;
+                status.pattern_needs_a_scope_it_lacks = needs_a_scope;
+                // The scope arm is the manifest that records no scope that
+                // confirms. Where one does, the rebuild measures and *is* the
+                // step (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`).
+                status.scope_confirms_nothing = needs_a_scope;
+                let printed = next_step(&status);
+                assert!(
+                    !printed.contains("canon cluster refresh") && !printed.contains("canon apply"),
+                    "no command may be named here: {printed}"
+                );
+                if needs_a_scope {
+                    assert!(
+                        printed.contains("meta.scope") && printed.contains("{source.rel_path}"),
+                        "the scope failure takes the scope answer: {printed}"
+                    );
+                    assert!(
+                        !printed.contains("canon facts"),
+                        "the scope key is not a fact, so fact coverage is the wrong place to \
+                         send the reader: {printed}"
+                    );
+                } else {
+                    assert!(
+                        printed.contains("canon facts") && printed.contains("facts it names"),
+                        "the fact failure takes the fact answer: {printed}"
+                    );
+                    assert!(
+                        !printed.contains("meta.scope"),
+                        "scoping the manifest does nothing for a missing fact: {printed}"
+                    );
+                }
+            }
         }
 
-        // But a lock that predates the measurement still gets its rebuild,
-        // even though its entries also fail to expand — there the refresh is
-        // exactly the fix.
-        let mut status = status_with(2, 0, 0, true);
+        // But a lock whose entries lack the scope the pattern needs still
+        // gets its rebuild where the scope confirms — there the refresh is
+        // exactly the fix, whatever the header says.
+        let mut status = status_with(2, 0, 0, old_lock());
         status.pattern_unexpandable = true;
+        status.pattern_needs_a_scope_it_lacks = true;
         assert_eq!(
             next_step(&status),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n"
@@ -1324,12 +1475,27 @@ mod tests {
     /// and sending the user to a refresh that preserves the line verbatim
     /// would only loop them. The line is stated above the hint, not instead
     /// of it.
+    ///
+    /// All three shapes a resolution can actually produce, because the
+    /// registers move together and two of them look alike from one field: a
+    /// line beside a confirmed one, a lone unrooted line, and a lone
+    /// set-aside line — the last of which stops the *refresh* by the terminal
+    /// rule while leaving the apply exactly where it was, which is the whole
+    /// reason the two acts have their own rows.
     #[test]
     fn a_scope_line_that_resolves_to_nothing_still_points_at_apply() {
-        let mut status = status_with(2, 0, 0, false);
-        status.unrooted_scope = vec!["/canon-test/no-such-root".to_string()];
-        status.set_aside_scope = vec!["/photos/nothing-here".to_string()];
-        assert_eq!(next_step(&status), "\nTo apply: canon apply m.toml\n");
+        for scope in [
+            RecordedScope::SomeConfirmed {
+                set_aside: vec!["/photos/nothing-here".to_string()],
+                unrooted: vec!["/canon-test/no-such-root".to_string()],
+            },
+            RecordedScope::AllUnrooted(vec!["/canon-test/no-such-root".to_string()]),
+            RecordedScope::KeptNothing(vec!["/photos/nothing-here".to_string()]),
+        ] {
+            let mut status = status_with(2, 0, 0, sound_lock());
+            with_scope(&mut status, scope);
+            assert_eq!(next_step(&status), "\nTo apply: canon apply m.toml\n");
+        }
     }
 
     /// **Whether** there is a next step is in no case the lock's business.
@@ -1344,12 +1510,12 @@ mod tests {
     #[test]
     fn a_lock_apply_would_refuse_conjures_no_step_where_there_was_none() {
         for status in [
-            status_with(0, 2, 0, true), // all applied; nothing to do
-            status_with(0, 0, 0, true), // an empty lock
-            status_with(0, 0, 2, true), // sources lost, no rebuild needed
-            status_with(2, 0, 1, true), // pending, but content is missing
-            status_with(2, 1, 1, true), // the same, part-applied
-            status_with(0, 1, 1, true), // part-applied and part-lost
+            status_with(0, 2, 0, old_lock()), // all applied; nothing to do
+            status_with(0, 0, 0, old_lock()), // an empty lock
+            status_with(0, 0, 2, old_lock()), // sources lost, no rebuild needed
+            status_with(2, 0, 1, old_lock()), // pending, but content is missing
+            status_with(2, 1, 1, old_lock()), // the same, part-applied
+            status_with(0, 1, 1, old_lock()), // part-applied and part-lost
         ] {
             assert_eq!(
                 next_step(&status),
@@ -1360,6 +1526,367 @@ mod tests {
                 status.source_lost
             );
         }
+    }
+
+    /// **A lock whose hash no longer matches points at the rebuild, never at
+    /// the apply.** The mismatch reached the header warning above the report
+    /// and stopped there; the step was decided without it, so a user following
+    /// the report's own advice met `apply`'s refusal, which points back at the
+    /// rebuild the report had declined to print.
+    #[test]
+    fn a_hash_mismatch_points_at_the_rebuild_not_the_apply() {
+        let mismatched = LockStanding::Read {
+            hash_matches: false,
+            carries_measurement: true,
+        };
+        for (pending, at_destination) in [(2, 0), (1, 1)] {
+            let status = status_with(pending, at_destination, 0, mismatched);
+            assert_eq!(
+                next_step(&status),
+                "\nTo rebuild the lock: canon cluster refresh m.toml\n",
+                "pending={pending}"
+            );
+        }
+    }
+
+    /// **A rebuild that would change only the stated reason is not a step.**
+    /// An unmeasured lock has two causes: a lock written before the
+    /// measurement, which a rebuild supplies, and a manifest recording no
+    /// scope that confirms, where there is nothing to measure from and the
+    /// rebuilt lock is unmeasured in exactly the same way.
+    ///
+    /// The first arm is the discrimination: the same old lock over a scope
+    /// that *does* confirm still gets its rebuild, so this is not a blanket
+    /// silence over old-and-unexpandable.
+    ///
+    /// Withholding the rebuild is not falling silent: where no rebuild helps,
+    /// the reader is told what to edit instead.
+    #[test]
+    fn a_rebuild_that_only_changes_the_reason_is_not_offered() {
+        let mut confirms = status_with(2, 0, 0, old_lock());
+        confirms.pattern_unexpandable = true;
+        confirms.pattern_needs_a_scope_it_lacks = true;
+        assert_eq!(
+            next_step(&confirms),
+            "\nTo rebuild the lock: canon cluster refresh m.toml\n",
+            "the scope confirms, so the rebuild measures"
+        );
+
+        let mut nothing_to_measure = status_with(2, 0, 0, old_lock());
+        nothing_to_measure.pattern_unexpandable = true;
+        nothing_to_measure.pattern_needs_a_scope_it_lacks = true;
+        with_scope(&mut nothing_to_measure, RecordedScope::Nothing);
+        let printed = next_step(&nothing_to_measure);
+        assert!(
+            !printed.contains("canon cluster refresh"),
+            "the rebuild would change only the reason: {printed}"
+        );
+        assert!(
+            printed.contains("meta.scope"),
+            "and the reader is still owed the edit: {printed}"
+        );
+    }
+
+    /// **The terminal rule is never a bare rebuild, and never silence
+    /// either**, though no door is closed anywhere. The report asked only
+    /// about doors, so a manifest whose one recorded line is set aside was
+    /// first sent to a rebuild that refuses — the pointer's only outcome a
+    /// second refusal — and then, when that was withheld, left with no act at
+    /// all. Both were wrong, and the second is the one a reader feels: a
+    /// set-aside line carries no act of its own, unlike a door line.
+    ///
+    /// What it gets instead is the pair `cluster refresh` prints when it
+    /// refuses for this very reason. The scan leads because Canon cannot tell
+    /// an unscanned folder from a wrong one, and only the user can.
+    #[test]
+    fn a_refresh_the_terminal_rule_turns_away_is_not_named_bare() {
+        let mut status = status_with(2, 0, 0, old_lock());
+        with_scope(
+            &mut status,
+            RecordedScope::KeptNothing(vec!["/photos/2011".to_string()]),
+        );
+
+        let step = next_step(&status);
+        assert_eq!(
+            step,
+            "\nNo sources are known under the scopes declared in this manifest, so the lock cannot be rebuilt:\n\
+             If the files are there, `canon scan /photos/2011` to index them.\n\
+             If not, edit meta.scope, then `canon cluster refresh m.toml` to rewrite the lock.\n",
+            "the state owes two acts under a lead naming the line they answer"
+        );
+        assert!(
+            !step.contains("To rebuild the lock"),
+            "a bare rebuild here refuses: the reader must edit or scan first"
+        );
+        assert!(
+            !status
+                .standing()
+                .can_run(crate::archive::domain::Act::Apply),
+            "the lock is an old one"
+        );
+        assert_eq!(
+            status.refresh_refused_by(),
+            Some(RefreshRefusal::ScopeKeptNothing),
+            "the terminal rule is not a door, and the report must still see it"
+        );
+        assert!(
+            status.parked_scope.is_empty(),
+            "and it sees it with no door in sight, which is the whole finding"
+        );
+    }
+
+    /// The remedy for a lock naming files the world has lost gives **each**
+    /// refusal the way back that refusal leaves the reader needing — one
+    /// composition, three answers.
+    ///
+    /// Renamed from `…_names_the_refresh_only_where_it_would_run`, whose claim
+    /// the terminal-rule arm now breaks on purpose: that arm does name a
+    /// refresh, after the act that unblocks it. The rule was never "never
+    /// mention the refresh" but "never send the reader straight at one that
+    /// will turn them away".
+    #[test]
+    fn the_source_lost_remedy_gives_each_refusal_its_own_way_back() {
+        let set_aside = vec!["/photos/2019".to_string()];
+        let runs = super::super::source_lost_remedy(
+            Path::new("m.toml"),
+            super::super::RefreshStanding::Runs,
+            &set_aside,
+        );
+        assert_eq!(
+            runs,
+            vec![
+                "Check if the source volume is connected. If files are truly lost,".to_string(),
+                "refresh the manifest: canon cluster refresh m.toml".to_string(),
+            ]
+        );
+        // A door states its own way back in the report, with the act that
+        // opens it, so repeating one here would be noise.
+        let door_closed = super::super::source_lost_remedy(
+            Path::new("m.toml"),
+            super::super::RefreshStanding::DoorClosed,
+            &set_aside,
+        );
+        assert_eq!(
+            door_closed,
+            vec!["Check if the source volume is connected.".to_string()]
+        );
+        // The terminal rule does not. `no sources known at <p> — skipped`
+        // names no act, so falling silent here would leave the reader with
+        // none at all — the defect this arm exists to stop. Both answers are
+        // offered because only the user knows which is theirs.
+        let kept_nothing = super::super::source_lost_remedy(
+            Path::new("m.toml"),
+            super::super::RefreshStanding::ScopeKeptNothing,
+            &set_aside,
+        );
+        assert_eq!(
+            kept_nothing,
+            vec![
+                "Check if the source volume is connected.".to_string(),
+                "No sources are known under the scopes declared in this manifest, so the lock cannot be rebuilt:"
+                    .to_string(),
+                "If the files are there, `canon scan /photos/2019` to index them.".to_string(),
+                "If not, edit meta.scope, then `canon cluster refresh m.toml` to rewrite the lock."
+                    .to_string(),
+            ],
+            "a scope that kept nothing owes the same pair the refresh itself prints"
+        );
+        assert!(
+            kept_nothing
+                .iter()
+                .all(|l| !l.contains("If files are truly")),
+            "the scope answers are their own thought, not a continuation of the lead"
+        );
+        assert_eq!(
+            super::super::source_lost_remedy(
+                Path::new("m.toml"),
+                super::super::RefreshStanding::Unasked,
+                &[],
+            ),
+            runs,
+            "a caller that has not asked still names the way forward"
+        );
+    }
+
+    /// **The scan comes first, and it names the paths the report just
+    /// skipped.** Canon cannot tell an unscanned folder from a wrong one, so
+    /// both answers are offered; the command is there to be pasted, so the
+    /// paths are in it and quoted by the tree's own quoter.
+    #[test]
+    fn a_scope_that_kept_nothing_is_offered_the_scan_before_the_edit() {
+        let lines = super::super::scan_or_edit_scope(
+            Path::new("m.toml"),
+            &["/photos/2019".to_string(), "/tmp/it's dir".to_string()],
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "If the files are there, `canon scan /photos/2019 '/tmp/it'\\''s dir'` \
+                 to index them."
+                    .to_string(),
+                "If not, edit meta.scope, then `canon cluster refresh m.toml` \
+                 to rewrite the lock."
+                    .to_string(),
+            ],
+            "every skipped path is named, and each is quoted to survive a shell"
+        );
+    }
+
+    /// **The two absences take opposite remedies, and the manifest's own
+    /// record tells them apart.** A manifest still naming a lock hash lost a
+    /// lock that existed, and a rebuild is the way back. A manifest recording
+    /// the empty hash has no lock *because* its last refresh matched nothing,
+    /// so naming the rebuild there is a fixed point — the refresh runs,
+    /// matches nothing again, and returns the manifest with not even the
+    /// stated reason changed. What moves it forward is a different selection.
+    #[test]
+    fn a_lock_that_matched_nothing_is_not_sent_back_to_the_same_query() {
+        let manifest = Path::new("m.toml");
+
+        let matched_nothing = super::super::no_lock_remedy(manifest, "");
+        assert!(
+            matched_nothing.contains("matched nothing"),
+            "{matched_nothing}"
+        );
+        assert!(
+            matched_nothing.contains("Edit the query or scope"),
+            "the way out is a different selection: {matched_nothing}"
+        );
+
+        let lock_has_gone = super::super::no_lock_remedy(manifest, "abc123");
+        assert_eq!(
+            lock_has_gone, "Rebuild it: canon cluster refresh m.toml",
+            "a lock that existed is rebuilt"
+        );
+    }
+
+    /// **The two absences read differently, and the sentences are not
+    /// interchangeable.** Each names the cause that decides which remedy
+    /// `apply` gives, so swapping them would send a reader whose query matched
+    /// nothing to a rebuild that matches nothing again — the fixed point this
+    /// pair exists to keep the report out of.
+    #[test]
+    fn each_absent_lock_is_named_by_its_own_cause() {
+        assert_eq!(
+            super::lock_line(
+                LockStanding::Absent {
+                    manifest_names_a_hash: false
+                },
+                0
+            ),
+            "Lock: none — the last refresh matched nothing.",
+            "the empty hash is Canon's own record of a zero-match refresh"
+        );
+        assert_eq!(
+            super::lock_line(
+                LockStanding::Absent {
+                    manifest_names_a_hash: true
+                },
+                0
+            ),
+            "Lock: none — the manifest names a lock file that is not there.",
+            "a recorded hash means a lock existed and has since gone"
+        );
+        assert_eq!(
+            super::lock_line(
+                LockStanding::Read {
+                    hash_matches: true,
+                    carries_measurement: true
+                },
+                4200
+            ),
+            "Lock: 4,200 entries",
+            "a lock that is there is counted, not explained"
+        );
+    }
+
+    /// **A lock written before the measurement says so beside its count**, in
+    /// the words `apply`'s refusal uses — so a reader who meets that refusal
+    /// next has already been told the cause, whatever the pattern reads.
+    #[test]
+    fn a_locks_age_is_stated_on_its_own_line() {
+        for hash_matches in [true, false] {
+            let line = super::lock_line(
+                LockStanding::Read {
+                    hash_matches,
+                    carries_measurement: false,
+                },
+                2,
+            );
+            assert_eq!(
+                line, "Lock: 2 entries — built before lock files recorded the scopes they were built from",
+                "hash_matches={hash_matches}"
+            );
+        }
+    }
+
+    /// **A remedy exists to be typed.** Every sentence naming a command goes
+    /// through one spelling, and that spelling defers to the tree's own
+    /// `shell_quote` — so all of them run as printed, not just whichever one
+    /// the quoting rule was written beside.
+    ///
+    /// The apostrophe case is the one that matters: a spelling that quoted
+    /// only spaces emitted `'/tmp/it's dir/m.toml'`, an unbalanced quote that
+    /// will not run, and "a path that needs it" is exactly what that is.
+    #[test]
+    fn every_remedy_quotes_a_path_that_needs_it() {
+        for (dir, want) in [
+            ("/tmp/my dir/m.toml", "'/tmp/my dir/m.toml'"),
+            ("/tmp/it's dir/m.toml", "'/tmp/it'\\''s dir/m.toml'"),
+        ] {
+            let path = Path::new(dir);
+            let set_aside = vec!["/photos/2019".to_string()];
+            let mut sentences = vec![
+                super::super::rebuild_remedy(path),
+                super::super::no_lock_remedy(path, ""),
+                super::super::no_lock_remedy(path, "abc123"),
+                super::super::apply_command(path, false),
+                super::super::apply_command(path, true),
+            ];
+            sentences.extend(super::super::scan_or_edit_scope(path, &set_aside));
+            sentences.extend(super::super::source_lost_remedy(
+                path,
+                super::super::RefreshStanding::Runs,
+                &set_aside,
+            ));
+            sentences.extend(super::super::source_lost_remedy(
+                path,
+                super::super::RefreshStanding::ScopeKeptNothing,
+                &set_aside,
+            ));
+
+            let mut checked = 0;
+            for sentence in &sentences {
+                // Longest verb first, and stop at the first match: `canon
+                // apply --resume` also contains `canon apply`, and testing the
+                // shorter form against it would demand the path sit where the
+                // flag is.
+                for verb in [
+                    "canon cluster refresh ",
+                    "canon apply --resume ",
+                    "canon apply ",
+                ] {
+                    if !sentence.contains(verb) {
+                        continue;
+                    }
+                    assert!(
+                        sentence.contains(&format!("{verb}{want}")),
+                        "will not run as printed: {sentence}"
+                    );
+                    checked += 1;
+                    break;
+                }
+            }
+            assert!(
+                checked >= 8,
+                "the sweep must actually reach the sentences: {checked}"
+            );
+        }
+
+        // A path needing no quoting must not grow any, or every ordinary
+        // remedy would read as if something were odd about the manifest.
+        let plain = super::super::rebuild_remedy(Path::new("/tmp/m.toml"));
+        assert_eq!(plain, "Rebuild it: canon cluster refresh /tmp/m.toml");
     }
 
     /// C4 — a refresh is not the place to refuse: it narrows a lock, and it is
@@ -1404,8 +1931,8 @@ mod tests {
         let said = String::from_utf8(said).unwrap();
         assert_eq!(
             said,
-            "no known root at /canon-test/no-such-root — kept in the manifest, \
-             no destination measures from it\n"
+            "no known root at /canon-test/no-such-root — kept in the manifest; \
+             no files come from it, and it does not shape where other files land\n"
         );
     }
 
@@ -1790,14 +2317,14 @@ mod tests {
         .unwrap();
 
         assert!(
-            refresh_must_refuse(&scope),
+            scope.kept_nothing(),
             "the fixture must reach the refusing branch, or this proves nothing"
         );
         let said = String::from_utf8(scope_statements(&scope, &[], true)).unwrap();
         assert_eq!(
             said,
-            "no known root at /canon-test/no-such-root — kept in the manifest, \
-             no destination measures from it\n",
+            "no known root at /canon-test/no-such-root — kept in the manifest; \
+             no files come from it, and it does not shape where other files land\n",
             "the unrooted line is stated; the set-aside is left to the refusal"
         );
 
@@ -1812,7 +2339,7 @@ mod tests {
             &roots,
         )
         .unwrap();
-        assert!(!refresh_must_refuse(&scope));
+        assert!(!scope.kept_nothing());
         let said = String::from_utf8(scope_statements(&scope, &[], false)).unwrap();
         assert!(
             said.contains("no known root at /canon-test/no-such-root"),
@@ -1887,7 +2414,7 @@ mod tests {
             vec!["/photos suspended — refused · canon roots unsuspend path:/photos".to_string()]
         );
         assert!(
-            !refresh_must_refuse(&scope),
+            !scope.kept_nothing(),
             "the sourceless refusal must not also fire — one cause, one sentence"
         );
     }
@@ -1934,11 +2461,15 @@ mod tests {
             root_id: 1,
             root_path: "/photos".to_string(),
         };
-        let mut status = status_with(1, 0, 0, false);
-        status.parked_scope = vec![crate::core::domain::root::ParkedPath {
-            path: "/photos".to_string(),
-            root: parked.clone(),
-        }];
+        let mut status = status_with(1, 0, 0, sound_lock());
+        with_scope_and_doors(
+            &mut status,
+            RecordedScope::AllConfirmed,
+            vec![crate::core::domain::root::ParkedPath {
+                path: "/photos".to_string(),
+                root: parked.clone(),
+            }],
+        );
         status.parked_entries = vec![(parked, 2)];
 
         assert_eq!(
@@ -1956,7 +2487,7 @@ mod tests {
     /// carry, the destination naming its role.
     #[test]
     fn each_cause_names_the_act_it_turns_away() {
-        let mut status = status_with(1, 0, 0, false);
+        let mut status = status_with(1, 0, 0, sound_lock());
         status.parked_entries = vec![(
             ParkedRoot {
                 root_id: 1,
@@ -2039,10 +2570,18 @@ mod tests {
             root_path: path.to_string(),
         };
         let scope_door = |s: &mut status_ops::ManifestStatus| {
-            s.parked_scope = vec![crate::core::domain::root::ParkedPath {
-                path: "/photos/2011".to_string(),
-                root: parked(1, "/photos"),
-            }]
+            // Through the funnel, so the parked line arrives beside a scope
+            // shape that confirmed — which is what a manifest scoped across
+            // two roots with one of them closed really looks like, and the
+            // shape this row's claim is about.
+            with_scope_and_doors(
+                s,
+                RecordedScope::AllConfirmed,
+                vec![crate::core::domain::root::ParkedPath {
+                    path: "/photos/2011".to_string(),
+                    root: parked(1, "/photos"),
+                }],
+            )
         };
         // One of the lock's entries behind a door, never all of them — a
         // wholly parked lock is its own case, below, and a fixture that
@@ -2059,7 +2598,7 @@ mod tests {
             &dest_door,
         ] {
             for (pending, at_destination) in [(2, 0), (2, 1)] {
-                let mut status = status_with(pending, at_destination, 0, false);
+                let mut status = status_with(pending, at_destination, 0, sound_lock());
                 door(&mut status);
                 assert!(
                     !next_step(&status).contains("canon apply"),
@@ -2075,7 +2614,7 @@ mod tests {
             (2, 0, "\nTo apply: canon apply m.toml\n"),
             (2, 1, "\nTo complete: canon apply --resume m.toml\n"),
         ] {
-            let mut status = status_with(pending, at_destination, 0, false);
+            let mut status = status_with(pending, at_destination, 0, sound_lock());
             scope_door(&mut status);
             assert_eq!(
                 next_step(&status),
@@ -2086,7 +2625,7 @@ mod tests {
 
         // Parked entries: the rebuild is the act that clears them, so it is
         // offered in place of the withheld apply.
-        let mut status = status_with(2, 0, 0, false);
+        let mut status = status_with(2, 0, 0, sound_lock());
         entry_door(&mut status);
         assert_eq!(
             next_step(&status),
@@ -2097,10 +2636,10 @@ mod tests {
         // A parked destination owes no step at all — its own way back was
         // stated with the door — and it silences the rebuild pointer even
         // where entries are parked too, since the apply is no nearer for it.
-        let mut status = status_with(2, 0, 0, false);
+        let mut status = status_with(2, 0, 0, sound_lock());
         dest_door(&mut status);
         assert_eq!(next_step(&status), "", "no act brings this apply nearer");
-        let mut status = status_with(2, 0, 0, false);
+        let mut status = status_with(2, 0, 0, sound_lock());
         entry_door(&mut status);
         dest_door(&mut status);
         assert_eq!(
@@ -2112,13 +2651,13 @@ mod tests {
         // A lock the apply refuses outright meets the identical rule — the
         // rebuild is the step where it brings the apply back, and nowhere
         // else. Withheld at a door of the refresh's own…
-        let mut status = status_with(2, 0, 0, true);
+        let mut status = status_with(2, 0, 0, old_lock());
         scope_door(&mut status);
         assert_eq!(next_step(&status), "", "a refresh meets this door");
 
         // …and withheld at a parked destination, which no rebuild moves,
         // however stale the lock is.
-        let mut status = status_with(2, 0, 0, true);
+        let mut status = status_with(2, 0, 0, old_lock());
         dest_door(&mut status);
         assert_eq!(
             next_step(&status),
@@ -2131,7 +2670,7 @@ mod tests {
             &entry_door as &dyn Fn(&mut status_ops::ManifestStatus),
             &(|_: &mut status_ops::ManifestStatus| {}) as &dyn Fn(&mut status_ops::ManifestStatus),
         ] {
-            let mut status = status_with(2, 0, 0, true);
+            let mut status = status_with(2, 0, 0, old_lock());
             door(&mut status);
             assert_eq!(
                 next_step(&status),
@@ -2149,8 +2688,8 @@ mod tests {
         // destination is unmoved by any rebuild), never a prediction about a
         // query: a predicate over the lock answers the wrong way in both
         // directions, silencing the first case and inviting the second.
-        for stale in [false, true] {
-            let mut status = status_with(2, 0, 0, stale);
+        for lock in [sound_lock(), old_lock()] {
+            let mut status = status_with(2, 0, 0, lock);
             status.parked_entries = vec![(parked(1, "/photos"), status.lock_entry_count)];
             assert_eq!(
                 next_step(&status),
@@ -2161,7 +2700,7 @@ mod tests {
 
         // Without a door the same states still point somewhere: this is the
         // door doing the work, not the counts.
-        assert!(next_step(&status_with(2, 0, 0, false)).contains("To apply:"));
+        assert!(next_step(&status_with(2, 0, 0, sound_lock())).contains("To apply:"));
     }
 
     #[test]

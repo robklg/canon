@@ -144,14 +144,14 @@ On refresh:
 - The **Notes** section is preserved verbatim
 - The same root breakdown and archive coverage summary is printed to stdout
 - **`meta.scope` is rewritten in the byte-form the index stores**, which is what `cluster generate` records for the same paths — root and the part below it alike. A path retyped in the other Unicode normalization is repaired in the file by the refresh.
-- **The lock file records where each file goes.** Refresh settles that from the scope it just resolved; [`apply`](apply.md) reads it and does not re-read `meta.scope`. Editing `meta.scope` therefore takes effect on the next refresh, like the filters beside it.
+- **The lock file records the scopes it was built from, and each entry's path measured from them.** Refresh settles that from the scope it just resolved; [`apply`](apply.md) reads it and does not re-read `meta.scope`. Editing `meta.scope` therefore takes effect on the next refresh, like the filters beside it.
 
 `--edit` opens the manifest in `$VISUAL`/`$EDITOR` before the re-query, so an edited query is the query that runs. The manifest is edited in place. If the editor exits with a failure status, or the saved manifest does not parse, the refresh stops: neither the manifest nor the lock file is written, and the file holds exactly what was saved. Nothing is parsed before the editor opens, so a manifest that no longer parses can be repaired this way.
 
 A path in `meta.scope` that Canon cannot resolve is stated and kept. Refresh narrows a lock rather than deciding where files go, so it continues; the path is written back exactly as it stands, and it contributes nothing, neither to **which files are gathered** nor to **where they land**. Both halves matter: a manifest naming a since-removed drive alongside a live path now locks fewer entries than it did, because the unresolvable path selects nothing. Two kinds, with two lines:
 
 ```
-no known root at /Volumes/old-laptop/photos/2016 — kept in the manifest, no destination measures from it
+no known root at /Volumes/old-laptop/photos/2016 — kept in the manifest; no files come from it, and it does not shape where other files land
 no sources known at /Volumes/Photos/2016 — skipped
 ```
 
@@ -198,16 +198,71 @@ A suspended destination is stated the same way. A root the manifest reaches thro
 *and* its lock is named once, with both acts in the line
 (`cluster refresh and apply would refuse`).
 
-Each next step is withheld where its own act meets a door — an apply invitation by a suspended lock
-entry or destination, the lock rebuild by a suspended scope line. Where a rebuild is the act that
-brings the apply back within reach, the report offers it:
+Each next step is withheld where its own act cannot run — which a door is one cause of, and not the
+only one. An apply invitation is withheld by a suspended lock entry or destination; the lock rebuild
+by a suspended scope line, and equally by a recorded scope that resolves to nothing. Where a rebuild
+is the act that brings the apply back within reach, the report offers it:
 
 ```
 To rebuild the lock: canon cluster refresh manifest.toml
 ```
 
+That includes a lock whose hash no longer matches the manifest: the lock is unusable as it stands,
+and rebuilding it is what makes the apply possible again.
+
 A suspended *destination* gets no step at all: no rebuild changes where the files are going, and
-the way back was stated with the door itself.
+the way back was stated with the door itself — a suspended root is always named with the command
+that unsuspends it.
+
+The rebuild is withheld in two further cases, and each says what it owes instead.
+
+If the only thing a rebuild would change is the *wording* of the refusal you are already reading,
+it is not offered — the report names an act when the act gets you further, not when it merely gives
+the same answer differently. That refusal is a pattern the lock cannot answer, so what you get in
+the rebuild's place is the pattern remedy — the same two lines [`apply`](apply.md) prints when it
+reaches the pattern, and which pair depends on what the pattern is missing, because the two take
+opposite advice. `apply` checks the lock before the pattern, so on a lock written before the
+measurement it says to rebuild first. The report offers a rebuild where it clears what stops the
+apply: a lock without a header, a hash mismatch, a lost lock, and a pattern that needs a scope
+the lock lacks when `meta.scope` names a place with sources to measure from. A pattern that fails
+for a missing fact is cleared by no rebuild, so it gets the fact remedy however old the lock; the
+lock's age is then stated on the `Lock:` line, in the words `apply` will refuse with:
+
+```
+Lock: 2 entries — built before lock files recorded the scopes they were built from
+```
+
+A pattern that places files relative to the scope, over a lock that records none:
+
+```
+The pattern places files relative to the scopes declared in the manifest, and this lock records none.
+Use {source.rel_path} to keep each file's own folders, or add paths to meta.scope and refresh.
+```
+
+Declaring a scope and refreshing is the second remedy taken; a manifest that already declares one
+is offered the refresh directly.
+
+`{scope.rel_path}` is not a fact, so there is no fact coverage to check here. A pattern naming a
+fact your sources do not carry gets the other answer:
+
+```
+Adjust the pattern in your manifest, or import the facts it names.
+Use 'canon facts' to see which sources carry them.
+```
+
+If the recorded scope resolves to nothing — every path in it set aside, so the report has just
+printed `no sources known at …` — a refresh is refused outright, and pointing at one would only
+earn a second refusal. What you get instead is the pair `cluster refresh` prints in that same
+state, under a line saying which of the report's own lines they answer:
+
+```
+No sources are known under the scopes declared in this manifest, so the lock cannot be rebuilt:
+If the files are there, `canon scan /photos/2019` to index them.
+If not, edit meta.scope, then `canon cluster refresh manifest.toml` to rewrite the lock.
+```
+
+Canon cannot tell a folder it has never scanned from a folder named by mistake, so it offers both
+and leads with the one that costs nothing to be wrong about.
 
 What a rebuild would *find* is a different kind of question, and the report does not guess at it: a
 refresh re-queries the open world, so a lock standing entirely on suspended roots may come back
@@ -216,4 +271,10 @@ the refresh states its own outcome. A lock is what your query, your scope and th
 so unsuspending and refreshing again rebuilds it from the same query and scope — over the world as
 it stands then, which is not always the world it described before.
 
-When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh.
+When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh. `cluster status` reads such a manifest and reports the absence rather than failing on it:
+
+```
+Lock: none — the last refresh matched nothing.
+```
+
+A manifest that still records a `lock_hash` but whose lock file is gone reads `Lock: none — the manifest names a lock file that is not there.` [`apply`](apply.md) refuses in both cases: there is nothing to carry across.

@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::archive::domain::LockEntry;
+use crate::archive::domain::{
+    LockEntry, LockStanding, ManifestStanding, NextStep, OwedWayBack, RefreshRefusal,
+};
 use crate::core::domain::root::{ParkedRoot, Root};
 use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
-use crate::expr::prefetch_pattern_facts;
+use crate::expr::{prefetch_pattern_facts, Unmeasured};
 
 use super::manifest::{read_lock_file, read_manifest_config};
 
@@ -128,10 +130,13 @@ pub struct ManifestStatus {
     pub dest_display: String,
     /// Output pattern from the manifest.
     pub pattern: String,
-    /// Number of entries in the lock file.
+    /// Number of entries in the lock file. Zero where there is no lock.
     pub lock_entry_count: usize,
-    /// Whether the lock file hash matches the manifest.
-    pub lock_hash_valid: bool,
+    /// The lock beside the manifest, as the read found it — absent, or read
+    /// with its two claims about itself. One field rather than three loose
+    /// booleans, so a claim about a file that was never read is
+    /// unrepresentable.
+    pub lock: LockStanding,
     /// Per-entry status assessment.
     pub entries: Vec<StatusEntry>,
     /// Count of entries where dest exists with correct size.
@@ -159,22 +164,32 @@ pub struct ManifestStatus {
     /// `cluster status` is a **view**, which states the pause and refuses
     /// nothing.
     pub parked_scope: Vec<crate::core::domain::root::ParkedPath>,
+    /// Whether the recorded scope kept nothing, so `cluster refresh` refuses
+    /// by the source-existence policy's terminal rule rather than by a door
+    /// (`ScopeResolution::kept_nothing`). Carried because a report must name
+    /// no act that would be turned away, and this is the half of that which
+    /// is not a door at all.
+    pub scope_kept_nothing: bool,
+    /// Whether no recorded prefix confirmed, so a rebuild would supply no
+    /// measurement (`ScopeResolution::scopes` empty). A different question
+    /// from the one above — that asks whether a refresh may run, this asks
+    /// what it would give — and the one that decides whether a rebuild helps a
+    /// pattern that cannot expand.
+    pub scope_confirms_nothing: bool,
     /// How many lock entries stand behind each closed door.
     pub parked_entries: Vec<(ParkedRoot, usize)>,
     /// The destination's own door, when the archive root this manifest writes
     /// into is one the user closed. Nothing would be written there until it is
     /// opened, so the report says so rather than inviting an apply.
     pub parked_destination: Option<ParkedRoot>,
-    /// Whether the lock file predates the recorded measurement, and so is
-    /// refused by `apply` outright, whatever the pattern says.
-    pub lock_predates_measurement: bool,
     /// Whether the pattern failed to expand for any entry, and so would fail
     /// for the whole run: `apply` collects expansion failures and aborts on
     /// them before it transfers anything.
     ///
-    /// Together with the flag above this is the whole answer to *can `apply`
-    /// run at all* — which is the question a report must ask before naming it,
-    /// and which the lock's own age does not answer on its own.
+    /// One input of the decision table, never the whole answer to *can
+    /// `apply` run at all* — that question has its own owner
+    /// (`archive::domain::ManifestStanding`), reached through
+    /// [`standing`](ManifestStatus::standing).
     pub pattern_unexpandable: bool,
     /// What the pattern said when it could not expand, in the order the
     /// entries were read and deduplicated: usually one reason for every
@@ -185,6 +200,16 @@ pub struct ManifestStatus {
     /// dest" and never this, so without it the run would report nothing at all
     /// about a manifest that cannot be applied.
     pub expansion_failures: Vec<String>,
+    /// Whether the pattern places files relative to the scope and the lock
+    /// carries no measurement to place them from.
+    ///
+    /// The one thing that tells the two expansion failures apart, and they
+    /// take opposite advice: a scope the manifest does not have is repaired by
+    /// scoping it or by measuring from each file's own root, a fact no source
+    /// carries by supplying the fact. Asked of the language facility rather
+    /// than of the refusal's wording, so the remedy cannot drift from what
+    /// actually failed.
+    pub pattern_needs_a_scope_it_lacks: bool,
     /// How many entries failed, which is not the length of the list above —
     /// that deduplicates by message, and a pattern usually fails the same way
     /// for every source. Carried rather than recovered by the interface,
@@ -198,43 +223,74 @@ impl ManifestStatus {
         self.source_lost == 0 && self.size_mismatch == 0
     }
 
-    /// Would `apply` be refused at a door, as this manifest stands?
+    /// This manifest as the decision table reads it.
     ///
-    /// **The two ends it actually has**: it transfers *from* the lock's
-    /// entries and *into* the destination, and it meets a door at each. The
-    /// recorded scope is neither end — `apply` selects nothing and carries out
-    /// a lock already built, reading its scope from the lock's header rather
-    /// than from `meta.scope`, so a scope line naming a closed root does not
-    /// stop it. A manifest whose scope spans two roots with entries on only
-    /// one is the shape that shows it: park the other, and the apply runs.
-    pub fn apply_meets_a_door(&self) -> bool {
-        !self.parked_entries.is_empty() || self.parked_destination.is_some()
+    /// The one projection, and the reason every question below is a call
+    /// rather than a derivation: *what stops which act* is written out once,
+    /// in the domain, and a report that re-tested the causes beside it would
+    /// be exactly the drift the table was minted to close.
+    ///
+    /// *Can `apply` run* has no shorthand here beside the refresh's, and that
+    /// is demand rather than oversight: nothing in the report asks it on its
+    /// own — the next step asks a wider question, and the door lines read the
+    /// doors themselves. A caller that needs it says `standing().can_run(
+    /// Act::Apply)`, which is the same words the table uses.
+    pub fn standing(&self) -> ManifestStanding {
+        ManifestStanding {
+            lock: self.lock,
+            pattern_expands: !self.pattern_unexpandable,
+            pattern_needs_a_scope_it_lacks: self.pattern_needs_a_scope_it_lacks,
+            parked_origins: !self.parked_entries.is_empty(),
+            parked_destination: self.parked_destination.is_some(),
+            parked_scope: !self.parked_scope.is_empty(),
+            scope_kept_nothing: self.scope_kept_nothing,
+            scope_confirms_nothing: self.scope_confirms_nothing,
+        }
     }
 
-    /// Would `cluster refresh` be refused at a door, as this manifest stands?
+    /// The step that moves this manifest forward, as far as the two acts go.
+    pub fn next_step(&self) -> NextStep {
+        self.standing().next_step()
+    }
+
+    /// Whether `cluster refresh` could run at all — and where it could not,
+    /// which of its two refusals turns it away.
     ///
-    /// **Its one, which is neither of apply's.** A refresh re-queries from the
-    /// recorded scope and rewrites the manifest and its lock — files that live
-    /// where the user put them, never inside the archive root — so a parked
-    /// **scope line** closes it, and neither a parked lock entry nor a parked
-    /// destination does. A lock entry is a record, not a naming: the rebuild
-    /// re-selects from the open world and leaves parked content out of the new
-    /// lock, which is what an act ignoring parked content looks like here.
+    /// **Its two, which are neither of apply's.** A refresh re-queries from
+    /// the recorded scope and rewrites the manifest and its lock — files that
+    /// live where the user put them, never inside the archive root — so a
+    /// parked **scope line** closes it, and neither a parked lock entry nor a
+    /// parked destination does. A lock entry is a record, not a naming: the
+    /// rebuild re-selects from the open world and leaves parked content out of
+    /// the new lock, which is what an act ignoring parked content looks like
+    /// here. The second is the source-existence policy's terminal rule — a
+    /// recorded scope that kept nothing — which is not a door at all, and
+    /// which a report naming the rebuild once did not consult.
     ///
-    /// The two predicates now share no cause at all, which is the whole point
-    /// of having two: a suggestion consults **its own act's** precondition. The
-    /// rule they serve is that a report must name no command that would be
-    /// turned away, and each half of *that* has been the defect once. Its
-    /// converse does not hold: a command that would run is named only where it
-    /// brings the withheld act within reach, which is `write_next_step`'s to
-    /// state and not this predicate's.
+    /// The two predicates share no cause, which is the whole point of having
+    /// two: a suggestion consults **its own act's** precondition, and each
+    /// half of that has been the defect once. Its converse does not hold: a
+    /// command that would run is named only where it brings the withheld act
+    /// within reach, which is the table's `next_step` to state.
     ///
-    /// **The door is not the only thing that turns a refresh away**, and this
-    /// answers for the door alone: a recorded scope that kept nothing refuses
-    /// too, by the boundary policy's terminal rule, and a report naming the
-    /// rebuild does not consult that. Known, and not closed here.
-    pub fn refresh_meets_a_door(&self) -> bool {
-        !self.parked_scope.is_empty()
+    /// **It answers with the cause rather than a bare yes**, because the two
+    /// refusals leave the reader differently placed: a door is announced with
+    /// the act that opens it, a scope that kept nothing with a skipped line
+    /// naming no act at all. A caller that only wants the boolean reads
+    /// `.is_none()`; a projection spelling that separately would be the same
+    /// question asked twice.
+    pub fn refresh_refused_by(&self) -> Option<RefreshRefusal> {
+        self.standing().refresh_refused_by()
+    }
+
+    /// What the reader is owed where the table names no step — the table's
+    /// answer, carried through unchanged.
+    ///
+    /// A report that has named a cause and no act has stopped mid-answer, and
+    /// which causes speak for themselves is a property of the rows, not of the
+    /// report. See [`ManifestStanding::owed_way_back`].
+    pub fn owed_way_back(&self) -> OwedWayBack {
+        self.standing().owed_way_back()
     }
 }
 
@@ -249,20 +305,57 @@ pub fn compute_manifest_status(
     use super::pattern::evaluate_pattern;
     use crate::expr::{extract_fact_keys, parse_pattern};
 
-    // 1. Read manifest and lock
+    // 1. Read the manifest
     let config = read_manifest_config(manifest_path)?;
     let lock_path = manifest_path.with_extension("lock");
-    let lock = read_lock_file(&lock_path)?;
-    let lock_predates_measurement = lock.header.is_none();
-    let unmeasured = lock.unmeasured_reason();
-    let lock_entries = lock.entries;
+    // The pattern is the manifest's own, so it is parsed before the lock is
+    // read: the lock is asked one question about it below, while it is still
+    // whole.
+    let pattern = parse_pattern(&config.output.pattern)
+        .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
+    let needed_keys = extract_fact_keys(&pattern);
+    // 2. Read the lock beside it, or record that there is none, and settle
+    //    the two claims a lock that *was* read makes about itself.
+    //
+    // An absent lock is a state this report states, not one it fails on: a
+    // refresh whose query matched nothing takes the lock away and records the
+    // empty hash, so the commonest shape of an empty manifest is exactly this
+    // — and a diagnostic that stopped reading here would answer the one
+    // question it exists for with an error, on a file Canon itself wrote.
+    // Every other failure is still an error: absence is not unreadability.
+    //
+    // The hash is asked only of a lock that was read. Asking it of an absent
+    // one and calling the failure a mismatch would report a claim about bytes
+    // nobody has, which is the second cause dressed as the first.
+    let (lock, unmeasured, pattern_needs_a_scope_it_lacks, lock_entries) =
+        match read_lock_file(&lock_path)? {
+            None => (
+                LockStanding::absent(&config.meta.lock_hash),
+                // Never read: the expansion loop below runs once per entry and
+                // there are none. Named rather than left to a default so the
+                // fact that nothing consumes it is visible here.
+                Unmeasured::NoScopeRecorded,
+                false,
+                Vec::new(),
+            ),
+            Some(lock) => {
+                let hash_matches = match crate::core::ops::fs::compute_full_hash(&lock_path) {
+                    Ok(actual_hash) => actual_hash == config.meta.lock_hash,
+                    Err(_) => false,
+                };
+                let standing = LockStanding::Read {
+                    hash_matches,
+                    carries_measurement: lock.header.is_some(),
+                };
+                (
+                    standing,
+                    lock.unmeasured_reason(),
+                    lock.pattern_needs_a_scope_it_lacks(&pattern),
+                    lock.entries,
+                )
+            }
+        };
     let lock_entry_count = lock_entries.len();
-
-    // 2. Validate lock hash (non-fatal)
-    let lock_hash_valid = match crate::core::ops::fs::compute_full_hash(&lock_path) {
-        Ok(actual_hash) => actual_hash == config.meta.lock_hash,
-        Err(_) => false,
-    };
 
     // 3. Fetch roots, build root_paths map
     let roots = repo::root::fetch_all(conn)?;
@@ -285,11 +378,7 @@ pub fn compute_manifest_status(
     };
     let dest_display = base_dir.to_string_lossy().to_string();
 
-    // 5. Parse pattern and fetch needed facts
-    let pattern = parse_pattern(&config.output.pattern)
-        .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
-    let needed_keys = extract_fact_keys(&pattern);
-    // The manifest's own scope, through the same resolution `cluster generate`
+    // 5. The manifest's own scope, through the same resolution `cluster generate`
     // and `cluster refresh` use. Status takes no measurement from it — that
     // comes off each lock entry, settled when the selection was — but this is
     // the diagnostic that tells a user what state their manifest is in, and a
@@ -415,7 +504,7 @@ pub fn compute_manifest_status(
         dest_display,
         pattern: config.output.pattern.clone(),
         lock_entry_count,
-        lock_hash_valid,
+        lock,
         entries,
         at_destination,
         pending,
@@ -425,11 +514,13 @@ pub fn compute_manifest_status(
         unrooted_scope: scope.unrooted().to_vec(),
         set_aside_scope: scope.set_aside().to_vec(),
         parked_scope: scope.parked().to_vec(),
+        scope_kept_nothing: scope.kept_nothing(),
+        scope_confirms_nothing: scope.scopes().is_empty(),
         parked_entries: parked_lock_entries(conn, &lock_entries, &roots)?,
         parked_destination: archive_root.parked(),
-        lock_predates_measurement,
         pattern_unexpandable,
         expansion_failures,
+        pattern_needs_a_scope_it_lacks,
         expansion_failure_count,
     })
 }
@@ -500,24 +591,109 @@ mod tests {
         (conn, dir, manifest_path, archive_dir)
     }
 
-    /// An absent measurement has two causes and a report must not blame the
-    /// wrong one. A manifest recording no scope measures nothing — correctly,
-    /// there is nothing to measure from — in a perfectly **current** lock. So
-    /// the message must name the manifest, not the lock's age, and must not
-    /// prescribe a refresh that would rebuild the identical lock.
+    /// **A manifest whose lock is gone is a state this read states, not one
+    /// it fails on.** Canon writes that state itself: a refresh whose query
+    /// matches nothing takes the lock away and records the empty hash. The
+    /// read used to stop at the missing file and the whole report went with
+    /// it, on a manifest Canon had just written and by following the report's
+    /// own suggestion.
     ///
-    /// The `apply` side of this is `an_unscoped_manifest_says_so_rather_than_blaming_the_lock`;
+    /// The manifest's own record tells the two absences apart, so the
+    /// standing carries which: nothing recorded is the zero-match refresh, a
+    /// recorded hash is a lock that has since gone.
+    #[test]
+    fn an_absent_lock_is_a_state_the_read_states() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        // A pattern that **cannot** expand, over a manifest recording no
+        // scope — so the derivation is the only thing keeping
+        // `pattern_unexpandable` false, and this assertion fails the day it
+        // is taken anywhere but the entry loop. With the fixture's own
+        // expandable pattern the row below could not fail against the defect
+        // it is cited for, which is the whole reason this line is here.
+        rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
+        std::fs::remove_file(dir.path().join("cluster.lock")).unwrap();
+
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert_eq!(
+            status.lock,
+            LockStanding::Absent {
+                manifest_names_a_hash: true
+            },
+            "this manifest still names the lock it lost"
+        );
+        assert_eq!(status.lock_entry_count, 0);
+        assert_eq!(status.pending, 0);
+        assert_eq!(
+            status.standing().obstacles(),
+            vec![crate::archive::domain::Obstacle::NoLock],
+            "one obstacle, and no claim about bytes nobody has"
+        );
+    }
+
+    /// A lock that is *unreadable* is still an error, and that distinction is
+    /// the point: absence is a state of a manifest, an empty or malformed file
+    /// is a file that never finished being written, and a reader that folded
+    /// them together would state a cause it cannot know.
+    #[test]
+    fn an_unreadable_lock_is_still_an_error() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        std::fs::write(dir.path().join("cluster.lock"), "").unwrap();
+
+        let err = match compute_manifest_status(&mut conn, &manifest) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an empty lock is not a state; it is a file that never finished"),
+        };
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    /// The two halves of the recorded scope the decision table reads are
+    /// carried out of the resolution, not left for a reader to re-derive from
+    /// the registers beside them: whether a refresh may run at all, and
+    /// whether a rebuild would have anything to measure from.
+    ///
+    /// An unscoped manifest is the plain shape of the second: it confirms
+    /// nothing and kept nothing, because there was nothing recorded to keep.
+    #[test]
+    fn an_unscoped_manifest_confirms_nothing_and_keeps_nothing() {
+        let (mut conn, _dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(status.scope_confirms_nothing, "no prefix was recorded");
+        assert!(
+            !status.scope_kept_nothing,
+            "nothing was set aside, so the terminal rule does not fire"
+        );
+        assert!(
+            status.refresh_refused_by().is_none(),
+            "an unscoped manifest refreshes perfectly well"
+        );
+    }
+
+    /// An absent measurement has two causes and a report must not blame the
+    /// wrong one. A lock built while the manifest declared no scope measures
+    /// nothing — correctly, there was nothing to measure from — and it is a
+    /// perfectly **current** lock. So the message must name the lock as built,
+    /// not the lock's age and not the manifest (which may declare a scope
+    /// since), and must not prescribe a refresh on its own — whether one
+    /// helps is the table's question.
+    ///
+    /// The `apply` side of this is `an_unmeasured_lock_names_its_cause_not_its_age`;
     /// it refuses and moves nothing, but prints the cause on stderr. Here the
     /// same string is data.
     #[test]
-    fn an_unscoped_manifest_blames_the_manifest_not_the_lock() {
+    fn an_unmeasured_lock_blames_the_lock_not_its_age() {
         let (mut conn, _dir, manifest, _archive) = status_fixture(&["a.jpg"]);
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
 
         let status = compute_manifest_status(&mut conn, &manifest).unwrap();
 
         assert!(
-            !status.lock_predates_measurement,
+            matches!(
+                status.lock,
+                LockStanding::Read {
+                    carries_measurement: true,
+                    ..
+                }
+            ),
             "the lock is a current one; its age explains nothing here"
         );
         assert!(
@@ -525,10 +701,65 @@ mod tests {
             "the run cannot expand, which is what a next-step hint must ask"
         );
         let dest = &status.entries[0].dest_path;
-        assert!(dest.contains("records no scope"), "{dest}");
+        assert!(dest.contains("were not scoped"), "{dest}");
         assert!(
             !dest.contains("cluster refresh"),
             "a refresh cannot give an unscoped manifest a scope: {dest}"
+        );
+    }
+
+    /// Give every entry of the fixture's lock a measurement, by hand. The
+    /// fixture generates unscoped, so its entries carry none; this is the
+    /// other lock a pin needs in order to tell the lock's answer from a
+    /// pattern-only one. The manifest's hash is left stale on purpose — the
+    /// read still parses the entries, and the question asked here is not the
+    /// hash's.
+    fn measure_lock_by_hand(dir: &Path) {
+        let lock_path = dir.join("cluster.lock");
+        let text = std::fs::read_to_string(&lock_path).unwrap();
+        let measured: Vec<String> = text
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value.get("id").is_some() {
+                    value["scope_rel_path"] = serde_json::Value::String("a.jpg".to_string());
+                }
+                value.to_string()
+            })
+            .collect();
+        std::fs::write(&lock_path, measured.join("\n") + "\n").unwrap();
+    }
+
+    /// **The report carries the lock's own answer on which remedy the pattern
+    /// takes**, read through the wiring production uses. The composition pin
+    /// in `cli/cluster.rs` sets the field by hand and can only see what it is
+    /// handed; this one asks the real fixture over both locks — one unmeasured,
+    /// one measured — so a report that stopped asking the lock fails here by
+    /// name whether it substituted a constant or the pattern's half alone.
+    #[test]
+    fn the_report_asks_the_lock_which_remedy_the_pattern_takes() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+
+        rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(
+            status.pattern_needs_a_scope_it_lacks,
+            "an unmeasured lock under a scope-relative pattern needs the scope it lacks"
+        );
+
+        rewrite_manifest_pattern(&manifest, "{source.rel_path}");
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(
+            !status.pattern_needs_a_scope_it_lacks,
+            "a pattern that never names the scope key needs no scope"
+        );
+
+        measure_lock_by_hand(dir.path());
+        rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(
+            !status.pattern_needs_a_scope_it_lacks,
+            "a measured lock lacks nothing the pattern needs — the pattern alone cannot say this"
         );
     }
 
@@ -709,7 +940,13 @@ mod tests {
     fn compute_manifest_status_flags_a_lock_file_that_no_longer_matches() {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
         let fresh = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert!(fresh.lock_hash_valid);
+        assert!(matches!(
+            fresh.lock,
+            LockStanding::Read {
+                hash_matches: true,
+                ..
+            }
+        ));
 
         // Change the lock without touching the manifest's recorded hash. The
         // entries stay parseable so the read still reaches the comparison —
@@ -722,7 +959,13 @@ mod tests {
         std::fs::write(&lock, format!("{content}{entries}")).unwrap();
 
         let tampered = compute_manifest_status(&mut conn, &manifest).unwrap();
-        assert!(!tampered.lock_hash_valid);
+        assert!(matches!(
+            tampered.lock,
+            LockStanding::Read {
+                hash_matches: false,
+                ..
+            }
+        ));
     }
 
     // =========================================================================

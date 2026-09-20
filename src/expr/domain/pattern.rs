@@ -108,9 +108,12 @@ pub(in crate::expr) fn is_context_supplied(key: &str) -> bool {
 /// the caller supplies it rather than the entry carrying it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unmeasured {
-    /// The manifest records no scope, so there was nothing to measure from.
-    /// Not a failure of anything: `{scope.rel_path}` has no meaning for this
-    /// run, and no amount of refreshing will give it one.
+    /// The lock's header records no scope, so there was nothing to measure
+    /// from when it was built. A fact about the lock, never the manifest: the
+    /// manifest may declare a scope since, and a refresh then measures the
+    /// lock from it — whether to name that refresh is for the one reader that
+    /// resolves the scope, the report, to say or withhold. While the manifest
+    /// declares none, `{scope.rel_path}` has no meaning for this run.
     NoScopeRecorded,
     /// The lock was written before the measurement was recorded in it. A
     /// refresh rebuilds it and the key resolves.
@@ -269,6 +272,28 @@ fn parse_expr(s: &str) -> Result<PatternExpr> {
         accessor,
         modifiers,
     })
+}
+
+impl Pattern {
+    /// Whether this pattern places files relative to the manifest's scope.
+    ///
+    /// Asked by a caller that has to tell two failures apart: a pattern the
+    /// scope cannot answer, and a pattern naming a fact no source carries.
+    /// They take opposite advice — one is repaired by scoping the manifest or
+    /// by measuring from each file's own root instead, the other by supplying
+    /// the fact — so a caller that cannot tell them apart must give advice
+    /// that is wrong for half its readers.
+    ///
+    /// **The facility answers it, not the caller.** Which key means
+    /// scope-relative placement is a fact about the language, and a caller
+    /// matching on the key's spelling, or on the wording of the refusal, would
+    /// be holding a second copy of it.
+    pub fn names_scope_rel_path(&self) -> bool {
+        self.segments.iter().any(|segment| match segment {
+            PatternSegment::Literal(_) => false,
+            PatternSegment::Expr(expr) => expr.key == SCOPE_REL_PATH,
+        })
+    }
 }
 
 /// Extract all fact keys referenced by a pattern (for prefetching from DB)
@@ -434,22 +459,30 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
     //
     // That collapses the two refusals a *resolution* used to fail with, which
     // cannot happen at evaluation time any more. It does not collapse the
-    // third: "the manifest records no scope" was never a resolution failure —
-    // it is a property of the manifest, it survives the move to write time
-    // unchanged, and it takes a different answer, because no refresh can give
-    // an unscoped manifest a scope. A destination is the one decision a user
-    // cannot un-decide after a move, so the alternative to refusing is
-    // inventing one — and a refusal naming a remedy that cannot work is one
-    // step short of that.
+    // third: "the selected sources were not scoped" was never a resolution failure — it
+    // is a property of the lock as built, it survives the move to write time
+    // unchanged, and it takes a different answer. A destination is the one
+    // decision a user cannot un-decide after a move, so the alternative to
+    // refusing is inventing one — and a refusal naming a remedy that cannot
+    // work is one step short of that.
+    //
+    // **Neither message names a remedy**, and the missing one is the point.
+    // A refresh does rebuild a lock written before the measurement — but only
+    // reaches an applicable manifest where the recorded scope confirms
+    // something to measure from, and this facility cannot see the manifest at
+    // all. Naming the refresh here sent a user round a loop that came back
+    // with the reason changed and nothing else, straight past the one reader
+    // that knows both facts and withholds the step on them
+    // (`archive::domain::ManifestStanding::next_step`). The reason is what
+    // this facility can warrant; the remedy belongs to whoever can.
     if key == SCOPE_REL_PATH {
         let scope_rel = ctx.scope_rel.ok_or_else(|| match ctx.unmeasured {
             Unmeasured::NoScopeRecorded => {
-                anyhow!("{SCOPE_REL_PATH} is not available: the manifest records no scope")
+                anyhow!("{SCOPE_REL_PATH} is not available: the selected sources were not scoped")
             }
             Unmeasured::LockPredatesMeasurement => anyhow!(
                 "{SCOPE_REL_PATH} is not available: this lock file was written before \
-                 the scope-relative path was recorded in it. Run `canon cluster refresh` \
-                 to rebuild the lock."
+                 the scope-relative path was recorded in it."
             ),
         })?;
         return Ok(FactValue::Path(scope_rel.to_string()));
@@ -510,6 +543,36 @@ fn available<'k>(ctx: &'k EvalContext<'_>) -> Vec<&'k str> {
 
 #[cfg(test)]
 mod tests {
+    /// The predicate a consumer leans on to choose between two opposite
+    /// remedies, so it is walked over the shapes that could fool a spelling
+    /// match: the key named plainly, named with an accessor, named beside
+    /// other keys, and a literal that merely contains its text.
+    #[test]
+    fn a_pattern_naming_the_scope_key_is_recognised_by_the_facility() {
+        for pattern in [
+            "{scope.rel_path}",
+            "{scope.rel_path}/{filename}",
+            "{content.Make}/{scope.rel_path}",
+            "{scope.rel_path[0]}",
+        ] {
+            assert!(
+                parse_pattern(pattern).unwrap().names_scope_rel_path(),
+                "names the key: {pattern}"
+            );
+        }
+        for pattern in [
+            "{source.rel_path}",
+            "{content.Make}/{filename}",
+            "scope.rel_path/{filename}",
+            "{filename}",
+        ] {
+            assert!(
+                !parse_pattern(pattern).unwrap().names_scope_rel_path(),
+                "does not name the key: {pattern}"
+            );
+        }
+    }
+
     use super::super::transform::Modifier;
     use super::*;
 
@@ -742,10 +805,13 @@ mod tests {
     /// two an absent measurement can actually mean, and each says its own
     /// thing.
     ///
-    /// The distinction is load-bearing rather than cosmetic: only one of them
-    /// has a remedy. A lock that predates the measurement is rebuilt by a
-    /// refresh; a manifest that records no scope has nothing to measure from,
-    /// and telling that user to refresh sends them round a loop.
+    /// The distinction is load-bearing rather than cosmetic: the two take
+    /// different answers, and the answer is not this facility's to give. A
+    /// lock that predates the measurement is rebuilt by a refresh, but a
+    /// rebuilt lock is only *applicable* where the manifest records a scope
+    /// that confirms — which is a fact about the manifest, invisible here. So
+    /// each message states its own reason and **neither names a remedy**; the
+    /// reader that holds both facts withholds or offers the step.
     #[test]
     fn an_unmeasured_entry_is_refused_by_the_reason_it_is_unmeasured() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
@@ -754,14 +820,22 @@ mod tests {
         old_lock.set_source(source("/media/backup", "proj-v1/src/main.c"));
         old_lock.set_scope_rel(None, Unmeasured::LockPredatesMeasurement);
         let err = evaluate(&pattern, &old_lock).unwrap_err().to_string();
-        assert!(err.contains("cluster refresh"), "{err}");
-        assert!(!err.contains("records no scope"), "{err}");
+        assert!(err.contains("written before"), "{err}");
+        assert!(!err.contains("were not scoped"), "{err}");
+        assert!(
+            !err.contains("cluster refresh"),
+            "a refresh rebuilds this lock but need not make the manifest \
+             applicable, and this facility cannot see which: {err}"
+        );
 
         let mut unscoped = EvalContext::new();
         unscoped.set_source(source("/media/backup", "proj-v1/src/main.c"));
         unscoped.set_scope_rel(None, Unmeasured::NoScopeRecorded);
         let err = evaluate(&pattern, &unscoped).unwrap_err().to_string();
-        assert!(err.contains("records no scope"), "{err}");
+        assert!(
+            err.contains("the selected sources were not scoped"),
+            "the fact is the lock's, never the manifest's, which may declare one since: {err}"
+        );
         assert!(
             !err.contains("cluster refresh"),
             "a refresh cannot give an unscoped manifest a scope: {err}"

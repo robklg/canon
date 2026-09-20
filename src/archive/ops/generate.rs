@@ -910,7 +910,7 @@ fn generate_fact_help(
     if has_scope {
         help.push_str(&format!(
             "#   {:18} {:6} - {}\n",
-            SCOPE_REL_PATH, "path", "Path relative to the manifest scope"
+            SCOPE_REL_PATH, "path", "Path relative to the scopes in meta.scope"
         ));
     }
     help.push_str("#\n");
@@ -1998,6 +1998,7 @@ mod tests {
                 // These two cases plan against a lock generation just wrote,
                 // so every entry is measured and this arm is never taken.
                 unmeasured: Unmeasured::NoScopeRecorded,
+                pattern_needs_a_scope_it_lacks: false,
                 root_paths: &root_paths,
                 archive_root_id: archive,
                 base_dir_rel: "",
@@ -2098,6 +2099,7 @@ mod tests {
                 // These two cases plan against a lock generation just wrote,
                 // so every entry is measured and this arm is never taken.
                 unmeasured: Unmeasured::NoScopeRecorded,
+                pattern_needs_a_scope_it_lacks: false,
                 root_paths: &root_paths,
                 archive_root_id: archive,
                 base_dir_rel: "",

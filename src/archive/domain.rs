@@ -1,5 +1,6 @@
 //! The manifest format — the on-disk contract between `cluster generate`
-//! and `apply`.
+//! and `apply` — and the table that says which acts a manifest in a given
+//! state can still take.
 //!
 //! A manifest is a TOML file the user edits: what was selected, where it
 //! should go, and free-form notes. Beside it sits a JSONL lock file, one
@@ -10,6 +11,12 @@
 //! and the notes extraction that keeps a user's own writing across a
 //! refresh. Reading and writing the files themselves is the operations
 //! layer's job.
+//!
+//! The decision table at the foot of the file is the second concept here, and
+//! it belongs beside the first: what stops `apply` and what stops `cluster
+//! refresh` is a property of the manifest-and-lock pair this module already
+//! defines. Its inputs arrive settled — someone else did the reading — so it
+//! stays as pure as everything above it.
 
 use std::fmt;
 use std::path::Path;
@@ -370,6 +377,512 @@ pub fn extract_notes(content: &str) -> Option<String> {
         None
     } else {
         Some(trimmed)
+    }
+}
+
+// ============================================================================
+// The status decision table
+// ============================================================================
+
+/// The lock file beside a manifest, as a reader found it.
+///
+/// An enum rather than three loose booleans, because two of the three claims
+/// are claims about a file that was *read*: "its bytes no longer hash to what
+/// the manifest records" and "it was written before the measurement" are both
+/// unrepresentable where there is no file, and representing them anyway is how
+/// a reader ends up asserting a hash mismatch against a lock that is simply
+/// gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockStanding {
+    /// No lock file beside the manifest.
+    ///
+    /// An ordinary state, not a broken one: a refresh whose query matched
+    /// nothing takes the lock away and records the empty hash. The two causes
+    /// of an absence are told apart by the manifest's own record, which is why
+    /// this carries it — an empty `lock_hash` is that zero-match refresh, a
+    /// recorded one is a file that has since gone.
+    Absent {
+        /// Whether the manifest still names a lock hash.
+        manifest_names_a_hash: bool,
+    },
+    /// The lock was read, with its two claims about itself.
+    Read {
+        /// Whether its bytes still hash to what the manifest records.
+        hash_matches: bool,
+        /// Whether it carries the header that records the scopes it was built
+        /// from.
+        /// `false` is a lock written before that header existed, which `apply`
+        /// refuses outright whatever the pattern says.
+        carries_measurement: bool,
+    },
+}
+
+impl LockStanding {
+    /// The standing of a manifest whose lock file is not there, read off the
+    /// hash the manifest records.
+    ///
+    /// The one spelling of *which absence this is*. Both readers of that fact
+    /// arrive at it from the same place — the manifest's `lock_hash` — and
+    /// they are at opposite ends of the subsystem: `cluster status` names the
+    /// absence in its report, `apply` chooses which way back to print. A
+    /// second `is_empty()` beside this one would be the same question asked
+    /// twice, and the day the empty hash stops meaning *matched nothing* only
+    /// one of them would learn it.
+    pub fn absent(recorded_lock_hash: &str) -> Self {
+        LockStanding::Absent {
+            manifest_names_a_hash: !recorded_lock_hash.is_empty(),
+        }
+    }
+
+    /// Whether this is an absence whose manifest still names a lock hash — a
+    /// lock that existed and has since gone, rather than a refresh that
+    /// matched nothing.
+    pub fn lost_a_lock_it_names(self) -> bool {
+        matches!(
+            self,
+            LockStanding::Absent {
+                manifest_names_a_hash: true
+            }
+        )
+    }
+}
+
+/// Everything about a manifest's own state that decides whether either act
+/// reading it can run — the inputs of the decision table below.
+///
+/// Pure, and built by whoever has already done the reading: the facts arrive
+/// settled, and nothing here touches a file, a database or a root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestStanding {
+    /// What the lock beside it came to.
+    pub lock: LockStanding,
+    /// Whether the destination pattern expands for the lock's entries as they
+    /// stand. Vacuously true where there are no entries to expand it for.
+    pub pattern_expands: bool,
+    /// Whether the pattern places files relative to a scope the **lock** cannot
+    /// place them from — the lock's own answer
+    /// (`ops::manifest::LockFile::pattern_needs_a_scope_it_lacks`), never the
+    /// manifest's: a manifest may declare a scope its lock was built without.
+    /// This is what a rebuild can supply, so it is what decides whether one
+    /// clears an unexpandable pattern; never true where the pattern expands.
+    pub pattern_needs_a_scope_it_lacks: bool,
+    /// Whether any lock entry's source stands on a root the user closed.
+    pub parked_origins: bool,
+    /// Whether the destination archive root is one the user closed.
+    pub parked_destination: bool,
+    /// Whether any recorded scope line stands on a root the user closed.
+    pub parked_scope: bool,
+    /// Whether the recorded scope kept nothing — the source-existence policy's
+    /// terminal rule (`ScopeResolution::kept_nothing`).
+    pub scope_kept_nothing: bool,
+    /// Whether no recorded prefix confirmed, so a rebuild would supply no
+    /// measurement (`ScopeResolution::scopes` empty).
+    pub scope_confirms_nothing: bool,
+}
+
+/// The two acts that read a manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    /// `canon apply` — carries the lock's entries into the destination.
+    Apply,
+    /// `canon cluster refresh` — re-queries from the recorded scope and
+    /// rewrites the manifest and its lock.
+    Refresh,
+}
+
+/// Why a `cluster refresh` would be turned away.
+///
+/// The two rows of the table below that stop a refresh, as the one question a
+/// caller telling the user about a refresh needs answered. Separate from
+/// [`Obstacle`] because a caller asking it must not have to say what the six
+/// apply-only rows would mean here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshRefusal {
+    /// A recorded scope line stands on a root the user closed.
+    Door,
+    /// The recorded scope kept nothing — the source-existence policy's
+    /// terminal rule.
+    ScopeKeptNothing,
+}
+
+/// What a withheld step still owes the reader.
+///
+/// **A report that names no act has not finished answering.** Where no act
+/// brings an apply within reach, the reader is left with a cause and nothing
+/// to do about it — which is only honest where the cause was announced with
+/// its own way back. Some are: a closed door is always named with the command
+/// that opens it. The rest are not, and this says which sentence they owe.
+///
+/// It is the table's to answer rather than the report's, for the same reason
+/// [`RefreshRefusal`] is: deciding it at the printing end would re-test causes
+/// the table already holds, and re-spell the precedence between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwedWayBack {
+    /// Nothing further: the line that named the cause carries its own act, or
+    /// a step was named and this question does not arise.
+    Stated,
+    /// The recorded scope kept nothing, and the line saying so names no act.
+    ScanOrEditScope,
+    /// The pattern cannot expand and no rebuild would change that, so what
+    /// moves this manifest is an edit to the pattern or to what it names.
+    AdjustPattern,
+}
+
+/// One thing standing between a manifest and an act that reads it.
+///
+/// **The table, and why it is written out rather than reasoned to.** The
+/// question *can `apply` run at all* was a nest of booleans in the report,
+/// listing four causes where the command itself refuses on more; a fifth input
+/// arriving found nobody able to say what the new combination should do, and
+/// two separate reviews reasoned to opposite wrong answers about the same
+/// withholding rule. So the rows are named, each stops exactly one act, and
+/// the matches below carry no catch-all arm.
+///
+/// | Row | Stops `apply` | Stops `cluster refresh` |
+/// |---|---|---|
+/// | [`NoLock`](Self::NoLock) | yes — there is nothing to carry across | no — a refresh *writes* the lock; it never reads one |
+/// | [`LockHashMismatch`](Self::LockHashMismatch) | yes | no — same reason |
+/// | [`LockPredatesMeasurement`](Self::LockPredatesMeasurement) | yes | no — same reason |
+/// | [`PatternUnexpandable`](Self::PatternUnexpandable) | yes | no — a refresh names no destination; only apply expands the pattern to move a file |
+/// | [`ParkedOrigins`](Self::ParkedOrigins) | yes | no — a record is not a naming: the rebuild re-selects from the open world and leaves them out |
+/// | [`ParkedDestination`](Self::ParkedDestination) | yes | no — a refresh writes only the manifest and its lock, never into the archive root |
+/// | [`ParkedScope`](Self::ParkedScope) | no — apply reads no recorded scope, taking its own from the lock header | yes |
+/// | [`ScopeKeptNothing`](Self::ScopeKeptNothing) | no — same reason | yes |
+///
+/// **Two unreachable cells, and one that only looks like them.** With no lock
+/// there is no hash to mismatch and no header to be missing, so `NoLock` can
+/// never be raised beside `LockHashMismatch` or `LockPredatesMeasurement` —
+/// **unrepresentable**, by the shape of [`LockStanding`] rather than by
+/// anyone's discipline, since both are claims about a file somebody read.
+///
+/// `PatternUnexpandable` beside `NoLock` is a third impossible state and is
+/// **not** of that kind, which is worth saying because the three read alike.
+/// With no lock there are no entries, so nothing can fail to expand — but
+/// `pattern_expands` is a field beside the enum, not inside it, so the pair
+/// *is* constructible here and only the caller's derivation keeps it from
+/// arising. The guarantee is therefore a construction fact of
+/// `archive::ops::status::compute_manifest_status`, pinned where it is made
+/// (`an_absent_lock_is_a_state_the_read_states`, over a real manifest whose
+/// lock was removed) rather than claimed here; what this file pins is the
+/// pair the enum really does own
+/// (`a_manifest_with_no_lock_raises_exactly_one_obstacle`, which also poses
+/// the constructible pair so the difference is visible rather than implied).
+///
+/// **What this table does *not* enforce**, named here rather than left to be
+/// discovered: these are the obstacles a *report* can see. `canon apply`
+/// refuses at further sites of its own — a non-archive destination root, a
+/// `base_dir` escaping the archive root, unhashed entries, and every preflight
+/// finding about the world moving under the lock — and those refusals are not
+/// raised from this table. Each row below names the `apply` site that enforces
+/// it; a *new* apply refusal with no row here is not build-refused, and that
+/// is the standing gap this enumeration narrows rather than closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Obstacle {
+    /// No lock file beside the manifest, so there is nothing to carry across.
+    /// Enforced at `apply`'s own lock read.
+    ///
+    /// **Unreachable in the report today** — a manifest with no lock has
+    /// nothing pending, and the interface asks for a step only where
+    /// something is. Written out anyway, because a row answering nothing is
+    /// how a table starts being guessed at, and answered from the standing
+    /// rather than at face value, because nothing observes this row being
+    /// wrong.
+    ///
+    /// Its rebuild answer turns on which absence this is. A manifest still
+    /// naming a lock hash lost a lock that existed, and a refresh rebuilds
+    /// it: `Clears`. A manifest recording the empty hash has no lock because
+    /// its own last refresh matched nothing, and a lock is a pure function of
+    /// the query, the scope and the index — so refreshing again with none of
+    /// the three touched reproduces that same answer: `Leaves`. That is a
+    /// **fixed point, not a forecast**: it says what running the same act
+    /// over the same inputs comes to, and claims nothing about what the query
+    /// would match after the user changes one of them. The interface reads
+    /// the same fact the same way (`cli.rs`’s `no_lock_remedy`), which is the
+    /// point of the row existing.
+    NoLock,
+    /// The lock's bytes no longer hash to what the manifest records.
+    /// Enforced by `apply`'s lock-hash comparison, before anything is planned.
+    LockHashMismatch,
+    /// The lock was built before lock files recorded the scopes they were
+    /// built from.
+    /// Enforced by `apply`'s absent-header refusal, which fires whatever the
+    /// pattern says, because a scoped act recorded as a global one is the
+    /// silence the lock header exists to close.
+    LockPredatesMeasurement,
+    /// The destination pattern does not expand for the entries as they stand.
+    /// Enforced by `apply`'s expansion-failure refusal, which collects every
+    /// failure and aborts before it transfers anything.
+    PatternUnexpandable,
+    /// Lock entries stand on a root the user closed.
+    /// Enforced by `apply`'s origin door, over the one computation
+    /// `cluster status` states in apply's conditional.
+    ParkedOrigins,
+    /// The destination archive root is one the user closed.
+    /// Enforced by `apply`'s destination door, asked before the summary.
+    ParkedDestination,
+    /// A recorded scope line stands on a root the user closed.
+    /// Enforced by `cluster refresh`, which refuses whole rather than
+    /// rebuilding from half a declaration.
+    ParkedScope,
+    /// The recorded scope kept nothing — the source-existence policy's
+    /// terminal rule. Enforced by `cluster refresh`, which names every
+    /// set-aside line as it refuses.
+    ScopeKeptNothing,
+}
+
+/// What a `cluster refresh` does about one obstacle.
+///
+/// Total over every row, so the rebuild question needs no partial function:
+/// an obstacle that stops the refresh itself answers
+/// [`Refused`](Self::Refused) rather than nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rebuild {
+    /// A rebuild clears it, so the apply it stops comes within reach.
+    Clears,
+    /// A rebuild leaves it exactly where it is.
+    Leaves,
+    /// It is the rebuild's own obstacle: the refresh is refused, so there is
+    /// no rebuild to ask about.
+    Refused,
+}
+
+/// The step that moves a manifest forward, as far as the two acts go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextStep {
+    /// The apply can run. Whether it is named plain or as a resume is a
+    /// question about counts, which this table does not hold.
+    Apply,
+    /// The apply cannot, and a rebuild is the act that brings it within reach.
+    Rebuild,
+    /// No act either command offers brings the apply nearer. The way back —
+    /// a door's own, or the reason a pattern will not expand — was stated
+    /// where the cause was.
+    None,
+}
+
+impl Obstacle {
+    /// Which act this row stops. Exactly one, by the table above.
+    pub fn stops(self) -> Act {
+        match self {
+            Obstacle::NoLock
+            | Obstacle::LockHashMismatch
+            | Obstacle::LockPredatesMeasurement
+            | Obstacle::PatternUnexpandable
+            | Obstacle::ParkedOrigins
+            | Obstacle::ParkedDestination => Act::Apply,
+            Obstacle::ParkedScope | Obstacle::ScopeKeptNothing => Act::Refresh,
+        }
+    }
+
+    /// What a rebuild does about this row, given the manifest it stands on.
+    ///
+    /// Only one row needs the standing to answer, and it is the row a rebuild
+    /// can go either way on: a pattern fails to expand for reasons a rebuild
+    /// supplies and for reasons it cannot. It supplies exactly one — the
+    /// scope-relative path of an entry the lock carries no measurement for —
+    /// and only where the recorded scope confirms something to measure from.
+    /// Both halves are read from the standing, and neither from the lock's
+    /// header: a lock *with* a header can still be measured from nothing (it
+    /// was built while the manifest declared no scope), and a manifest can
+    /// declare a confirming scope its lock has never seen — that is the
+    /// ordinary edit-then-refresh workflow, and the rebuild is exactly the
+    /// step it needs. A manifest that records no scope, or none that confirms,
+    /// rebuilds into an identically unmeasured lock with only the stated
+    /// reason changed, which is not a step; and a pattern that fails for a
+    /// fact no source carries is helped by no rebuild at all.
+    ///
+    /// **The residual, declared rather than hidden**: where a rebuild *would*
+    /// supply the measurement, this answers `Clears` without knowing whether
+    /// the pattern also names a fact nothing supplies. A pattern failing for
+    /// both reasons is pointed at a rebuild that only half helps. Closing it
+    /// needs the expansion failure to carry its own cause out of the
+    /// expression facility, which no reader asks for today.
+    pub fn rebuild(self, standing: &ManifestStanding) -> Rebuild {
+        match self {
+            Obstacle::LockHashMismatch
+            | Obstacle::LockPredatesMeasurement
+            | Obstacle::ParkedOrigins => Rebuild::Clears,
+            // A lock that went missing is rebuilt; a lock that was never
+            // written because the query matched nothing is not, because the
+            // rebuild is the same act over the same inputs.
+            Obstacle::NoLock => {
+                if standing.lock.lost_a_lock_it_names() {
+                    Rebuild::Clears
+                } else {
+                    Rebuild::Leaves
+                }
+            }
+            Obstacle::PatternUnexpandable => {
+                if standing.pattern_needs_a_scope_it_lacks && !standing.scope_confirms_nothing {
+                    Rebuild::Clears
+                } else {
+                    Rebuild::Leaves
+                }
+            }
+            // No rebuild moves a destination.
+            Obstacle::ParkedDestination => Rebuild::Leaves,
+            Obstacle::ParkedScope | Obstacle::ScopeKeptNothing => Rebuild::Refused,
+        }
+    }
+}
+
+impl ManifestStanding {
+    /// Every obstacle this manifest raises, in the table's own order.
+    pub fn obstacles(&self) -> Vec<Obstacle> {
+        let mut raised = Vec::new();
+        match self.lock {
+            LockStanding::Absent { .. } => raised.push(Obstacle::NoLock),
+            LockStanding::Read {
+                hash_matches,
+                carries_measurement,
+            } => {
+                if !hash_matches {
+                    raised.push(Obstacle::LockHashMismatch);
+                }
+                if !carries_measurement {
+                    raised.push(Obstacle::LockPredatesMeasurement);
+                }
+            }
+        }
+        if !self.pattern_expands {
+            raised.push(Obstacle::PatternUnexpandable);
+        }
+        if self.parked_origins {
+            raised.push(Obstacle::ParkedOrigins);
+        }
+        if self.parked_destination {
+            raised.push(Obstacle::ParkedDestination);
+        }
+        if self.parked_scope {
+            raised.push(Obstacle::ParkedScope);
+        }
+        if self.scope_kept_nothing {
+            raised.push(Obstacle::ScopeKeptNothing);
+        }
+        raised
+    }
+
+    /// Whether this act can run, as the manifest stands.
+    pub fn can_run(&self, act: Act) -> bool {
+        !self.obstacles().iter().any(|o| o.stops() == act)
+    }
+
+    /// Which of the two refusals turns a `cluster refresh` away, where one
+    /// does.
+    ///
+    /// Asked because the answer changes what a reader is owed, not merely
+    /// whether an act is named: a closed door announces itself with the act
+    /// that opens it, and a scope that kept nothing announces itself with a
+    /// skipped line carrying no act at all. An interface deciding that from
+    /// `parked_scope` and `scope_kept_nothing` would be re-testing causes the
+    /// table already holds, and would re-spell the precedence between them.
+    ///
+    /// **The door outranks the terminal rule**, matching the order `cluster
+    /// refresh` itself asks in — it refuses on a door before it looks at what
+    /// the scope kept — so a manifest with both is told about the door, whose
+    /// way back is the one already on screen.
+    ///
+    /// Its `None` is exactly [`can_run(Act::Refresh)`](Self::can_run) — the
+    /// same question, answered with its cause — and the two are held to that
+    /// by `the_refresh_refusal_agrees_with_the_predicate`, over every shape
+    /// the table can take.
+    pub fn refresh_refused_by(&self) -> Option<RefreshRefusal> {
+        self.obstacles().into_iter().find_map(|o| match o {
+            Obstacle::ParkedScope => Some(RefreshRefusal::Door),
+            Obstacle::ScopeKeptNothing => Some(RefreshRefusal::ScopeKeptNothing),
+            // Every row that stops `apply` and never a refresh. Spelled out
+            // rather than swept into a rest, so a new refresh-stopping row
+            // cannot arrive without this answering for it.
+            Obstacle::NoLock
+            | Obstacle::LockHashMismatch
+            | Obstacle::LockPredatesMeasurement
+            | Obstacle::PatternUnexpandable
+            | Obstacle::ParkedOrigins
+            | Obstacle::ParkedDestination => None,
+        })
+    }
+
+    /// What the reader is owed where [`next_step`](Self::next_step) names no
+    /// act.
+    ///
+    /// **Three causes reach that answer and only one of them speaks for
+    /// itself.** A door is announced with `canon roots unsuspend`, so it needs
+    /// nothing here. A recorded scope that kept nothing is announced as `no
+    /// sources known at <p> — skipped`, which names no act. A pattern that
+    /// cannot expand states why it cannot, and where no rebuild clears it —
+    /// nothing to measure from, or a fact no refresh supplies — what moves it
+    /// is an edit, and saying so is the only thing left to say.
+    ///
+    /// **The scope outranks the pattern**, because a scope that kept nothing
+    /// is also why the pattern has nothing to measure from: fixing the scope
+    /// is fixing both, and pointing at the pattern first would send the reader
+    /// to edit a line that was never the problem.
+    ///
+    /// Spelled over every row rather than swept into a rest, like
+    /// [`refresh_refused_by`](Self::refresh_refused_by) beside it, so a new
+    /// row cannot arrive without this saying what it owes.
+    pub fn owed_way_back(&self) -> OwedWayBack {
+        if !matches!(self.next_step(), NextStep::None) {
+            return OwedWayBack::Stated;
+        }
+        let mut owed = OwedWayBack::Stated;
+        for obstacle in self.obstacles() {
+            owed = match obstacle {
+                Obstacle::ScopeKeptNothing => return OwedWayBack::ScanOrEditScope,
+                Obstacle::PatternUnexpandable => match obstacle.rebuild(self) {
+                    // A rebuild that clears it was already named as the step,
+                    // and a refused one is the door's or the scope's answer
+                    // below, not the pattern's.
+                    Rebuild::Clears | Rebuild::Refused => owed,
+                    Rebuild::Leaves => OwedWayBack::AdjustPattern,
+                },
+                // Each of these is either named on a line carrying its own
+                // act, or is not what withheld the step.
+                Obstacle::ParkedScope
+                | Obstacle::ParkedDestination
+                | Obstacle::ParkedOrigins
+                | Obstacle::NoLock
+                | Obstacle::LockHashMismatch
+                | Obstacle::LockPredatesMeasurement => owed,
+            };
+        }
+        owed
+    }
+
+    /// The step that moves this manifest forward.
+    ///
+    /// **A step is named where it is the act that brings an apply within
+    /// reach** — the narrower of two readings, and the one a reader takes. A
+    /// rebuild is named where it would run *and* would clear every obstacle
+    /// standing in the apply's way; where one of them survives a rebuild, no
+    /// act this report can name gets the reader further, and the cause's own
+    /// way back is the whole answer.
+    ///
+    /// **The narrowing reaches only what a report knows, never what a query
+    /// will match.** A parked destination is knowable: no rebuild moves it. A
+    /// lock standing wholly behind a door is not — a refresh re-queries the
+    /// open world, which holds content this lock has never seen — so the act
+    /// that runs is named and the refresh states its own outcome.
+    pub fn next_step(&self) -> NextStep {
+        let obstacles = self.obstacles();
+        let stopping_apply: Vec<Obstacle> = obstacles
+            .iter()
+            .copied()
+            .filter(|o| o.stops() == Act::Apply)
+            .collect();
+        if stopping_apply.is_empty() {
+            return NextStep::Apply;
+        }
+        let rebuild_runs = self.can_run(Act::Refresh);
+        if rebuild_runs
+            && stopping_apply
+                .iter()
+                .all(|o| o.rebuild(self) == Rebuild::Clears)
+        {
+            NextStep::Rebuild
+        } else {
+            NextStep::None
+        }
     }
 }
 
@@ -811,5 +1324,556 @@ base_dir = "photos"
         let content = "# === Notes ===\n# My notes\n# === Cluster Summary ===\n# stuff\n";
         let notes = extract_notes(content).unwrap();
         assert_eq!(notes, "My notes");
+    }
+
+    // =========================================================================
+    // The status decision table
+    // =========================================================================
+
+    /// A manifest nothing is wrong with: the lock is there, in order, and
+    /// carries its measurement; the pattern expands; no door is closed and the
+    /// recorded scope confirmed.
+    fn sound() -> ManifestStanding {
+        ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: true,
+            },
+            pattern_expands: true,
+            pattern_needs_a_scope_it_lacks: false,
+            parked_origins: false,
+            parked_destination: false,
+            parked_scope: false,
+            scope_kept_nothing: false,
+            scope_confirms_nothing: false,
+        }
+    }
+
+    /// Every row of the table, listed once.
+    fn all_obstacles() -> Vec<Obstacle> {
+        vec![
+            Obstacle::NoLock,
+            Obstacle::LockHashMismatch,
+            Obstacle::LockPredatesMeasurement,
+            Obstacle::PatternUnexpandable,
+            Obstacle::ParkedOrigins,
+            Obstacle::ParkedDestination,
+            Obstacle::ParkedScope,
+            Obstacle::ScopeKeptNothing,
+        ]
+    }
+
+    /// Where each row sits in the census above — an exhaustive match, so a new
+    /// obstacle cannot be minted without being given a place here.
+    fn position(obstacle: Obstacle) -> usize {
+        match obstacle {
+            Obstacle::NoLock => 0,
+            Obstacle::LockHashMismatch => 1,
+            Obstacle::LockPredatesMeasurement => 2,
+            Obstacle::PatternUnexpandable => 3,
+            Obstacle::ParkedOrigins => 4,
+            Obstacle::ParkedDestination => 5,
+            Obstacle::ParkedScope => 6,
+            Obstacle::ScopeKeptNothing => 7,
+        }
+    }
+
+    /// **The census is complete, and matched both directions.** A row minted
+    /// without a place fails [`position`]'s match at compile time; a row given
+    /// a place but left out of the list fails the run here. Eight, because the
+    /// charter's seven conditions split the manifest door in two — the origin
+    /// end and the destination end meet different acts — and the recorded
+    /// scope's own two reasons are a door and the terminal rule, which are
+    /// likewise not one row.
+    #[test]
+    fn the_table_holds_every_row_once() {
+        let all = all_obstacles();
+        let mut places: Vec<usize> = all.iter().copied().map(position).collect();
+        places.sort_unstable();
+        places.dedup();
+        assert_eq!(
+            places,
+            (0..all.len()).collect::<Vec<_>>(),
+            "every row listed once, and none listed twice"
+        );
+        assert_eq!(all.len(), 8, "the table's row count");
+    }
+
+    /// Each row stops exactly one act, and which one is the table's own claim
+    /// rather than a reading of the code: apply transfers from the lock into
+    /// the destination and reads no recorded scope, so the lock's states, the
+    /// pattern's and the two ends' doors are its; a refresh re-queries from
+    /// the recorded scope and writes the lock, so the scope's door and the
+    /// sourceless terminal rule are its and nothing else is.
+    #[test]
+    fn each_row_stops_the_act_the_table_names() {
+        for (obstacle, act) in [
+            (Obstacle::NoLock, Act::Apply),
+            (Obstacle::LockHashMismatch, Act::Apply),
+            (Obstacle::LockPredatesMeasurement, Act::Apply),
+            (Obstacle::PatternUnexpandable, Act::Apply),
+            (Obstacle::ParkedOrigins, Act::Apply),
+            (Obstacle::ParkedDestination, Act::Apply),
+            (Obstacle::ParkedScope, Act::Refresh),
+            (Obstacle::ScopeKeptNothing, Act::Refresh),
+        ] {
+            assert_eq!(obstacle.stops(), act, "{obstacle:?}");
+        }
+        // And the two acts partition the table: neither is left with nothing
+        // to be stopped by, which would mean a predicate with no rows.
+        for act in [Act::Apply, Act::Refresh] {
+            assert!(all_obstacles().iter().any(|o| o.stops() == act));
+        }
+    }
+
+    /// **The two cells the shape makes unreachable, and the one it does not.**
+    /// With no lock there is no hash to mismatch and no header to be missing,
+    /// so `NoLock` can never be raised beside either — structural, not a
+    /// discipline: `LockStanding` has no representation for a lock that is
+    /// absent and hash-mismatched at once, and the arm below would not compile
+    /// if it tried to pose one.
+    ///
+    /// The pattern row is the one that reads like a third and is not. With no
+    /// lock there are no entries, so nothing can fail to expand — but
+    /// `pattern_expands` sits beside the enum rather than inside it, so the
+    /// second half here **poses the pair and asserts what actually happens**:
+    /// both rows are raised. It records where the shape stops, which is why
+    /// the real guarantee is pinned at the derivation instead.
+    ///
+    /// **It is a record of a gap, not a rule**, and the distinction matters
+    /// to whoever closes the gap: fold `pattern_expands` into `LockStanding`,
+    /// or suppress the pattern row where the lock is absent, and this arm is
+    /// what changes — delete it and say so, rather than reading it as a claim
+    /// that the weaker shape is wanted.
+    #[test]
+    fn a_manifest_with_no_lock_raises_exactly_one_obstacle() {
+        for manifest_names_a_hash in [false, true] {
+            let standing = ManifestStanding {
+                lock: LockStanding::Absent {
+                    manifest_names_a_hash,
+                },
+                ..sound()
+            };
+            assert_eq!(standing.obstacles(), vec![Obstacle::NoLock]);
+        }
+
+        // Constructible today, and therefore not a claim this type may make.
+        // The arm that retires when the shape is strengthened.
+        let contradictory = ManifestStanding {
+            lock: LockStanding::Absent {
+                manifest_names_a_hash: true,
+            },
+            pattern_expands: false,
+            ..sound()
+        };
+        assert_eq!(
+            contradictory.obstacles(),
+            vec![Obstacle::NoLock, Obstacle::PatternUnexpandable],
+            "the pattern row is a construction fact of the caller, not a shape fact here"
+        );
+    }
+
+    /// **A lock that went missing is rebuilt; one the query never matched is
+    /// not.** The row answers from the manifest's own record rather than at
+    /// face value, and the difference is a fixed point, not a forecast: a lock
+    /// is a pure function of the query, the scope and the index, so refreshing
+    /// with none of the three touched reproduces the same answer.
+    ///
+    /// Pinned because the row is unreachable in the report today — nothing
+    /// observes it being wrong — and because the interface answers the same
+    /// question from the same field (`cli.rs`’s `no_lock_remedy`), so the two
+    /// must not drift.
+    #[test]
+    fn a_missing_lock_is_rebuilt_and_a_zero_match_one_is_not() {
+        let lost = ManifestStanding {
+            lock: LockStanding::Absent {
+                manifest_names_a_hash: true,
+            },
+            ..sound()
+        };
+        assert_eq!(
+            Obstacle::NoLock.rebuild(&lost),
+            Rebuild::Clears,
+            "a lock that existed and went is what a refresh rebuilds"
+        );
+
+        let matched_nothing = ManifestStanding {
+            lock: LockStanding::Absent {
+                manifest_names_a_hash: false,
+            },
+            ..sound()
+        };
+        assert_eq!(
+            Obstacle::NoLock.rebuild(&matched_nothing),
+            Rebuild::Leaves,
+            "the same query over the same index matches nothing again"
+        );
+
+        // And the row is the one the standing raises in both cases, so the
+        // answers above are the ones a reader of the table actually meets.
+        assert_eq!(lost.obstacles(), vec![Obstacle::NoLock]);
+        assert_eq!(matched_nothing.obstacles(), vec![Obstacle::NoLock]);
+    }
+    /// **Every withheld step is either self-explaining or told what to do.**
+    ///
+    /// Walked over every shape the table can take — every input of
+    /// [`ManifestStanding`], the lock over both absences and all four
+    /// readings — rather than the shapes that arise today: the claim is that
+    /// a reader left without a step is never left without an answer, and a
+    /// new row that withholds a step must say here what it owes, or fail.
+    /// One pair the construction rules out is skipped by name rather than
+    /// asserted about: with no lock there are no entries, so nothing can fail
+    /// to expand (the construction fact `an_absent_lock_is_a_state_the_read_states`
+    /// pins) — and the skip is load-bearing, since the table answers that
+    /// pair inconsistently. A pattern that needs a scope it lacks cannot
+    /// expand either, but that pair is walked anyway: the table answers it
+    /// consistently, so nothing rests on the skip and it is not made.
+    ///
+    /// Two of the three answers are pinned by name. A door owes nothing,
+    /// because its own line carries `canon roots unsuspend`. A scope that kept
+    /// nothing outranks a pattern that cannot expand, because it is why the
+    /// pattern has nothing to measure from — sending the reader at the pattern
+    /// there would be sending them to edit a line that was never the problem.
+    #[test]
+    fn a_withheld_step_is_never_left_without_an_answer() {
+        for lock in [
+            LockStanding::absent(""),
+            LockStanding::absent("abc123"),
+            LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: true,
+            },
+            LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: false,
+            },
+            LockStanding::Read {
+                hash_matches: false,
+                carries_measurement: true,
+            },
+            LockStanding::Read {
+                hash_matches: false,
+                carries_measurement: false,
+            },
+        ] {
+            for pattern_expands in [true, false] {
+                for pattern_needs_a_scope_it_lacks in [true, false] {
+                    for parked_origins in [true, false] {
+                        for parked_scope in [true, false] {
+                            for parked_destination in [true, false] {
+                                for scope_kept_nothing in [true, false] {
+                                    for scope_confirms_nothing in [true, false] {
+                                        if !pattern_expands
+                                            && matches!(lock, LockStanding::Absent { .. })
+                                        {
+                                            continue;
+                                        }
+                                        let standing = ManifestStanding {
+                                            lock,
+                                            pattern_expands,
+                                            pattern_needs_a_scope_it_lacks,
+                                            parked_origins,
+                                            parked_destination,
+                                            parked_scope,
+                                            scope_kept_nothing,
+                                            scope_confirms_nothing,
+                                        };
+                                        let owed = standing.owed_way_back();
+                                        if !matches!(standing.next_step(), NextStep::None) {
+                                            assert_eq!(
+                                                owed,
+                                                OwedWayBack::Stated,
+                                                "a named step asks nothing of this: {standing:?}"
+                                            );
+                                            continue;
+                                        }
+                                        if scope_kept_nothing {
+                                            assert_eq!(
+                                                owed,
+                                                OwedWayBack::ScanOrEditScope,
+                                                "the scope outranks the pattern: {standing:?}"
+                                            );
+                                        }
+                                        // Exhaustive on purpose: a fourth
+                                        // answer fails to compile here until
+                                        // it says which input earns it.
+                                        match owed {
+                                            // Parked origins are deliberately
+                                            // not in this list: a rebuild
+                                            // clears them and never withholds
+                                            // the step, so they can never be
+                                            // what left the reader without one.
+                                            OwedWayBack::Stated => assert!(
+                                                parked_scope
+                                                    || parked_destination
+                                                    || pattern_expands,
+                                                "nothing here states its own way back: {standing:?}"
+                                            ),
+                                            OwedWayBack::ScanOrEditScope => assert!(
+                                                scope_kept_nothing,
+                                                "a scan offered where the scope kept something: {standing:?}"
+                                            ),
+                                            OwedWayBack::AdjustPattern => assert!(
+                                                !pattern_expands && !scope_kept_nothing,
+                                                "a pattern remedy owed by something other than the pattern: {standing:?}"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The refusal and the predicate are one question**, so they may never
+    /// disagree — and the refusal must name the door first, matching the
+    /// order `cluster refresh` itself refuses in.
+    ///
+    /// Walked over every combination of the two scope inputs against every
+    /// lock shape, rather than the shapes that happen to arise today: this
+    /// exists so that a row added to one answer and not the other fails here.
+    #[test]
+    fn the_refresh_refusal_agrees_with_the_predicate() {
+        let locks = [
+            LockStanding::Absent {
+                manifest_names_a_hash: true,
+            },
+            LockStanding::Absent {
+                manifest_names_a_hash: false,
+            },
+            LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: true,
+            },
+            LockStanding::Read {
+                hash_matches: false,
+                carries_measurement: true,
+            },
+            LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: false,
+            },
+        ];
+        for lock in locks {
+            for parked_scope in [false, true] {
+                for scope_kept_nothing in [false, true] {
+                    let standing = ManifestStanding {
+                        lock,
+                        parked_scope,
+                        scope_kept_nothing,
+                        ..sound()
+                    };
+                    let refused = standing.refresh_refused_by();
+                    assert_eq!(
+                        refused.is_none(),
+                        standing.can_run(Act::Refresh),
+                        "the cause and the yes/no must answer alike: {standing:?}"
+                    );
+                    let expected = match (parked_scope, scope_kept_nothing) {
+                        (true, _) => Some(RefreshRefusal::Door),
+                        (false, true) => Some(RefreshRefusal::ScopeKeptNothing),
+                        (false, false) => None,
+                    };
+                    assert_eq!(
+                        refused, expected,
+                        "the door outranks the terminal rule: {standing:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A sound manifest raises nothing, both acts run, and the step is the
+    /// apply — the row every other row is measured against.
+    #[test]
+    fn a_sound_manifest_raises_nothing_and_points_at_the_apply() {
+        let standing = sound();
+        assert!(standing.obstacles().is_empty());
+        assert!(standing.can_run(Act::Apply));
+        assert!(standing.can_run(Act::Refresh));
+        assert_eq!(standing.next_step(), NextStep::Apply);
+    }
+
+    /// **A lock whose hash no longer matches stops the apply, and the rebuild
+    /// is the step.** The report used to read this for a header warning and
+    /// never for the decision, so it invited the one command that refuses by
+    /// name — pointing, in its refusal, at the very rebuild the report already
+    /// knew how to print.
+    #[test]
+    fn a_lock_hash_mismatch_stops_the_apply_and_the_rebuild_is_the_step() {
+        let standing = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: false,
+                carries_measurement: true,
+            },
+            ..sound()
+        };
+        assert_eq!(standing.obstacles(), vec![Obstacle::LockHashMismatch]);
+        assert!(!standing.can_run(Act::Apply));
+        assert!(standing.can_run(Act::Refresh));
+        assert_eq!(standing.next_step(), NextStep::Rebuild);
+    }
+
+    /// **A rebuild that would supply no measurement is not a step.** An
+    /// unmeasured lock has two causes and only one of them is a lock: where
+    /// the manifest records no scope that confirms, rebuilding produces an
+    /// identically unmeasured lock and changes only the stated reason. The
+    /// arm above it — the same old lock over a scope that *does* confirm — is
+    /// what makes this a discrimination rather than a blanket silence.
+    #[test]
+    fn a_rebuild_that_supplies_no_measurement_is_not_a_step() {
+        let old_and_unexpandable = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: false,
+            },
+            pattern_expands: false,
+            pattern_needs_a_scope_it_lacks: true,
+            ..sound()
+        };
+        assert_eq!(
+            old_and_unexpandable.next_step(),
+            NextStep::Rebuild,
+            "the scope confirms, so the rebuild measures and the pattern expands"
+        );
+
+        let nothing_to_measure_from = ManifestStanding {
+            scope_confirms_nothing: true,
+            ..old_and_unexpandable
+        };
+        assert_eq!(
+            nothing_to_measure_from.next_step(),
+            NextStep::None,
+            "only the stated reason would change"
+        );
+        assert_eq!(
+            Obstacle::PatternUnexpandable.rebuild(&nothing_to_measure_from),
+            Rebuild::Leaves
+        );
+
+        // A pattern failing for a fact no source carries is helped by no
+        // rebuild, however old the lock: the header's age is not the fact
+        // this row reads.
+        let old_and_missing_a_fact = ManifestStanding {
+            pattern_needs_a_scope_it_lacks: false,
+            ..old_and_unexpandable
+        };
+        assert_eq!(
+            old_and_missing_a_fact.next_step(),
+            NextStep::None,
+            "no rebuild supplies a fact"
+        );
+
+        // And a current lock whose pattern will not expand is untouched by
+        // this: no rebuild ever supplied its measurement.
+        let current_and_unexpandable = ManifestStanding {
+            pattern_expands: false,
+            ..sound()
+        };
+        assert_eq!(current_and_unexpandable.next_step(), NextStep::None);
+    }
+
+    /// **The rebuild is decided from what the lock carries, never from
+    /// whether it carries a header.** A lock written while the manifest
+    /// declared no scope has a header and no measurement; declare a scope
+    /// that confirms and refresh, and the entries are measured — so the
+    /// rebuild is the step, and withholding it would send the reader back to
+    /// an edit they have already made. The table once read the header here
+    /// and told such a manifest it declared none.
+    #[test]
+    fn a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it() {
+        let declared_after_the_lock = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: true,
+            },
+            pattern_expands: false,
+            pattern_needs_a_scope_it_lacks: true,
+            scope_confirms_nothing: false,
+            ..sound()
+        };
+        assert_eq!(
+            Obstacle::PatternUnexpandable.rebuild(&declared_after_the_lock),
+            Rebuild::Clears,
+            "the header's presence says nothing about what the entries carry"
+        );
+        assert_eq!(declared_after_the_lock.next_step(), NextStep::Rebuild);
+        assert_eq!(
+            declared_after_the_lock.owed_way_back(),
+            OwedWayBack::Stated,
+            "a named step owes no remedy"
+        );
+    }
+
+    /// **A recorded scope that kept nothing withholds the rebuild**, though no
+    /// door is closed anywhere. The report once asked only about doors, and so
+    /// named a refresh the source-existence policy's terminal rule turns away
+    /// — a pointer whose only outcome is a second refusal.
+    #[test]
+    fn a_scope_that_kept_nothing_withholds_the_rebuild() {
+        let standing = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                carries_measurement: false,
+            },
+            scope_kept_nothing: true,
+            scope_confirms_nothing: true,
+            ..sound()
+        };
+        assert!(!standing.can_run(Act::Refresh), "the terminal rule refuses");
+        assert!(!standing.can_run(Act::Apply), "the lock is an old one");
+        assert_eq!(standing.next_step(), NextStep::None);
+        assert_eq!(
+            Obstacle::ScopeKeptNothing.rebuild(&standing),
+            Rebuild::Refused
+        );
+    }
+
+    /// The scope's two rows stop the refresh and **not** the apply, which
+    /// reads no recorded scope at all: a manifest scoped across two roots with
+    /// entries on only one applies perfectly well when the other is closed.
+    #[test]
+    fn the_recorded_scope_stops_no_apply() {
+        for standing in [
+            ManifestStanding {
+                parked_scope: true,
+                ..sound()
+            },
+            ManifestStanding {
+                scope_kept_nothing: true,
+                scope_confirms_nothing: true,
+                ..sound()
+            },
+        ] {
+            assert!(standing.can_run(Act::Apply));
+            assert!(!standing.can_run(Act::Refresh));
+            assert_eq!(standing.next_step(), NextStep::Apply);
+        }
+    }
+
+    /// A parked destination is the one apply obstacle no rebuild moves, so it
+    /// silences the pointer even beside obstacles a rebuild would clear.
+    #[test]
+    fn a_parked_destination_leaves_every_rebuild_where_it_was() {
+        let dest = ManifestStanding {
+            parked_destination: true,
+            ..sound()
+        };
+        assert_eq!(Obstacle::ParkedDestination.rebuild(&dest), Rebuild::Leaves);
+        assert_eq!(dest.next_step(), NextStep::None);
+
+        let both = ManifestStanding {
+            parked_origins: true,
+            ..dest
+        };
+        assert_eq!(Obstacle::ParkedOrigins.rebuild(&both), Rebuild::Clears);
+        assert_eq!(
+            both.next_step(),
+            NextStep::None,
+            "a refresh would run, but it addresses nothing the reader is stuck on"
+        );
     }
 }

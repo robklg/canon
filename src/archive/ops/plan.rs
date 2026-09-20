@@ -54,6 +54,12 @@ pub struct ApplyPlanParams<'a> {
     /// path (`ops::manifest::LockFile::unmeasured_reason`). Per run, like the
     /// pattern beside it.
     pub unmeasured: Unmeasured,
+    /// Whether the pattern places files relative to a scope the lock cannot
+    /// place them from (`ops::manifest::LockFile::pattern_needs_a_scope_it_lacks`).
+    /// The lock's answer, asked of the whole file before `--root` cut
+    /// `sources` down: which remedy a failed expansion takes is the manifest's
+    /// fact, not this run's.
+    pub pattern_needs_a_scope_it_lacks: bool,
     /// Root ID → root path cache (from core::repo::root::fetch_all).
     pub root_paths: &'a HashMap<i64, String>,
     /// Destination archive root ID.
@@ -127,6 +133,12 @@ pub struct ApplyPlan {
 pub struct ApplyViolations {
     /// Sources that failed pattern expansion: (source_path, error_message).
     pub expansion_failures: Vec<(String, String)>,
+    /// Whether the pattern places files relative to the manifest's scope and
+    /// the lock carries no measurement to place them from — the one thing that
+    /// tells the two expansion failures apart, since they take opposite
+    /// advice. Carried through from the params unchanged: the lock answers it,
+    /// never the refusal's text and never this run's subset of entries.
+    pub pattern_needs_a_scope_it_lacks: bool,
     /// Destination paths with multiple sources: (dest_rel_path, source_paths).
     pub collisions: Vec<(String, Vec<String>)>,
     /// Destination paths already occupied in DB (non-resume mode only).
@@ -258,7 +270,12 @@ fn compute_archive_rel_path(base_dir_rel: &str, dest_rel: &str) -> String {
 /// Returns `Err` only for precondition failures (unhashed sources, archive
 /// hash gap) and unexpected DB errors.
 pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<ApplyPlan> {
-    let mut violations = ApplyViolations::default();
+    // Settled before any entry is evaluated: it is a property of the pattern
+    // and the lock, not of whichever entry happened to fail first.
+    let mut violations = ApplyViolations {
+        pattern_needs_a_scope_it_lacks: params.pattern_needs_a_scope_it_lacks,
+        ..Default::default()
+    };
 
     // --- Preconditions (return Err) ---
 
@@ -1037,6 +1054,9 @@ mod tests {
             // Every test in this module drives a manifest with no recorded
             // scope, so this is the reading that is true of all of them.
             unmeasured: Unmeasured::NoScopeRecorded,
+            // No test here asks the pattern-remedy question; the lock's own
+            // answer is pinned beside `LockFile`.
+            pattern_needs_a_scope_it_lacks: false,
             root_paths,
             archive_root_id,
             base_dir_rel: "",

@@ -102,16 +102,20 @@ deriving one: `EvalContext` carries `scope_rel: Option<&str>`, not a vantage, an
 `SCOPE_REL_PATH` arm is a lookup. The strip happens at write time, through the path law's own
 `path_strip_prefix`.
 
-**An absent measurement is refused for exactly two reasons, kept apart because only one has a
-remedy**: a lock written before the measurement was recorded in it is rebuilt by
-`cluster refresh`, while a manifest that records no scope has nothing to measure from and no
-refresh will give it one — telling that user to refresh sends them round a loop. The facility
-cannot tell them apart on its own: both are an absent field on an entry, and the difference is
-a property of the **lock file**. So the caller hands it in, as `Unmeasured`
-(`domain/pattern.rs`), beside the measurement itself — `EvalContext::set_scope_rel` takes both,
-because half of that pair is a state no caller means to be in. Pinned by
+**An absent measurement is refused for exactly two reasons, and each states its own.** A lock
+written before the measurement was recorded in it is one; a lock built while the manifest
+declared no scope is the other — the lock's fact both times, never the manifest's, which may
+have declared a scope since. The facility cannot tell them apart on its own: both are an absent field on an
+entry, and the difference is a property of the **lock file**. So the caller hands it in, as
+`Unmeasured` (`domain/pattern.rs`), beside the measurement itself — `EvalContext::set_scope_rel`
+takes both, because half of that pair is a state no caller means to be in. Pinned by
 `an_unmeasured_entry_is_refused_by_the_reason_it_is_unmeasured`, which also asserts the *other*
 message does not appear.
+
+**Neither message names a remedy**, which is the rule rather than an omission. A refresh does
+rebuild an old lock, but reaches an applicable manifest only where the recorded scope confirms
+something to measure from — a fact about the manifest this facility never sees. The reason is
+what it can warrant; the remedy belongs to whoever holds both facts.
 
 **There is no fallback**, on purpose: a destination is the one decision a user cannot un-decide
 after a move, so the alternative to refusing is inventing one — and a refusal naming a remedy
@@ -121,6 +125,13 @@ Where it does **not** apply: `scope.rel_path` is pattern-only and never reaches 
 `--where` clause has no access to a manifest's scope, which is why `SCOPE_REL_PATH` is a plain
 const rather than a `BuiltinKey` variant. The facility itself never reads the manifest or the
 lock; the consumer hands it the measured value.
+
+**Whether a pattern names that key is the facility's answer, not the consumer's**
+(`Pattern::names_scope_rel_path`). A consumer needs it to tell two expansion failures apart — a
+scope it has not got, and a fact no source carries — which take opposite remedies; without it the
+advice is wrong for half the readers. Answered here because the alternative is a consumer matching
+on the key's spelling or on the refusal's wording, which is a second copy of a language rule
+living outside the language.
 
 ## The context-supplied law
 
