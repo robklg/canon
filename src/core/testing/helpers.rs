@@ -8,6 +8,25 @@ pub fn setup_test_db() -> Connection {
     crate::core::repo::db::open_in_memory_for_test()
 }
 
+/// Make exactly one statement kind fail against one table, from the test side.
+///
+/// A trigger that raises on `BEFORE <event> ON <table>` fails every statement
+/// of that kind against that table and leaves every other statement working —
+/// the recorder's own UPDATE on `decisions` included. That is the whole point:
+/// a site can be failed *inside* its window, so what the row says afterwards is
+/// observable, without production code growing an injection seam for the test's
+/// benefit. Dropping the table (what the recorder's own battery does) cannot
+/// serve here — the row has to survive to be read.
+///
+/// `event` is `INSERT`, `UPDATE` or `DELETE`.
+pub fn plant_failure(conn: &Connection, event: &str, table: &str) {
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER plant_{event}_{table} BEFORE {event} ON {table} \
+         BEGIN SELECT RAISE(ABORT, 'planted'); END"
+    ))
+    .unwrap();
+}
+
 pub fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
     conn.execute(
         "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",

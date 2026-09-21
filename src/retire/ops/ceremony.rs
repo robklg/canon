@@ -155,6 +155,20 @@ pub struct RetireCeremony {
     /// Review-time basis for the release movement's world-moved re-check.
     snapshot_source_count: i64,
     snapshot_max_decision_id: Option<i64>,
+    /// Whether the release transaction committed.
+    ///
+    /// What makes `release`'s failure sentence follow *state* rather than its
+    /// own position in the body. Before the commit, a failure leaves the
+    /// bound-not-released standing and the row must say so; after it, the root
+    /// is gone and that sentence would be false in the durable record. This
+    /// flag is what the failure arm reads, so a step added after the commit
+    /// cannot silently make the sentence a lie.
+    ///
+    /// `pub(super)` for the retire module's own tests, like the fields above:
+    /// the released arm has no production path yet — nothing after the commit
+    /// can fail today — so a test is the only way to reach it, and an arm
+    /// nobody can reach is an arm nobody has checked.
+    pub(super) released: bool,
 }
 
 /// Start the ceremony's two-phase decision (status: `started` — an
@@ -193,6 +207,7 @@ pub fn begin_ceremony(
         now: params.now,
         snapshot_source_count: review.snapshot_source_count,
         snapshot_max_decision_id: review.snapshot_max_decision_id,
+        released: false,
     }
 }
 
@@ -341,26 +356,44 @@ impl RetireCeremony {
     /// bound, root still in the index, nothing destroyed — so every one of them
     /// settles here, by construction: a `?` cannot leave the body without
     /// passing through this arm. Without it the row would keep saying
-    /// `started`, which is reserved for a run that never reached a last act at
-    /// all, over the one ceremony in Canon that destroys index state.
+    /// `started`, which is reserved for a run whose outcome was never written
+    /// down, over the one ceremony in Canon that destroys index state.
     ///
-    /// **The reaching is structural; the sentence is positional.** That every
-    /// `?` arrives here holds for any body. That the sentence it records is
-    /// *true* holds only while every `?` sits before `tx.commit()` — see the
-    /// note there, which is the half a later edit can break.
+    /// **The reaching is structural, and so is the sentence.** That every `?`
+    /// arrives here holds for any body. What it records follows the `released`
+    /// flag rather than the failure's position, so a step added after the
+    /// commit cannot make the recorded sentence false.
     pub fn release(&mut self, conn: &Connection) -> Result<ReleaseOutcome> {
         match self.perform_release(conn) {
             Ok(outcome) => Ok(outcome),
             Err(e) => {
-                // The transaction is gone by the time we are here — dropped on
-                // the way out — so anything it wrote is rolled back, including
-                // a completion written just before a failed commit. Settling on
-                // the connection is what makes the row's terminal outlive that
-                // rollback.
-                self.record_unreleased(conn, &format!("release failed: {e:#}"));
+                self.settle_release_failure(conn, &e);
                 Err(e)
             }
         }
+    }
+
+    /// What a failed release records, read off the `released` flag.
+    ///
+    /// **Not released**: the bound-not-released standing, which is what every
+    /// pre-commit failure leaves — book bound, root still in the index,
+    /// nothing destroyed. The transaction is gone by the time this runs
+    /// (dropped on the way out), so anything it wrote is rolled back,
+    /// including a completion written just before a failed commit; settling on
+    /// the **connection** is what makes the row's terminal outlive that
+    /// rollback.
+    ///
+    /// **Released**: the committed row already reads `completed`, and that is
+    /// true — the root is gone and the book stands. A later step that fails
+    /// does not walk it back; the error propagates and the record stays as the
+    /// commit made it.
+    ///
+    /// `pub(super)` for the same reason the flag is.
+    pub(super) fn settle_release_failure(&mut self, conn: &Connection, e: &anyhow::Error) {
+        if self.released {
+            return;
+        }
+        self.record_unreleased(conn, &format!("release failed: {e:#}"));
     }
 
     /// The release movement's body: one `BEGIN IMMEDIATE` transaction holding
@@ -401,13 +434,13 @@ impl RetireCeremony {
             },
             &summary,
         );
-        // The last statement that may fail. Nothing below may `?`: past this
-        // line the root is gone, and the wrapper would settle the row saying
-        // "the root remains in the index" over a root that does not — a false
-        // statement in the durable record, at the one command that destroys
-        // index state. A step that has to fail after the commit needs its own
-        // sentence, not this one.
         tx.commit()?;
+        // Past this line the root is gone, and the bound-not-released sentence
+        // would be false in the durable record. The flag is what the failure
+        // arm reads instead of counting on nothing below being able to fail:
+        // a step added here that fails leaves the record as the commit made
+        // it. Adjacent to the commit on purpose — nothing between them can.
+        self.released = true;
 
         Ok(ReleaseOutcome::Released {
             deleted_sources: removed.deleted_sources,

@@ -728,3 +728,65 @@ fn a_failed_release_claims_no_sources_released() {
     assert!(decision.count_failed.is_none());
     assert!(decision.count_skipped.is_none());
 }
+
+/// **The watch, closed.** The failure arm's sentence follows the `released`
+/// flag, not the failure's position in the body.
+///
+/// Flag false is every failure the body can raise today: the transaction never
+/// committed, so the bound-not-released standing is what happened and what the
+/// row says. Reached here through the real failure path, not by setting the
+/// flag, so the arm is the one production uses.
+///
+/// *Smoke*: make `settle_release_failure` ignore the flag — this arm still
+/// passes, and its sibling below fails, which is the pair working as intended.
+#[test]
+fn an_unreleased_failure_records_the_root_remaining() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
+
+    conn.execute_batch("DROP TABLE notes").unwrap();
+    release_must_fail(&mut ceremony, &conn);
+
+    assert!(!ceremony.released, "the transaction never committed");
+    let decision = retire_decision_row(&conn, &ceremony);
+    assert_eq!(decision.status, "partial");
+    let summary = decision.summary.expect("a settled row carries its summary");
+    assert!(
+        summary.contains("the root remains in the index"),
+        "the bound-not-released standing: {summary}"
+    );
+    root_and_book_still_stand(&conn, root_id, &bound.dir);
+}
+
+/// Flag true: the commit landed, the row already reads `completed`, and that
+/// is true — the root is gone and the book stands. A step that fails after the
+/// commit must not walk it back to "the root remains in the index", which
+/// would be a false statement in the durable record at the one command that
+/// destroys index state.
+///
+/// No production path reaches this arm today — nothing after the commit can
+/// fail — which is exactly why the flag exists rather than a note saying so,
+/// and why the arm is reached here directly.
+///
+/// *Smoke*: make `settle_release_failure` ignore the flag. The row then reads
+/// `partial` and claims a root that is gone.
+#[test]
+fn a_failure_after_release_leaves_the_committed_row_alone() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    ceremony.bind(&conn, test_telling()).unwrap();
+    let outcome = ceremony.release(&conn).unwrap();
+    assert!(matches!(outcome, ReleaseOutcome::Released { .. }));
+    assert!(ceremony.released, "the commit landed");
+
+    let before = retire_decision_row(&conn, &ceremony);
+    assert_eq!(before.status, "completed");
+
+    ceremony.settle_release_failure(&conn, &anyhow::anyhow!("a later step failed"));
+
+    let after = retire_decision_row(&conn, &ceremony);
+    assert_eq!(after.status, "completed", "the commit's own word stands");
+    assert_eq!(after.summary, before.summary);
+    assert_eq!(after.count_completed, before.count_completed);
+}

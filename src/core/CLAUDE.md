@@ -162,10 +162,11 @@ one shape, tracked side by side on the recorder:
   before anything happens. Settling it means writing a terminal: confirmed (`completed`),
   corrected (`partial`/`interrupted`), or **retracted** (`refused` — the run declined to do
   anything, so the counts stay empty and the receipt claim retracts in the same act). What
-  survives on a row that reads `started` is therefore exactly one thing: a run that never
-  reached a last act at all — killed, crashed, power lost. That is the recovery signal the
-  provenance model and the user docs both promise, and it is only true because every other
-  exit settles.
+  survives on a row that reads `started` is therefore what the recovery signal names: a run
+  whose outcome was never written — killed, crashed, power lost, or a settlement the database
+  itself refused. That is only true because every other exit settles, which is what the armed
+  recorder below closes; the refused-settlement reading is stated on every surface that carries
+  the signal rather than rounded away.
 
 **Which word an outcome deserves stays the caller's**, legitimately: the caller is what knows
 its own results, and funnelling scan's uncounted interruption, retirement's snapshotted
@@ -182,18 +183,51 @@ conforming. And a settlement the database refused is not a settlement: the claim
 registered, because the row really is still `started` and the warning already pushed is the
 record of why.
 
-**Still open — the general `?` between `start()` and `complete()`.** A propagating error at
-`cluster generate`/`refresh`, `roots rm`/`suspend`/`unsuspend`, `facts delete` and the prunes,
-or `import-facts` still leaves `started`. Closing each window is per-command product judgment
-(*which* status each failure deserves), not recorder work.
+**Every other window settles on drop — the armed recorder.** `armed(conn, UnwindTerminal)`
+yields an `ArmedRecorder` whose cleanup writes the command's own terminal word and sentence. A
+normal early return runs it; a kill does not. So a propagating error at `cluster
+generate`/`refresh`, `roots rm`/`suspend`/`unsuspend`, the prunes or `import-facts` leaves a
+settled row rather than `started`. (`facts delete` settles too, but not this way — see *Where it
+does not apply*.) *Which* word and sentence such an exit deserves stays per-command judgment,
+composed beside that site's `DecisionParams`; the recorder owns only *that* it is written. The
+guard offers no way out — no `into_inner`, no constructor for the inner recorder — though the
+public `DerefMut` means the seal is the absence of a reason to swap the recorder out, not a
+refusal the type can make. Arming is opt-in, and the architecture test's
+`RECORDER_START_SITES` census refuses a new `start()` caller declaring no settlement shape.
+
+**The ordering rule: arm before any transaction is opened on the same connection.** Locals drop
+in reverse declaration order, so on a `?` the transaction rolls back first and the guard's
+UPDATE lands in autocommit. Armed the other way round it rolls back with the transaction and
+the row reads `started` over a run that did reach a last act — the falsehood the guard exists
+to remove, wearing its clothes, and silent when broken. Held in the recorder by
+`a_settlement_after_a_rollback_lands`, and at the one production site that opens a transaction
+on the same connection by `a_failed_orphan_prune_settles_after_its_rollback`.
+
+**Where it does not apply.** `exclude` and `notes` roll their row back with their own
+transaction; `scan`, `apply` and retirement settle on their own declared paths (below);
+**`facts delete` cannot arm at all** — its delete needs a mutable connection, which the guard's
+shared borrow forbids, so it settles through its own wrapper, and `src/facts/CLAUDE.md` carries
+why. None of them arms. A panic leaves `started` deliberately — a panic is a crash, and writing to SQLite
+during unwind could turn one panic into an abort. So does a drop-time write the database
+refuses: the run reached a last act and could not write it down, most likely because the busy
+lock that raised the `?` refused the settlement too. **Stated, not repaired** — it is why a
+`started` row means *the outcome was never written* rather than *killed*, and why
+`docs/src/concepts/decisions.md` and `trail show` say so instead of promising a kill. One blind
+spot, named and unheld: a `std::process::exit` inside an armed window skips the guard. None
+sits inside one today, and only the guard's doc comment holds it there — the census cannot see
+it.
+
+The guard's own battery sits beside the recorder, named in its doc comments.
 
 **Retirement's release is closed**, and is the reference projection for the rest: `release` is
 a wrapper whose single `Err` arm settles on the connection, so its four internal `?` — the
 immediate transaction, the world-moved probe, the removal, the commit — settle by
-construction rather than by a list anyone has to keep current. The *reaching* is structural;
-the sentence recorded is positional, true only while every `?` precedes the commit, and a note
-at the commit line says so. The word is `partial` at every one of them, because they all leave
-the one standing the bind ordering guarantees: book bound, root still in the index. The
+construction rather than by a list anyone has to keep current. The reaching is structural, and
+so is the sentence: the failure arm reads a `released` flag set on the line after the commit,
+rather than counting on nothing below that line being able to fail. The word is `partial` on
+every arm that reaches it, because they all leave the one standing the bind ordering
+guarantees: book bound, root still in the index; past the commit the committed row is left
+alone. The
 guarantee is **best-effort and says so** — a settling `UPDATE` that contends for the same busy
 lock can itself fail, and the recorder then warns and leaves the claim registered, which is
 true.
@@ -207,9 +241,7 @@ reads `Settled` while the row reads `started`. This is not repaired, and must no
 repair would be walking a settled claim back to `Registered`, which
 `settling_a_settled_status_again_leaves_it_alone` forbids for the stronger reason that it
 would point crash recovery at a run that finished. It stays unobservable, since nothing reads
-`status_claim` after that point, and the instrument that would catch it — a `Drop` assert on an
-unsettled claim — is deliberately absent: it would fire on the open `?` window above. `exclude`
-and `notes` are not exposed: their row rolls back
+`status_claim` after that point. `exclude` and `notes` are not exposed: their row rolls back
 entirely, so there is no row left to mis-describe.
 
 The status claim's battery sits beside the recorder, `every_terminal_status_is_reachable_by_name`

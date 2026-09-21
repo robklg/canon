@@ -17,7 +17,9 @@ use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorVerb, ParkedRoot, RefusedAct, RefusedActs};
 use crate::core::domain::scope::ScopeResolution;
-use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::core::ops::decision::{
+    DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
+};
 use crate::core::ops::scope::{
     classify_all, no_sources_known, resolve_archive_path, resolve_recorded_scope,
 };
@@ -150,7 +152,21 @@ pub fn generate(
     // computed above — is what stops a receipt file being written. Generating
     // a manifest performs no transition on any source; the manifest itself is
     // the artifact the run leaves behind.
-    let mut recorder = DecisionRecorder::start(conn, &decision, None);
+    //
+    // Armed: the window is `execute_generate`, which writes exactly these two
+    // files, and "what is on disk now?" is the user's next question. Both
+    // paths are in hand here, so the sentence carries them.
+    let mut recorder = DecisionRecorder::start(conn, &decision, None).armed(
+        conn,
+        UnwindTerminal {
+            status: DecisionStatus::Interrupted,
+            summary: format!(
+                "Manifest generation ended early; check {} and {} on disk",
+                output_path.display(),
+                lock_path.display()
+            ),
+        },
+    );
 
     let result = generate_ops::execute_generate(&mut plan, &exec_params)?;
 
@@ -472,14 +488,25 @@ fn refresh_with_editor(
     // computed above — is what stops a receipt file being written. Generating
     // a manifest performs no transition on any source; the manifest itself is
     // the artifact the run leaves behind.
-    let mut recorder = DecisionRecorder::start(conn, &decision, None);
+    //
+    // Armed: generation's shape mirrored — the window writes these two files,
+    // and the sentence names them.
+    let mut recorder = DecisionRecorder::start(conn, &decision, None).armed(
+        conn,
+        UnwindTerminal {
+            status: DecisionStatus::Interrupted,
+            summary: format!(
+                "Refresh ended early; check {} and {} on disk",
+                config_path.display(),
+                lock_path.display()
+            ),
+        },
+    );
 
     let result = generate_ops::execute_refresh(&mut plan, &exec_params)?;
 
     // Only an empty plan leaves no outcome, and that path returned above; a
-    // missing one here means the lock was never written, and this `?` leaves
-    // the decision row unsettled — one of the sites where an error between
-    // start() and completion still exits without naming an outcome.
+    // missing one here means the lock was never written.
     let r = result
         .outcome
         .context("refresh wrote no lock file for a non-empty plan")?;

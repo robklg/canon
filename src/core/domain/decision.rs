@@ -63,7 +63,7 @@ pub enum DecisionStatus {
     /// The run declined to do anything: a pre-flight check said no and it
     /// bailed before touching content. Distinct from `Interrupted`, which
     /// means a run was cut short after starting, and from `Started`, which
-    /// means the run never reached a last act at all.
+    /// means the run's outcome was never written down.
     Refused,
 }
 

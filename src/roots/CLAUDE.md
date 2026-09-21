@@ -22,7 +22,12 @@ for that reason, the same treatment `exclude.rs`/`trail.rs` give their test-only
   interruption partway leaves a root with some of its rows already gone. Retirement's release
   performs the identical mechanics inside one `BEGIN IMMEDIATE` transaction. The gap is real and
   comment-mitigated at the call site (`ops.rs::execute_remove`), not closed — closing it is its
-  own change.
+  own change. What *is* closed is the record of it: `execute_remove` arms its recorder, so a `?`
+  between the deletes settles the row `partial` with a sentence naming the half-removed standing
+  and the way to converge (`a_failed_removal_settles_partial`). The two suspend sites arm the
+  same way, with `interrupted` — the flip may well have landed, and each sentence points at the
+  listing that answers it (`canon roots --suspended` for suspend, since a suspended root is
+  hidden from the plain one; `canon roots` for unsuspend).
 - **Three decision-recording shapes, all gated on the same pattern**: the recorder starts only
   *after* the already-in-state check, so a no-op records nothing.
   - `execute_remove` (`RootsRm`) records real counts — `attempted`/`completed` from the plan's

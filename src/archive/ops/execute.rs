@@ -2905,9 +2905,10 @@ mod tests {
         assert_eq!(row.receipt_root_id, None, "claim must not outlive the run");
         assert_eq!(row.receipt_rel_path, None, "claim must not outlive the run");
         // The refusal *is* the decision's last act, so both of the row's
-        // prospective claims settle in it. `started` is reserved for a run that
-        // never reached a last act at all — a kill, a crash, a power cut — and
-        // a deliberate no must not read as one of those.
+        // prospective claims settle in it. `started` is reserved for a run
+        // whose outcome was never written down — a kill, a crash, a power cut,
+        // or a settlement the database refused — and a deliberate no must not
+        // read as one of those.
         assert_eq!(row.status, "refused");
     }
 

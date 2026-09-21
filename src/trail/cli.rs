@@ -645,6 +645,9 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
         }
     }
     println!("  version:  {}", d.canon_version);
+    if let Some(line) = started_outcome_line(&d.status) {
+        println!("{line}");
+    }
     if let Some(summary) = &d.summary {
         println!("  summary:  {summary}");
     }
@@ -676,6 +679,28 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
     }
     Ok(())
 }
+
+/// What a row still reading `started` can tell, stated on the row itself.
+///
+/// In the receipt-absence idiom (`no receipt (the run refused)`): what the
+/// reader can observe and its readings, never one cause. A settled row needs
+/// nothing here — its status and summary say what happened. A `started` row
+/// says only that its outcome was never written, and since every
+/// non-panicking exit now settles, the reading that used to dominate — an
+/// ordinary error partway — belongs to rows written by older versions alone.
+///
+/// It points at the `version:` line above rather than comparing versions
+/// itself. The reader already sees that line, and a machine comparison would
+/// want a semver dependency the tree does not carry for a number already on
+/// the screen.
+fn started_outcome_line(status: &str) -> Option<String> {
+    (status == crate::core::domain::decision::DecisionStatus::Started.as_str())
+        .then(|| format!("  outcome:  {STARTED_OUTCOME}"))
+}
+
+/// One line on purpose: a `\`-continued literal is reflowed by the formatter
+/// with its indentation left inside the string.
+const STARTED_OUTCOME: &str = "never written — killed, crashed, or a settlement that could not be written; a row from an older Canon (see version: above) may also have failed early";
 
 /// Maximum scopes `trail show` lists before an explicit remainder line —
 /// the value `drew_from_lines` uses in this same file, for the same reason:
@@ -760,6 +785,45 @@ mod tests {
             .map(|(i, _)| i)
             .unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// A row that still reads `started` states what it can: its outcome was
+    /// never written. The three readings are the whole population the guard
+    /// leaves — a kill or crash, a settlement the database refused, and a row
+    /// from a version before every exit settled — so the line must not promise
+    /// any one of them.
+    ///
+    /// *Smoke*: return the line for every status (a settled row then carries
+    /// an outcome line contradicting its own summary), or return `None`
+    /// always.
+    #[test]
+    fn a_started_row_states_its_outcome_was_never_written() {
+        let line = started_outcome_line("started").expect("a started row earns the line");
+        assert!(
+            line.starts_with("  outcome:  "),
+            "the field-list shape: {line}"
+        );
+        assert!(line.contains("never written"), "the observed fact: {line}");
+        assert!(
+            line.contains("killed, crashed"),
+            "the first reading: {line}"
+        );
+        assert!(
+            line.contains("could not be written"),
+            "the refused-settlement reading, which is the likeliest at these \
+             sites and the one a user hits while two canons run: {line}"
+        );
+        assert!(
+            line.contains("older Canon (see version: above)"),
+            "the pre-change reading, pointed at the line that settles it: {line}"
+        );
+
+        for settled in ["completed", "partial", "interrupted", "refused"] {
+            assert!(
+                started_outcome_line(settled).is_none(),
+                "{settled} says what happened in its own status and summary"
+            );
+        }
     }
 
     /// **The scope-door extraction's guard.** `open_scope` holds the retired

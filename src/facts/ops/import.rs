@@ -117,8 +117,12 @@ pub fn init_state(conn: &Connection) -> Result<ImportState> {
 }
 
 /// Process a single import record. Returns structured outcome — no stdout/stderr.
+/// Takes a shared connection so the command's armed recorder can hold one for
+/// the whole run. The one transaction below opens with `unchecked_transaction`
+/// for that reason; nesting is what SQLite refuses at runtime, and nothing
+/// here is reached from inside another transaction.
 pub fn process_record(
-    conn: &mut Connection,
+    conn: &Connection,
     record: &ImportRecord,
     state: &mut ImportState,
     allow_archived: bool,
@@ -205,7 +209,7 @@ pub fn process_record(
 
             // Link source to object AND promote existing facts in a single transaction
             if current_object_id.is_none() {
-                let tx = conn.transaction()?;
+                let tx = conn.unchecked_transaction()?;
                 repo::source::set_object_id(&tx, record.source_id, obj.id)?;
                 let promoted = promote_content_facts(&tx, record.source_id, obj.id)?;
                 tx.commit()?;
@@ -755,24 +759,24 @@ mod tests {
 
     #[test]
     fn test_process_record_source_not_found() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let mut state = init_state(&conn).unwrap();
         let record = make_record(999, 0, HashMap::new());
 
-        let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
+        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings[0].contains("not found"));
     }
 
     #[test]
     fn test_process_record_stale_skipped() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         insert_source(&conn, root, "photo.jpg", None);
         let mut state = init_state(&conn).unwrap();
 
         // Source has basis_rev 0 (default), import has 99
         let record = make_record(1, 99, HashMap::new());
-        let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
+        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
 
         assert!(outcome.warnings[0].contains("basis_rev"));
         assert_eq!(state.stats.skipped_stale, 1);
@@ -782,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_touched_roots_collects_acted_on_roots() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root_a = insert_root(&conn, "/a", "source", false);
         let root_b = insert_root(&conn, "/b", "source", false);
         let s1 = insert_source(&conn, root_a, "1.jpg", None);
@@ -795,11 +799,11 @@ mod tests {
                 0,
                 HashMap::from([("Make".to_string(), Value::String("Canon".to_string()))]),
             );
-            process_record(&mut conn, &record, &mut state, false).unwrap();
+            process_record(&conn, &record, &mut state, false).unwrap();
         }
         // Missing source: gated, must not touch.
         process_record(
-            &mut conn,
+            &conn,
             &make_record(999, 0, HashMap::new()),
             &mut state,
             false,
@@ -814,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_process_record_archived_skipped() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/archive", "archive", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
@@ -823,7 +827,7 @@ mod tests {
         let record = make_record(1, 0, HashMap::new());
 
         // Without allow_archived
-        let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
+        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings.is_empty());
         assert_eq!(state.stats.skipped_archived, 1);
     }
@@ -834,7 +838,7 @@ mod tests {
     /// import acted there.
     #[test]
     fn an_import_record_on_a_parked_root_is_counted_not_written() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let parked = insert_root(&conn, "/photos", "source", true);
         let live = insert_root(&conn, "/live", "source", false);
         let behind = insert_source(&conn, parked, "photo.jpg", None);
@@ -847,13 +851,8 @@ mod tests {
                 Value::String("abc123def456".to_string()),
             )])
         };
-        let outcome = process_record(
-            &mut conn,
-            &make_record(behind, 0, facts()),
-            &mut state,
-            false,
-        )
-        .unwrap();
+        let outcome =
+            process_record(&conn, &make_record(behind, 0, facts()), &mut state, false).unwrap();
 
         assert!(outcome.warnings.is_empty(), "set aside is not a warning");
         assert_eq!(state.stats.skipped_suspended, 1);
@@ -865,20 +864,14 @@ mod tests {
         );
 
         // And the batch runs on: the next record imports as it always did.
-        process_record(
-            &mut conn,
-            &make_record(keeper, 0, facts()),
-            &mut state,
-            false,
-        )
-        .unwrap();
+        process_record(&conn, &make_record(keeper, 0, facts()), &mut state, false).unwrap();
         assert_eq!(state.stats.objects_created, 1);
         assert!(state.touched_roots.contains(&live));
     }
 
     #[test]
     fn test_process_record_imports_fact() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
@@ -888,14 +881,14 @@ mod tests {
         facts.insert("content.Make".to_string(), serde_json::json!("Canon"));
         let record = make_record(1, 0, facts);
 
-        let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
+        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings.is_empty());
         assert_eq!(state.stats.facts_imported, 1);
     }
 
     #[test]
     fn test_process_record_hash_links_object() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         insert_source(&conn, root, "photo.jpg", None); // unhashed
         let mut state = init_state(&conn).unwrap();
@@ -907,7 +900,7 @@ mod tests {
         );
         let record = make_record(1, 0, facts);
 
-        let outcome = process_record(&mut conn, &record, &mut state, false).unwrap();
+        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings.is_empty());
         assert_eq!(state.stats.objects_created, 1);
     }
@@ -917,7 +910,7 @@ mod tests {
     /// created; a fact arriving straight onto an object was never promoted.
     #[test]
     fn the_import_counters_count_the_events_they_name() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let first = insert_source(&conn, root, "photo.jpg", None);
         let second = insert_source(&conn, root, "copy.jpg", None);
@@ -927,13 +920,7 @@ mod tests {
         // giving it one promotes that fact onto the object.
         let mut with_fact = HashMap::new();
         with_fact.insert("content.Make".to_string(), serde_json::json!("Canon"));
-        process_record(
-            &mut conn,
-            &make_record(first, 0, with_fact),
-            &mut state,
-            false,
-        )
-        .unwrap();
+        process_record(&conn, &make_record(first, 0, with_fact), &mut state, false).unwrap();
         assert_eq!(state.stats.facts_imported, 1);
         assert_eq!(state.stats.facts_promoted, 0, "nothing promoted yet");
 
@@ -944,7 +931,7 @@ mod tests {
         );
         hash_and_fact.insert("content.Model".to_string(), serde_json::json!("R6"));
         process_record(
-            &mut conn,
+            &conn,
             &make_record(first, 0, hash_and_fact.clone()),
             &mut state,
             false,
@@ -960,7 +947,7 @@ mod tests {
         // that already exists, and the facts it brings land on that object
         // directly — imported, not promoted.
         process_record(
-            &mut conn,
+            &conn,
             &make_record(second, 0, hash_and_fact),
             &mut state,
             false,
@@ -978,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_process_record_type_mismatch() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
@@ -988,14 +975,14 @@ mod tests {
         let mut facts1 = HashMap::new();
         facts1.insert("content.Width".to_string(), serde_json::json!(1920));
         let record1 = make_record(1, 0, facts1);
-        process_record(&mut conn, &record1, &mut state, false).unwrap();
+        process_record(&conn, &record1, &mut state, false).unwrap();
         assert_eq!(state.stats.facts_imported, 1);
 
         // Second import: "content.Width" as string (type mismatch)
         let mut facts2 = HashMap::new();
         facts2.insert("content.Width".to_string(), serde_json::json!("wide"));
         let record2 = make_record(1, 0, facts2);
-        let outcome = process_record(&mut conn, &record2, &mut state, false).unwrap();
+        let outcome = process_record(&conn, &record2, &mut state, false).unwrap();
 
         assert!(!outcome.warnings.is_empty());
         assert!(outcome.warnings[0].contains("type mismatch"));

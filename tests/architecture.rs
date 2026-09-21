@@ -1796,6 +1796,179 @@ fn every_decompose_caller_names_its_redeemer() {
 }
 
 // ----------------------------------------------------------------------------
+// The `DecisionRecorder::start` settlement census
+// ----------------------------------------------------------------------------
+
+/// How one production caller of `DecisionRecorder::start` settles the status
+/// claim that `start()` registers.
+///
+/// `start()` writes `started` before anything happens — a claim about a run
+/// that has not finished. A row that still reads `started` afterwards means
+/// the run never reached a last act at all, which is the recovery signal the
+/// provenance model publishes. That is only true while *every* caller settles
+/// some way, and the ways are not interchangeable, so each caller declares
+/// which one answers for it.
+///
+/// Exhaustive with no `_` arm: a fifth shape cannot arrive without a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settlement {
+    /// Wrapped in `ArmedRecorder`: the guard's cleanup writes the command's
+    /// terminal on every non-panicking exit. The recorder's own battery holds
+    /// the mechanism.
+    Armed,
+    /// Started on `&tx`. A `?` rolls the row back with the transaction, so
+    /// there is no row left to mis-describe.
+    RollsBackWithTransaction,
+    /// A closure or wrapper whose single `Err` arm settles, so every `?` in
+    /// the body reaches it by construction. The file carries the test
+    /// declaring it.
+    OwnWrapper,
+    /// Zero `?` after `start`. It settles on named paths, held by its own
+    /// refusal pins.
+    Positional,
+}
+
+impl Settlement {
+    fn as_str(self) -> &'static str {
+        match self {
+            Settlement::Armed => "armed (`ArmedRecorder` settles on drop)",
+            Settlement::RollsBackWithTransaction => "started on `&tx` (the row rolls back)",
+            Settlement::OwnWrapper => "its own wrapper's single `Err` arm",
+            Settlement::Positional => "positional (no `?` after `start`)",
+        }
+    }
+}
+
+/// The census: every production file that starts a decision, how many times,
+/// and which shape settles those starts.
+///
+/// The count is part of the row for the reason the `decompose` census gives:
+/// a new start added to a file that already has a row would otherwise inherit
+/// that row's declaration silently, and a declaration is about a specific call
+/// site's shape, not about a file.
+///
+/// **A file may hold several rows**, one per shape, and its counts sum —
+/// `facts/ops/maintain.rs` arms three of its four and settles the fourth
+/// through its own wrapper, because `execute_delete`'s window needs a mutable
+/// connection that an armed guard's shared borrow forbids.
+///
+/// What this pins is that each caller *declares* its shape; it cannot verify
+/// the shape. Each tag is backed by the thing it names: the guard's battery,
+/// the `&tx` start, the declaring tests scan, retirement and facts carry, and
+/// apply's two refusal pins.
+const RECORDER_START_SITES: &[(&str, usize, Settlement)] = &[
+    ("archive/cli/cluster.rs", 2, Settlement::Armed),
+    ("archive/ops/execute.rs", 1, Settlement::Positional),
+    (
+        "exclude/ops/runner.rs",
+        1,
+        Settlement::RollsBackWithTransaction,
+    ),
+    ("facts/cli/import.rs", 1, Settlement::Armed),
+    ("facts/ops/maintain.rs", 3, Settlement::Armed),
+    ("facts/ops/maintain.rs", 1, Settlement::OwnWrapper),
+    ("notes/ops.rs", 1, Settlement::RollsBackWithTransaction),
+    ("retire/ops/ceremony.rs", 1, Settlement::OwnWrapper),
+    ("roots/ops.rs", 3, Settlement::Armed),
+    ("scan/cli.rs", 1, Settlement::OwnWrapper),
+];
+
+/// Every production start of a decision, by file.
+///
+/// Matching `DecisionRecorder::start(` with the paren leaves the definition —
+/// `pub fn start(` — unmatched, and leaves a comment naming the function
+/// without calling it unmatched too.
+///
+/// **Blind spot, named**: `production_text` blanks `cfg(test)` modules but not
+/// comments, so a commented-out call counts. The same aperture the `decompose`
+/// census has, and for the same reason — a text scan cannot parse.
+fn recorder_start_sites(src_root: &Path) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for path in collect_rs_files(src_root) {
+        let rel = path
+            .strip_prefix(src_root)
+            .expect("file under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_externalised_test_file(&rel) {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let calls = production_text(&rel, &text)
+            .matches("DecisionRecorder::start(")
+            .count();
+        if calls > 0 {
+            found.push((rel, calls));
+        }
+    }
+    found
+}
+
+/// Both directions over supplied evidence: a file that starts a decision and
+/// declares nothing, a row whose file no longer starts one, a count that has
+/// moved. A file's rows are summed before comparing, so several shapes in one
+/// file are one arithmetic statement.
+fn recorder_census_violations(
+    found: &[(String, usize)],
+    rows: &[(&str, usize, Settlement)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (file, calls) in found {
+        let declared: usize = rows
+            .iter()
+            .filter(|(f, _, _)| f == file)
+            .map(|(_, n, _)| n)
+            .sum();
+        if declared == 0 {
+            violations.push(format!(
+                "{file} starts a decision {calls}× and declares no settlement — add a row \
+                 naming the shape that settles the row `start()` registers",
+            ));
+        } else if declared != *calls {
+            let shapes: Vec<&str> = rows
+                .iter()
+                .filter(|(f, _, _)| f == file)
+                .map(|(_, _, s)| s.as_str())
+                .collect();
+            violations.push(format!(
+                "{file} starts a decision {calls}× and its rows declare {declared} ({}) — \
+                 the new start needs its own declaration, not one already spoken for",
+                shapes.join(", "),
+            ));
+        }
+    }
+    for (file, _, _) in rows {
+        if !found.iter().any(|(f, _)| f == file) {
+            violations.push(format!(
+                "the census carries `{file}`, which no longer starts a decision — \
+                 delete the row with the call",
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn every_recorder_start_site_declares_its_settlement() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let src_root = Path::new(&manifest_dir).join("src");
+    let violations =
+        recorder_census_violations(&recorder_start_sites(&src_root), RECORDER_START_SITES);
+    assert!(
+        violations.is_empty(),
+        "\n  `DecisionRecorder::start` registers a claim that the row's run has not \
+         finished. A row left `started` is supposed to mean the run never reached a last \
+         act — which holds only while every caller settles:\n{}\n",
+        violations
+            .iter()
+            .map(|v| format!("  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ----------------------------------------------------------------------------
 // The empty-remainder caller census
 // ----------------------------------------------------------------------------
 
@@ -3540,6 +3713,61 @@ mod source {
         let v = decompose_census_violations(&[], rows);
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].contains("no longer calls the funnel"), "{v:?}");
+    }
+
+    #[test]
+    fn the_recorder_census_refuses_a_new_caller_a_stale_row_and_a_moved_count() {
+        let rows = &[
+            ("roots/ops.rs", 3, Settlement::Armed),
+            ("facts/ops/maintain.rs", 3, Settlement::Armed),
+            ("facts/ops/maintain.rs", 1, Settlement::OwnWrapper),
+        ];
+
+        // Whole, including the file whose two rows sum to its four starts.
+        assert!(recorder_census_violations(
+            &[
+                ("roots/ops.rs".into(), 3),
+                ("facts/ops/maintain.rs".into(), 4)
+            ],
+            rows
+        )
+        .is_empty());
+
+        // A caller nobody declared.
+        let v = recorder_census_violations(
+            &[
+                ("roots/ops.rs".into(), 3),
+                ("facts/ops/maintain.rs".into(), 4),
+                ("survey/cli.rs".into(), 1),
+            ],
+            rows,
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(
+            v[0].contains("survey/cli.rs") && v[0].contains("declares no settlement"),
+            "{v:?}"
+        );
+
+        // A fifth start in the multi-row file: the shapes already declared
+        // answer for four calls, never for one they have not seen.
+        let v = recorder_census_violations(
+            &[
+                ("roots/ops.rs".into(), 3),
+                ("facts/ops/maintain.rs".into(), 5),
+            ],
+            rows,
+        );
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("declare 4"), "{v:?}");
+
+        // The other direction: the file stopped starting decisions and the
+        // rows outlived it. Both of its rows are named.
+        let v = recorder_census_violations(&[("roots/ops.rs".into(), 3)], rows);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(
+            v.iter().all(|m| m.contains("no longer starts a decision")),
+            "{v:?}"
+        );
     }
 
     #[test]

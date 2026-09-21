@@ -6,7 +6,9 @@ use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::format_count;
-use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::core::ops::decision::{
+    DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
+};
 use crate::core::repo::object::OrphanedStats;
 use crate::core::repo::{Connection, Db};
 use crate::facts::repo as facts_repo;
@@ -27,6 +29,14 @@ pub struct DeletePlan {
 pub struct PruneStalePlan {
     pub stale_count: i64,
 }
+
+/// The sentence an excluded-fact prune that ended early records.
+///
+/// Held as a const so the pin asserts the same bytes the command writes, and
+/// so no formatter can reflow it: at the default scope the repo runs two
+/// DELETEs, sources first, and a failure between them is what the hedge and
+/// the converge pointer are about.
+const EXCLUDED_PRUNE_UNWIND: &str = "Excluded-fact pruning ended early; excluded-source facts may be gone while excluded-object facts stand — re-run to converge";
 
 /// Plan result for excluded fact pruning.
 pub struct PruneExcludedPlan {
@@ -86,6 +96,20 @@ pub struct DeleteResult {
 /// The summary and counts come from the plan, not from the delete's own
 /// return — they describe what was counted, which is the same thing only as
 /// long as nothing changed the facts in between.
+///
+/// **The one site of the ten that settles through its own wrapper rather than
+/// an armed recorder**, and the reason is a borrow, not a preference: the
+/// delete needs `&mut Connection` (`delete_by_criteria` fills a temp table
+/// through `populate_temp_sources`, which opens a transaction of its own),
+/// while the guard would have to hold a shared one for the whole run. Narrowing
+/// the helper instead would trade the compile-time refusal that keeps those
+/// fills out of an outer transaction for a runtime error, across the tree.
+///
+/// The wrapper reaches every `?` in `delete_body` structurally, the same way
+/// retirement's release and scan's closure do, and `a_failed_fact_delete_settles_interrupted`
+/// is this file's declaring test. What is convention rather than construction
+/// is the boundary: a statement added *here* rather than inside the body would
+/// sit outside the settlement.
 pub fn execute_delete(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -97,34 +121,64 @@ pub fn execute_delete(
 ) -> Result<DeleteResult> {
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
+    match delete_body(conn, source_ids, key, entity_type, value_type, plan) {
+        Ok(summary) => {
+            if let Some(recorder) = recorder.as_mut() {
+                recorder.complete(
+                    conn,
+                    DecisionStatus::Completed,
+                    DecisionCounts {
+                        attempted: Some(plan.fact_count),
+                        completed: Some(plan.fact_count),
+                        failed: None,
+                        skipped: None,
+                    },
+                    &summary,
+                );
+            }
+            Ok(DeleteResult { summary })
+        }
+        Err(e) => {
+            // One fact-changing statement in the window — the rest is
+            // temp-table housekeeping — so the run either did the deletion or
+            // did not, and `interrupted` is the word. The sentence says the
+            // run ended early, never that the act failed.
+            if let Some(recorder) = recorder.as_mut() {
+                recorder.complete(
+                    conn,
+                    DecisionStatus::Interrupted,
+                    DecisionCounts::none(),
+                    &format!("Deletion of {key} facts ended early"),
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Everything `execute_delete`'s settlement brackets. Separate so that every
+/// `?` it holds arrives at one `Err` arm rather than at a list someone keeps
+/// current.
+fn delete_body(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    key: &str,
+    entity_type: &str,
+    value_type: Option<&str>,
+    plan: &DeletePlan,
+) -> Result<String> {
     facts_repo::delete_by_criteria(conn, source_ids, key, entity_type, value_type)?;
     let entity_label = if entity_type == "source" {
         "sources"
     } else {
         "objects"
     };
-    let summary = format!(
+    Ok(format!(
         "Deleted {} fact rows across {} {}",
         format_count(plan.fact_count),
         format_count(plan.entity_count),
         entity_label
-    );
-
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.complete(
-            conn,
-            DecisionStatus::Completed,
-            DecisionCounts {
-                attempted: Some(plan.fact_count),
-                completed: Some(plan.fact_count),
-                failed: None,
-                skipped: None,
-            },
-            &summary,
-        );
-    }
-
-    Ok(DeleteResult { summary })
+    ))
 }
 
 /// Plan stale fact pruning: count facts with mismatched basis_rev.
@@ -148,7 +202,16 @@ pub fn execute_prune_stale(
     conn: &Connection,
     decision: Option<&DecisionParams>,
 ) -> Result<PruneStaleResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    // Armed: one fact-changing statement, so the run either did it or did not.
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, None).armed(
+            conn,
+            UnwindTerminal {
+                status: DecisionStatus::Interrupted,
+                summary: "Stale-fact pruning ended early".to_string(),
+            },
+        )
+    });
 
     let deleted = facts_repo::delete_stale(conn)?;
     let summary = format!(
@@ -193,10 +256,25 @@ pub fn execute_prune_orphaned(
     db: &mut Db,
     decision: Option<&DecisionParams>,
 ) -> Result<PruneOrphanedResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(db.conn(), d, None));
+    // Armed on the shared connection, and **before** the transaction below:
+    // locals drop in reverse order, so on a `?` the transaction rolls back
+    // first and this settlement lands in autocommit. Armed the other way
+    // round it would roll back with the transaction and the row would read
+    // `started` over a run that reached a last act. This is the ordering rule
+    // at its one production site that opens a transaction on the same
+    // connection — `unchecked_transaction` is what lets the two share it.
+    let conn = db.conn();
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, None).armed(
+            conn,
+            UnwindTerminal {
+                status: DecisionStatus::Interrupted,
+                summary: "Orphan pruning ended early; nothing was removed".to_string(),
+            },
+        )
+    });
 
-    let conn = db.conn_mut();
-    let tx = conn.transaction()?;
+    let tx = conn.unchecked_transaction()?;
     let deleted = crate::core::repo::object::delete_orphaned(&tx)?;
     tx.commit()?;
     let summary = format!(
@@ -210,7 +288,7 @@ pub fn execute_prune_orphaned(
         let total_deleted =
             deleted.object_count + deleted.source_count + deleted.total_fact_count();
         recorder.complete(
-            db.conn(),
+            conn,
             DecisionStatus::Completed,
             DecisionCounts {
                 attempted: Some(total_deleted),
@@ -265,7 +343,21 @@ pub fn execute_prune_excluded(
     scope: &str,
     decision: Option<&DecisionParams>,
 ) -> Result<PruneExcludedResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    // Armed `partial`, not `interrupted`: at the default scope (`all`) the
+    // repo runs two DELETEs, sources first, so a failure between them leaves
+    // source facts gone and object facts standing.
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, None).armed(
+            conn,
+            UnwindTerminal {
+                status: DecisionStatus::Partial,
+                // One line on purpose: rustfmt collapses a `\`-continued
+                // literal and keeps its indentation, which silently changed
+                // this sentence once already.
+                summary: EXCLUDED_PRUNE_UNWIND.to_string(),
+            },
+        )
+    });
 
     let (source_deleted, object_deleted) = facts_repo::delete_excluded(conn, scope)?;
     let total_deleted = source_deleted + object_deleted;
@@ -509,5 +601,147 @@ mod tests {
         assert_eq!(completed, 1);
         assert_eq!(summary, result.summary);
         assert!(!summary.is_empty());
+    }
+
+    // =========================================================================
+    // The drop settlement at this file's four sites (the subsystem's fifth
+    // is `cli/import.rs`, which carries its own)
+    //
+    // Each plants a failure inside the window and reads the row afterwards.
+    // Red-smoked by removing `.armed(..)` at the site — or, at `facts delete`,
+    // by deleting the wrapper's `Err` arm: the row then reads `started`.
+    // `summary` is read nullable so that smoke fails on the status assertion
+    // rather than on a NULL column, where the message would say nothing.
+    // =========================================================================
+
+    fn settled_row(conn: &Connection) -> (String, Option<String>) {
+        conn.query_row("SELECT status, summary FROM decisions", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+    }
+
+    /// One fact-changing statement in the window, so the run either did the
+    /// deletion or did not: `interrupted`, and the key names what was asked.
+    #[test]
+    fn a_failed_fact_delete_settles_interrupted() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
+        // A `BEFORE DELETE` trigger over an empty result set never fires, so
+        // the row the delete must match is asserted rather than assumed.
+        assert_eq!(plan.fact_count, 1);
+        let decision =
+            recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
+        crate::core::testing::plant_failure(&conn, "DELETE", "facts");
+
+        assert!(execute_delete(
+            &mut conn,
+            &[s1],
+            "content.Make",
+            "source",
+            None,
+            &plan,
+            Some(&decision)
+        )
+        .is_err());
+
+        let (status, summary) = settled_row(&conn);
+        assert_eq!(status, "interrupted");
+        assert_eq!(
+            summary.unwrap(),
+            "Deletion of content.Make facts ended early"
+        );
+    }
+
+    /// One statement again, so the same word.
+    #[test]
+    fn a_failed_stale_prune_settles_interrupted() {
+        let conn = setup_test_db();
+        // A stale fact must exist for the prune's DELETE to match a row: a
+        // `BEFORE DELETE` trigger over an empty result set never fires, and
+        // the statement would then succeed.
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        conn.execute("UPDATE sources SET basis_rev = 7 WHERE id = ?1", [s1])
+            .unwrap();
+        assert_eq!(plan_prune_stale(&conn).unwrap().stale_count, 1);
+
+        let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
+        crate::core::testing::plant_failure(&conn, "DELETE", "facts");
+
+        assert!(execute_prune_stale(&conn, Some(&decision)).is_err());
+
+        let (status, summary) = settled_row(&conn);
+        assert_eq!(status, "interrupted");
+        assert_eq!(summary.unwrap(), "Stale-fact pruning ended early");
+    }
+
+    /// Two DELETEs at the default scope, sources first, so a failure between
+    /// them leaves half the prune standing: `partial`, with a sentence that
+    /// hedges and says how to converge. Both branches delete from `facts`, so
+    /// the pin asserts the word and the sentence, never which half stood.
+    #[test]
+    fn a_failed_excluded_prune_settles_partial() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        conn.execute("UPDATE sources SET excluded = 1 WHERE id = ?1", [s1])
+            .unwrap();
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        // A `BEFORE DELETE` trigger over an empty result set never fires, so
+        // the row the prune must match is asserted rather than assumed.
+        assert_eq!(plan_prune_excluded(&conn, "all").unwrap().total_count(), 1);
+        let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
+        crate::core::testing::plant_failure(&conn, "DELETE", "facts");
+
+        assert!(execute_prune_excluded(&conn, "all", Some(&decision)).is_err());
+
+        let (status, summary) = settled_row(&conn);
+        assert_eq!(status, "partial");
+        assert_eq!(
+            summary.unwrap(),
+            "Excluded-fact pruning ended early; excluded-source facts may be gone while \
+             excluded-object facts stand — re-run to converge",
+            "the chartered sentence, spelled here rather than read from the const, \
+             so the pin cannot follow a change to it"
+        );
+    }
+
+    /// **The ordering rule at its one production site.** The failure happens
+    /// inside the prune's own transaction, so the transaction rolls back and
+    /// the guard's settlement lands after it, in autocommit. Armed after the
+    /// transaction instead, the settlement would roll back with it and the row
+    /// would read `started` over a run that reached a last act.
+    #[test]
+    fn a_failed_orphan_prune_settles_after_its_rollback() {
+        let conn = setup_test_db();
+        insert_object(&conn, "h1", false);
+        let mut db = crate::core::repo::Db::from_connection(conn);
+        let decision = recording_decision(crate::core::domain::decision::DecisionCommand::Prune);
+        crate::core::testing::plant_failure(db.conn(), "DELETE", "objects");
+
+        assert!(execute_prune_orphaned(&mut db, Some(&decision)).is_err());
+
+        let (status, summary) = settled_row(db.conn());
+        assert_eq!(status, "interrupted");
+        assert_eq!(
+            summary.unwrap(),
+            "Orphan pruning ended early; nothing was removed"
+        );
+        let objects: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM objects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            objects, 1,
+            "the transaction's own work must have rolled back"
+        );
     }
 }

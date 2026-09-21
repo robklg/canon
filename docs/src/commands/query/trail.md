@@ -495,6 +495,17 @@ A removed origin that left through [`canon roots retire`](../roots/retire.md) po
 
 No section when the decision drew from nowhere (every other decision kind).
 
+A row still reading `started` gains one more line, because the status alone does not say enough to act on:
+
+```
+  status:   started
+  ...
+  version:  0.5.2
+  outcome:  never written — killed, crashed, or a settlement that could not be written; a row from an older Canon (see version: above) may also have failed early
+```
+
+Every ordinary error now settles the row with a word and a sentence of its own, so `started` is reserved for a run whose outcome was never written down at all. The line states what that can mean rather than naming one cause; the `version:` line above it is what tells you whether the last reading applies. See [decisions](../../concepts/decisions.md).
+
 `show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk, including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)`, `no receipt (the run refused)`, `no receipt (nothing transferred)` for a run that completed no transfer, or `no receipt recorded`); absence is never silent. A finished decision's receipt pointer names a file that exists: a run whose receipt was never written carries no pointer rather than a dangling one. A receipt pointer whose root has since been removed renders as `root #N (removed)/…`: the receipt was written, but the file now lives on storage Canon no longer indexes.
 
 ### `show`'s scope list

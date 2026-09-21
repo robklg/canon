@@ -1052,8 +1052,10 @@ fn run(cli: Cli) -> Result<()> {
         }
         Commands::ImportFacts { allow, verbose } => {
             let allow_archived = allow.contains(&ImportFactsAllow::Archived);
+            let stdin = std::io::stdin();
             facts::import_run(
                 &mut db,
+                stdin.lock(),
                 allow_archived,
                 verbose,
                 &command_line,

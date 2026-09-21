@@ -21,6 +21,25 @@ what facts alone speaks lives here. `ops/report.rs` calls `batch_fetch_key_for_s
 in core directly: an operations stratum reaching the shared repository is the ordinary
 edge, not a barrel item.
 
+**Four of this subsystem's five decision sites arm their recorder; `execute_delete` cannot.**
+An armed recorder holds a shared connection for the whole run, and the delete needs a mutable
+one — `delete_by_criteria` fills a temp table through `core::repo::db::populate_temp_sources`,
+which opens a transaction of its own. Narrowing that helper would trade the compile-time
+refusal that keeps those fills out of an outer transaction for a runtime error, tree-wide, so
+`execute_delete` settles through its own wrapper instead: one `Err` arm over a private
+`delete_body`, which is the shape scan and retirement already hold.
+`a_failed_fact_delete_settles_interrupted` is its declaring test, and the architecture test's
+census carries the file's two shapes as two rows.
+
+**`import_run` takes its input as `impl BufRead`.** The caller passes `stdin.lock()`; a test
+passes a reader that breaks partway, which is the only way to reach the command's own `?` at
+all. Both of those arms settle explicitly rather than leaving it to the armed recorder behind
+them, because there — and nowhere else in this subsystem — the counts, the touched roots and
+the error text are all in hand. The scopes are the load-bearing part: `record_scopes` otherwise
+runs only after the loop, so a run that died mid-stream would leave a scope-less row, hidden
+from a scoped `trail` view behind its "global decisions not shown" footer — invisible from the
+folder being enriched.
+
 **The two commands keep separate cli files.** They share no helper, type or call — "parse,
 dispatch, display" is a property every cli file has, not a bond between these two. Their
 entry points are `run` and `import_run`, because one barrel cannot carry two `run`s.

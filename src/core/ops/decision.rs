@@ -576,6 +576,113 @@ impl DecisionRecorder {
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
     }
+
+    /// Arm the recorder so its status claim settles on every non-panicking
+    /// exit, with `terminal` as the word and sentence such an exit deserves.
+    ///
+    /// **Arm before any transaction is opened on `conn`** — see
+    /// [`ArmedRecorder`] for why the order is the whole mechanism.
+    #[must_use]
+    pub fn armed(self, conn: &Connection, terminal: UnwindTerminal) -> ArmedRecorder<'_> {
+        ArmedRecorder {
+            inner: self,
+            conn,
+            terminal,
+        }
+    }
+}
+
+/// The word an armed site gives a run that leaves early with an error: the
+/// status and the sentence the guard writes.
+///
+/// Composed where the command composes its `DecisionParams`, so it carries the
+/// invocation's own nouns — the root, the key, the two manifest paths. It
+/// states what a reader can observe — the *run* ended early, never that the
+/// act failed, because at several sites the act may well have landed — and
+/// never a cause: the cleanup cannot see the error that caused the exit.
+///
+/// A floor, not a ceiling: a site that holds the error text may settle
+/// explicitly with it first, and the guard is then a no-op.
+pub struct UnwindTerminal {
+    pub status: DecisionStatus,
+    pub summary: String,
+}
+
+/// A recorder whose status claim settles on every non-panicking exit.
+///
+/// A normal early return runs this type's cleanup; a process kill does not. So
+/// a row that still reads `started` means exactly what every register promises
+/// — the run never reached a last act — instead of meaning that too, and also
+/// that some command happened not to catch its own error.
+///
+/// **Arm before any transaction is opened on `conn`.** Locals drop in reverse
+/// declaration order, so on a `?` the transaction drops first (rollback) and
+/// this guard's UPDATE then runs in autocommit and survives. Armed after the
+/// transaction, or started inside it, the settling UPDATE rolls back with it
+/// and the row reads `started` over a run that reached a last act — the
+/// falsehood this type exists to remove, wearing the fix's clothes.
+/// `a_settlement_after_a_rollback_lands` holds the rule.
+///
+/// There is deliberately no way out offered — no `into_inner`, no constructor
+/// handing the inner recorder back — so an armed site has nothing to reach for
+/// that would return it to a shape able to leave `started`.
+///
+/// Not a refusal the type can make, and the doc must not claim one: `DerefMut`
+/// is public, so a standard-library swap could still take the recorder out.
+/// What holds is that no site has a reason to, and the census in the
+/// architecture test is what makes a new site say what settles it.
+pub struct ArmedRecorder<'c> {
+    inner: DecisionRecorder,
+    conn: &'c Connection,
+    terminal: UnwindTerminal,
+}
+
+impl std::ops::Deref for ArmedRecorder<'_> {
+    type Target = DecisionRecorder;
+
+    fn deref(&self) -> &DecisionRecorder {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ArmedRecorder<'_> {
+    fn deref_mut(&mut self) -> &mut DecisionRecorder {
+        &mut self.inner
+    }
+}
+
+impl Drop for ArmedRecorder<'_> {
+    fn drop(&mut self) {
+        // A crash keeps reading `started` — the register's "never reached a
+        // last act" — and a SQLite write during unwind could turn one panic
+        // into an abort.
+        if std::thread::panicking() {
+            return;
+        }
+        // A run that reached a last act settled already; a recorder that never
+        // registered (recording off, INSERT failed) claims nothing.
+        if self.inner.status_claim != StatusClaim::Registered {
+            return;
+        }
+        // `complete`, not `complete_db`: a registered receipt claim retracts in
+        // the same act. Warnings from this write die with the guard.
+        //
+        // A failed write leaves `started` over a run that did reach a last act
+        // — the likeliest cause being the same locked database that raised the
+        // `?`. So a `started` row can mean this too, and the user docs and
+        // `trail show` say so rather than promising a kill.
+        //
+        // Blind spot, named: `std::process::exit` inside an armed window skips
+        // this body. None sits inside one today — every exit in the tree
+        // precedes its recorder's start or follows the row's settlement — and
+        // nothing but this comment holds it there.
+        self.inner.complete(
+            self.conn,
+            self.terminal.status,
+            DecisionCounts::none(),
+            &self.terminal.summary,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1429,6 +1536,208 @@ mod tests {
             assert_eq!(row.status, status.as_str());
             assert_eq!(recorder.status_claim, StatusClaim::Settled);
         }
+    }
+
+    // =========================================================================
+    // The drop settlement's battery
+    //
+    // An armed recorder settles its own status claim on every non-panicking
+    // exit, so the only run that can leave `started` is one that never reached
+    // a last act. Each test below is red-smoked by reverting the one line of
+    // the drop body it names.
+    // =========================================================================
+
+    /// The word and sentence these tests arm with. Fixed here so an assertion
+    /// reads against one spelling.
+    fn test_terminal() -> UnwindTerminal {
+        UnwindTerminal {
+            status: DecisionStatus::Interrupted,
+            summary: "The run ended early".to_string(),
+        }
+    }
+
+    fn row_of(conn: &Connection, id: i64) -> crate::core::domain::decision::Decision {
+        repo::decision::fetch_by_id(conn, id).unwrap().unwrap()
+    }
+
+    /// The mechanism itself: a `?` inside an armed window leaves a settled row,
+    /// not a `started` one. *Smoke*: remove the `complete` call in the drop
+    /// body.
+    #[test]
+    fn an_error_after_arming_settles_the_row() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsSuspend, true);
+
+        let id = std::cell::Cell::new(0i64);
+        let leave_early = || -> anyhow::Result<()> {
+            let recorder =
+                DecisionRecorder::start(&conn, &params, None).armed(&conn, test_terminal());
+            id.set(recorder.decision_id().unwrap());
+            anyhow::bail!("something failed inside the window");
+        };
+        assert!(leave_early().is_err());
+
+        let row = row_of(&conn, id.get());
+        assert_eq!(row.status, "interrupted");
+        assert_eq!(row.summary.as_deref(), Some("The run ended early"));
+        assert_eq!(row.count_attempted, None);
+        assert_eq!(row.count_completed, None);
+    }
+
+    /// A run that reached a last act said what happened; the guard must not
+    /// speak over it. *Smoke*: remove the claim check in the drop body.
+    #[test]
+    fn a_settled_recorder_drops_without_a_second_write() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsSuspend, true);
+
+        let id = {
+            let mut recorder =
+                DecisionRecorder::start(&conn, &params, None).armed(&conn, test_terminal());
+            let id = recorder.decision_id().unwrap();
+            recorder.complete(
+                &conn,
+                DecisionStatus::Completed,
+                DecisionCounts::none(),
+                "Suspended root 1",
+            );
+            id
+        };
+
+        let row = row_of(&conn, id);
+        assert_eq!(row.status, "completed");
+        assert_eq!(row.summary.as_deref(), Some("Suspended root 1"));
+    }
+
+    /// A panic is a crash, and a crash leaves `started` — the one meaning every
+    /// register carries for that row. Writing to SQLite during unwind could
+    /// also turn one panic into an abort. *Smoke*: remove the `panicking()`
+    /// check.
+    #[test]
+    fn a_panic_leaves_the_row_started() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsSuspend, true);
+
+        let id = std::cell::Cell::new(0i64);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let recorder =
+                DecisionRecorder::start(&conn, &params, None).armed(&conn, test_terminal());
+            id.set(recorder.decision_id().unwrap());
+            panic!("the run crashed");
+        }));
+        assert!(result.is_err());
+
+        let row = row_of(&conn, id.get());
+        assert_eq!(row.status, "started");
+    }
+
+    /// **The ordering rule**, in the shape production has it: the guard and a
+    /// transaction are both live locals and the run leaves through a `?`.
+    /// Locals drop in reverse declaration order, so the transaction rolls back
+    /// first and the guard's UPDATE then lands in autocommit.
+    ///
+    /// Nothing here drops the transaction by hand. An explicit `drop(tx)`
+    /// settles the order before the guard ever runs, so the test would pass
+    /// whichever way round the two were declared — which is the one property
+    /// it exists to hold.
+    ///
+    /// *Smoke*: declare the guard after the transaction. Its UPDATE then runs
+    /// inside the still-open transaction, rolls back with it, and the row reads
+    /// `started` — the fix wearing the defect's clothes.
+    #[test]
+    fn a_settlement_after_a_rollback_lands() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::Prune, true);
+
+        let id = std::cell::Cell::new(0i64);
+        let leave_early = || -> anyhow::Result<()> {
+            let recorder =
+                DecisionRecorder::start(&conn, &params, None).armed(&conn, test_terminal());
+            id.set(recorder.decision_id().unwrap());
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO roots (path, role, suspended) VALUES ('/gone', 'source', 0)",
+                [],
+            )?;
+            anyhow::bail!("something failed with the transaction still open");
+        };
+        assert!(leave_early().is_err());
+
+        let row = row_of(&conn, id.get());
+        assert_eq!(row.status, "interrupted");
+        let roots: i64 = conn
+            .query_row("SELECT COUNT(*) FROM roots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            roots, 0,
+            "the transaction's own write must have rolled back"
+        );
+    }
+
+    /// Nothing was ever claimed, so there is nothing to settle: arming a
+    /// disabled recorder is a no-op the same way `refuse` is.
+    #[test]
+    fn an_unclaimed_recorder_arms_to_a_no_op() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsSuspend, false);
+
+        {
+            let recorder =
+                DecisionRecorder::start(&conn, &params, None).armed(&conn, test_terminal());
+            assert!(recorder.decision_id().is_none());
+        }
+
+        assert_eq!(count_decisions(&conn), 0);
+    }
+
+    /// A settlement the database refuses did not happen, and the row says
+    /// `started` over a run that did reach a last act. Stated, not repaired:
+    /// it is why a `started` row means *the outcome was never written* rather
+    /// than *killed*, and why the user docs and `trail show` say so.
+    #[test]
+    fn a_drop_time_write_failure_leaves_started() {
+        let conn = setup_test_db();
+        let params = make_params(DecisionCommand::RootsSuspend, true);
+
+        let id = {
+            let recorder =
+                DecisionRecorder::start(&conn, &params, None).armed(&conn, test_terminal());
+            let id = recorder.decision_id().unwrap();
+            crate::core::testing::plant_failure(&conn, "UPDATE", "decisions");
+            id
+        };
+
+        let row = row_of(&conn, id);
+        assert_eq!(row.status, "started");
+    }
+
+    /// The drop body calls `complete`, not `complete_db`, so a receipt path
+    /// registered at `start()` and never written retracts in the same act —
+    /// the row must not leave a citation for a file that does not exist.
+    /// *Smoke*: call `complete_db` in the drop body instead.
+    #[test]
+    fn a_drop_settlement_retracts_a_registered_receipt_claim() {
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = make_receipt_params();
+        let placement = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+
+        let id = {
+            let recorder = DecisionRecorder::start(&conn, &params, Some(&placement))
+                .armed(&conn, test_terminal());
+            let id = recorder.decision_id().unwrap();
+            assert_eq!(recorder.claim, ReceiptClaim::Registered);
+            id
+        };
+
+        let row = row_of(&conn, id);
+        assert_eq!(row.status, "interrupted");
+        assert_eq!(row.receipt_root_id, None);
+        assert_eq!(row.receipt_rel_path, None);
     }
 
     /// The smallest thing that serializes to a receipt body.

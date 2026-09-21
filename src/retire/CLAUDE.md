@@ -155,13 +155,21 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   `perform_release` body — the immediate transaction, the world-moved probe, the removal, the
   commit — passes through it, later additions included. (*Returning* is the honest word: Ctrl-C in
   the inspection window lands on findable-`started`, that word's reserved meaning, not a gap.)
-  **The reaching is structural; the sentence is positional** — the arm is reached from any body,
-  but what it records is true only while every `?` sits before `tx.commit()`: past the commit the
-  root is gone, and "the root remains in the index" would be false in the durable record. The note
-  at the commit line is that guard, and it is prose, not a build refusal. The settlement is written
-  on the **connection**, after the transaction has dropped; written inside it, it would roll back
-  with it and look like a fix while being none. On a busy database the settling `UPDATE` can itself
-  fail — the recorder then warns and honestly leaves the claim registered.
+  **The reaching is structural, and so is the sentence.** The arm is reached from any body, and
+  what it records follows the `released` flag rather than the failure's position: not released
+  gives the bound-not-released standing, released leaves the committed row alone, because past
+  the commit the root is gone and "the root remains in the index" would be false in the durable
+  record. The flag is set on the line after `tx.commit()`, so a step added after the commit
+  cannot make the sentence a lie — what used to hold that was a note at the commit line, prose
+  rather than construction. `an_unreleased_failure_records_the_root_remaining` and
+  `a_failure_after_release_leaves_the_committed_row_alone` hold the two arms; the second has no
+  production path today, which is why the flag exists rather than a note saying nothing below
+  may fail. **Retirement keeps its wrapper and never arms** an `ArmedRecorder`: the wrapper needs
+  the error text and the rollback case, which a claim-respecting guard cannot serve. The
+  settlement is written on the **connection**, after the transaction has dropped; written inside
+  it, it would roll back with it and look like a fix while being none. On a busy database the
+  settling `UPDATE` can itself fail — the recorder then warns and honestly leaves the claim
+  registered.
 - **The word is positional, not causal**: `interrupted` before a book exists (`interrupt` speaks
   for a bind that produced none), `partial` once it stands with the root intact — every exit after
   the bind, since they all leave the same standing, which is why the prompt-failure method is named

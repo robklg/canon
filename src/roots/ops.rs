@@ -3,7 +3,9 @@ use rusqlite::Connection;
 
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format_count;
-use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
+use crate::core::ops::decision::{
+    DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
+};
 use crate::core::repo;
 use crate::notes::count_subtree_notes;
 use crate::roots::repo as roots_repo;
@@ -123,7 +125,21 @@ pub fn execute_remove(
     plan: &RemoveRootPlan,
     decision: Option<&DecisionParams>,
 ) -> Result<RemoveRootResult> {
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    // Armed: the four deletes below are separate statements, so a `?` between
+    // them leaves a half-removed root — a standing the row has to name.
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, None).armed(
+            conn,
+            UnwindTerminal {
+                status: DecisionStatus::Partial,
+                summary: format!(
+                    "Removal of root {} ({}) ended early; its rows may be partly removed — \
+                     re-run to converge",
+                    plan.root_id, plan.root_path
+                ),
+            },
+        )
+    });
 
     let removed = remove_root_data(conn, plan.root_id)?;
     let (deleted_sources, deleted_notes) = (removed.deleted_sources, removed.deleted_notes);
@@ -190,7 +206,22 @@ pub fn execute_suspend(
 
     // The recorder starts only past that check, so a no-op records nothing.
 
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    // Armed: one UPDATE then a count read, so the flip may well have landed —
+    // the sentence says the run ended early and points at the view that
+    // answers either way. `canon roots` hides suspended roots, so only
+    // `--suspended` can settle it.
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, None).armed(
+            conn,
+            UnwindTerminal {
+                status: DecisionStatus::Interrupted,
+                summary: format!(
+                    "Suspend of {} ended early; canon roots --suspended shows whether it stands",
+                    root.path
+                ),
+            },
+        )
+    });
 
     roots_repo::root::set_suspended(conn, root_id, true)?;
     let counts = roots_repo::root::fetch_file_counts(conn, &[root_id])?;
@@ -245,7 +276,20 @@ pub fn execute_unsuspend(
 
     // The recorder starts only past that check, so a no-op records nothing.
 
-    let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
+    // Armed: suspend's shape mirrored. An open root appears in the plain
+    // listing, so that is the view this sentence points at.
+    let mut recorder = decision.map(|d| {
+        DecisionRecorder::start(conn, d, None).armed(
+            conn,
+            UnwindTerminal {
+                status: DecisionStatus::Interrupted,
+                summary: format!(
+                    "Unsuspend of {} ended early; canon roots shows whether it is open again",
+                    root.path
+                ),
+            },
+        )
+    });
 
     roots_repo::root::set_suspended(conn, root_id, false)?;
     let counts = roots_repo::root::fetch_file_counts(conn, &[root_id])?;
@@ -724,6 +768,101 @@ mod tests {
             decision_count(&conn),
             0,
             "a root already in the asked-for state changes nothing, so there is nothing to record"
+        );
+    }
+
+    // =========================================================================
+    // The drop settlement at this subsystem's three sites
+    //
+    // Each plants a failure inside the window, so the `?` fires where a real
+    // one would, and reads what the row says afterwards. Red-smoked by
+    // removing `.armed(..)` at the site: the row then reads `started`.
+    // =========================================================================
+
+    /// A failed removal reads `partial`, because the deletes are separate
+    /// statements and the root may be half gone.
+    #[test]
+    fn a_failed_removal_settles_partial() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        insert_source(&conn, root_id, "a.jpg");
+        let plan = plan_remove(&conn, root_id).unwrap();
+        let params = recording_params(DecisionCommand::RootsRm, root_id, "/photos");
+        // On `sources`, which the removal reaches after notes and facts — so
+        // the run really does leave the root half removed, which is the
+        // standing the sentence names. (A trigger on an empty table never
+        // fires, so planting on `notes` here would not fail anything.)
+        crate::core::testing::plant_failure(&conn, "DELETE", "sources");
+
+        assert!(execute_remove(&conn, &plan, Some(&params)).is_err());
+
+        // `summary` is read as nullable so a row left `started` — the defect
+        // this pin names — fails on the status assertion rather than on a
+        // NULL column, where the message would say nothing about why.
+        let (status, summary): (String, Option<String>) = conn
+            .query_row("SELECT status, summary FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(status, "partial");
+        assert_eq!(
+            summary.unwrap(),
+            format!(
+                "Removal of root {root_id} (/photos) ended early; its rows may be partly \
+                 removed — re-run to converge"
+            )
+        );
+    }
+
+    /// A failed suspend reads `interrupted`, and points at the one view that
+    /// answers whether the flip landed.
+    #[test]
+    fn a_failed_suspend_settles_interrupted() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let params = recording_params(DecisionCommand::RootsSuspend, root_id, "/photos");
+        // The pre-start `fetch_all` read still succeeds; the flip does not.
+        crate::core::testing::plant_failure(&conn, "UPDATE", "roots");
+
+        assert!(execute_suspend(&conn, root_id, Some(&params)).is_err());
+
+        // `summary` is read as nullable so a row left `started` — the defect
+        // this pin names — fails on the status assertion rather than on a
+        // NULL column, where the message would say nothing about why.
+        let (status, summary): (String, Option<String>) = conn
+            .query_row("SELECT status, summary FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert_eq!(
+            summary.unwrap(),
+            "Suspend of /photos ended early; canon roots --suspended shows whether it stands"
+        );
+    }
+
+    /// Unsuspend mirrors it, and points at the plain listing instead.
+    #[test]
+    fn a_failed_unsuspend_settles_interrupted() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        let params = recording_params(DecisionCommand::RootsUnsuspend, root_id, "/photos");
+        crate::core::testing::plant_failure(&conn, "UPDATE", "roots");
+
+        assert!(execute_unsuspend(&conn, root_id, Some(&params)).is_err());
+
+        // `summary` is read as nullable so a row left `started` — the defect
+        // this pin names — fails on the status assertion rather than on a
+        // NULL column, where the message would say nothing about why.
+        let (status, summary): (String, Option<String>) = conn
+            .query_row("SELECT status, summary FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert_eq!(
+            summary.unwrap(),
+            "Unsuspend of /photos ended early; canon roots shows whether it is open again"
         );
     }
 }
