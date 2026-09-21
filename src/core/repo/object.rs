@@ -41,6 +41,23 @@ use crate::core::domain::object::{ArchiveCopy, ArchiveLocation, Object};
 /// Batch size for SQL IN clauses (consistent with other repos).
 const BATCH_SIZE: usize = 1000;
 
+/// The archived-ness WHERE fragment: a source counts as an archive-side copy
+/// of its object when its root is archive-role, the source is present, and
+/// it carries content. Bound-value precedent applied from the path law's
+/// [`super::db::path_at_or_under_sql`] — one string spoken once and bound at
+/// every site that asks "is this an archive copy", rather than four
+/// hand-synchronized spellings held together by cross-referencing comments.
+/// Assumes `sources` aliased `s` and `roots` aliased `r`, joined on
+/// `s.root_id = r.id`.
+///
+/// `s.size > 0` is the contentless law (`Source::is_contentless`): an empty
+/// archive copy is no coverage evidence — the universal empty object would
+/// hollowly "cover" every empty file in the universe, so identity claims
+/// about empty content are vacuous and never count as coverage.
+fn archive_copy_sql() -> &'static str {
+    "r.role = 'archive' AND s.present = 1 AND s.size > 0"
+}
+
 /// The columns we SELECT for Object construction.
 ///
 /// `pub(crate)`, not private: `exclude::repo::object::fetch_excluded` reuses
@@ -113,20 +130,17 @@ pub fn fetch_by_hash(conn: &Connection, hash: &str) -> Result<Option<Object>> {
 /// each stands on.
 ///
 /// An object is "archived" if a source holding it stands under a root with
-/// `role='archive'` and `present=1`. The suspension of that root is
-/// **returned, never filtered**: a closed door is the user's own act of
-/// setting a place aside from their attention, and content does not stop
-/// standing where it stands because attention moved. Filtering here would
-/// make every coverage claim in Canon conditional on which roots happen to
-/// be parked today — which is the inversion this projection exists to make
-/// unwritable. Surfaces state the standing; nothing here decides it.
+/// `role='archive'` and `present=1` and carries content — [`archive_copy_sql`]
+/// is the predicate, here and at every other archived-ness query in this
+/// module. The suspension of that root is **returned, never filtered**: a
+/// closed door is the user's own act of setting a place aside from their
+/// attention, and content does not stop standing where it stands because
+/// attention moved. Filtering here would make every coverage claim in Canon
+/// conditional on which roots happen to be parked today — which is the
+/// inversion this projection exists to make unwritable. Surfaces state the
+/// standing; nothing here decides it.
 ///
 /// If `archive_root_id` is Some, only that archive is read.
-///
-/// SQL projection of the contentless law (`Source::is_contentless`): the
-/// archive side requires `s.size > 0` — an empty archive copy is no coverage
-/// evidence (the universal empty object would hollowly "cover" every empty
-/// file in the universe).
 ///
 /// **Important**: Callers must filter out sources with object_id=None before
 /// calling this function. Only valid object IDs should be passed.
@@ -164,8 +178,8 @@ pub fn batch_archive_copies(
                     "SELECT DISTINCT s.object_id, r.id, r.suspended
                  FROM sources s
                  JOIN roots r ON s.root_id = r.id
-                 WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
-                   AND s.object_id IN ({})",
+                 WHERE {} AND s.object_id IN ({})",
+                    archive_copy_sql(),
                     placeholders.join(",")
                 );
                 let params: Vec<rusqlite::types::Value> = chunk
@@ -215,8 +229,8 @@ pub fn batch_check_archived(
 }
 
 /// Which of these objects were archived *from* the given root: an archive
-/// copy of the object stands (present, archive-role root) stamped by a
-/// decision whose extraction rows draw from `origin_root_id`. Object-grain,
+/// copy of the object stands ([`archive_copy_sql`]) stamped by a decision
+/// whose extraction rows draw from `origin_root_id`. Object-grain,
 /// like coverage itself — the standing split's evidence. DB projections
 /// only: apply stamps the destination rows (never the origin root's), so the
 /// archive side carries the apply id and the extraction ledger names its
@@ -237,17 +251,14 @@ pub fn batch_check_archived_from_root(
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        // s.size > 0: the contentless law (see batch_archive_copies) —
-        // consistent with the classifier, which never lets an empty source
-        // reach the Archived standing.
         let sql = format!(
             "SELECT DISTINCT s.object_id
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              JOIN decision_extractions de ON de.decision_id = s.decision_id
-             WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
-               AND de.root_id = ?
+             WHERE {} AND de.root_id = ?
                AND s.object_id IN ({})",
+            archive_copy_sql(),
             placeholders.join(",")
         );
         let mut params = vec![rusqlite::types::Value::from(origin_root_id)];
@@ -276,12 +287,10 @@ pub fn batch_check_archived_from_root(
 /// travels here rather than being looked up again per surface.
 ///
 /// Suspension is **returned, never filtered**, for the reason
-/// [`batch_archive_copies`] states.
-///
-/// `s.size > 0`: the contentless law (see [`batch_archive_copies`]) — the
-/// universal empty object claims no locations, so coverage-location answers
-/// (cluster's skip set, the story's covered-where, the compile's locations)
-/// never see it.
+/// [`batch_archive_copies`] states. Archived-ness is [`archive_copy_sql`],
+/// so the universal empty object claims no locations, and coverage-location
+/// answers (cluster's skip set, the story's covered-where, the compile's
+/// locations) never see it.
 ///
 /// **Important**: Callers must filter out sources with object_id=None before
 /// calling this function. Only valid object IDs should be passed.
@@ -301,9 +310,9 @@ pub fn batch_find_archive_paths(
             "SELECT s.object_id, r.path, s.rel_path, r.id, r.suspended
              FROM sources s
              JOIN roots r ON s.root_id = r.id
-             WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
-               AND s.object_id IN ({})
+             WHERE {} AND s.object_id IN ({})
              ORDER BY s.object_id, r.path, s.rel_path",
+            archive_copy_sql(),
             placeholders.join(",")
         );
 
@@ -350,7 +359,9 @@ pub fn batch_find_archive_paths(
 /// # Behavior
 /// - Looks up objects by hash_value (sha256), finds all archive copies
 /// - Returns the archive root_id along with the full path
-/// - Only includes present sources in archive-role roots
+/// - Archived-ness is [`archive_copy_sql`] — present, archive-role roots,
+///   content-bearing (the contentless law: an empty file "conflicting" with
+///   every empty file already in the archive would be a vacuous claim)
 /// - Handles large inputs via chunking (BATCH_SIZE)
 ///
 /// # Returns
@@ -373,18 +384,14 @@ pub fn batch_find_archive_info_by_hash(
 
     for chunk in hash_values.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
-        // s.size > 0: the contentless law (see batch_archive_copies) —
-        // identity-keyed archive-conflict claims about empty content are
-        // vacuous (an empty file being applied must not "conflict" with
-        // every empty file already in the archive).
         let sql = format!(
             "SELECT o.hash_value, r.id, r.path, s.rel_path
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              JOIN objects o ON s.object_id = o.id
-             WHERE r.role = 'archive' AND s.present = 1 AND s.size > 0
-               AND o.hash_value IN ({})
+             WHERE {} AND o.hash_value IN ({})
              ORDER BY o.hash_value, r.id, s.rel_path",
+            archive_copy_sql(),
             placeholders.join(",")
         );
 
