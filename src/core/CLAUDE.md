@@ -357,9 +357,9 @@ The **form-tolerance law**: the gate retries a path's below-root remainder throu
 normalization candidates and hands back the byte-form the index stores, so every downstream
 comparison — Rust prefix matching and the SQL boundary spellings alike — sees stored bytes.
 One law, two halves: the **owner** is `domain::path::normalization_candidates`, the root half,
-database-free and first at every door; the retry is its **registered projection**, spoken once
-in `stored_form_of_rel` and reached from both — the argument door's gate and the manifest
-door's `resolve_recorded_scope`. Canon-wide: wherever a path arrives as text and is matched
+database-free and first at every door; the retry is its **registered projection**,
+`known_form_of_rel`, whose sources reading `stored_form_of_rel` is what both doors take — the
+argument door's gate and the manifest door's `resolve_recorded_scope`. Canon-wide: wherever a path arrives as text and is matched
 byte-exact, this is the law it owes.
 
 `ops::scope` also owns `cwd_for`/`needs_cwd`: the current directory's absence is only fatal
@@ -378,18 +378,52 @@ prefix in their own silence: the vantage measures from somewhere deeper and file
 flattened at exit 0, while the recorder writes a scoped act down as a global one.
 
 It reuses rather than re-spells, and it does so **in two stages** — the same form-tolerance
-law reaching both halves of a path, not two rules. Stage one is `attribute_prefix`
-(`domain::path::normalization_candidates` composed with `domain::root::find_containing_root`),
-which is pure and answers *which root*. Stage two asks which byte-form of the below-root
-remainder the index knows sources under, which only a database can answer, so it lives one
-layer up in `ops::scope::resolve_recorded_scope` and goes through `stored_form_of_rel` — the
-very function the argument door's source-existence gate uses. That is what makes the two doors
+law reaching both halves of a path, not two rules. Stage one is `attribute_prefix`, a reading
+of `domain::path::resolve_containing_root`, which is pure and answers *which root*. Stage two
+asks which byte-form of the below-root remainder the index knows sources under, which only a
+database can answer, so it lives one layer up in `ops::scope::resolve_recorded_scope` and goes
+through `stored_form_of_rel` — the very function the argument door's source-existence gate
+uses. That is what makes the two doors
 incapable of drifting apart, and it is pinned as such by `the_two_doors_agree_on_the_same_paths`.
 That pin says nothing about a *sourceless* path, where the two doors legitimately differ — the
 argument door aborts on a lone one and sets aside among several, the manifest door always sets
 aside — and widening it to cover that would assert an equality that is false by design.
 **Order is not interchangeable**: a prefix whose root portion is written in the other form must
-match its root before its remainder can be asked about at all. The **door** is asked between
+match its root before its remainder can be asked about at all.
+
+**The law has one owner, one projection and a named set of readings; a site outside them is a
+second spelling.** No count is given, deliberately — a count invites a completeness it cannot
+warrant, and the readings are enumerated here instead. The *root* half is `domain::path::resolve_containing_root` — candidates of the whole
+path over `find_containing_root`, database-free, first match wins, carrying the matched form out
+as `RootedPath.path` so the next comparison cannot undo the match; `domain::path::resolve_path`
+and `domain::scope::attribute_prefix` are its readings for text that names something already
+recorded, and `domain::path::resolve_containing_root_as_written` its reading for text that names
+somewhere content is *going* — the root bends to be found, the folder below it is being created
+and keeps the bytes the caller typed. None of the three spells any of it themselves. Carrying a
+healed remainder back out as a whole path is the law's last step and has its own owner,
+`domain::path::join_under_root`, read by `domain::extraction::join_prefix` and, in archive,
+`ops::plan::compute_archive_rel_path`. What it owns is the **empty-remainder rule**: a remainder
+that is empty gives the root back unchanged. `Path::join` is not a spelling of it — it puts a
+separator after an empty remainder and hands back a root with a trailing slash. **The tree still
+hand-spells that branch in several places** (apply's and cluster status's `base_dir`, plan's two
+destination joins, trail's scope-row display), each a standing second spelling rather than an
+exemption; route new ones through the owner. The
+*remainder* half is `ops::scope::known_form_of_rel`: the **loop** is the contract — as-given
+first, first-confirmed wins, `None` where no form is — and the question is a parameter, because
+two questions exist. **A root-level remainder is asked about like any other**: whether an empty
+remainder counts as known belongs to the question and not to the loop, so a reading that answers
+yes for it says so itself. `stored_form_of_rel` asks the sources one, which is
+what both scope doors and `stored_form_with_sources` need; trail's history gate asks about notes,
+extraction endpoints and scoped decisions besides, and asks *through* here, since a place with no
+sources is exactly the case that gate exists for. Beside them two **comparison readings**,
+`path_is_under_any_form` and `same_path_any_form`, for the sites that have no live root to find
+and no remainder to ask about — a retirement's scope snapshot, a receipt's origin root, a book's
+recorded root. Those answer yes/no, so the as-given ordering that governs healing is moot there:
+*any candidate matching* is the honest question when the recorded side is snapshot text whose
+form was fixed whenever it was written. Outside core, one subsystem-local reading:
+`trail::domain::crossings::ledger_form_of_counterpart`, which asks the **ledger** rather than
+the index and is described in `src/trail/CLAUDE.md`. **The asymmetry is the point**: the text
+side bends, the recorded side never does. The **door** is asked between
 those two stages, never after: a prefix on a closed root comes back `Parked` whether or not the
 index knows sources under it, which is the argument door's own precedence (root membership >
 the door > source existence) at the second door, and which is why a closed root's remainder is

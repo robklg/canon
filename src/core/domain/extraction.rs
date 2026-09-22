@@ -154,7 +154,19 @@ pub fn build_extraction_rows<'a>(
     let mut rows = Vec::new();
     let mut unknown_roots: Vec<String> = Vec::new();
     for ((source_root, origin_dir, dest_dir), (files, bytes)) in groups {
-        match known_roots.iter().find(|r| r.path == source_root) {
+        // Form-tolerantly. On the forward path `source_root` is the root's
+        // own stored string and the two agree by construction; on the
+        // backfill path it is text read back off an apply receipt, and a root
+        // removed and re-added from storage handing the other normalization
+        // makes the receipt and the index disagree with no defect anywhere —
+        // which is the case the law exists for. Both paths run this one
+        // helper, so a backfilled row stays structurally indistinguishable
+        // from a forward-recorded one; a root no form matches is still
+        // reported as an unknown source root rather than guessed at.
+        match known_roots
+            .iter()
+            .find(|r| crate::core::domain::path::same_path_any_form(source_root, &r.path))
+        {
             Some(root) => rows.push(DecisionExtraction {
                 decision_id,
                 root_id: root.id,
@@ -185,11 +197,7 @@ fn parent_dir(rel_path: &str) -> &str {
 }
 
 fn join_prefix(root_path: &str, prefix: &str) -> String {
-    if prefix.is_empty() {
-        root_path.to_string()
-    } else {
-        format!("{root_path}/{prefix}")
-    }
+    crate::core::domain::path::join_under_root(root_path, prefix)
 }
 
 #[cfg(test)]
@@ -515,5 +523,66 @@ mod tests {
         let (rows, _) = build_extraction_rows(&items, &roots, (Some(1), "/archive"), None, 1);
         assert_eq!(rows[0].rel_prefix, "");
         assert_eq!(rows[0].destination_path, "/archive");
+    }
+
+    /// **`ledger reindex` reads text Canon itself wrote, and that is not the
+    /// same as text that still matches.** A receipt's `source_root` is the
+    /// root's stored string *as it was at apply time*; a root removed and
+    /// re-added from storage handing the other normalization makes the
+    /// receipt and the index disagree with no defect anywhere — the
+    /// other-drive-other-OS case the law exists for. Attribution therefore
+    /// bends the receipt's text and never the root's own bytes, which is what
+    /// the row records.
+    ///
+    /// One helper, both paths: a backfilled row stays structurally
+    /// indistinguishable from a forward-recorded one.
+    #[test]
+    fn a_receipts_origin_root_attributes_in_the_other_form() {
+        const NFC_DIR: &str = "caf\u{e9}";
+        const NFD_DIR: &str = "cafe\u{301}";
+
+        let receipt_form = format!("/Volumes/{NFC_DIR}");
+        let items = vec![ExtractionItem {
+            source_root: &receipt_form,
+            source_rel_path: "2016/a.jpg",
+            destination_rel_path: "m/a.jpg",
+            size: 7,
+        }];
+        let roots = vec![root(4, &format!("/Volumes/{NFD_DIR}"))];
+
+        let (rows, unknown) = build_extraction_rows(&items, &roots, (Some(9), "/archive"), None, 1);
+        assert!(
+            unknown.is_empty(),
+            "the root is known, in one form or the other"
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].root_id, 4);
+        assert_eq!(
+            rows[0].root_path,
+            format!("/Volumes/{NFD_DIR}"),
+            "the row snapshots the root's own bytes, never the receipt's"
+        );
+    }
+
+    /// The floor: a root no byte-form matches is still reported as unknown,
+    /// never attributed to whichever root happened to be nearest. The gap
+    /// report `ledger reindex` prints is what stays self-explaining.
+    #[test]
+    fn a_receipts_origin_root_no_form_matches_is_still_unknown() {
+        const NFC_DIR: &str = "caf\u{e9}";
+        const NFD_DIR: &str = "cafe\u{301}";
+
+        let receipt_form = format!("/Volumes/{NFC_DIR}-other");
+        let items = vec![ExtractionItem {
+            source_root: &receipt_form,
+            source_rel_path: "2016/a.jpg",
+            destination_rel_path: "m/a.jpg",
+            size: 7,
+        }];
+        let roots = vec![root(4, &format!("/Volumes/{NFD_DIR}"))];
+
+        let (rows, unknown) = build_extraction_rows(&items, &roots, (Some(9), "/archive"), None, 1);
+        assert!(rows.is_empty());
+        assert_eq!(unknown, vec![receipt_form]);
     }
 }

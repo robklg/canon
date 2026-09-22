@@ -82,8 +82,14 @@ pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<B
             chosen = Some((name, false));
             break;
         }
+        // Form-tolerantly: the text side is what was read back off the
+        // shelf, the index's root path is what never bends. A root removed
+        // and re-added from storage handing the other normalization would
+        // otherwise read as a *different* root and bind a second book beside
+        // the first — one place with two tellings, and nothing anywhere would
+        // say so.
         let standing_root = read_book_root_path(&candidate)?;
-        if standing_root == story.root.path {
+        if crate::core::domain::path::same_path_any_form(&standing_root, &story.root.path) {
             chosen = Some((name, true));
             break;
         }

@@ -1335,7 +1335,17 @@ fn capture_deletion_items(
 /// What this deliberately does *not* ask is whether the storage is currently
 /// there. `--missing` is the user's explicit assertion, and taking their word
 /// is the whole point of it — see the caller that does ask, and why.
+///
+/// **It does ask the index, and both halves of the form-tolerance law run
+/// here.** This is the one deletion arm with no disk to fall back on: the
+/// folder is gone by hypothesis, so nothing but the index can say which
+/// byte-form of the path Canon knows. A root matched in one form and a
+/// remainder stored in the other would mark nothing and report it as nothing
+/// to mark — a silence indistinguishable from success. A remainder no form
+/// has sources under stays as given, so a path that really names nothing
+/// still reports `missing_count = 0`.
 pub fn resolve_missing_target(
+    conn: &Connection,
     path: &Path,
     roots: &[crate::core::domain::root::Root],
     cwd: &Path,
@@ -1344,8 +1354,8 @@ pub fn resolve_missing_target(
     let cleaned_str = cleaned.to_string_lossy();
 
     let (root_id, root_path, rel_prefix) =
-        match crate::core::domain::root::find_containing_root(&cleaned_str, roots) {
-            Some((id, root_path, _role, rel)) => (id, root_path, rel),
+        match crate::core::domain::path::resolve_containing_root(&cleaned_str, roots) {
+            Some(rooted) => (rooted.root_id, rooted.root_path, rooted.rel_path),
             None => bail!(
                 "Cannot mark missing: {} is not under any known root",
                 path.display()
@@ -1368,6 +1378,9 @@ pub fn resolve_missing_target(
         )
         .into());
     }
+
+    let rel_prefix = crate::core::ops::scope::stored_form_of_rel(conn, root_id, &rel_prefix)?
+        .unwrap_or(rel_prefix);
 
     Ok(MissingTarget {
         root_id,
@@ -1430,7 +1443,7 @@ pub fn missing_is_worth_suggesting(
     roots: &[crate::core::domain::root::Root],
     cwd: &Path,
 ) -> bool {
-    let Ok(target) = resolve_missing_target(path, roots, cwd) else {
+    let Ok(target) = resolve_missing_target(conn, path, roots, cwd) else {
         return false;
     };
     if target.rel_prefix.is_empty() {
@@ -1471,7 +1484,7 @@ pub fn mark_missing_path(
         root_id,
         root_path,
         rel_prefix,
-    } = resolve_missing_target(path, roots, cwd)?;
+    } = resolve_missing_target(conn, path, roots, cwd)?;
 
     let prefix_arg = if rel_prefix.is_empty() {
         None
@@ -5038,5 +5051,107 @@ mod tests {
             present, 1,
             "the row for the deleted sibling stands untouched — the assertion is --missing's"
         );
+    }
+
+    // =====================================================================
+    // The form-tolerance law at `--missing`
+    // =====================================================================
+
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    fn root_with_indexed_dir(
+        conn: &Connection,
+        root_path: &str,
+        rel_dir: &str,
+    ) -> (i64, Vec<crate::core::domain::root::Root>) {
+        let root_id = crate::core::repo::insert_test_root(conn, root_path, "source", false);
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash,
+                                  scanned_at, last_seen_at, device, inode, present)
+             VALUES (?, ?, 10, 0, '', 0, 0, 1, 1, 1)",
+            rusqlite::params![root_id, format!("{rel_dir}/a.jpg")],
+        )
+        .unwrap();
+        let roots = crate::core::repo::root::fetch_all(conn).unwrap();
+        (root_id, roots)
+    }
+
+    /// `--missing` is the one deletion arm with **no disk to fall back on**:
+    /// the folder is gone by hypothesis, so only the index can say which
+    /// byte-form of the path Canon knows. Without the law's **root half**,
+    /// the act marks nothing and reports it as nothing to mark — a silence
+    /// indistinguishable from success.
+    #[test]
+    fn marking_missing_finds_a_root_stored_in_the_other_form() {
+        let conn = crate::core::repo::open_in_memory_for_test();
+        let root_path = format!("/mnt/{NFD_DIR}");
+        let (root_id, roots) = root_with_indexed_dir(&conn, &root_path, "2016");
+
+        let result = mark_missing_path(
+            &conn,
+            &PathBuf::from(format!("/mnt/{NFC_DIR}/2016")),
+            &roots,
+            Path::new("/any"),
+            1000,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.root_id, root_id);
+        assert_eq!(result.root_path, root_path, "the root's own stored bytes");
+        assert_eq!(result.missing_count, 1, "and the act reached the row");
+    }
+
+    /// And the **remainder half**, which the root half cannot reach: below an
+    /// **ASCII root** the whole path matches as written, so no candidate but
+    /// as-given is ever tried on it, and only the index can say which form
+    /// the folder underneath was stored in.
+    #[test]
+    fn marking_missing_finds_a_place_below_an_ascii_root_in_the_other_form() {
+        let conn = crate::core::repo::open_in_memory_for_test();
+        let (root_id, roots) = root_with_indexed_dir(&conn, "/mnt/photos", NFD_DIR);
+
+        let result = mark_missing_path(
+            &conn,
+            &PathBuf::from(format!("/mnt/photos/{NFC_DIR}")),
+            &roots,
+            Path::new("/any"),
+            1000,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.root_id, root_id);
+        assert_eq!(result.rel_prefix, NFD_DIR, "healed to what the index holds");
+        assert_eq!(result.missing_count, 1, "and the act reached the row");
+    }
+
+    /// The floor: a place no byte-form has sources under is genuinely
+    /// sourceless. The remainder stays as typed and the act reports marking
+    /// nothing — healing must never invent a place to act on.
+    #[test]
+    fn marking_missing_at_a_place_no_form_knows_marks_nothing() {
+        let conn = crate::core::repo::open_in_memory_for_test();
+        let (_root_id, roots) = root_with_indexed_dir(&conn, "/mnt/photos", NFD_DIR);
+
+        let result = mark_missing_path(
+            &conn,
+            &PathBuf::from(format!("/mnt/photos/{NFC_DIR}-elsewhere")),
+            &roots,
+            Path::new("/any"),
+            1000,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            result.rel_prefix,
+            format!("{NFC_DIR}-elsewhere"),
+            "unhealed, as typed"
+        );
+        assert_eq!(result.missing_count, 0);
     }
 }

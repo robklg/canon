@@ -91,6 +91,40 @@ fn plan_bind_different_root_book_probes_to_a_sibling_name() {
     assert_eq!(plan.final_dir, shelf.join(format!("{name}-3")));
 }
 
+/// **The book identity check bends the text side only.** The standing book's
+/// `identity.path` is bytes read back off the shelf; the root path is what
+/// the index holds now. A root removed and re-added from storage handing the
+/// other normalization would otherwise read as a *different* root, and the
+/// ceremony would bind a second book beside the first — one place with two
+/// tellings, and nothing anywhere saying so.
+#[test]
+fn plan_bind_recognises_a_book_whose_identity_is_written_in_the_other_form() {
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    let conn = crate::core::repo::db::open_in_memory_for_test();
+    let src_dir = tempfile::tempdir().unwrap();
+    let arch_dir = tempfile::tempdir().unwrap();
+    let root_path = format!("{}/{NFD_DIR}", src_dir.path().to_str().unwrap());
+    let root_id = crate::core::repo::insert_test_root(&conn, &root_path, "source", false);
+    crate::core::repo::insert_test_root(&conn, arch_dir.path().to_str().unwrap(), "archive", false);
+
+    let story = fetch_root_story(&conn, root_id).unwrap();
+    let shelf = arch_dir.path().join(SHELF_DIR);
+    let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+    // The standing book names the same place, spelled the other way.
+    let other_form = root_path.replace(NFD_DIR, NFC_DIR);
+    assert_ne!(other_form, root_path, "the fixture must be two byte-forms");
+    fake_book(&shelf, &name, &other_form);
+
+    let plan = plan_bind(&story, &ledger_config(), CEREMONY_NOW).unwrap();
+    assert!(
+        plan.replaces_existing,
+        "the standing book is this root's own telling, however it was spelled"
+    );
+    assert_eq!(plan.final_dir, shelf.join(&name));
+}
+
 #[test]
 fn plan_bind_refuses_an_unidentifiable_directory() {
     let (conn, _src, arch, root_id) = every_fate_fixture();

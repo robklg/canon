@@ -411,7 +411,7 @@ fn open_scope(
     // not recoverable from here, so a scope naming a parked path before a live
     // one renders the live one first. Ordering is preserved *within* what the
     // boundary handed over, which is as far as this can honestly reach.
-    let asked: Vec<String> = resolved
+    let mut asked: Vec<String> = resolved
         .prefixes
         .iter()
         .cloned()
@@ -448,7 +448,20 @@ fn open_scope(
                 emit_retired_statement(&statement, jsonl)?;
                 return Ok(ScopeDoor::Answered(TrailExit::Reported));
             }
-            ops::place::PlaceKnowledge::Evidence => resolved.prefixes.push(prefix),
+            // The healed form, not the typed one: the gate found this
+            // place's records under this spelling, and the view is about to
+            // be read with the same byte-exact comparisons the gate just
+            // ran. The ask is re-spelled with it, because the order below is
+            // keyed on the ask and a healed path is the same place the user
+            // named — it must not slide to the end of its own list.
+            ops::place::PlaceKnowledge::Evidence(found) => {
+                if found != prefix {
+                    if let Some(slot) = asked.iter_mut().find(|asked| **asked == prefix) {
+                        slot.clone_from(&found);
+                    }
+                }
+                resolved.prefixes.push(found);
+            }
             ops::place::PlaceKnowledge::Unknown => unknown.push(prefix),
         }
     }

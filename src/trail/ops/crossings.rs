@@ -21,11 +21,11 @@ use anyhow::Result;
 
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
-use crate::core::domain::root::{find_containing_root, Root};
+use crate::core::domain::root::Root;
 use crate::core::repo::{self, Connection};
 use crate::trail::domain::composition::OriginLine;
 use crate::trail::domain::crossings::{
-    counterpart_of, crossing_verdict, CrossingFilter, CrossingVerdict,
+    counterpart_of, crossing_verdict, ledger_form_of_counterpart, CrossingFilter, CrossingVerdict,
 };
 use crate::trail::domain::grouping::group_destinations;
 use crate::trail::domain::placement::{placement_in_view, RowAspect};
@@ -228,6 +228,29 @@ pub fn compute_crossings(conn: &Connection, params: &CrossingsParams) -> Result<
     // door exists for — the removed and the retired.
     let rows = crate::trail::repo::fetch_all_extractions(conn)?;
 
+    // The form-tolerance law's one reading for this door, run once and ahead
+    // of everything that asks about these paths — the evidence gate, the two
+    // narrowing filters, the boundary, the section headers and the
+    // reconciliation line all compare a counterpart against recorded text,
+    // and a door that opened on one spelling while the filter discarded
+    // another would answer "nothing crossed" about the row it just let in.
+    // The healed pair shadows the caller's, so no reader below can reach the
+    // unhealed one by accident.
+    let healed = CrossingsParams {
+        prefixes: params.prefixes.clone(),
+        origin: params
+            .origin
+            .as_ref()
+            .map(|path| ledger_form_of_counterpart(path, &rows)),
+        destination: params
+            .destination
+            .as_ref()
+            .map(|path| ledger_form_of_counterpart(path, &rows)),
+        limit: params.limit,
+        machine_output: params.machine_output,
+    };
+    let params = &healed;
+
     let named: Vec<&String> = [params.origin.as_ref(), params.destination.as_ref()]
         .into_iter()
         .flatten()
@@ -315,8 +338,8 @@ pub fn compute_crossings(conn: &Connection, params: &CrossingsParams) -> Result<
 /// counterpart is by definition a place the ledger names, and it is the one
 /// evidence class that survives its root being removed. That is the whole
 /// motivating case here, and the one `history_evidence_at` cannot reach —
-/// that function opens on `find_containing_root` and returns false for a path
-/// under no live root, so a plain-`rm`'d origin root would be reported
+/// that function opens on `resolve_containing_root` and answers `None` for a
+/// path under no live root, so a plain-`rm`'d origin root would be reported
 /// unknown and this door would refuse to open on a line the composition card
 /// printed a second earlier.
 ///
@@ -338,7 +361,7 @@ fn counterpart_is_known(
         return Ok(true);
     }
     Ok(match place_knowledge(conn, path, roots)? {
-        PlaceKnowledge::Retired(_) | PlaceKnowledge::Evidence => true,
+        PlaceKnowledge::Retired(_) | PlaceKnowledge::Evidence(_) => true,
         PlaceKnowledge::Unknown => false,
     })
 }
@@ -469,8 +492,15 @@ fn counterparty_fn(aspect: RowAspect) -> fn(&DecisionExtraction) -> &str {
 /// and a location that exists today is visitable today. The book lookup runs
 /// only for a removed location, and its own liveness gate is what keeps a
 /// bound-but-unreleased ceremony from marking a live place as bound history.
+///
+/// **Form-tolerantly, and the sibling of the heal one door up.** The path
+/// here is ledger text — a healed counterpart or a row's own recorded
+/// location — while the roots are what the index holds now, and the two
+/// legitimately straddle a re-add in the other normalization. Read
+/// byte-exact, that straddle reports a live place as removed and then finds
+/// no book for it.
 fn counterpart_at(path: &str, roots: &[Root], conn: &Connection) -> Result<Counterpart> {
-    let root_removed = find_containing_root(path, roots).is_none();
+    let root_removed = crate::core::domain::path::resolve_containing_root(path, roots).is_none();
     let retired_book = if root_removed {
         crate::retire::find_retirement_covering_path(conn, path)?.map(|r| r.book_display)
     } else {

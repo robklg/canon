@@ -126,9 +126,14 @@ pub fn find_retirement_covering_path(
     // (disk truth — its book stands). Suspended roots count as live: their
     // index is intact, merely awaiting reconnection.
     let roots = repo::root::fetch_all(conn)?;
+    // Form-tolerantly, at both comparisons below: the asked path is text a
+    // user typed or a CWD the OS handed over, while a root path and a scope
+    // snapshot are recorded bytes that never bend. Reading them byte-exact
+    // let a retired place answer "never known here" to the one spelling its
+    // own book is not written in.
     if roots
         .iter()
-        .any(|r| crate::core::domain::path::path_is_under(path, &r.path))
+        .any(|r| crate::core::domain::path::path_is_under_any_form(path, &r.path))
     {
         return Ok(None);
     }
@@ -138,7 +143,7 @@ pub fn find_retirement_covering_path(
     // (a re-retired path resolves to its newest telling).
     let Some(hit) = rows
         .into_iter()
-        .find(|r| crate::core::domain::path::path_is_under(path, &r.root_path))
+        .find(|r| crate::core::domain::path::path_is_under_any_form(path, &r.root_path))
     else {
         return Ok(None);
     };

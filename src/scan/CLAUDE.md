@@ -191,7 +191,11 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   simply not among what it was asked to scan, and there is nothing to refuse. That is a
   different question from naming a place behind a door, and it is unchanged.
 - **A suggestion consults the act's preconditions; it never re-derives them.**
-  `resolve_missing_target` is where `--missing`'s two refusals live (under no known root,
+  `resolve_missing_target` asks the index, and **both halves of the form-tolerance law run
+  there** — it is the one deletion arm with no disk to fall back on, so a root matched in one
+  byte-form beside a remainder stored in the other would mark nothing and report it as nothing
+  to mark, a silence indistinguishable from success. What it still declines to consult is the
+  *disk*. It is also where `--missing`'s two refusals live (under no known root,
   suspended root — the second carried as a typed `DoorRefused` rather than a spelled sentence,
   because the user-facing wording has one owner and the hint is a second consumer that is not a
   screen), and both the act and the interface's hint ask it. Two spellings of one rule

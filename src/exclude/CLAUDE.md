@@ -120,8 +120,15 @@ partition never sees them; each calls `core::ops::scope::refuse_parked_locations
 resolution and before the existence gate. `duplicates`' scope and prefer paths are members of the
 same `validate_sources_exist` carve-out list `compare` belongs to — a location the question rests
 on — and repairing one member of a closed list while leaving another is exactly the drift that
-list exists to prevent. The two single-file arms reach the same call for a plainer reason: they
-are single-target acts, and the closed default refuses every act. The filter-driven arms take the door at the front door instead, with the
+list exists to prevent. The two single-file arms reach `refuse_parked_locations` for a plainer
+reason: they are single-target acts, and the closed default refuses every act.
+
+**Those same two arms then heal their path** through
+`core::ops::scope::stored_form_with_sources` — the source-existence gate's own spelling of the
+form-tolerance law's remainder half — because a named file is about to be matched against the
+index byte-for-byte and root containment alone never sees a remainder stored in the other form.
+A path no byte-form has sources under comes back unhealed, so the refusal is still the one the
+user earned. The filter-driven arms take the door at the front door instead, with the
 `Refused` verb, before the plan display and the confirmation, so `--yes` cannot get past it.
 
 

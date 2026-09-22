@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::path::normalization_candidates;
+use super::path::resolve_containing_root;
 use super::root::{find_containing_root, ParkedPath, ParkedRoot, Root};
 
 /// Domain concept: what kind of scope match do we want?
@@ -123,12 +123,11 @@ impl DecisionScope {
 
 /// Attribute one recorded prefix to a known root, form-tolerantly.
 ///
-/// The composition path resolution performs at the argument door —
-/// [`normalization_candidates`] over [`find_containing_root`] — so a root
-/// stored in the disk's form is reachable from a prefix typed in the other
-/// one. Candidates are of the **whole** prefix and the first that finds a root
-/// wins, which is what makes the form that matched the root the form the
-/// prefix carries from here on.
+/// The manifest door's reading of the form-tolerance law's root half, which is
+/// spoken once in [`resolve_containing_root`] — the same call the argument
+/// door's `resolve_path` makes, so a root stored in the disk's form is
+/// reachable from a prefix typed in the other one and the two doors cannot
+/// answer differently.
 ///
 /// It does not lexically clean the prefix (`resolve_path` calls `clean_path`
 /// first), so a hand-written `..` is matched literally. That is a limit, not a
@@ -138,10 +137,8 @@ impl DecisionScope {
 /// the index knows is a question only the index can answer, and it is asked
 /// afterwards, one layer up (`core::ops::scope::resolve_recorded_scope`).
 pub fn attribute_prefix(prefix: &str, roots: &[Root]) -> Option<DecisionScope> {
-    normalization_candidates(prefix).into_iter().find_map(|c| {
-        find_containing_root(&c, roots)
-            .map(|(root_id, root_path, _role, rel)| DecisionScope::new(root_id, root_path, rel))
-    })
+    resolve_containing_root(prefix, roots)
+        .map(|rooted| DecisionScope::new(rooted.root_id, rooted.root_path, rooted.rel_path))
 }
 
 /// What a confirmed prefix names in the index: a place, or one item standing

@@ -595,10 +595,19 @@ const LAWS: &[Law] = &[
         name: "form-tolerance",
         // One law with two halves, one owner and one registered projection.
         // The root half — `normalization_candidates` over root containment —
-        // needs no database and runs first at both doors; the remainder half
-        // is `core::ops::scope::stored_form_of_rel`, spoken once and reached
-        // by both. The verifier is the one that pins what is worth
-        // protecting: that the two doors run both halves in the same order.
+        // needs no database and runs first at every door, spoken once as
+        // `resolve_containing_root` — with `resolve_containing_root_as_written`
+        // its reading for a path naming somewhere content is going, where the
+        // root bends and the folder below it keeps the bytes typed; the
+        // remainder half is
+        // `core::ops::scope::known_form_of_rel`, whose question is a
+        // parameter, with `stored_form_of_rel` its sources reading and the
+        // one both scope doors take. Two comparison readings beside them,
+        // `path_is_under_any_form` and `same_path_any_form`, serve the sites
+        // with no root to find and no remainder to ask about. Every reading
+        // carries its own battery in the owner's file; the verifier here is
+        // the one that pins what is worth protecting across them: that the
+        // two doors run both halves in the same order.
         owner: "core/domain/path.rs",
         verifier: "the_two_doors_agree_on_the_same_paths",
         reach: Reach::Canon,

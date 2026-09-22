@@ -413,7 +413,7 @@ fn an_intra_view_apply_appears_in_no_crossing_section() {
 // ----------------------------------------------------------------------
 
 /// The arm the scope gate does not have. `history_evidence_at` opens on
-/// `find_containing_root` and returns false for a path under no live root, so
+/// `resolve_containing_root` and answers `None` for a path under no live root, so
 /// without the ledger arm a plain-`rm`'d origin root would be reported
 /// unknown — and this door would refuse to open on a line the composition
 /// card printed a second earlier, which is this feature's own motivating
@@ -443,6 +443,102 @@ fn a_plain_removed_origin_root_still_opens_its_door() {
     let arrivals = section(&result, RowAspect::Arrival);
     assert_eq!(arrivals.files, 7);
     assert!(arrivals.named.as_ref().unwrap().root_removed);
+}
+
+/// **The whole door speaks one spelling.** A counterpart named in the other
+/// normalization heals to the ledger's form once, ahead of the evidence gate
+/// *and* the narrowing filter — so the door cannot open on a counterpart the
+/// filter then discards, which would answer "nothing crossed" about the row
+/// it had just let in.
+///
+/// And the sibling one step on: the healed path is ledger text while the
+/// roots are what the index holds now, so the liveness test behind
+/// `root_removed` bends the same way. Here the root is live under a spelling
+/// the ledger does not use, and reading it byte-exact would report a
+/// standing drive as removed.
+#[test]
+fn a_counterpart_named_in_the_other_form_opens_its_door_and_keeps_its_rows() {
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    let conn = open_in_memory_for_test();
+    insert_test_root(&conn, "/archive", "archive", false);
+    // The drive stands today under the NFC spelling; the ledger recorded it
+    // in NFD, back when the apply ran.
+    insert_test_root(&conn, &format!("/Volumes/{NFC_DIR}"), "source", false);
+    let apply = insert_decision_at(&conn, "apply", 100);
+    write_rows(
+        &conn,
+        &[extraction_row(
+            apply,
+            999,
+            &format!("/Volumes/{NFD_DIR}"),
+            "",
+            7,
+            Some(70),
+            "/archive/Media",
+        )],
+    );
+
+    let mut p = crossings_params(vec!["/archive"]);
+    p.origin = Some(format!("/Volumes/{NFC_DIR}"));
+    let result = reported(&conn, &p);
+    let arrivals = section(&result, RowAspect::Arrival);
+    assert_eq!(arrivals.files, 7, "the filter kept the row it opened on");
+    assert!(
+        !arrivals.named.as_ref().unwrap().root_removed,
+        "a drive standing under the other spelling is not a removed one"
+    );
+}
+
+/// The constraint this door carries: a place nothing was ever applied from
+/// still answers about itself, and never borrows a neighbour's crossing.
+#[test]
+fn a_never_applied_from_counterpart_is_not_healed_onto_a_neighbours_rows() {
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    let conn = open_in_memory_for_test();
+    insert_test_root(&conn, "/archive", "archive", false);
+    let src = insert_test_root(&conn, "/Volumes/drive", "source", false);
+    let apply = insert_decision_at(&conn, "apply", 100);
+    write_rows(
+        &conn,
+        &[extraction_row(
+            apply,
+            src,
+            "/Volumes/drive",
+            NFD_DIR,
+            7,
+            Some(70),
+            "/archive/Media",
+        )],
+    );
+    // A sibling folder that shares the accent but is not the recorded place.
+    insert_test_source(
+        &conn,
+        src,
+        &format!("{NFD_DIR}-other/a.jpg"),
+        1,
+        1,
+        1000,
+        100,
+    );
+
+    let mut p = crossings_params(vec!["/archive"]);
+    p.origin = Some(format!("/Volumes/drive/{NFC_DIR}-other"));
+    match compute_crossings(&conn, &p).unwrap() {
+        Crossings::Reported(reported) => assert!(
+            reported
+                .sections
+                .iter()
+                .all(|s| s.aspect != RowAspect::Arrival),
+            "nothing crossed from a place nothing was applied from"
+        ),
+        Crossings::UnknownCounterpart(_) => {
+            panic!("the place has sources, so the door opens")
+        }
+    }
 }
 
 #[test]

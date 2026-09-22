@@ -63,7 +63,14 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   or a decision scope **descendant-or-equal**, never ancestor, which is the two-claims placement
   law's direction. Both queries live in trail's own `repo` — core stays history-agnostic — and route
   through `core::repo::db::path_at_or_under_sql`, so a real path containing `_` or `%` matches
-  literally. A path with evidence is re-included in the view. **The gate runs at both doors**: a
+  literally. A path with evidence is re-included in the view — **at the byte-form the evidence
+  was found under**, which is why `history_evidence_at` answers with a path rather than a yes:
+  the gate runs the form-tolerance law (the root half through its owner, the remainder half
+  through `known_form_of_rel` with all four classes as its question), and a gate that healed
+  privately would open on a place and then render none of it. Asking the remainder half's
+  *sources* reading here would be a no-op in exactly the case this gate exists for. The ask is
+  re-spelled with the healed form too, so a healed place keeps its position in the order it was
+  named in. **The gate runs at both doors**: a
   place reached by standing in it is the same place as one named on the command line, or a bare
   `canon trail` in a storyless folder renders its *parent's* decisions under that folder's heading.
   A root's own top is exempt at both doors alike — the boundary policy's "root-level paths are
@@ -182,10 +189,25 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   (`ops::crossings::counterpart_is_known`). The **ledger arm runs first**, from rows already in
   hand: a counterpart is by definition a place the ledger names, and it is the one evidence class
   that survives its root being removed — the one `history_evidence_at` cannot reach, since that
-  opens on `find_containing_root` and returns false for a path under no live root. Without it a
+  opens on `resolve_containing_root` and answers `None` for a path under no live root. Without it a
   plain-`rm`'d origin root reads as unknown and the door refuses to open on a line the card printed
   a second earlier. Then `place_knowledge` unchanged; `ops/place.rs` is untouched. Guard:
   `a_plain_removed_origin_root_still_opens_its_door`.
+- **A counterpart heals against the ledger, never against the index**
+  (`domain::crossings::ledger_form_of_counterpart`, run once in `ops::crossings` before the gate
+  and the filter both). A counterpart is matched by `placement_in_view` over
+  `decision_extractions`, whose locations were written at apply time and never rewritten, so the
+  form-tolerance law's remainder half is the wrong instrument here: a root re-scanned from
+  storage handing the other form leaves the index answering to the new spelling while the ledger
+  keeps the old, and healing through the index would *lose* a relation that matches today — and
+  a removed origin root, the case this door exists for, has no root to heal against at all. It
+  cannot manufacture a crossing: a candidate is adopted only where a row's own recorded location
+  already lies at-or-under it, and as-given is tried first. Its sibling is
+  `counterpart_at`'s liveness test, which bends the same way and for the same reason — the path
+  is ledger text, the roots are what the index holds now, and the two straddle a re-add in the
+  other normalization. Guards: `a_counterpart_heals_to_the_form_the_ledger_holds`,
+  `a_never_applied_from_place_is_never_healed_onto_someone_elses_row`,
+  `a_counterpart_named_in_the_other_form_opens_its_door_and_keeps_its_rows`.
 - **A counterpart path resolves by the scope pipeline's own rule, plus trail's leniency**:
   soft-match against known roots → `fs::canonicalize` → lexical clean (`cli::resolve_counterpart`).
   The first two arms are `core::ops::scope::resolve_path`'s, because a counterpart is the same kind

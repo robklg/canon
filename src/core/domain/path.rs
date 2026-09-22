@@ -102,21 +102,156 @@ pub fn normalization_candidates(path: &str) -> Vec<String> {
     candidates
 }
 
+/// Which known root contains a path, and the byte-form that found it.
+///
+/// The extra field over [`find_containing_root`]'s tuple is the point: a
+/// caller must carry on with the form that matched, not the one it was
+/// handed, or the next comparison undoes the match.
+pub struct RootedPath {
+    /// The path as the caller must carry it on — [`root_path`](Self::root_path)
+    /// and [`rel_path`](Self::rel_path) joined, never the text as handed in.
+    pub path: String,
+    pub root_id: i64,
+    /// The root's own stored path.
+    pub root_path: String,
+    /// The remainder below the root. Which byte-form it carries is the
+    /// reading's, not the struct's: [`resolve_containing_root`] hands back the
+    /// form that matched, [`resolve_containing_root_as_written`] the form the
+    /// caller typed.
+    pub rel_path: String,
+}
+
+// The root's *role* is deliberately absent. `find_containing_root` returns it
+// and no caller reached for here wants it: carrying it would record a demand
+// that does not exist, and adding it later is one edit with its consumer as
+// the evidence.
+
+/// The **root half of the form-tolerance law, spoken once**: which known root
+/// contains this path, asked of every byte-form in the owner's order.
+///
+/// Pure and database-free, which is why it runs *first* at every door. The
+/// law's other half — which byte-form of the below-root remainder the index
+/// knows — can only be answered by the index and is asked afterwards, one
+/// layer up (`core::ops::scope::known_form_of_rel` and its sources reading
+/// `stored_form_of_rel`). **The order is not interchangeable**: a path whose
+/// root portion is written in the other form must match its root before its
+/// remainder can be asked about at all.
+///
+/// Candidates are of the **whole** path and the first that finds a root wins,
+/// which is what makes the form that matched the root the form the path
+/// carries from here on. `None` means no byte-form of this path lies under
+/// any known root — genuinely rootless, and the caller's own disposition.
+///
+/// It does not lexically clean the path; callers taking user arguments run
+/// [`clean_path`] first ([`resolve_path`] does).
+pub fn resolve_containing_root(path: &str, roots: &[Root]) -> Option<RootedPath> {
+    normalization_candidates(path)
+        .into_iter()
+        .find_map(|candidate| {
+            find_containing_root(&candidate, roots).map(|(root_id, root_path, _role, rel_path)| {
+                RootedPath {
+                    path: candidate,
+                    root_id,
+                    root_path,
+                    rel_path,
+                }
+            })
+        })
+}
+
+/// [`resolve_containing_root`] for a path naming somewhere content is
+/// **going**: the root portion bends to be found, the remainder never does.
+///
+/// The two readings differ in what the below-root text *is*. Everywhere else
+/// it is an argument about something Canon already recorded, so bending it is
+/// how the record is reached. Here it names a folder that need not exist yet,
+/// and there is nothing to reach: the only bytes in play are the ones the
+/// caller typed, so rewriting them would invent a name nobody asked for —
+/// which is the law's own rule about recorded bytes, read from the other end.
+///
+/// Recovering the remainder as written is a **component** count and not a byte
+/// slice: normalizing changes a component's length but never adds, removes or
+/// moves a separator, so the text as handed in has exactly the components the
+/// matched candidate has, and the remainder is the tail past the root's own.
+/// Counting through [`Path`] rather than splitting on `/` is what makes the
+/// count survive a doubled or trailing separator, in the path or in the root.
+///
+/// **Like [`resolve_containing_root`], it does not lexically clean the path**,
+/// and here the precondition bites harder than there: [`Path::components`]
+/// keeps `..` verbatim, so an uncleaned `/root/../root/sub` comes back as
+/// `../root/sub` — a remainder [`rel_dir_escapes`] refuses, against a field
+/// that promises a below-root one. Callers taking user arguments run
+/// [`clean_path`] first, which resolves `..` away; the one caller does.
+pub fn resolve_containing_root_as_written(path: &str, roots: &[Root]) -> Option<RootedPath> {
+    let matched = resolve_containing_root(path, roots)?;
+    let rel_path = Path::new(path)
+        .components()
+        .skip(Path::new(&matched.root_path).components().count())
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned();
+    Some(RootedPath {
+        path: join_under_root(&matched.root_path, &rel_path),
+        rel_path,
+        ..matched
+    })
+}
+
+/// A root path and a below-root remainder as one absolute path; the root
+/// alone when the remainder is empty.
+///
+/// The law's last step, and it had three spellings: rejoining is what carries
+/// a healed remainder back out to a caller who asked about a whole path.
+/// `Path::join` is not one of them — it appends a separator to an empty
+/// remainder, so a root would come back with a trailing slash.
+pub fn join_under_root(root_path: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        root_path.to_string()
+    } else {
+        format!("{root_path}/{rel}")
+    }
+}
+
+/// Whether any byte-form of `path` is `prefix` or lies under it.
+///
+/// [`path_is_under`] read form-tolerantly, for the comparisons that have no
+/// root to look up: a retirement's scope snapshot is recorded text, not a live
+/// root, so [`resolve_containing_root`] has nothing to find there.
+///
+/// **The text side bends and the recorded side never does** — the law's own
+/// asymmetry. This answers a yes/no, so the as-given-first ordering that
+/// governs *healing* is moot: any candidate matching is the honest question
+/// when the recorded side is snapshot text whose form was fixed whenever it
+/// was written.
+pub fn path_is_under_any_form(path: &str, prefix: &str) -> bool {
+    normalization_candidates(path)
+        .iter()
+        .any(|candidate| path_is_under(candidate, prefix))
+}
+
+/// Whether any byte-form of `path` is exactly `other`.
+///
+/// [`path_is_under_any_form`]'s equality sibling, for the two places that
+/// compare a whole path Canon wrote down earlier against a whole path it holds
+/// now — a receipt's origin root, a book's recorded root. Same asymmetry: the
+/// text read back bends, the stored path never does.
+pub fn same_path_any_form(path: &str, other: &str) -> bool {
+    normalization_candidates(path)
+        .iter()
+        .any(|candidate| candidate == other)
+}
+
 /// Resolve a single path against known roots (pure, offline — no filesystem
 /// access). Returns `None` when the (lexically cleaned) path doesn't match
 /// any known root; a filesystem fallback for unmatched paths lives in
 /// `core::ops::scope::resolve_path`.
 ///
-/// Matching is form-tolerant: each normalization candidate of the cleaned
-/// path is tried in turn, and the one that finds a root is what comes back —
-/// so a root stored in the disk's form is reachable from an argument typed
-/// in the other one.
+/// The root half's whole-path reading: [`resolve_containing_root`] keeping
+/// only the form that matched, so a root stored in the disk's form is
+/// reachable from an argument typed in the other one.
 pub fn resolve_path(path: &Path, roots: &[Root], cwd: &Path) -> Option<String> {
     let cleaned = clean_path(path, cwd);
-    let cleaned_str = cleaned.to_string_lossy();
-    normalization_candidates(&cleaned_str)
-        .into_iter()
-        .find(|candidate| find_containing_root(candidate, roots).is_some())
+    resolve_containing_root(&cleaned.to_string_lossy(), roots).map(|rooted| rooted.path)
 }
 
 /// Resolve multiple paths against known roots (pure, offline).
@@ -544,5 +679,164 @@ mod tests {
         assert_eq!(common_path_prefix(["", "m/01"].into_iter()), "");
         assert_eq!(common_path_prefix(["a/x", "b/y"].into_iter()), "");
         assert_eq!(common_path_prefix(std::iter::empty()), "");
+    }
+
+    // ========================================================================
+    // The form-tolerance law's root half, and its two comparison readings
+    // ========================================================================
+
+    /// The root half's own spelling: the candidate that found the root is
+    /// what comes back, and the remainder comes back in that same form.
+    #[test]
+    fn resolve_containing_root_carries_the_form_that_matched() {
+        let roots = vec![make_test_root(1, &format!("/mnt/{NFD_DIR}"))];
+        let rooted =
+            resolve_containing_root(&format!("/mnt/{NFC_DIR}/2016/a.jpg"), &roots).unwrap();
+        assert_eq!(rooted.root_id, 1);
+        assert_eq!(rooted.root_path, format!("/mnt/{NFD_DIR}"));
+        assert_eq!(rooted.rel_path, "2016/a.jpg");
+        assert_eq!(rooted.path, format!("/mnt/{NFD_DIR}/2016/a.jpg"));
+    }
+
+    /// **As-given first, and it must not be tidied.** On a
+    /// normalization-sensitive filesystem the two spellings are two genuinely
+    /// different directories, so each has to resolve to itself.
+    #[test]
+    fn resolve_containing_root_tries_the_path_as_written_before_bending_it() {
+        let roots = vec![
+            make_test_root(1, &format!("/mnt/{NFD_DIR}")),
+            make_test_root(2, &format!("/mnt/{NFC_DIR}")),
+        ];
+        assert_eq!(
+            resolve_containing_root(&format!("/mnt/{NFC_DIR}/x"), &roots)
+                .unwrap()
+                .root_id,
+            2
+        );
+        assert_eq!(
+            resolve_containing_root(&format!("/mnt/{NFD_DIR}/x"), &roots)
+                .unwrap()
+                .root_id,
+            1
+        );
+    }
+
+    #[test]
+    fn resolve_containing_root_answers_none_for_a_genuinely_rootless_path() {
+        let roots = vec![make_test_root(1, "/mnt/photos")];
+        assert!(resolve_containing_root("/elsewhere/x", &roots).is_none());
+    }
+
+    /// The as-written reading's whole claim: the root bends, the remainder
+    /// does not — so a folder about to be created keeps the bytes the caller
+    /// typed even where the root above it had to be found in the other form.
+    #[test]
+    fn resolve_containing_root_as_written_bends_the_root_and_not_the_name_below_it() {
+        let roots = vec![make_test_root(1, &format!("/mnt/{NFD_DIR}"))];
+
+        let rooted =
+            resolve_containing_root_as_written(&format!("/mnt/{NFC_DIR}/{NFC_DIR}"), &roots)
+                .unwrap();
+        assert_eq!(rooted.root_path, format!("/mnt/{NFD_DIR}"), "root found");
+        assert_eq!(rooted.rel_path, NFC_DIR, "name below it as typed");
+        assert_eq!(rooted.path, format!("/mnt/{NFD_DIR}/{NFC_DIR}"));
+
+        // The matched reading beside it, on the same input: it heals the
+        // whole path, which is right where the remainder names a record and
+        // wrong where it names something not yet on disk.
+        assert_eq!(
+            resolve_containing_root(&format!("/mnt/{NFC_DIR}/{NFC_DIR}"), &roots)
+                .unwrap()
+                .rel_path,
+            NFD_DIR,
+        );
+
+        // A remainder several deep, and none at all.
+        assert_eq!(
+            resolve_containing_root_as_written(&format!("/mnt/{NFC_DIR}/{NFC_DIR}/b"), &roots)
+                .unwrap()
+                .rel_path,
+            format!("{NFC_DIR}/b"),
+        );
+        let root_itself =
+            resolve_containing_root_as_written(&format!("/mnt/{NFC_DIR}"), &roots).unwrap();
+        assert_eq!(root_itself.rel_path, "");
+        assert_eq!(root_itself.path, format!("/mnt/{NFD_DIR}"));
+    }
+
+    /// Redundant separators — doubled or trailing, in the path or in the
+    /// root — do not reach the remainder. **Not every uncleaned shape**: `..`
+    /// survives a component count, and that is the doc's stated precondition
+    /// rather than a claim made here. The one caller cleans its argument, so
+    /// none of these arrives there; the promise under test is the struct's
+    /// field, not that caller's habit, and a text split keeps none of them.
+    #[test]
+    fn resolve_containing_root_as_written_hands_back_a_below_root_remainder() {
+        let roots = vec![make_test_root(1, "/mnt/root")];
+        let rel = |p: &str| {
+            resolve_containing_root_as_written(p, &roots)
+                .unwrap()
+                .rel_path
+        };
+
+        assert_eq!(rel("/mnt/root//sub"), "sub", "a doubled separator");
+        assert_eq!(rel("/mnt/root/sub/"), "sub", "a trailing separator");
+        assert_eq!(rel("/mnt/root/a//b/"), "a/b", "both, several deep");
+
+        // Green under a text split too, and kept deliberately: it guards the
+        // neighbouring off-by-one, not the shape above it.
+        assert_eq!(rel("/mnt/root"), "", "the root itself");
+
+        // An untidy *root*, which no caller cleans — it comes from the index.
+        let untidy = vec![make_test_root(3, "/mnt/root/")];
+        assert_eq!(
+            resolve_containing_root_as_written("/mnt/root/sub", &untidy)
+                .unwrap()
+                .rel_path,
+            "sub",
+        );
+    }
+
+    /// The rejoin's one behaviour worth pinning: an empty remainder gives
+    /// the root back unchanged. `Path::join` appends a separator here, which
+    /// is why the owner is a plain function and not that.
+    #[test]
+    fn join_under_root_returns_the_root_itself_for_an_empty_remainder() {
+        assert_eq!(join_under_root("/mnt/photos", ""), "/mnt/photos");
+        assert_eq!(
+            join_under_root("/mnt/photos", "2016/a.jpg"),
+            "/mnt/photos/2016/a.jpg"
+        );
+    }
+
+    /// The containment reading: the text side bends, the recorded side never
+    /// does — and the path law's own boundary rule survives the bending.
+    #[test]
+    fn path_is_under_any_form_bends_the_text_side_only() {
+        let recorded = format!("/mnt/{NFD_DIR}");
+        assert!(path_is_under_any_form(
+            &format!("/mnt/{NFC_DIR}/2016"),
+            &recorded
+        ));
+        assert!(path_is_under_any_form(&recorded, &recorded));
+        // Not a licence to match a sibling: the boundary is still segment-aware.
+        assert!(!path_is_under_any_form(
+            &format!("/mnt/{NFC_DIR}x/2016"),
+            &recorded
+        ));
+        assert!(!path_is_under_any_form("/elsewhere", &recorded));
+    }
+
+    /// The equality reading. A prefix is not a match — only the whole path is.
+    #[test]
+    fn same_path_any_form_is_whole_path_equality() {
+        let recorded = format!("/mnt/{NFD_DIR}");
+        assert!(same_path_any_form(&format!("/mnt/{NFC_DIR}"), &recorded));
+        assert!(same_path_any_form(&recorded, &recorded));
+        assert!(!same_path_any_form(
+            &format!("/mnt/{NFC_DIR}/2016"),
+            &recorded
+        ));
+        assert!(!same_path_any_form("/mnt/other", &recorded));
     }
 }

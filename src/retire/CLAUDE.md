@@ -22,7 +22,9 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   (`snapshot_source_count`, `snapshot_max_decision_id`) feeds the release's world-moved re-check.
 - **Retirement's own SQL lives in `repo.rs`** — `fetch_bound_retirements`/`BoundRetirementRow`,
   read by the shelf listing and by `find_retirement_covering_path` (the retired-scope statement the
-  trail renders at a retired root's old path), and the world-moved pair
+  trail renders at a retired root's old path — whose liveness gate and snapshot match both bend
+  the asked path through `core::domain::path::path_is_under_any_form`, since a scope snapshot is
+  recorded bytes and the path asked about is an argument or a CWD), and the world-moved pair
   `count_all_by_root`/`max_decision_id_touching_root`. **Not** the readiness review, which reads
   `fetch_root_story` like every other lens. No other subsystem asks these questions, so they sit
   here rather than in the shared repository layer; the structural fetch stays shared, because
@@ -192,7 +194,13 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
 - **Collision/convergence is disk-keyed, deliberately**: `plan_bind` reads the standing book's own
   `meta.toml` identity — same root → replace (same-day re-runs converge; a later-date
   re-retirement stands beside the earlier book as its own telling, the fleet listing both
-  honestly); different root → numbered sibling; unidentifiable → refuse. Never "simplify" into a
+  honestly); different root → numbered sibling; unidentifiable → refuse. **Same root is asked
+  form-tolerantly** (`core::domain::path::same_path_any_form`): the book's `identity.path` is
+  bytes read back off the shelf and the root path is what the index holds now, so a root removed
+  and re-added from storage handing the other normalization would otherwise read as a *different*
+  root and bind a second book beside the first — one place with two tellings, and nothing
+  anywhere saying so. Guard:
+  `plan_bind_recognises_a_book_whose_identity_is_written_in_the_other_form`. Never "simplify" into a
   decision-row lookup: disk-keying is what makes convergence survive any recording-mode history,
   and an Off-mode bind leaves no row.
 - **The artifact pointer gates on `record_enabled`, not `receipt_enabled`** (documented

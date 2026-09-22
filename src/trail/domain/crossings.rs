@@ -17,9 +17,41 @@
 //! No I/O.
 
 use crate::core::domain::extraction::DecisionExtraction;
-use crate::core::domain::path::path_is_under;
+use crate::core::domain::path::{normalization_candidates, path_is_under};
 
 use super::placement::{classify_row, placement_in_view, RowAspect};
+
+/// The byte-form of a named counterpart the **ledger** already holds.
+///
+/// The form-tolerance law at the counterpart door, and the one door where the
+/// law's remainder half is the wrong instrument. That half answers "which form
+/// does the *index* know sources under", and a counterpart is matched against
+/// `decision_extractions` instead — whose locations were written at apply time
+/// and never rewritten since. The two can honestly differ: a root re-scanned
+/// from storage handing the other form leaves the index answering to the new
+/// spelling while the ledger keeps the old, so healing through the index would
+/// *lose* a relation that matches today. A removed origin root — the case this
+/// door exists for — has no root to heal against at all.
+///
+/// **It cannot manufacture a crossing.** A candidate is adopted only where a
+/// row's own recorded location already lies at-or-under it, so every form this
+/// returns is one the ledger was already going to answer for; and as-given is
+/// tried first, so a path that matches today comes back unchanged. A place
+/// nothing was ever applied from still answers "nothing crossed".
+///
+/// Matching is [`placement_in_view`] on either endpoint — descendant-or-equal,
+/// the same direction as every other read here.
+pub fn ledger_form_of_counterpart(path: &str, rows: &[DecisionExtraction]) -> String {
+    normalization_candidates(path)
+        .into_iter()
+        .find(|candidate| {
+            rows.iter().any(|row| {
+                placement_in_view(candidate, &row.drawn_from())
+                    || placement_in_view(candidate, &row.destination_path)
+            })
+        })
+        .unwrap_or_else(|| path.to_string())
+}
 
 /// The boundary a crossings view measures against, and what narrows it.
 pub struct CrossingFilter<'a> {
@@ -550,6 +582,91 @@ mod tests {
         assert_eq!(
             counterpart_of(&r, RowAspect::Extraction),
             "/archive/Media/2016"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The form-tolerance law at the counterpart door
+    // ------------------------------------------------------------------
+
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    /// A counterpart named in the other normalization finds the ledger's own
+    /// spelling — on either endpoint, and including the case the index could
+    /// never have answered for: a **removed** origin root, where there is no
+    /// live root to heal against and the ledger is the only witness.
+    #[test]
+    fn a_counterpart_heals_to_the_form_the_ledger_holds() {
+        let origin_root = format!("/Volumes/{NFD_DIR}");
+        let rows = vec![
+            row(&origin_root, "2016", "/archive/media"),
+            row("/photos", "x", &format!("/archive/{NFD_DIR}")),
+        ];
+
+        // The origin end, root grain.
+        assert_eq!(
+            ledger_form_of_counterpart(&format!("/Volumes/{NFC_DIR}"), &rows),
+            origin_root
+        );
+        // The origin end, below the root.
+        assert_eq!(
+            ledger_form_of_counterpart(&format!("/Volumes/{NFC_DIR}/2016"), &rows),
+            format!("{origin_root}/2016")
+        );
+        // The destination end.
+        assert_eq!(
+            ledger_form_of_counterpart(&format!("/archive/{NFC_DIR}"), &rows),
+            format!("/archive/{NFD_DIR}")
+        );
+    }
+
+    /// **As-given first, and this is where it earns its keep.** A path that
+    /// matches the ledger today must come back untouched — healing toward
+    /// some other form would *lose* a relation the trail itself just printed.
+    #[test]
+    fn a_counterpart_the_ledger_already_matches_comes_back_untouched() {
+        let rows = vec![
+            row(&format!("/Volumes/{NFD_DIR}"), "2016", "/archive/media"),
+            row(&format!("/Volumes/{NFC_DIR}"), "2016", "/archive/media"),
+        ];
+        assert_eq!(
+            ledger_form_of_counterpart(&format!("/Volumes/{NFC_DIR}"), &rows),
+            format!("/Volumes/{NFC_DIR}")
+        );
+        assert_eq!(
+            ledger_form_of_counterpart(&format!("/Volumes/{NFD_DIR}"), &rows),
+            format!("/Volumes/{NFD_DIR}")
+        );
+    }
+
+    /// **The constraint this door carries: healing must never manufacture a
+    /// match.** A place nothing was ever applied from comes back exactly as
+    /// typed, whatever forms the ledger holds elsewhere — so the answer stays
+    /// "nothing crossed" rather than borrowing someone else's crossing.
+    #[test]
+    fn a_never_applied_from_place_is_never_healed_onto_someone_elses_row() {
+        let rows = vec![row(
+            &format!("/Volumes/{NFD_DIR}"),
+            "2016",
+            "/archive/media",
+        )];
+
+        // A sibling sharing the accent but not the place.
+        let asked = format!("/Volumes/{NFC_DIR}-other");
+        assert_eq!(ledger_form_of_counterpart(&asked, &rows), asked);
+
+        // A folder *below* a recorded location. `placement_in_view` is
+        // descendant-or-equal on the placement, so a row recorded at the
+        // folder above claims nothing about this one — and no candidate may
+        // reach up for it either.
+        let below = format!("/Volumes/{NFC_DIR}/2016/january");
+        assert_eq!(ledger_form_of_counterpart(&below, &rows), below);
+
+        // And a place with no relation to the ledger at all.
+        assert_eq!(
+            ledger_form_of_counterpart("/elsewhere", &rows),
+            "/elsewhere"
         );
     }
 }

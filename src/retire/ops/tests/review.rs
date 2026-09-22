@@ -55,6 +55,54 @@ fn find_retirement_ignores_an_ancestor_path() {
         .is_none());
 }
 
+/// The retired-scope statement bends the text side only. A retired root's
+/// scope snapshot is recorded bytes, fixed whenever the ceremony ran; the
+/// path asked about is a user's argument or a CWD the OS handed over. Read
+/// byte-exact, a retired place answered "never known here" to the one
+/// spelling its own book is not written in — silent, and the book binds that
+/// silence forever.
+#[test]
+fn find_retirement_covers_a_path_typed_in_the_other_form() {
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    let conn = open_in_memory_for_test();
+    let archive = insert_test_root(&conn, "/archive", "archive", false);
+    insert_bound_retirement(
+        &conn,
+        &format!("/Volumes/{NFD_DIR}"),
+        100,
+        archive,
+        Some("retired/vol"),
+        None,
+    );
+
+    for asked in [
+        format!("/Volumes/{NFC_DIR}"),
+        format!("/Volumes/{NFC_DIR}/photos/2016"),
+    ] {
+        let hit = find_retirement_covering_path(&conn, &asked)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no hit for {asked}"));
+        assert_eq!(
+            hit.root_path,
+            format!("/Volumes/{NFD_DIR}"),
+            "and the snapshot's own bytes are what comes back"
+        );
+    }
+
+    // The liveness gate bends the same way: a *live* root stored in the other
+    // form must still stop the statement, or a place Canon plainly holds gets
+    // called retired.
+    insert_test_root(&conn, &format!("/Volumes/{NFD_DIR}"), "source", false);
+    assert!(
+        find_retirement_covering_path(&conn, &format!("/Volumes/{NFC_DIR}/photos"))
+            .unwrap()
+            .is_none(),
+        "a live root answers for the place, whichever form it was typed in"
+    );
+}
+
 #[test]
 fn find_retirement_prefers_the_newest_of_two_retirements() {
     // A re-added, re-retired path resolves to its newest telling.

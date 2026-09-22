@@ -319,6 +319,14 @@ pub fn set_by_path(
     // closed door it is refused by name.
     crate::core::ops::scope::refuse_parked_locations(std::slice::from_ref(&path_str), &roots)?;
 
+    // The form-tolerance law's remainder half. Root containment above is
+    // form-tolerant already; the remainder below it is not, and this path is
+    // about to be matched against the index byte-for-byte. A remainder no
+    // byte-form has sources under comes back unhealed, so the refusal below
+    // stays the one the user earned.
+    let path_str = crate::core::ops::scope::stored_form_with_sources(conn, &path_str, &roots)?
+        .unwrap_or(path_str);
+
     // Find which root contains this path (domain layer)
     let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(&path_str, &roots)
     else {
@@ -598,6 +606,13 @@ pub fn set_object_by_file(
     // Naming a file to reach its object is still an act aimed at a place, and
     // behind a closed door it is refused by name.
     crate::core::ops::scope::refuse_parked_locations(std::slice::from_ref(&path_str), &roots)?;
+
+    // The form-tolerance law's remainder half, exactly as a single-file
+    // `exclude set` asks it one command over: the object is reached through a
+    // named file, so
+    // the file has to be findable in the form the index stores.
+    let path_str = crate::core::ops::scope::stored_form_with_sources(conn, &path_str, &roots)?
+        .unwrap_or(path_str);
 
     // Find which root contains this path (domain layer)
     let Some((root_id, _root_path, _role, rel_path)) = find_containing_root(&path_str, &roots)
@@ -1263,5 +1278,121 @@ mod tests {
             is_source_excluded(db.conn(), source_id),
             "Single source should be excluded without confirmation"
         );
+    }
+
+    // =========================================================================
+    // The form-tolerance law at the two single-target doors
+    // =========================================================================
+
+    const NFC_DIR: &str = "caf\u{e9}";
+    const NFD_DIR: &str = "cafe\u{301}";
+
+    /// A dismissal aimed at one named file, typed in the other normalization.
+    ///
+    /// The root is ASCII, so root containment matches as typed and never sees
+    /// the difference; the remainder below it is what the index stores in the
+    /// other form. Without the law's remainder half this refused a file that
+    /// is plainly indexed.
+    #[test]
+    fn set_by_path_finds_a_source_the_index_stores_in_the_other_form() {
+        let mut db = make_test_db();
+        let conn = db.conn();
+        let root = insert_root(conn, "/photos", "source", false);
+        let source_id = insert_source(conn, root, &format!("{NFD_DIR}/a.jpg"), None, true, false);
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+            yes: true,
+        };
+        set_by_path(
+            &mut db,
+            Path::new(&format!("/photos/{NFC_DIR}/a.jpg")),
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            true,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            is_source_excluded(db.conn(), source_id),
+            "the file the user named is the file that was dismissed"
+        );
+    }
+
+    /// The same law one command over. Reaching an object through a named file
+    /// needs the file found first, so the remainder is healed the same way.
+    #[test]
+    fn set_object_by_file_finds_a_source_the_index_stores_in_the_other_form() {
+        let mut db = make_test_db();
+        let conn = db.conn();
+        let root = insert_root(conn, "/photos", "source", false);
+        insert_root(conn, "/archive", "archive", false);
+        let obj = insert_object(conn, "a".repeat(64).as_str(), false);
+        insert_source(
+            conn,
+            root,
+            &format!("{NFD_DIR}/a.jpg"),
+            Some(obj),
+            true,
+            false,
+        );
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+            yes: true,
+        };
+        set_object_by_file(
+            &mut db,
+            Path::new(&format!("/photos/{NFC_DIR}/a.jpg")),
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            true,
+            None,
+        )
+        .unwrap();
+
+        let excluded: i64 = db
+            .conn()
+            .query_row("SELECT excluded FROM objects WHERE id = ?", [obj], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            excluded, 1,
+            "the object behind the named file is the object that was dismissed"
+        );
+    }
+
+    /// The floor under both heals: a path no byte-form has sources under is
+    /// genuinely sourceless, and the refusal the user earned still arrives.
+    #[test]
+    fn set_by_path_still_refuses_a_path_no_form_knows() {
+        let mut db = make_test_db();
+        let conn = db.conn();
+        let root = insert_root(conn, "/photos", "source", false);
+        insert_source(conn, root, &format!("{NFD_DIR}/a.jpg"), None, true, false);
+
+        let options = SetOptions {
+            dry_run: false,
+            verbose: false,
+            yes: true,
+        };
+        let err = set_by_path(
+            &mut db,
+            Path::new(&format!("/photos/{NFC_DIR}/absent.jpg")),
+            &options,
+            "test",
+            &LedgerConfig::default(),
+            true,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("No source found for path"), "{err}");
     }
 }

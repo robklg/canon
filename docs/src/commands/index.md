@@ -44,7 +44,9 @@ These error as a single path does.
 
 Paths you pass on the command line match the index whichever Unicode
 normalization form you type. Canon stores the form the disk gave it and matches
-your argument against that.
+your argument against that. This holds wherever a path is matched against what
+Canon already knows — a scope, a named file, a manifest's recorded scope, a
+place you ask the trail about.
 
 **Filters**: Select sources using `--where` with boolean expressions:
 

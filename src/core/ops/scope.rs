@@ -351,6 +351,15 @@ pub fn resolve_root_path_any(
 ///
 /// Callers must fetch roots via `core::repo::root::fetch_all()` first.
 ///
+/// **The two arms answer the sub-directory's byte-form differently, because
+/// they know different things.** The offline arm never touches disk — that is
+/// what lets a detached archive still resolve — so the only bytes it has for
+/// the sub-directory are the ones the caller typed, and it keeps them. The
+/// fallback arm asks the filesystem, which is the only reason it can follow a
+/// symlink, and takes the form the disk hands back for whatever part of the
+/// path already exists. One folder can therefore be recorded under either
+/// byte-form, according to which arm answered.
+///
 /// Returns (root_id, root_path, relative_subdir) or error if not in an archive.
 pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String, String)> {
     // Soft resolution: try matching against known roots first (works offline),
@@ -359,11 +368,17 @@ pub fn resolve_archive_path(roots: &[Root], path: &Path) -> Result<(i64, String,
     let cleaned = clean_path(path, &cwd);
     let cleaned_str = cleaned.to_string_lossy();
 
-    let path_str = if find_containing_root(&cleaned_str, roots).is_some() {
-        cleaned_str.into_owned()
-    } else {
+    // The form-tolerance law's root half in its **as-written** reading, which
+    // is the whole of what a destination may take: an archive root stored in
+    // the disk's form has to be reachable from a `--dest` typed in the other
+    // one — the arm that matters, because it is the one a detached archive
+    // falls back on when `canonicalize` cannot answer — while the folder
+    // named below it is being created rather than found, so the bytes the
+    // user typed are the only ones there are.
+    let path_str = match domain::path::resolve_containing_root_as_written(&cleaned_str, roots) {
+        Some(rooted) => rooted.path,
         // Fallback: canonicalize (tolerating non-existent subdirectories)
-        canonicalize_maybe_missing(path)?
+        None => canonicalize_maybe_missing(path)?,
     };
 
     // **All roots, not the active ones.** Filtering here answered
@@ -602,7 +617,8 @@ pub fn resolve_history_scope(explicit_paths: &[PathBuf], roots: &[Root]) -> Opti
 }
 
 /// The index's answer to "which byte-form of this below-root remainder does
-/// Canon know?" — the form-tolerance rule's database-asking half, spoken once.
+/// Canon know?" — the sources reading of the form-tolerance law's remainder
+/// half, which is spoken once in [`known_form_of_rel`] below.
 ///
 /// The path's root has already been matched (root containment is
 /// form-tolerant in its own right, at both doors); only the relative remainder
@@ -621,16 +637,53 @@ pub fn resolve_history_scope(explicit_paths: &[PathBuf], roots: &[Root]) -> Opti
 /// different directories, and trying the path as written before any bend is
 /// what makes each of them resolve to itself.
 ///
-/// Both doors ask through this: the argument door via
+/// Both scope doors ask through this — the argument door via
 /// [`stored_form_with_sources`], the manifest door via
-/// [`resolve_recorded_scope`]. Two spellings of one question is how the two
-/// doors drifted apart in the first place.
-fn stored_form_of_rel(conn: &Connection, root_id: i64, rel: &str) -> Result<Option<String>> {
+/// [`resolve_recorded_scope`] — and so does `scan --missing`, which has no
+/// disk left to ask. Two spellings of one question is how the two doors
+/// drifted apart in the first place. A caller whose evidence is *not* sources
+/// asks [`known_form_of_rel`] with its own question rather than this one.
+pub fn stored_form_of_rel(conn: &Connection, root_id: i64, rel: &str) -> Result<Option<String>> {
+    // **The empty remainder is this reading's answer, not the loop's.** A root
+    // is valid whether or not anything has been scanned into it, which is true
+    // of *this* question and of no other: a caller asking whether anything
+    // records a place would be told yes about every root top without a single
+    // class of evidence being consulted.
     if rel.is_empty() {
         return Ok(Some(String::new()));
     }
+    known_form_of_rel(rel, |candidate| {
+        repo::source::sources_exist_at_scope(conn, root_id, candidate)
+    })
+}
+
+/// The **remainder half of the form-tolerance law, spoken once** — the loop
+/// [`stored_form_of_rel`] is one reading of.
+///
+/// The contract is the loop and nothing else: candidates run in the owner's
+/// order with **as-given first**, and the first form the question answers to
+/// is the one that carries on. `None` means no form is known, which is what
+/// makes a genuinely unknown remainder reach the caller's own disposition
+/// rather than a guess.
+///
+/// **A root-level remainder is asked about like any other.** Whether an empty
+/// remainder is known belongs to the question, not to the loop:
+/// [`stored_form_of_rel`] answers yes for its own good reason, and a loop that
+/// answered for it would hand that reason to callers whose question it is
+/// false for.
+///
+/// `known` is the question. Two readings exist because two questions do:
+/// [`stored_form_of_rel`] asks whether the index holds *sources* under a
+/// remainder, which is what both scope doors need; trail's history gate asks
+/// about notes, extraction endpoints and scoped decisions besides, and asks
+/// through here rather than over a candidate loop of its own — a second loop
+/// is exactly what drifts from the ordering this one says must not be tidied.
+pub fn known_form_of_rel(
+    rel: &str,
+    mut known: impl FnMut(&str) -> Result<bool>,
+) -> Result<Option<String>> {
     for candidate in domain::path::normalization_candidates(rel) {
-        if repo::source::sources_exist_at_scope(conn, root_id, &candidate)? {
+        if known(&candidate)? {
             return Ok(Some(candidate));
         }
     }
@@ -643,7 +696,12 @@ fn stored_form_of_rel(conn: &Connection, root_id: i64, rel: &str) -> Result<Opti
 /// `None` means no form of this path has sources; a path under no known root
 /// comes back as given, because root membership is validated separately and
 /// this gate has nothing to say about it.
-fn stored_form_with_sources(
+///
+/// **This is the reading a command reaches for when it has a whole path in
+/// hand and is about to match it against the index byte-for-byte** — the
+/// source-existence gate's own spelling, so a command that heals its argument
+/// heals it the way the boundary does rather than by a rule of its own.
+pub fn stored_form_with_sources(
     conn: &Connection,
     path: &str,
     roots: &[Root],
@@ -656,21 +714,15 @@ fn stored_form_with_sources(
     if rel_path.is_empty() {
         return Ok(Some(path.to_string()));
     }
-    Ok(
-        stored_form_of_rel(conn, root_id, &rel_path)?.map(|candidate| {
-            Path::new(&root_path)
-                .join(&candidate)
-                .to_string_lossy()
-                .into_owned()
-        }),
-    )
+    Ok(stored_form_of_rel(conn, root_id, &rel_path)?
+        .map(|candidate| domain::path::join_under_root(&root_path, &candidate)))
 }
 
 /// Resolve a **recorded** (manifest) scope: attribute each prefix to a root,
 /// then heal its remainder to the byte-form the index stores, then partition
 /// by the source-existence policy.
 ///
-/// The form-tolerance rule's fourth integration point, and the second stage no
+/// The form-tolerance law's second stage at the manifest door — the one no
 /// pure resolution can run: healing needs an answer only the index has, and
 /// `ScopeResolution` has no `Connection`. That is why this is the type's only
 /// source of outcomes in production.
@@ -2189,6 +2241,94 @@ mod tests {
             item.measured_from()[0].location(),
             format!("/photos/{NFD_DIR}"),
         );
+    }
+
+    /// The remainder half's contract, over a question that is not the
+    /// sources one: as-given first, first-confirmed wins, `None` where no
+    /// form is — and an empty remainder asked about like any other, because
+    /// whether it counts as known belongs to the question and not here.
+    #[test]
+    fn known_form_of_rel_runs_the_owners_order_whatever_the_question() {
+        let known =
+            |forms: Vec<String>| move |candidate: &str| Ok(forms.iter().any(|f| f == candidate));
+
+        // As-given first: a remainder the question already answers for is
+        // never bent, even though its twin would answer too.
+        let both = vec![NFC_DIR.to_string(), NFD_DIR.to_string()];
+        assert_eq!(
+            known_form_of_rel(NFC_DIR, known(both.clone())).unwrap(),
+            Some(NFC_DIR.to_string())
+        );
+        assert_eq!(
+            known_form_of_rel(NFD_DIR, known(both)).unwrap(),
+            Some(NFD_DIR.to_string())
+        );
+
+        // Only the twin answers: that is the form that carries on.
+        assert_eq!(
+            known_form_of_rel(NFC_DIR, known(vec![NFD_DIR.to_string()])).unwrap(),
+            Some(NFD_DIR.to_string())
+        );
+
+        // No form answers: genuinely unknown, never a guess.
+        assert_eq!(
+            known_form_of_rel(NFC_DIR, known(vec!["other".to_string()])).unwrap(),
+            None
+        );
+
+        // **A root-level remainder is asked about like any other.** Whether
+        // an empty remainder is known belongs to the question: a loop that
+        // answered for it would be telling trail's history gate that every
+        // root top is recorded, without one class of evidence consulted.
+        let mut asked = Vec::new();
+        assert_eq!(
+            known_form_of_rel("", |c| {
+                asked.push(c.to_string());
+                Ok(false)
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(asked, vec![String::new()], "asked, and asked exactly once");
+    }
+
+    /// And the reading that *does* answer for it, for its own reason: a root
+    /// is valid whether or not anything has been scanned into it, so the
+    /// source-existence gate keeps a root-level scope whatever the index
+    /// holds. That answer lives there and nowhere above it.
+    #[test]
+    fn the_sources_reading_keeps_a_root_level_remainder_with_no_sources() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        assert!(
+            !repo::source::sources_exist_at_scope(&conn, root_id, "").unwrap(),
+            "the root really is empty"
+        );
+        assert_eq!(
+            stored_form_of_rel(&conn, root_id, "").unwrap(),
+            Some(String::new())
+        );
+    }
+
+    /// `cluster generate --dest` resolves its destination **offline** when a
+    /// known archive root contains it — the arm a detached archive falls back
+    /// on. That arm owes the law's root half: a root stored in the disk's
+    /// form has to be reachable from a `--dest` typed in the other one.
+    ///
+    /// The root half **as written**, which is the discriminating half here:
+    /// the folder below the root is being created rather than found, so it
+    /// comes back in the bytes the caller typed even though the root above it
+    /// had to be bent to be found. A remainder written in the other form is
+    /// the only input that can tell the two readings apart — an ASCII one
+    /// leaves the claim untestable.
+    #[test]
+    fn an_archive_destination_matches_a_root_stored_in_the_other_form() {
+        let roots = vec![make_test_root(7, &format!("/mnt/{NFD_DIR}"), "archive")];
+        let (root_id, root_path, rel) =
+            resolve_archive_path(&roots, Path::new(&format!("/mnt/{NFC_DIR}/{NFC_DIR}/new")))
+                .unwrap();
+        assert_eq!((root_id, root_path), (7, format!("/mnt/{NFD_DIR}")));
+        assert_eq!(rel, format!("{NFC_DIR}/new"));
     }
 
     /// The roster law, unchanged by the second stage: a prefix under no known

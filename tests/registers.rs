@@ -60,7 +60,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/core/CLAUDE.md",
-        words: 6792,
+        words: 7245,
         verifiers: 17,
     },
     Ceiling {
@@ -70,7 +70,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/exclude/CLAUDE.md",
-        words: 1523,
+        words: 1534,
         verifiers: 13,
     },
     Ceiling {
@@ -95,8 +95,8 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/retire/CLAUDE.md",
-        words: 3237,
-        verifiers: 7,
+        words: 3335,
+        verifiers: 8,
     },
     Ceiling {
         path: "src/roots/CLAUDE.md",
@@ -105,7 +105,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/scan/CLAUDE.md",
-        words: 4224,
+        words: 4290,
         verifiers: 1,
     },
     Ceiling {
@@ -125,8 +125,8 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/trail/CLAUDE.md",
-        words: 7369,
-        verifiers: 27,
+        words: 7649,
+        verifiers: 30,
     },
     Ceiling {
         path: "src/worklist/CLAUDE.md",
