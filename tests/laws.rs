@@ -576,6 +576,14 @@ const LAWS: &[Law] = &[
         record: "2026-08-30",
     },
     Law {
+        name: "derived-once",
+        owner: "expr/domain/value.rs",
+        verifier: "the_filter_answers_every_computed_key_as_the_resolver_does",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Recognised,
+        record: "2026-09-24",
+    },
+    Law {
         name: "extraction round-trip",
         owner: "core/domain/extraction.rs",
         verifier: "round_trip_law_backfill_matches_forward_recording",

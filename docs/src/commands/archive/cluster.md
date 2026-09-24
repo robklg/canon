@@ -4,28 +4,28 @@ Generate a manifest of files matching filters. The `--dest` flag specifies where
 
 ```bash
 # All photos to an archive (unhashed sources are automatically skipped)
-canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive/Photos
+canon cluster generate --where 'source.ext|lowercase IN (jpg, png, heic)' --dest /Volumes/Archive/Photos
 
 # Destination can be a subdirectory within an archive
-canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive/Photos/2024
+canon cluster generate --where 'source.ext|lowercase IN (jpg, png, heic)' --dest /Volumes/Archive/Photos/2024
 
 # Scope to a specific path
 canon cluster generate /path/to/photos --dest /Volumes/Archive
 
 # Custom output file
-canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive -o my-manifest.toml
+canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archive -o my-manifest.toml
 
 # Allow sources from archive roots
-canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --allow archived
+canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archive --allow archived
 
 # Allow duplicate content (same hash already in an archive)
-canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --allow duplicates
+canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archive --allow duplicates
 
 # Show which files were excluded (already archived)
-canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --show-archived
+canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archive --show-archived
 
 # Overwrite existing manifest file
-canon cluster generate --where 'source.ext=jpg' --dest /Volumes/Archive --force
+canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archive --force
 ```
 
 The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) holding what the run settled: the resolved scope, and one line per source recording its state and where it goes. The lock is not edited by hand: [`apply`](apply.md) reads it as written.
@@ -33,7 +33,7 @@ The command generates two files: a manifest (`.toml`) that you edit, and a lock 
 **Typical workflow:**
 
 ```bash
-canon cluster generate --where 'source.ext IN (jpg, png, heic)' --dest /Volumes/Archive
+canon cluster generate --where 'source.ext|lowercase IN (jpg, png, heic)' --dest /Volumes/Archive
 # Edit manifest.toml to customize the output pattern
 canon apply manifest.toml --dry-run   # Preview
 canon apply manifest.toml             # Execute
@@ -71,7 +71,7 @@ The generated manifest includes a cluster summary, a notes section for your own 
 
 [meta]
 version = 2
-query = ["source.ext IN ('jpg', 'png', 'heic')"]
+query = ["source.ext|lowercase IN ('jpg', 'png', 'heic')"]
 scope = ["/path/to/photos"]
 generated_at = "2026-02-28T12:00:00Z"
 lock_hash = "abc123..."
@@ -120,7 +120,7 @@ pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{has
 pattern = "{content.Make}/{content.Model}/{filename}"
 
 # By file type
-pattern = "{source.ext}/{filename}"
+pattern = "{source.ext|lowercase}/{filename}"
 ```
 
 See [Pattern Expressions](../../reference/expr.md) for the full syntax reference, including modifiers, path accessors, and aliases.

@@ -4,14 +4,16 @@
 //! parsed filters, get back the ids that match. Inside, the work runs against
 //! a prefetched cache rather than a query per source, with a per-source
 //! fallback for the built-in keys that are derived from source columns instead
-//! of stored as facts.
+//! of stored as facts. Those values are read through the resolver that owns
+//! them (`get_builtin_value`), never derived again here.
 //!
-//! That fallback queries the database directly rather than going through the
-//! repository stratum beside it — the one place here that does. It is a known
-//! exception, marked and pinned at the function itself.
+//! That fallback reads the source row and the object link straight from the
+//! database rather than going through the repository stratum beside it — the
+//! one place here that does. It is a known exception, marked and pinned at the
+//! function itself.
 
 use anyhow::{bail, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::core::domain::fact;
 use crate::expr::domain::cache::{to_local_fact_value, FactCache, FactValue};
@@ -19,8 +21,9 @@ use crate::expr::domain::filter::{
     compare_fact_value, detect_status_predicates, extract_comparable_keys, extract_keys, CompareOp,
     Expr, Filter, FilterResult, StatusPredicate,
 };
-use crate::expr::domain::key::{is_builtin_key, parse_key_with_modifiers, BuiltinKey};
+use crate::expr::domain::key::{parse_key_with_modifiers, BuiltinKey};
 use crate::expr::domain::transform::{apply_accessor, apply_modifier, ModifierCall, PathAccessor};
+use crate::expr::domain::value::{get_builtin_value, SourceAttributes};
 use crate::expr::repo::{get_fact_value, is_known_key, prefetch_facts, prefetch_status_data};
 
 // ============================================================================
@@ -98,19 +101,19 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
 // Fact Checking Functions
 // ============================================================================
 
-/// Check fact comparison for built-in keys (derived from source columns)
-/// This is used by the cached version for built-in key fallback
+/// Check one comparison for a source: a built-in key is read through the
+/// resolver from the source row, anything else is a stored fact. This is used
+/// by the cached version for the built-in keys and for nothing it holds.
 ///
 /// This is the one function in this stratum that queries the database itself
 /// rather than going through the repository beside it, and the exception is
 /// pinned by a test so it cannot spread or be forgotten. Moving it whole into
 /// the repository would not help — that would put comparison logic there
 /// instead, which breaks the same rule from the other side. What removes the
-/// exception is deriving built-in values in one place rather than two, here
-/// and in the value surface the rest of the engine reads through; there would
-/// then be nothing left for this to do.
-// AUDIT: queries the database from the operations stratum, accepted until
-// built-in value derivation is unified.
+/// exception is moving the two reads it makes — the source row and the object
+/// link — into the repository, leaving the comparison here.
+// AUDIT: queries the database from the operations stratum, accepted until its
+// source-row and object-link reads move into the repository stratum.
 fn check_fact_compare(
     conn: &Connection,
     source_id: i64,
@@ -121,21 +124,44 @@ fn check_fact_compare(
     // Parse key, accessor, and modifiers
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
 
-    // Handle built-in keys via enum
+    // Built-in keys are read through the resolver that owns their meaning. A
+    // key it cannot answer from the source row (the hash keys) falls through
+    // to the stored-fact lookup below.
     if let Some(builtin) = BuiltinKey::from_str(&base_key) {
-        match builtin {
-            // Text fields
-            BuiltinKey::SourceExt | BuiltinKey::Ext => {
-                let rel_path: String = conn.query_row(
-                    "SELECT rel_path FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let ext = std::path::Path::new(&rel_path)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                let fact_value = FactValue::Text(ext.to_string());
+        let row: Option<(SourceAttributes, bool, bool)> = conn
+            .query_row(
+                "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.mtime, s.device, s.inode
+                 FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
+                [source_id],
+                |row| {
+                    let device: Option<i64> = row.get(6)?;
+                    let inode: Option<i64> = row.get(7)?;
+                    Ok((
+                        SourceAttributes {
+                            id: row.get(0)?,
+                            root_id: row.get(1)?,
+                            root_path: row.get(2)?,
+                            rel_path: row.get(3)?,
+                            size: row.get(4)?,
+                            mtime: row.get(5)?,
+                            device: device.unwrap_or(0),
+                            inode: inode.unwrap_or(0),
+                        },
+                        device.is_some(),
+                        inode.is_some(),
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((attributes, has_device, has_inode)) = row {
+            // A NULL device or inode column has no value to compare.
+            if (builtin == BuiltinKey::SourceDevice && !has_device)
+                || (builtin == BuiltinKey::SourceInode && !has_inode)
+            {
+                return Ok(false);
+            }
+            if let Some(builtin_value) = get_builtin_value(&attributes, builtin) {
+                let fact_value = to_local_fact_value(&builtin_value);
                 if let Ok(modified) =
                     apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
                 {
@@ -143,179 +169,6 @@ fn check_fact_compare(
                 }
                 return Ok(false);
             }
-            BuiltinKey::Filename => {
-                let rel_path: String = conn.query_row(
-                    "SELECT rel_path FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let filename = std::path::Path::new(&rel_path)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&rel_path);
-                let fact_value = FactValue::Text(filename.to_string());
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::Stem => {
-                let rel_path: String = conn.query_row(
-                    "SELECT rel_path FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let stem = std::path::Path::new(&rel_path)
-                    .file_stem()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("");
-                let fact_value = FactValue::Text(stem.to_string());
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourceRoot => {
-                let root_path: String = conn.query_row(
-                    "SELECT r.path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let fact_value = FactValue::Text(root_path);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourcePath => {
-                let (root_path, rel_path): (String, String) = conn.query_row(
-                    "SELECT r.path, s.rel_path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
-                    [source_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-                let full_path = if rel_path.is_empty() {
-                    root_path
-                } else {
-                    format!("{root_path}/{rel_path}")
-                };
-                let fact_value = FactValue::Text(full_path);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourceRelPath => {
-                let rel_path: String = conn.query_row(
-                    "SELECT rel_path FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let fact_value = FactValue::Text(rel_path);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-
-            // Numeric fields
-            BuiltinKey::SourceSize | BuiltinKey::Size => {
-                let v: i64 = conn.query_row(
-                    "SELECT size FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let fact_value = FactValue::Num(v as f64);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
-                let v: i64 = conn.query_row(
-                    "SELECT mtime FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                // mtime is a time value, so use Time type for proper modifier support
-                let fact_value = FactValue::Time(v);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourceDevice => {
-                let device: Option<i64> = conn.query_row(
-                    "SELECT device FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                if let Some(d) = device {
-                    let fact_value = FactValue::Num(d as f64);
-                    if let Ok(modified) =
-                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                    {
-                        return Ok(compare_fact_value(&modified, op, value));
-                    }
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourceInode => {
-                let inode: Option<i64> = conn.query_row(
-                    "SELECT inode FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                if let Some(i) = inode {
-                    let fact_value = FactValue::Num(i as f64);
-                    if let Ok(modified) =
-                        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                    {
-                        return Ok(compare_fact_value(&modified, op, value));
-                    }
-                }
-                return Ok(false);
-            }
-            BuiltinKey::RootId => {
-                let v: i64 = conn.query_row(
-                    "SELECT root_id FROM sources WHERE id = ?",
-                    [source_id],
-                    |row| row.get(0),
-                )?;
-                let fact_value = FactValue::Num(v as f64);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-            BuiltinKey::SourceId | BuiltinKey::Id => {
-                // The source ID is the source_id parameter itself
-                let fact_value = FactValue::Num(source_id as f64);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
-
-            // Other builtin keys (aliases, etc.) fall through to fact lookup
-            _ => {}
         }
     }
 
@@ -426,11 +279,13 @@ fn check_fact_exists_cached(
         }
     }
 
-    // Check for built-in keys
-    if base_key == "content.hash.sha256" {
-        return Ok(cache.get_object_id(source_id).is_some());
+    // A built-in the resolver answers from the source row (`is_computed`)
+    // exists for every source; the keys it cannot answer that way (the hash
+    // keys) exist when the source is linked to an object.
+    if let Some(builtin) = BuiltinKey::from_str(&base_key) {
+        return Ok(builtin.is_computed() || cache.get_object_id(source_id).is_some());
     }
-    Ok(is_builtin_key(&base_key))
+    Ok(false)
 }
 
 fn check_fact_compare_cached(
@@ -791,6 +646,138 @@ mod tests {
         let r1 = apply_filters(&mut conn, &ids, &[f1]).unwrap();
         let r2 = apply_filters(&mut conn, &ids, &[f2]).unwrap();
         assert_eq!(r1.source_ids, r2.source_ids);
+    }
+
+    #[test]
+    fn ext_in_a_filter_keeps_its_case_and_lowercase_folds_it() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let upper = insert_source(&conn, root, "2024/IMG_001.JPG");
+        let lower = insert_source(&conn, root, "2024/b.jpg");
+        let ids = [upper, lower];
+
+        let run = |conn: &mut RawConnection, where_clause: &str| {
+            let filter = Filter::parse(where_clause).unwrap();
+            apply_filters(conn, &ids, &[filter]).unwrap().source_ids
+        };
+        assert_eq!(run(&mut conn, "source.ext=JPG"), vec![upper]);
+        assert_eq!(run(&mut conn, "ext=jpg"), vec![lower]);
+        assert_eq!(
+            run(&mut conn, "source.ext|lowercase=jpg"),
+            vec![upper, lower]
+        );
+        assert_eq!(run(&mut conn, "ext|uppercase=JPG"), vec![upper, lower]);
+    }
+
+    #[test]
+    fn the_filter_answers_every_computed_key_as_the_resolver_does() {
+        use strum::IntoEnumIterator;
+
+        // Two sources that differ in every attribute a built-in reads, so an
+        // equality selects exactly one of them and an inequality the other.
+        let mut conn = setup_test_db();
+        let root_a = insert_root(&conn, "/src");
+        let root_b = insert_root(&conn, "/other");
+        let insert = |root: i64, rel_path: &str, size: i64, mtime: i64, device: i64, inode: i64| {
+            conn.execute(
+                "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+                 VALUES (?, ?, ?, ?, '', 0, 0, ?, ?)",
+                rusqlite::params![root, rel_path, size, mtime, device, inode],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let subject = insert(root_a, "2024/IMG_001.JPG", 1000, 1704067200, 7, 11);
+        let other = insert(root_b, "b.png", 2000, 1710000000, 8, 12);
+        let attributes = SourceAttributes {
+            id: subject,
+            root_id: root_a,
+            root_path: "/src".to_string(),
+            rel_path: "2024/IMG_001.JPG".to_string(),
+            size: 1000,
+            mtime: 1704067200,
+            device: 7,
+            inode: 11,
+        };
+
+        for builtin in BuiltinKey::iter().filter(|b| b.is_computed()) {
+            let name: &'static str = builtin.into();
+            let expected = get_builtin_value(&attributes, builtin)
+                .unwrap_or_else(|| panic!("{name} is computed but the resolver has no answer"));
+            let text = match expected {
+                fact::FactValue::Text(t) | fact::FactValue::Path(t) => t,
+                fact::FactValue::Num(n) => format!("{n}"),
+                fact::FactValue::Time(t) => t.to_string(),
+            };
+
+            for (op, want) in [("=", subject), ("!=", other)] {
+                let filter = Filter::parse(&format!("{name}{op}{text}")).unwrap();
+                let matched = apply_filters(&mut conn, &[subject, other], &[filter])
+                    .unwrap_or_else(|e| panic!("{name}{op}{text} failed: {e}"))
+                    .source_ids;
+                assert_eq!(
+                    matched,
+                    vec![want],
+                    "{name}{op}{text} must answer as the resolver's own value does"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_null_device_or_inode_column_answers_false_for_its_own_key() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, 'a.jpg', 1000, 1704067200, '', 0, 0, NULL, NULL)",
+            [root],
+        )
+        .unwrap();
+        let s1 = conn.last_insert_rowid();
+
+        for clause in [
+            "source.device=0",
+            "source.inode=0",
+            "source.device!=5",
+            "source.inode!=5",
+        ] {
+            let filter = Filter::parse(clause).unwrap();
+            let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+            assert!(
+                result.source_ids.is_empty(),
+                "{clause} must not select a NULL column"
+            );
+        }
+        let filter = Filter::parse("source.size=1000").unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        assert_eq!(result.source_ids, vec![s1]);
+    }
+
+    #[test]
+    fn a_built_in_exists_when_the_resolver_answers_it_or_the_source_is_linked_to_an_object() {
+        use strum::IntoEnumIterator;
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let obj = insert_object(&conn, "hash_exists");
+        let hashed = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
+        let unhashed = insert_source_with_object(&conn, root, "b.jpg", None);
+        let ids = [hashed, unhashed];
+
+        for builtin in BuiltinKey::iter() {
+            let name: &'static str = builtin.into();
+            let filter = Filter::parse(&format!("{name}?")).unwrap();
+            let matched = apply_filters(&mut conn, &ids, &[filter])
+                .unwrap()
+                .source_ids;
+            let expected = if builtin.is_computed() {
+                vec![hashed, unhashed]
+            } else {
+                vec![hashed]
+            };
+            assert_eq!(matched, expected, "{name}? disagrees with the resolver");
+        }
     }
 
     #[test]

@@ -205,19 +205,19 @@ Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md
 --where 'NOT content.hash.sha256?'
 
 # JPG files only
---where 'source.ext=jpg'
+--where 'source.ext|lowercase=jpg'
 
 # JPG or PNG files
---where 'source.ext=jpg OR source.ext=png'
+--where 'source.ext|lowercase=jpg OR source.ext|lowercase=png'
 
 # Common image formats
---where 'source.ext IN (jpg, png, gif, webp)'
+--where 'source.ext|lowercase IN (jpg, png, gif, webp)'
 
 # Exclude certain extensions
---where 'source.ext NOT IN (tmp, bak, log)'
+--where 'source.ext|lowercase NOT IN (tmp, bak, log)'
 
 # Not temporary files
---where 'NOT source.ext=tmp'
+--where 'NOT source.ext|lowercase=tmp'
 
 # iPhone photos (content. prefix is optional)
 --where 'Make=Apple'
@@ -229,8 +229,8 @@ Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md
 --where 'source.mtime>=2024-01-01'
 
 # Large images (combining with parentheses)
---where '(source.ext=jpg OR source.ext=png) AND source.size>1000000'
+--where '(source.ext|lowercase=jpg OR source.ext|lowercase=png) AND source.size>1000000'
 
 # Multiple --where flags combine with AND
---where 'source.ext=jpg' --where 'content.Make=Apple'
+--where 'source.ext|lowercase=jpg' --where 'content.Make=Apple'
 ```

@@ -7,7 +7,7 @@ List sources matching filters. Useful for quick inspection and piping to other t
 canon ls
 
 # List sources matching a filter
-canon ls --where 'source.ext=jpg'
+canon ls --where 'source.ext|lowercase=jpg'
 
 # Filter by source ID
 canon ls --where 'source.id=12345'
@@ -36,13 +36,13 @@ canon ls --include excluded
 canon ls --include all
 
 # Query all roots, ignoring current directory scope
-canon ls --global --where 'source.ext=jpg'
+canon ls --global --where 'source.ext|lowercase=jpg'
 
 # Long format with size and date
 canon ls -l
 
 # Null-delimited output for xargs (handles spaces in paths, macOS)
-canon ls -0 --where 'source.ext=jpg' | xargs -0 open -a Preview
+canon ls -0 --where 'source.ext|lowercase=jpg' | xargs -0 open -a Preview
 
 # Combine status predicates with fact filters
 canon ls --where 'NOT archived? AND mime~image/*'

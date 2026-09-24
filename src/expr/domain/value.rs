@@ -146,7 +146,7 @@ pub fn get_builtin_value(source: &SourceAttributes, builtin: BuiltinKey) -> Opti
             let ext = std::path::Path::new(&source.rel_path)
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
+                .map(str::to_string)
                 .unwrap_or_default();
             Some(FactValue::Text(ext))
         }
@@ -320,6 +320,19 @@ mod tests {
     fn resolve_source_ext() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.ext").unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        assert_eq!(result, Some("jpg".to_string()));
+    }
+
+    #[test]
+    fn resolve_source_ext_keeps_its_case() {
+        let mut source = make_source();
+        source.rel_path = "2024/IMG_001.JPG".to_string();
+        let key = ParsedFactKey::parse("source.ext").unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        assert_eq!(result, Some("JPG".to_string()));
+
+        let key = ParsedFactKey::parse("source.ext|lowercase").unwrap();
         let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
         assert_eq!(result, Some("jpg".to_string()));
     }

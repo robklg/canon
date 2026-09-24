@@ -7,7 +7,7 @@ These facts are automatically available for all sources without enrichment.
 | Fact | Type | Description |
 |------|------|-------------|
 | `source.id` | num | Database ID (hidden*) |
-| `source.ext` | text | File extension (lowercase, no dot) |
+| `source.ext` | text | File extension (no dot) |
 | `source.size` | num | File size in bytes |
 | `source.mtime` | time | Modification timestamp |
 | `source.path` | path | Full absolute path |

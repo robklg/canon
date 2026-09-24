@@ -189,19 +189,28 @@ such a row, which is why the widening is unreachable in practice and pinned anyw
 ## The one pinned exception
 
 `ops/filter.rs`'s `check_fact_compare` queries the database from the operations stratum
-instead of going through the repository beside it. It carries an `// AUDIT:` marker and is
+instead of going through the repository beside it: it reads the source row a built-in key is
+derived from, and the object link stored facts hang off. It carries an `// AUDIT:` marker and is
 pinned by `the_facility_leaves_sql_to_its_repo_but_for_one_pinned_exception`
 (`tests/architecture.rs`), which asserts the set of SQL-speaking functions in `ops/` is exactly
 this one *and* that it still carries its marker. The pin fails if a second such function
 appears, if the marker is dropped while the hazard stands, or if the site disappears — which is
 what the repair looks like.
 
-Moving the function whole into `repo` would not help: that puts comparison logic in the
-repository instead, breaking the same rule from the other side. What retires the exception is
-deriving built-in values in **one** place rather than two — here and in the value surface the
-rest of the engine reads through — after which there is nothing left for it to do. The marker
-and the pin are retired by the same commit that lands that repair, which is what stops the
-repair landing quietly.
+Moving the function whole into `repo` would put comparison logic in the repository, breaking the
+same rule from the other side. What retires the exception is moving its two reads into `repo`
+and leaving the comparison in `ops`. The marker and the pin are retired by the same commit.
+
+## Built-in values are derived once
+
+`get_builtin_value` (`domain/value.rs`) is the one place a built-in key's value is derived from a
+source row. The `--where` comparison, `facts --key` on a listed key, and a pattern's `{source.*}`
+key read it. The exists check (`?`) reads its partition, `is_computed()`: computed keys exist for
+every source; a key the resolver cannot answer from the row (`hash`, `hash_short`,
+`content.hash.sha256`) exists when the source is linked to an object. One test holds the
+comparison to the resolver's value for every computed key, another holds `?` to that partition.
+Not bound: the pattern aliases (accessor and modifier chains) and the unlisted alias spellings
+that `facts --key` reports no value for (`ext`, `stem`, `id`).
 
 ## Mechanics
 

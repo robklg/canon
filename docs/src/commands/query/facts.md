@@ -13,7 +13,7 @@ canon facts /path/to/photos
 canon facts --global
 
 # With filters
-canon facts --where 'source.ext=jpg'
+canon facts --where 'source.ext|lowercase=jpg'
 
 # Value distribution for a specific fact
 canon facts --key content.Make
@@ -48,6 +48,9 @@ canon facts --where '@image' --by-root
 
 # Group fact values by root (which roots contribute to each value?)
 canon facts --key source.ext --by-root
+
+# Count extensions regardless of letter case
+canon facts --key 'source.ext|lowercase'
 
 # Group by any fact key (with modifiers)
 canon facts --key source.ext --group-by 'source.mtime|year'

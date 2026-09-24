@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use super::domain::cache::{to_fact_value, FactCache, FactValue};
 use super::domain::filter::{StatusPredicate, UsedStatus};
-use super::domain::key::{is_builtin_key, parse_key_with_modifiers};
+use super::domain::key::{is_builtin_key, parse_key_with_modifiers, BuiltinKey};
 use crate::core::repo::db::populate_temp_sources;
 
 // ============================================================================
@@ -47,8 +47,13 @@ pub fn prefetch_facts(
     }
 
     if stored_keys.is_empty() {
-        // content.hash.sha256? needs source_objects even with no stored keys.
-        if base_keys.iter().any(|k| k == "content.hash.sha256") {
+        // The keys the resolver cannot answer from the source row (the hash
+        // keys) exist through the object link, so they need source_objects
+        // even with no stored keys.
+        if base_keys
+            .iter()
+            .any(|k| BuiltinKey::from_str(k).is_some_and(|b| !b.is_computed()))
+        {
             // Filling the temp source table opens and commits a transaction
             // of its own, and clears whatever a previous fill left behind.
             // Two consequences hold for every query in this module that uses

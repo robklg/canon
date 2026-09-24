@@ -1187,13 +1187,14 @@ const SQL_CALLS: &[&str] = &[
 /// The expression facility's operations stratum leaves SQL to its repository
 /// stratum — with exactly one accepted exception, pinned here.
 ///
-/// `check_fact_compare` is the per-source fallback for built-in keys, the
-/// values derived from source columns rather than stored as facts, and it
-/// queries the database itself. It is accepted rather than repaired: moving it
-/// whole into `repo` would put comparison logic there instead, which is the
-/// same law broken from the other side. The repair that does work is deriving
-/// built-in values in one place rather than two, which deletes the function
-/// outright — so the exception ends by being removed, not by being relocated.
+/// `check_fact_compare` is the per-source comparison for built-in keys and
+/// stored facts, and it queries the database itself: the source row a built-in
+/// is read from, and the object link stored facts hang off. It is accepted
+/// rather than repaired: moving it whole into `repo` would put comparison
+/// logic there instead, which is the same law broken from the other side. The
+/// repair that does work is moving those two reads into `repo` and leaving the
+/// comparison in `ops`, after which the function speaks no SQL — so the
+/// exception ends by being removed, not by being relocated.
 ///
 /// The exception predates the stratum. What changed when the code moved is
 /// that the file it sits in now claims a layer, so the claim needs a stated

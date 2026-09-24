@@ -130,5 +130,5 @@ pattern = "{content.DateTimeOriginal|date}/{hash_short}_{filename}"
 pattern = "{content.Make}/{content.Model}/{filename}"
 
 # By file type and year
-pattern = "{source.ext}/{source.mtime|year}/{filename}"
+pattern = "{source.ext|lowercase}/{source.mtime|year}/{filename}"
 ```
