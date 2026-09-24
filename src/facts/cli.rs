@@ -745,8 +745,8 @@ pub fn show_aliases() {
     }
 
     println!();
-    println!("Note: 'filename' and 'ext' also work in --where filters.");
-    println!("Other aliases (stem, hash, hash_short, id) only work in manifest patterns.");
+    println!("Note: 'filename', 'stem', 'ext' and 'id' also work in --where filters.");
+    println!("Other aliases (hash, hash_short) only work in manifest patterns.");
 }
 
 #[cfg(test)]

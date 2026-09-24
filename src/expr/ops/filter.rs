@@ -161,6 +161,24 @@ fn check_fact_compare(
                 }
                 return Ok(false);
             }
+            BuiltinKey::Stem => {
+                let rel_path: String = conn.query_row(
+                    "SELECT rel_path FROM sources WHERE id = ?",
+                    [source_id],
+                    |row| row.get(0),
+                )?;
+                let stem = std::path::Path::new(&rel_path)
+                    .file_stem()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("");
+                let fact_value = FactValue::Text(stem.to_string());
+                if let Ok(modified) =
+                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
+                {
+                    return Ok(compare_fact_value(&modified, op, value));
+                }
+                return Ok(false);
+            }
             BuiltinKey::SourceRoot => {
                 let root_path: String = conn.query_row(
                     "SELECT r.path FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
@@ -602,6 +620,28 @@ mod tests {
 
         // Modifier failure treated as non-match, not error
         assert!(result.source_ids.is_empty());
+    }
+
+    #[test]
+    fn stem_in_a_filter_is_the_filename_without_its_last_extension() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let s1 = insert_source(&conn, root, "2024/IMG_001.JPG");
+        let s2 = insert_source(&conn, root, "2024/archive.tar.gz");
+        let s3 = insert_source(&conn, root, "NoExt");
+        let all = [s1, s2, s3];
+
+        let ids = |conn: &mut RawConnection, expr: &str| {
+            let filter = Filter::parse(expr).unwrap();
+            apply_filters(conn, &all, &[filter]).unwrap().source_ids
+        };
+
+        assert_eq!(ids(&mut conn, "stem=IMG_001"), vec![s1]);
+        assert_eq!(ids(&mut conn, "stem=archive.tar"), vec![s2]);
+        assert_eq!(ids(&mut conn, "stem=NoExt"), vec![s3]);
+        assert_eq!(ids(&mut conn, "stem=other"), Vec::<i64>::new());
+        // A modifier applies to the stem, not to the filename around it.
+        assert_eq!(ids(&mut conn, "stem|uppercase=ARCHIVE.TAR"), vec![s2]);
     }
 
     // ========================================================================
