@@ -525,3 +525,49 @@ fn test_execute_clear_object_clears_and_returns_summary() {
     let objects = crate::core::repo::object::batch_fetch_by_ids(&conn, &[obj_id]).unwrap();
     assert!(!objects.get(&obj_id).unwrap().is_excluded());
 }
+
+// =========================================================================
+// hash prefixes on text Canon did not write
+// =========================================================================
+
+/// An imported `hash.sha256` is stored as given, so an object's hash can be
+/// any text. Every check that shows its prefix cuts between characters, never
+/// inside one — byte 16 of these hashes falls inside an accented letter.
+#[test]
+fn a_hash_prefix_is_cut_between_characters() {
+    let conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let open_hash = format!("a{}", "é".repeat(20));
+    let excluded_hash = format!("b{}", "é".repeat(20));
+    let open = insert_object(&conn, &open_hash, false);
+    let excluded = insert_object(&conn, &excluded_hash, true);
+    insert_source(&conn, root, "a.jpg", Some(open));
+    insert_source(&conn, root, "b.jpg", Some(excluded));
+    let open_prefix = format!("a{}", "é".repeat(15));
+    let excluded_prefix = format!("b{}", "é".repeat(15));
+
+    let ObjectExclusionCheck::Ready { hash_prefix, .. } =
+        check_set_object_by_hash(&conn, &open_hash).unwrap()
+    else {
+        panic!("expected Ready");
+    };
+    assert_eq!(hash_prefix, open_prefix);
+
+    let ObjectExclusionCheck::Ready { hash_prefix, .. } =
+        check_set_object_by_file(&conn, root, "a.jpg", "/photos/a.jpg").unwrap()
+    else {
+        panic!("expected Ready");
+    };
+    assert_eq!(hash_prefix, open_prefix);
+
+    let ObjectClearCheck::Ready { hash_prefix, .. } =
+        check_clear_object(&conn, &excluded_hash).unwrap()
+    else {
+        panic!("expected Ready");
+    };
+    assert_eq!(hash_prefix, excluded_prefix);
+
+    let listed = list_excluded_objects(&conn).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].hash_prefix, excluded_prefix);
+}

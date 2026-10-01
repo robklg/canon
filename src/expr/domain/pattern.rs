@@ -351,6 +351,7 @@ pub fn placement_shape(pattern: &Pattern) -> (Option<String>, bool) {
     // holding `..` would name a directory that never exists.
     let prefix = match head.rfind('/') {
         Some(cut) => {
+            #[expect(clippy::string_slice, reason = "an `rfind` position")]
             let dir = normalize_pattern_result(&head[..cut].replace("..", "_"));
             (!dir.is_empty()).then_some(dir)
         }

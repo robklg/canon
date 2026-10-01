@@ -100,6 +100,10 @@ fn law_citations(display_path: &str, text: &str) -> Vec<Citation> {
     let mut out = Vec::new();
     for (base, paragraph) in paragraphs(text) {
         for (key, offset) in law_keys_in(paragraph) {
+            #[expect(
+                clippy::string_slice,
+                reason = "a paragraph start plus a `char_indices` offset"
+            )]
             out.push(Citation {
                 key,
                 file: display_path.to_string(),
@@ -125,6 +129,7 @@ fn paragraphs(text: &str) -> Vec<(usize, &str)> {
     for line in text.split_inclusive('\n') {
         if line.trim().is_empty() {
             if let Some(from) = start.take() {
+                #[expect(clippy::string_slice, reason = "sums of whole-line lengths")]
                 out.push((from, &text[from..offset]));
             }
         } else if start.is_none() {
@@ -133,6 +138,7 @@ fn paragraphs(text: &str) -> Vec<(usize, &str)> {
         offset += line.len();
     }
     if let Some(from) = start {
+        #[expect(clippy::string_slice, reason = "a sum of whole-line lengths")]
         out.push((from, &text[from..]));
     }
     out

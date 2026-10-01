@@ -4,6 +4,7 @@ pub(super) mod import;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::IncludeSet;
@@ -264,6 +265,23 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
     }
 }
 
+/// A value as the distribution table's first column shows it: labelled when
+/// empty, cut to fit the 40-character column when long. The cut counts
+/// characters, as the column's padding does, never bytes.
+fn value_cell(value: &str, base_key: &str) -> String {
+    if value.is_empty() {
+        if base_key == "source.ext" {
+            "(no extension)".to_string()
+        } else {
+            "(empty)".to_string()
+        }
+    } else if value.chars().count() > 38 {
+        format!("{}...", first_chars(value, 35))
+    } else {
+        value.to_string()
+    }
+}
+
 fn display_distribution(result: &DistributionResult, display_key: &str, key: &ParsedFactKey) {
     use std::io::Write;
     // Build label with category for builtin keys
@@ -280,17 +298,7 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
     let _ = writeln!(handle, "{}", "─".repeat(62));
 
     for entry in &result.entries {
-        let display_val = if entry.value.is_empty() {
-            if key.base_key == "source.ext" {
-                "(no extension)".to_string()
-            } else {
-                "(empty)".to_string()
-            }
-        } else if entry.value.len() > 38 {
-            format!("{}...", &entry.value[..35])
-        } else {
-            entry.value.clone()
-        };
+        let display_val = value_cell(&entry.value, &key.base_key);
         let coverage = (entry.count as f64 / result.total_sources as f64) * 100.0;
         if writeln!(
             handle,
@@ -752,6 +760,30 @@ pub fn show_aliases() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // value_cell tests
+    // =========================================================================
+
+    /// A long value whose 35th byte falls inside an accented letter is cut
+    /// between letters, never inside one.
+    #[test]
+    fn a_long_accented_value_is_cut_between_characters() {
+        let cell = value_cell(&"é".repeat(40), "content.title");
+        assert_eq!(cell, format!("{}...", "é".repeat(35)));
+    }
+
+    /// The cut is measured in characters, as the column's padding is: a value
+    /// that fits the column in characters prints whole, however many bytes.
+    #[test]
+    fn a_value_that_fits_in_characters_prints_whole() {
+        let value = "é".repeat(38);
+        assert_eq!(value_cell(&value, "content.title"), value);
+        assert_eq!(
+            value_cell(&"a".repeat(39), "content.title").chars().count(),
+            38
+        );
+    }
 
     // =========================================================================
     // format_root_display tests

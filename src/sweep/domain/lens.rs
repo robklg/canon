@@ -852,6 +852,7 @@ fn parent_prefix(rel_prefix: &str) -> Option<String> {
         return None;
     }
     Some(match rel_prefix.rfind('/') {
+        #[expect(clippy::string_slice, reason = "an `rfind` position")]
         Some(cut) => rel_prefix[..cut].to_string(),
         None => String::new(),
     })

@@ -786,7 +786,9 @@ mod tests {
             .find(&format!("\nfn {name}("))
             .or_else(|| source.find(&format!("\npub fn {name}(")))
             .unwrap_or_else(|| panic!("{name} not found"));
+        #[expect(clippy::string_slice, reason = "just past a found ASCII newline")]
         let rest = &source[start + 1..];
+        #[expect(clippy::string_slice, reason = "just past a found ASCII `\\n\\n`")]
         let end = rest
             .match_indices("\n\n")
             .find(|(i, _)| {
@@ -797,7 +799,9 @@ mod tests {
             })
             .map(|(i, _)| i)
             .unwrap_or(rest.len());
-        &rest[..end]
+        #[expect(clippy::string_slice, reason = "a `match_indices` position")]
+        let body = &rest[..end];
+        body
     }
 
     /// A row that still reads `started` states what it can: its outcome was

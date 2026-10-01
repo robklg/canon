@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::format::first_chars;
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::repo;
 
@@ -113,7 +114,7 @@ fn read_listing_probe(dir: &Path) -> Option<ListingProbe> {
 fn book_day(compiled_at: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(compiled_at) {
         Ok(dt) => iso_date(dt.timestamp()),
-        Err(_) => compiled_at.chars().take(10).collect(),
+        Err(_) => first_chars(compiled_at, 10),
     }
 }
 

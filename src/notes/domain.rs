@@ -32,7 +32,9 @@ pub fn ancestor_paths(rel_path: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut path = rel_path;
     while let Some(pos) = path.rfind('/') {
-        path = &path[..pos];
+        #[expect(clippy::string_slice, reason = "an `rfind` position")]
+        let parent = &path[..pos];
+        path = parent;
         result.push(path.to_string());
     }
     // The root ancestor (empty string)
@@ -66,6 +68,7 @@ pub fn relative_to_scope(note_rel_path: &str, scope_rel_path: &str) -> String {
 
     // Take the first segment
     let first_segment = match remainder.find('/') {
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         Some(pos) => &remainder[..pos],
         None => remainder,
     };

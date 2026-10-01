@@ -822,15 +822,20 @@ mod tests {
         let rewritten = match text.find("\nscope = [") {
             Some(at) => {
                 let start = at + 1;
+                #[expect(clippy::string_slice, reason = "just past a found ASCII newline")]
                 let end = start + text[start..].find(']').expect("unterminated scope array") + 1;
-                format!("{}{line}{}", &text[..start], &text[end..])
+                #[expect(clippy::string_slice, reason = "at and past found ASCII text")]
+                let rewritten = format!("{}{line}{}", &text[..start], &text[end..]);
+                rewritten
             }
             None => {
                 let at = text
                     .find("\ngenerated_at = ")
                     .expect("no [meta] table to write a scope into")
                     + 1;
-                format!("{}{line}\n{}", &text[..at], &text[at..])
+                #[expect(clippy::string_slice, reason = "just past a found ASCII newline")]
+                let rewritten = format!("{}{line}\n{}", &text[..at], &text[at..]);
+                rewritten
             }
         };
         std::fs::write(manifest, rewritten).unwrap();

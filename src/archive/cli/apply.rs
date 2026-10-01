@@ -1626,6 +1626,7 @@ mod tests {
             ]
         };
 
+        #[expect(clippy::string_slice, reason = "the whole string")]
         let selected = [
             &format!("{DECOMPOSED}/proj-v1")[..],
             &format!("{DECOMPOSED}/proj-v2")[..],

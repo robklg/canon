@@ -224,6 +224,7 @@ fn staleness_remedy(stale: &[StaleSource], manifest: &str) -> Vec<String> {
     let whole_root = "run `canon scan` then `cluster refresh` to regenerate the lock file";
     if stale.is_empty() || stale.len() > STALE_SHOWN {
         let mut sentence = whole_root.to_string();
+        #[expect(clippy::string_slice, reason = "the first byte of an ASCII literal")]
         sentence[..1].make_ascii_uppercase();
         return vec![format!("{sentence}.")];
     }

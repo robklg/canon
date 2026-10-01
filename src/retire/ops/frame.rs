@@ -86,12 +86,16 @@ pub fn finalize_telling(text: &str) -> Result<String> {
     let with_break = format!("{section}\n");
     let finalized = if let Some(pos) = text.find(&with_break) {
         let mut out = String::with_capacity(text.len());
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         out.push_str(&text[..pos]);
+        #[expect(clippy::string_slice, reason = "just past the found section")]
         out.push_str(&text[pos + with_break.len()..]);
         out
     } else if let Some(pos) = text.find(&section) {
         let mut out = String::with_capacity(text.len());
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         out.push_str(&text[..pos]);
+        #[expect(clippy::string_slice, reason = "just past the found section")]
         out.push_str(&text[pos + section.len()..]);
         out
     } else {

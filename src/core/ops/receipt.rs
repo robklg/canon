@@ -828,6 +828,7 @@ mod tests {
         assert!(out.contains("posture = \"performed\""));
         assert!(out.contains("origin_disposition = \"retained\""));
         assert!(out.contains("[meta.locus]"));
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let locus = &out[out.find("[meta.locus]").unwrap()..];
         assert!(locus.contains("path = \"/Volumes/Archive\""));
         assert!(locus.contains("id = 7"));

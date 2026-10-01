@@ -260,7 +260,15 @@ fn dot_suspended_starts(line: &str) -> Vec<usize> {
     let bytes = line.as_bytes();
     let mut starts = Vec::new();
     let mut i = 0;
-    while let Some(pos) = line[i..].find(".suspended") {
+    loop {
+        #[expect(
+            clippy::string_slice,
+            reason = "`i` is zero or just past a found ASCII `.suspended`"
+        )]
+        let rest = &line[i..];
+        let Some(pos) = rest.find(".suspended") else {
+            break;
+        };
         let start = i + pos;
         let after = start + ".suspended".len();
         let boundary_ok = bytes

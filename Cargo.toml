@@ -19,6 +19,20 @@ include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 name = "canon"
 path = "src/main.rs"
 
+[lints.rust]
+# A stale `#[expect]` — one whose lint no longer fires — is an exemption
+# that outlived its reason; fail rather than warn.
+unfulfilled_lint_expectations = "deny"
+
+[lints.clippy]
+# Range-indexing a string panics when the cut lands inside a multi-byte
+# character. Cut text for display with `first_chars`. A slice whose index
+# is known to be a character boundary (a `find` position, just past found
+# ASCII text, a sum of whole-line lengths, a `char_indices` offset, the
+# whole string) takes an `#[expect]` on its own statement saying which.
+# Reaches this package only, and only when `cargo clippy` runs.
+string_slice = "deny"
+
 [workspace]
 members = ["canonargs"]
 

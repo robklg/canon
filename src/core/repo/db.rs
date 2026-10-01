@@ -8,6 +8,7 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::core::domain::format::first_chars;
 use crate::core::domain::time::now_epoch_secs;
 
 /// Query record for profiling
@@ -557,8 +558,8 @@ pub fn print_profile_summary(conn: &Connection) {
         );
 
         // Show truncated SQL
-        let display_sql = if normalized.len() > 200 {
-            format!("{}...", &normalized[..200])
+        let display_sql = if normalized.chars().count() > 200 {
+            format!("{}...", first_chars(normalized, 200))
         } else {
             normalized.clone()
         };

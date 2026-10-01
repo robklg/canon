@@ -450,7 +450,9 @@ mod tests {
     fn the_note_add_door_is_spelled_as_a_refusal() {
         let body = include_str!("cli.rs");
         let start = body.find("fn resolve_single_scope(").unwrap();
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let end = body[start..].find("\n}\n").unwrap() + start;
+        #[expect(clippy::string_slice, reason = "between two `find` positions")]
         let region = &body[start..end];
         assert!(
             region.contains("DoorVerb::Refused"),

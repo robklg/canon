@@ -339,6 +339,7 @@ pub fn extract_notes_raw(content: &str) -> Option<String> {
     let marker = "# === Notes ===";
     let start_idx = content.find(marker)?;
     let after_marker = start_idx + marker.len();
+    #[expect(clippy::string_slice, reason = "just past a found ASCII marker")]
     let rest = &content[after_marker..];
 
     // Walk whole lines with their terminators still attached, so the running
@@ -356,6 +357,7 @@ pub fn extract_notes_raw(content: &str) -> Option<String> {
         offset += line.len();
     }
 
+    #[expect(clippy::string_slice, reason = "a sum of whole-line lengths")]
     Some(rest[..end].to_string())
 }
 

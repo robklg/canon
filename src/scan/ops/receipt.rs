@@ -175,6 +175,7 @@ mod tests {
         assert!(body.contains("transition = \"deleted\""));
         assert!(body.contains("posture = \"observed\""));
         // The where: this drive's root identity, from placement.
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let locus = &body[body.find("[meta.locus]").expect("locus table present")..];
         assert!(locus.contains(&format!("path = \"{root_path}\"")));
         assert!(locus.contains("id = 1"));
@@ -265,11 +266,13 @@ mod tests {
         // could not disambiguate the two.
         let body_a =
             std::fs::read_to_string(temp_a.path().join(".canon-ledger").join(&name)).unwrap();
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let locus_a = &body_a[body_a.find("[meta.locus]").unwrap()..];
         assert!(locus_a.contains(&format!("path = \"{root_a}\"")));
         assert!(locus_a.contains("id = 11"));
         let body_b =
             std::fs::read_to_string(temp_b.path().join(".canon-ledger").join(&name)).unwrap();
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let locus_b = &body_b[body_b.find("[meta.locus]").unwrap()..];
         assert!(locus_b.contains(&format!("path = \"{root_b}\"")));
         assert!(locus_b.contains("id = 22"));

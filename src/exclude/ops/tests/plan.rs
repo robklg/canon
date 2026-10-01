@@ -782,3 +782,18 @@ fn object_exclusion_counts_parked_sharers_without_filtering_them() {
         "and it is marked, so the ceremony can count it"
     );
 }
+
+/// An object's hash can be any imported text; the plan's prefix of it is cut
+/// between characters — byte 16 of this hash falls inside an accented letter.
+#[test]
+fn test_plan_set_objects_cuts_a_hash_prefix_between_characters() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let obj = insert_object(&conn, &format!("a{}", "é".repeat(20)), false);
+    insert_source(&conn, root, "photo.jpg", Some(obj));
+
+    let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
+
+    assert_eq!(plan.objects.len(), 1);
+    assert_eq!(plan.objects[0].hash_prefix, format!("a{}", "é".repeat(15)));
+}

@@ -49,6 +49,14 @@ path matching and scope resolution are testable with known inputs. One sanctione
 spelling of it is a duplicate re-derivation; test-only `with_test_now` pins it for a fixture
 needing a controlled timestamp.
 
+**Text is cut by characters, never by byte index**, because a cut inside a multi-byte
+character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies
+`clippy::string_slice`; a slice whose index is a known boundary carries an `#[expect]` on its
+own statement saying why, and a stale `#[expect]` is fatal. **Not reached**: anything clippy is not run on (no
+build, test, hook or CI step runs it), the `canonargs` crate, non-slicing methods that panic
+the same way (`truncate`, `split_at`, `drain`, `insert`, `remove`), and the hand-spelled guard
+beside each fit-to-column cut.
+
 `ArchiveCopy`/`ArchiveLocation` are what the archived-ness projections answer with: one
 archive-side copy, its path where a path is wanted, and **the standing of its root beside it**.
 Carried as data rather than looked up per surface — a surface asking the roots table again is

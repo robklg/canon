@@ -369,8 +369,12 @@ fn try_parse_datetime(s: &str) -> Option<i64> {
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&format!("{}Z", &iso)) {
             return Some(dt.timestamp());
         }
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&iso[..19], "%Y-%m-%dT%H:%M:%S") {
-            return Some(dt.and_utc().timestamp());
+        // `get`, not a slice: the length check above counts bytes, so byte 19
+        // can fall inside a character, and then there is no date to read.
+        if let Some(head) = iso.get(..19) {
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(head, "%Y-%m-%dT%H:%M:%S") {
+                return Some(dt.and_utc().timestamp());
+            }
         }
     }
 
@@ -593,6 +597,15 @@ mod tests {
         let ts = try_parse_datetime("2020:07:23 11:06:32").unwrap();
         // 2020-07-23T11:06:32 UTC
         assert_eq!(ts, 1595502392);
+    }
+
+    /// An EXIF-shaped value with a multi-byte character straddling byte 19 is
+    /// not a date, and saying so must not stop the import.
+    #[test]
+    fn an_exif_shaped_value_cut_inside_a_character_is_not_a_date() {
+        assert_eq!(try_parse_datetime("2020:07:23 11:06:3é"), None);
+        // A trailing character past the first 19 bytes still reads, as before.
+        assert_eq!(try_parse_datetime("2020:07:23 11:06:32é"), Some(1595502392));
     }
 
     #[test]

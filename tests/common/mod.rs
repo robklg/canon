@@ -231,6 +231,7 @@ pub fn scan_inline_mods(containing: &str, text: &str) -> Vec<String> {
             rest = after.trim_start();
             if let Some(after) = rest.strip_prefix('(') {
                 match after.find(')') {
+                    #[expect(clippy::string_slice, reason = "just past a found ASCII `)`")]
                     Some(close) => rest = after[close + 1..].trim_start(),
                     None => continue,
                 }
@@ -246,6 +247,10 @@ pub fn scan_inline_mods(containing: &str, text: &str) -> Vec<String> {
         if name.is_empty() {
             continue;
         }
+        #[expect(
+            clippy::string_slice,
+            reason = "just past a run of ASCII identifier characters"
+        )]
         let tail = after[name.len()..].trim_start();
         if tail.starts_with(';') || tail.starts_with('{') {
             if containing.is_empty() {
@@ -273,6 +278,7 @@ pub fn cargo_dependency_roots(cargo_toml: &Path) -> Vec<String> {
             continue;
         }
         if let Some(eq) = line.find('=') {
+            #[expect(clippy::string_slice, reason = "a `find` position")]
             let name = line[..eq].trim();
             if !name.is_empty()
                 && name

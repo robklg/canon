@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::core::domain::format::first_chars;
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
@@ -366,7 +367,7 @@ pub fn plan_set_objects(
             continue;
         }
 
-        let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+        let hash_prefix = first_chars(&object.hash_value, 16);
         let hash = format!("{}:{}", object.hash_type, object.hash_value);
 
         // Get and sort sources for this object

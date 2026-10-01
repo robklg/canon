@@ -42,6 +42,7 @@ fn comment_text(line: &str) -> Option<&str> {
     let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'/' && bytes[i + 1] == b'/' && (i == 0 || bytes[i - 1] != b':') {
+            #[expect(clippy::string_slice, reason = "just past two ASCII `/` bytes")]
             return Some(&line[i + 2..]);
         }
         i += 1;
@@ -292,6 +293,7 @@ fn check_claude_md(root: &Path, path: &Path) -> Vec<String> {
         let Some(pos) = line.find("Modules: ") else {
             continue;
         };
+        #[expect(clippy::string_slice, reason = "just past a found ASCII marker")]
         let after = &line[pos + "Modules: ".len()..];
         // A top-level bullet names its directory as **`X/`**; a nested
         // CLAUDE.md enumerates its own directory.
@@ -307,8 +309,10 @@ fn check_claude_md(root: &Path, path: &Path) -> Vec<String> {
 
 fn bullet_directory(line: &str) -> Option<String> {
     let start = line.find("**`")? + 3;
+    #[expect(clippy::string_slice, reason = "just past a found ASCII marker")]
     let rest = &line[start..];
     let end = rest.find("`**")?;
+    #[expect(clippy::string_slice, reason = "a `find` position")]
     let name = rest[..end].trim_end_matches('/');
     if name.is_empty()
         || !name

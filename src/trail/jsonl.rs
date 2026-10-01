@@ -429,9 +429,12 @@ mod tests {
                 .find(&format!("fn {name}("))
                 .or_else(|| source.find(&format!("fn {name}<")))
                 .unwrap_or_else(|| panic!("{name} not found"));
+            #[expect(clippy::string_slice, reason = "a `find` position")]
             let rest = &source[start..];
             let end = rest.find("\n}\n").map(|i| i + 3).unwrap_or(rest.len());
-            &rest[..end]
+            #[expect(clippy::string_slice, reason = "just past a found ASCII `\\n}\\n`")]
+            let body = &rest[..end];
+            body
         };
         // The chain, end to end: the timeline delegates to the event loop,
         // and that loop and the crossings printer both reach the one

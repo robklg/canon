@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{Local, TimeZone};
 
-use crate::core::domain::format::format_size;
+use crate::core::domain::format::{first_chars, format_size};
 use crate::core::domain::source::Source;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
@@ -230,11 +230,7 @@ pub fn show_duplicates(
     let mut handle = stdout.lock();
     let mut total_sources = 0usize;
     for group in &duplicate_groups {
-        let short_hash = if group.hash_value.len() > 12 {
-            &group.hash_value[..12]
-        } else {
-            &group.hash_value
-        };
+        let short_hash = first_chars(&group.hash_value, 12);
         let size_str = format_size(group.total_size);
         if writeln!(
             handle,

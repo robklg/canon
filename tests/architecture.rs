@@ -406,6 +406,7 @@ fn match_repo(path: &str) -> Option<String> {
         return Some(path.to_string());
     }
     if is_or_under(path, "repo") {
+        #[expect(clippy::string_slice, reason = "just past a matched ASCII prefix")]
         return Some(format!("core::repo{}", &path["repo".len()..]));
     }
     None
@@ -1243,7 +1244,9 @@ fn the_facility_leaves_sql_to_its_repo_but_for_one_pinned_exception() {
              one and would stop seeing production code below it"
         );
         let production = match text.find("#[cfg(test)]") {
+            #[expect(clippy::string_slice, reason = "a `find` position")]
             Some(i) => &text[..i],
+            #[expect(clippy::string_slice, reason = "the whole string")]
             None => &text[..],
         };
 
@@ -2391,11 +2394,14 @@ fn fate_vocabulary_words(src_root: &Path) -> Vec<String> {
     let text = fs::read_to_string(&owner)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", owner.display(), e));
     let mut words = Vec::new();
-    for (_, after) in text
+    #[expect(clippy::string_slice, reason = "just past a found ASCII `=> \"`")]
+    let arms: Vec<&str> = text
         .match_indices("=> \"")
-        .map(|(i, _)| (i, &text[i + 4..]))
-    {
+        .map(|(i, _)| &text[i + 4..])
+        .collect();
+    for after in arms {
         if let Some(end) = after.find('"') {
+            #[expect(clippy::string_slice, reason = "a `find` position")]
             words.push(after[..end].to_string());
         }
     }

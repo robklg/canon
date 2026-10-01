@@ -6,6 +6,7 @@
 use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
+use crate::core::domain::format::first_chars;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptKind;
 use crate::core::repo::{self, Connection};
@@ -171,7 +172,7 @@ pub fn check_set_object_by_hash(conn: &Connection, hash: &str) -> Result<ObjectE
         anyhow::bail!("No object found with hash: {hash}");
     };
 
-    let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+    let hash_prefix = first_chars(&object.hash_value, 16);
 
     if object.is_excluded() {
         return Ok(ObjectExclusionCheck::AlreadyExcluded { hash_prefix });
@@ -226,7 +227,7 @@ pub fn check_set_object_by_file(
         );
     }
 
-    let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+    let hash_prefix = first_chars(&object.hash_value, 16);
 
     if object.is_excluded() {
         return Ok(ObjectExclusionCheck::AlreadyExcluded { hash_prefix });
@@ -321,7 +322,7 @@ pub fn check_clear_object(conn: &Connection, hash: &str) -> Result<ObjectClearCh
         anyhow::bail!("No object found with hash: {hash}");
     };
 
-    let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+    let hash_prefix = first_chars(&object.hash_value, 16);
 
     if !object.is_excluded() {
         return Ok(ObjectClearCheck::NotExcluded { hash_prefix });
@@ -436,7 +437,7 @@ pub fn list_excluded_objects(conn: &Connection) -> Result<Vec<ExcludedObjectEntr
     Ok(excluded
         .iter()
         .map(|object| {
-            let hash_prefix = object.hash_value[..16.min(object.hash_value.len())].to_string();
+            let hash_prefix = first_chars(&object.hash_value, 16);
             let source_count = sources_by_object
                 .get(&object.id)
                 .map(|sources| sources.len())

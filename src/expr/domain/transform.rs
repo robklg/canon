@@ -105,7 +105,12 @@ pub fn parse_modifier(s: &str) -> Result<ModifierCall> {
         if !s.ends_with(')') {
             bail!("Unclosed '(' in modifier: '{s}'");
         }
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let name = &s[..paren_pos];
+        #[expect(
+            clippy::string_slice,
+            reason = "inside a found `(` and a trailing `)`, both ASCII"
+        )]
         let args_str = &s[paren_pos + 1..s.len() - 1];
 
         let args: Vec<f64> = if args_str.is_empty() {

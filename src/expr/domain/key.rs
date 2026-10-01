@@ -371,12 +371,18 @@ pub(super) fn expand_alias(name: &str) -> Option<&'static str> {
 /// Parse key with optional accessor: `source.rel_path[-1]` or `source.rel_path[1:3]`
 pub fn parse_key_and_accessor(s: &str) -> Result<(String, Option<PathAccessor>)> {
     if let Some(bracket_start) = s.find('[') {
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let key = s[..bracket_start].to_string();
+        #[expect(clippy::string_slice, reason = "a `find` position")]
         let rest = &s[bracket_start..];
 
         if !rest.ends_with(']') {
             bail!("Unclosed '[' in accessor");
         }
+        #[expect(
+            clippy::string_slice,
+            reason = "inside a leading `[` and a trailing `]`, both ASCII"
+        )]
         let inner = &rest[1..rest.len() - 1];
 
         let accessor = parse_accessor(inner)?;
@@ -449,6 +455,7 @@ pub fn normalize_key_string(key: &str) -> String {
     let key_part = parts[0];
 
     // Split off accessor if present (e.g., "key[-1]" -> "key", "[-1]")
+    #[expect(clippy::string_slice, reason = "a `find` position")]
     let (base_part, accessor_part) = if let Some(bracket_pos) = key_part.find('[') {
         (&key_part[..bracket_pos], &key_part[bracket_pos..])
     } else {
