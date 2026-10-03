@@ -135,6 +135,45 @@ impl BuiltinKey {
         }
     }
 
+    /// The stored key, and the modifier applied before any the writer added,
+    /// that this key is read as outside patterns — where it is an alias of a
+    /// stored fact rather than a name for itself.
+    ///
+    /// The two hash aliases name content identity, which no source column
+    /// answers. A pattern reads them from the lock entry (`expansion`, above);
+    /// a filter or a `facts` report reads the stored content hash. Without
+    /// this the alias reached the stored-fact lookup under its own name, where
+    /// no fact is ever named `hash`: every comparison was false, and `NOT`
+    /// turned it into every source.
+    pub(super) fn reading(&self) -> Option<(&'static str, Option<&'static str>)> {
+        match self {
+            BuiltinKey::Hash => Some((BuiltinKey::ContentHashSha256.into(), None)),
+            BuiltinKey::HashShort => Some((BuiltinKey::ContentHashSha256.into(), Some("short"))),
+
+            // Exhaustive, like `is_computed`: a new built-in says whether it
+            // is read as something else. A target here must have no reading
+            // of its own — the filter applies this once at parse and again
+            // at evaluation (`a_reading_is_applied_once_however_often_the_key_is_read`).
+            BuiltinKey::SourceExt
+            | BuiltinKey::SourceSize
+            | BuiltinKey::SourceMtime
+            | BuiltinKey::SourcePath
+            | BuiltinKey::SourceRoot
+            | BuiltinKey::SourceRelPath
+            | BuiltinKey::SourceId
+            | BuiltinKey::SourceDevice
+            | BuiltinKey::SourceInode
+            | BuiltinKey::Filename
+            | BuiltinKey::Stem
+            | BuiltinKey::Ext
+            | BuiltinKey::Id
+            | BuiltinKey::Size
+            | BuiltinKey::Mtime
+            | BuiltinKey::RootId
+            | BuiltinKey::ContentHashSha256 => None,
+        }
+    }
+
     /// Whether the source itself answers this key, or the facts table does.
     ///
     /// This is the conjugation the context-supplied law reads: a key the
@@ -317,7 +356,6 @@ pub fn is_builtin_key(key: &str) -> bool {
 ///
 /// let key = ParsedFactKey::parse("source.mtime|year")?;
 /// assert_eq!(key.base_key, "source.mtime");
-/// assert!(key.is_builtin());
 /// assert!(key.has_transforms());
 /// ```
 #[derive(Debug, Clone)]
@@ -337,7 +375,8 @@ impl ParsedFactKey {
     ///
     /// Keys without a namespace prefix are normalized to `content.*`
     /// (e.g., "Make" becomes "content.Make"). Built-in keys (source.*, filename, etc.)
-    /// are not modified.
+    /// are not modified, except the hash aliases, which read as the stored
+    /// content hash (`BuiltinKey::reading`).
     pub fn parse(key: &str) -> Result<Self> {
         let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
         Ok(Self {
@@ -346,11 +385,6 @@ impl ParsedFactKey {
             accessor,
             modifiers,
         })
-    }
-
-    /// Check if this key refers to a built-in fact.
-    pub fn is_builtin(&self) -> bool {
-        BuiltinKey::from_str(&self.base_key).is_some()
     }
 
     /// Check if this key has transforms (accessor or modifiers).
@@ -447,6 +481,18 @@ pub fn normalize_fact_key(key: &str) -> String {
     format!("content.{key}")
 }
 
+/// Read a written base key as the key the asking half evaluates: an alias of
+/// a stored fact becomes that fact's key plus the modifier it implies
+/// (`BuiltinKey::reading`), and any other key is normalized. The one place
+/// both key readers below take the alias from, so the filter's text form and
+/// the parsed form cannot disagree.
+fn read_base_key(key: &str) -> (String, Option<&'static str>) {
+    match BuiltinKey::from_str(key).and_then(|k| k.reading()) {
+        Some((stored, leading_modifier)) => (stored.to_string(), leading_modifier),
+        None => (normalize_fact_key(key), None),
+    }
+}
+
 /// Normalize a full key string that may contain accessors and modifiers.
 /// E.g., "Make|year" becomes "content.Make|year", but "source.mtime|year" stays unchanged.
 pub fn normalize_key_string(key: &str) -> String {
@@ -463,11 +509,15 @@ pub fn normalize_key_string(key: &str) -> String {
     };
 
     // Normalize the base part
-    let normalized_base = normalize_fact_key(base_part);
+    let (normalized_base, leading_modifier) = read_base_key(base_part);
 
     // Reconstruct with accessor and modifiers
     let mut result = normalized_base;
     result.push_str(accessor_part);
+    if let Some(modifier) = leading_modifier {
+        result.push('|');
+        result.push_str(modifier);
+    }
     for modifier in &parts[1..] {
         result.push('|');
         result.push_str(modifier);
@@ -479,7 +529,8 @@ pub fn normalize_key_string(key: &str) -> String {
 /// Returns (base_key, accessor, modifiers)
 ///
 /// Keys without a namespace prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
-/// Built-in keys (source.*, filename, etc.) are not modified.
+/// Built-in keys (source.*, filename, etc.) are not modified, except the hash
+/// aliases, which read as the stored content hash (`BuiltinKey::reading`).
 pub fn parse_key_with_modifiers(
     key: &str,
 ) -> Result<(String, Option<PathAccessor>, Vec<ModifierCall>)> {
@@ -491,10 +542,13 @@ pub fn parse_key_with_modifiers(
     let (base_key, accessor) = parse_key_and_accessor(key_part)?;
 
     // Normalize the base key (add content. prefix if needed)
-    let normalized_key = normalize_fact_key(&base_key);
+    let (normalized_key, leading_modifier) = read_base_key(&base_key);
 
     // Parse modifiers
     let mut modifiers = Vec::new();
+    if let Some(modifier) = leading_modifier {
+        modifiers.push(parse_modifier(modifier)?);
+    }
     for mod_str in &parts[1..] {
         let modifier_call = parse_modifier(mod_str.trim())?;
         modifiers.push(modifier_call);
@@ -512,6 +566,30 @@ mod tests {
     use super::super::transform::Modifier;
     use super::*;
 
+    /// The filter reads a key twice — `normalize_key_string` at parse, then
+    /// `parse_key_with_modifiers` at evaluation — so a reading must survive
+    /// being applied to its own output. It does only because a target has no
+    /// reading of its own; a doubled `short` would hide, since cutting a cut
+    /// hash changes nothing, so the modifier count is what is asserted.
+    #[test]
+    fn a_reading_is_applied_once_however_often_the_key_is_read() {
+        use strum::IntoEnumIterator;
+
+        for builtin in BuiltinKey::iter() {
+            let Some((target, leading)) = builtin.reading() else {
+                continue;
+            };
+            let name: &'static str = builtin.into();
+            assert!(
+                BuiltinKey::from_str(target).is_some_and(|t| t.reading().is_none()),
+                "{name} reads as {target}, which has a reading of its own"
+            );
+            let twice = parse_key_with_modifiers(&normalize_key_string(name)).unwrap();
+            assert_eq!(twice.0, target, "{name}");
+            assert_eq!(twice.2.len(), usize::from(leading.is_some()), "{name}");
+        }
+    }
+
     // =========================================================================
     // ParsedFactKey tests
     // =========================================================================
@@ -523,7 +601,7 @@ mod tests {
         assert_eq!(key.base_key, "source.ext");
         assert!(key.accessor.is_none());
         assert!(key.modifiers.is_empty());
-        assert!(key.is_builtin());
+        assert!(is_builtin_key(&key.base_key));
         assert!(!key.has_transforms());
     }
 
@@ -534,7 +612,7 @@ mod tests {
         assert_eq!(key.base_key, "source.rel_path");
         assert!(matches!(key.accessor, Some(PathAccessor::Index(-1))));
         assert!(key.modifiers.is_empty());
-        assert!(key.is_builtin());
+        assert!(is_builtin_key(&key.base_key));
         assert!(key.has_transforms());
     }
 
@@ -546,7 +624,7 @@ mod tests {
         assert!(key.accessor.is_none());
         assert_eq!(key.modifiers.len(), 1);
         assert_eq!(key.modifiers[0].modifier, Modifier::Year);
-        assert!(key.is_builtin());
+        assert!(is_builtin_key(&key.base_key));
         assert!(key.has_transforms());
     }
 
@@ -558,7 +636,7 @@ mod tests {
         assert!(matches!(key.accessor, Some(PathAccessor::Index(-1))));
         assert_eq!(key.modifiers.len(), 1);
         assert_eq!(key.modifiers[0].modifier, Modifier::Stem);
-        assert!(key.is_builtin());
+        assert!(is_builtin_key(&key.base_key));
         assert!(key.has_transforms());
     }
 
@@ -568,7 +646,7 @@ mod tests {
         let key = ParsedFactKey::parse("Make").unwrap();
         assert_eq!(key.raw, "Make");
         assert_eq!(key.base_key, "content.Make");
-        assert!(!key.is_builtin());
+        assert!(!is_builtin_key(&key.base_key));
         assert!(!key.has_transforms());
     }
 
@@ -580,7 +658,7 @@ mod tests {
         assert!(key.accessor.is_none());
         assert_eq!(key.modifiers.len(), 1);
         assert_eq!(key.modifiers[0].modifier, Modifier::YearMonth);
-        assert!(!key.is_builtin());
+        assert!(!is_builtin_key(&key.base_key));
         assert!(key.has_transforms());
     }
 

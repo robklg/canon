@@ -930,6 +930,30 @@ mod tests {
         assert_eq!(result, "abcdef12");
     }
 
+    /// Outside patterns the hash aliases read as the stored content hash
+    /// (`BuiltinKey::reading`); inside one they stay the lock entry's
+    /// `object.hash`, which the context supplies. If the reading leaked into
+    /// pattern parsing, the stored fact would be fetched and evaluated in its
+    /// place — the context-supplied law broken on the destination path.
+    #[test]
+    fn the_hash_aliases_in_a_pattern_read_the_lock_entry_not_the_stored_hash() {
+        for alias in ["{hash}", "{hash_short}"] {
+            let pattern = parse_pattern(alias).unwrap();
+            assert_eq!(extract_fact_keys(&pattern), vec![OBJECT_HASH.to_string()]);
+        }
+        // With a modifier the whole-expression expansion does not apply, so
+        // these reach `parse_expr` itself — the seam the reading must not
+        // cross.
+        for written in ["{hash|uppercase}", "{hash_short|uppercase}"] {
+            let pattern = parse_pattern(written).unwrap();
+            let stored: &'static str = BuiltinKey::ContentHashSha256.into();
+            assert!(
+                !extract_fact_keys(&pattern).iter().any(|k| k == stored),
+                "{written} must not read the stored content hash"
+            );
+        }
+    }
+
     #[test]
     fn test_complex_pattern() {
         let pattern =

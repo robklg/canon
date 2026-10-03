@@ -204,13 +204,15 @@ and leaving the comparison in `ops`. The marker and the pin are retired by the s
 ## Built-in values are derived once
 
 `get_builtin_value` (`domain/value.rs`) is the one place a built-in key's value is derived from a
-source row. The `--where` comparison, `facts --key` on a listed key, and a pattern's `{source.*}`
-key read it. The exists check (`?`) reads its partition, `is_computed()`: computed keys exist for
-every source; a key the resolver cannot answer from the row (`hash`, `hash_short`,
-`content.hash.sha256`) exists when the source is linked to an object. One test holds the
-comparison to the resolver's value for every computed key, another holds `?` to that partition.
-Not bound: the pattern aliases (accessor and modifier chains) and the unlisted alias spellings
-that `facts --key` reports no value for (`ext`, `stem`, `id`).
+source row; `--where`, `facts --key` and a pattern's `{source.*}` key read it. Readers split
+built-in from stored by the resolver's own answer — `is_computed()` or its pinned-equal
+`None` — never by listing visibility: a key the row cannot answer exists when the source is
+linked to an object, and its value is the stored fact.
+
+Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
+`content.hash.sha256|short`, rewritten where a key is read (`BuiltinKey::reading`); patterns
+never pass through it, so there the aliases stay the lock's `object.hash`. Pinned per reader.
+Not bound: pattern aliases' own modifier chains.
 
 ## Mechanics
 

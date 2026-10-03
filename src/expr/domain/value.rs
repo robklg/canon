@@ -107,12 +107,13 @@ pub fn resolve_fact_value(
     key: &ParsedFactKey,
     stored_facts: &HashMap<String, FactEntry>,
 ) -> Result<Option<String>> {
-    // 1. Get raw value (built-in or stored)
-    let raw_value = if let Some(builtin) = BuiltinKey::from_str(&key.base_key) {
-        get_builtin_value(&SourceAttributes::from(source), builtin)
-    } else {
-        stored_facts.get(&key.base_key).map(|e| e.value.clone())
-    };
+    // 1. Get raw value: the resolver for a built-in it answers from the
+    // source row, the stored facts for everything else — the hash keys
+    // included, which are built-ins the source row cannot answer. The
+    // resolver's own `None` is the partition, as in the filter's compare.
+    let raw_value = BuiltinKey::from_str(&key.base_key)
+        .and_then(|builtin| get_builtin_value(&SourceAttributes::from(source), builtin))
+        .or_else(|| stored_facts.get(&key.base_key).map(|e| e.value.clone()));
 
     // 2. Apply transforms if value exists
     match raw_value {
@@ -528,12 +529,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_hash_returns_none() {
-        // Hash-based builtins return None (need object lookup)
+    fn resolve_hash_reads_the_stored_content_hash() {
+        // The source row cannot answer a hash key; its value is the stored
+        // fact, and with none stored there is no value.
         let source = make_source();
         let key = ParsedFactKey::parse("hash").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
-        assert_eq!(result, None);
+        assert_eq!(
+            resolve_fact_value(&source, &key, &HashMap::new()).unwrap(),
+            None
+        );
+
+        let stored = make_stored_facts(vec![(
+            "content.hash.sha256",
+            FactValue::Text("abcdef12345".into()),
+        )]);
+        let short = ParsedFactKey::parse("hash_short").unwrap();
+        assert_eq!(
+            resolve_fact_value(&source, &short, &stored).unwrap(),
+            Some("abcdef12".to_string())
+        );
     }
 
     // =========================================================================

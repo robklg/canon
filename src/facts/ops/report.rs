@@ -125,17 +125,20 @@ pub fn compute_root_distribution(
 // Helper functions
 // ============================================================================
 
-fn is_builtin_or_derived(key: &str) -> bool {
-    BuiltinKey::from_str(key)
-        .map(|k| k.visibility() != BuiltinKeyVisibility::NotListed)
-        .unwrap_or(false)
+/// The built-in a key names, when the source row answers it — the owner's
+/// partition (`BuiltinKey::is_computed`), never the listing's visibility. A
+/// built-in the source row cannot answer (the content hash) is a stored fact
+/// here, and a short alias (`stem`, `size`) is as much a built-in as its long
+/// form, though neither is listed.
+fn computed_builtin(key: &str) -> Option<BuiltinKey> {
+    BuiltinKey::from_str(key).filter(|k| k.is_computed())
 }
 
 /// Apply default grouping for builtin keys without transforms.
 /// Returns a human-readable bucket/group string for the value.
-fn default_grouping(base_key: &str, value: FactValue) -> String {
-    match base_key {
-        "source.size" => {
+fn default_grouping(builtin: BuiltinKey, value: FactValue) -> String {
+    match builtin {
+        BuiltinKey::SourceSize | BuiltinKey::Size => {
             if let FactValue::Num(size) = value {
                 let size = size as i64;
                 if size < 1024 {
@@ -156,7 +159,7 @@ fn default_grouping(base_key: &str, value: FactValue) -> String {
                 fact_value_to_display(&value)
             }
         }
-        "source.mtime" => {
+        BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
             if let FactValue::Time(ts) = value {
                 chrono::DateTime::from_timestamp(ts, 0)
                     .map(|dt| dt.format("%Y").to_string())
@@ -248,9 +251,11 @@ pub fn compute_all_keys(
 
 /// Compute value distribution for a single fact key.
 ///
-/// Internally dispatches based on key type:
-/// - Builtin key WITHOUT transforms → default grouping (size buckets, mtime→year, etc.)
-/// - Builtin key WITH transforms → resolve_fact_value()
+/// Internally dispatches on whether the source row answers the key
+/// (`computed_builtin`) — the content hash, a built-in it cannot answer, is a
+/// stored key here:
+/// - Computed key WITHOUT transforms → default grouping (size buckets, mtime→year, etc.)
+/// - Computed key WITH transforms → resolve_fact_value()
 /// - Stored key WITHOUT transforms → fetch raw values, group by display string
 /// - Stored key WITH transforms → fetch raw values, apply transforms, aggregate
 ///
@@ -272,8 +277,8 @@ pub fn compute_distribution(
         });
     }
 
-    if is_builtin_or_derived(&key.base_key) {
-        compute_builtin_distribution(conn, source_ids, key, total_sources, limit)
+    if let Some(builtin) = computed_builtin(&key.base_key) {
+        compute_builtin_distribution(conn, source_ids, key, builtin, total_sources, limit)
     } else if key.has_transforms() {
         compute_transformed_distribution(conn, source_ids, key, total_sources, limit)
     } else {
@@ -286,6 +291,7 @@ fn compute_builtin_distribution(
     conn: &mut Connection,
     source_ids: &[i64],
     key: &ParsedFactKey,
+    builtin: BuiltinKey,
     total_sources: usize,
     limit: usize,
 ) -> Result<DistributionResult> {
@@ -303,13 +309,8 @@ fn compute_builtin_distribution(
             }
         } else {
             // Use default grouping for the no-transform case
-            match BuiltinKey::from_str(&key.base_key) {
-                Some(builtin) => {
-                    match get_builtin_value(&SourceAttributes::from(source), builtin) {
-                        Some(raw) => default_grouping(&key.base_key, raw),
-                        None => continue,
-                    }
-                }
+            match get_builtin_value(&SourceAttributes::from(source), builtin) {
+                Some(raw) => default_grouping(builtin, raw),
                 None => continue,
             }
         };
@@ -437,11 +438,12 @@ pub fn compute_grouped_distribution(
 
     // Collect stored fact keys we need to fetch
     let mut stored_keys: Vec<&str> = Vec::new();
-    if !main_key.is_builtin() {
+    if computed_builtin(&main_key.base_key).is_none() {
         stored_keys.push(&main_key.base_key);
     }
     for gk in grouping_keys {
-        if !gk.is_builtin() && !stored_keys.contains(&gk.base_key.as_str()) {
+        if computed_builtin(&gk.base_key).is_none() && !stored_keys.contains(&gk.base_key.as_str())
+        {
             stored_keys.push(&gk.base_key);
         }
     }
@@ -759,6 +761,61 @@ mod tests {
         assert_eq!(y2024.count, 2);
         let y2023 = result.entries.iter().find(|e| e.value == "2023").unwrap();
         assert_eq!(y2023.count, 1);
+    }
+
+    /// A hashed source carrying its content hash, the way scanning stores it.
+    fn hashed_source(conn: &Connection, root_id: i64, rel_path: &str, hash: &str) -> i64 {
+        let obj = insert_object(conn, hash, false);
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+             VALUES ('object', ?1, 'content.hash.sha256', ?2, 0, NULL)",
+            rusqlite::params![obj, hash],
+        )
+        .unwrap();
+        insert_source(conn, root_id, rel_path, Some(obj))
+    }
+
+    /// Every built-in key has a value in `facts --key`, alone and grouped.
+    /// The defect it names: the report split built-ins from stored facts by
+    /// listing visibility (and the grouped path by "is a built-in"), so the
+    /// unlisted aliases (`stem`, `size`, `hash`) and the content hash went
+    /// to a lookup that could never answer, and printed "(no value)".
+    #[test]
+    fn every_built_in_key_has_a_value_in_the_report() {
+        use strum::IntoEnumIterator;
+
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let full = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let s1 = hashed_source(&conn, root_id, "2024/a.jpg", full);
+
+        for builtin in BuiltinKey::iter() {
+            let name: &'static str = builtin.into();
+            let key = ParsedFactKey::parse(name).unwrap();
+            let alone = compute_distribution(&mut conn, &[s1], &key, 0).unwrap();
+            assert_eq!(alone.sources_with_value, 1, "facts --key {name}");
+
+            let by_root = ParsedFactKey::parse("source.root").unwrap();
+            let grouped =
+                compute_grouped_distribution(&mut conn, &[s1], &key, &[by_root], 0).unwrap();
+            assert_eq!(
+                grouped.sources_with_value, 1,
+                "facts --key {name} --by-root"
+            );
+        }
+
+        for (name, want) in [
+            ("hash", full),
+            ("hash_short", "2cf24dba"),
+            ("content.hash.sha256", full),
+            ("size", "< 1 KB"),
+            ("mtime", "2024"),
+            ("stem", "a"),
+        ] {
+            let key = ParsedFactKey::parse(name).unwrap();
+            let result = compute_distribution(&mut conn, &[s1], &key, 0).unwrap();
+            assert_eq!(result.entries[0].value, want, "facts --key {name}");
+        }
     }
 
     // =========================================================================

@@ -724,6 +724,63 @@ mod tests {
         }
     }
 
+    /// The other half of the keeper above: a built-in the source row cannot
+    /// answer reads the stored content hash, so every `BuiltinKey` answers in
+    /// `--where`. The claim table is written out rather than derived from
+    /// `BuiltinKey::reading`, and it must name every non-computed built-in.
+    ///
+    /// The defect it names: `hash` and `hash_short` reached the stored lookup
+    /// under their own names, where no fact is ever kept — every comparison
+    /// false, and `NOT` selecting every source.
+    #[test]
+    fn a_built_in_the_source_row_cannot_answer_reads_the_content_hash() {
+        use strum::IntoEnumIterator;
+
+        let full = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let claims = [
+            (BuiltinKey::Hash, full),
+            (BuiltinKey::HashShort, "2cf24dba"),
+            (BuiltinKey::ContentHashSha256, full),
+        ];
+        for builtin in BuiltinKey::iter().filter(|b| !b.is_computed()) {
+            assert!(
+                claims.iter().any(|(k, _)| *k == builtin),
+                "{} has no claim in this table",
+                <&'static str>::from(builtin)
+            );
+        }
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let subject_obj = insert_object(&conn, "subject");
+        let other_obj = insert_object(&conn, "other");
+        insert_fact_entry(&conn, "object", subject_obj, "content.hash.sha256", full);
+        insert_fact_entry(
+            &conn,
+            "object",
+            other_obj,
+            "content.hash.sha256",
+            "711e9609339e92b03ddc0a211827dba421f38f9ed8b9d806e1ffdd8c15ffa03d",
+        );
+        let subject = insert_source_with_object(&conn, root, "a.txt", Some(subject_obj));
+        let other = insert_source_with_object(&conn, root, "b.txt", Some(other_obj));
+
+        for (builtin, value) in claims {
+            let name: &'static str = builtin.into();
+            for (clause, want) in [
+                (format!("{name}=\"{value}\""), vec![subject]),
+                (format!("NOT {name}=\"{value}\""), vec![other]),
+                (format!("{name} IN (\"{value}\")"), vec![subject]),
+            ] {
+                let filter = Filter::parse(&clause).unwrap();
+                let matched = apply_filters(&mut conn, &[subject, other], &[filter])
+                    .unwrap_or_else(|e| panic!("{clause} failed: {e}"))
+                    .source_ids;
+                assert_eq!(matched, want, "{clause} must read the content hash");
+            }
+        }
+    }
+
     #[test]
     fn a_null_device_or_inode_column_answers_false_for_its_own_key() {
         let mut conn = setup_test_db();

@@ -270,7 +270,11 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
 /// characters, as the column's padding does, never bytes.
 fn value_cell(value: &str, base_key: &str) -> String {
     if value.is_empty() {
-        if base_key == "source.ext" {
+        // Matched on the key, not its spelling: `ext` is the same value.
+        if matches!(
+            BuiltinKey::from_str(base_key),
+            Some(BuiltinKey::SourceExt | BuiltinKey::Ext)
+        ) {
             "(no extension)".to_string()
         } else {
             "(empty)".to_string()
@@ -753,8 +757,8 @@ pub fn show_aliases() {
     }
 
     println!();
-    println!("Note: 'filename', 'stem', 'ext' and 'id' also work in --where filters.");
-    println!("'hash' and 'hash_short' work in --where only as an existence check, e.g. 'hash?'.");
+    println!("Note: these also work in --where filters and in facts --key, where 'hash'");
+    println!("means content.hash.sha256 and 'hash_short' means content.hash.sha256|short.");
 }
 
 #[cfg(test)]
@@ -764,6 +768,16 @@ mod tests {
     // =========================================================================
     // value_cell tests
     // =========================================================================
+
+    /// An empty extension is labelled the same under either spelling of the
+    /// key; `ext` printed `(empty)` where `source.ext` printed this.
+    #[test]
+    fn an_empty_extension_is_labelled_under_either_spelling() {
+        for key in ["source.ext", "ext"] {
+            assert_eq!(value_cell("", key), "(no extension)", "{key}");
+        }
+        assert_eq!(value_cell("", "content.title"), "(empty)");
+    }
 
     /// A long value whose 35th byte falls inside an accented letter is cut
     /// between letters, never inside one.
