@@ -8,7 +8,6 @@ Facts are key-value metadata. See [Concepts: Facts](../concepts/facts.md) for an
 |-----------|-------------|
 | `source.*` | Facts about the file on disk (path, size, mtime) |
 | `content.*` | Facts about the content (hash, EXIF, mime type) |
-| `object.*` | Object-level properties |
 
 The `content.` prefix is optional when querying. For example, `Make=Apple` is equivalent to `content.Make=Apple`.
 

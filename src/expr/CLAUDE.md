@@ -203,16 +203,16 @@ and leaving the comparison in `ops`. The marker and the pin are retired by the s
 
 ## Built-in values are derived once
 
-`get_builtin_value` (`domain/value.rs`) is the one place a built-in key's value is derived from a
-source row; `--where`, `facts --key` and a pattern's `{source.*}` key read it. Readers split
-built-in from stored by the resolver's own answer — `is_computed()` or its pinned-equal
-`None` — never by listing visibility: a key the row cannot answer exists when the source is
-linked to an object, and its value is the stored fact.
+`get_builtin_value` (`domain/value.rs`) is the one place a built-in value is derived from a
+source row; `--where`, `facts --key` and `{source.*}` read it. Readers split built-in from stored
+by the resolver's answer (`is_computed()`, pinned equal to its `None`), never by listing
+visibility. Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
+`content.hash.sha256|short` (`BuiltinKey::reading`); patterns keep the lock's `object.hash`.
+Pinned per reader. Not bound: pattern aliases' own modifier chains.
 
-Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
-`content.hash.sha256|short`, rewritten where a key is read (`BuiltinKey::reading`); patterns
-never pass through it, so there the aliases stay the lock's `object.hash`. Pinned per reader.
-Not bound: pattern aliases' own modifier chains.
+Separately, a written key keeps its prefix only where a stored key can carry one (`source.`,
+`content.`); `object.` names a key in patterns alone. Agreement with import is pinned on sampled
+prefixes beside import.
 
 ## Mechanics
 

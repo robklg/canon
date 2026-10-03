@@ -84,6 +84,36 @@ pub fn is_content_fact(key: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Import and the asking half name an importable key the same way, so
+    /// a filter finds a fact by the name it was imported under. The defect it
+    /// names: the asking half kept `policy.`/`object.` keys as written while
+    /// import stored them under `content.`, and `--where policy.reviewed?`
+    /// selected nothing. Sampled prefixes; a key spelled as a built-in name
+    /// (`size`, `hash`) is outside it — the asking half reads the built-in.
+    #[test]
+    fn a_key_is_read_by_the_name_import_stored_it_under() {
+        use crate::expr::ParsedFactKey;
+
+        let prefixes = [
+            "",
+            "content.",
+            "policy.",
+            "object.",
+            "tag.",
+            "a.b.",
+            "Content.",
+            "contents.",
+        ];
+        for prefix in prefixes {
+            for name in ["Make", "reviewed", "x.y"] {
+                let written = format!("{prefix}{name}");
+                let stored = normalize_fact_key(&written).unwrap();
+                let read = ParsedFactKey::parse(&written).unwrap().base_key;
+                assert_eq!(read, stored, "{written}");
+            }
+        }
+    }
+
     // =========================================================================
     // FactValueType tests
     // =========================================================================

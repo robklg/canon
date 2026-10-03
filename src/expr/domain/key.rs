@@ -373,7 +373,7 @@ pub struct ParsedFactKey {
 impl ParsedFactKey {
     /// Parse a key string into its components.
     ///
-    /// Keys without a namespace prefix are normalized to `content.*`
+    /// Keys without a kept prefix (`source.`, `content.`) are normalized to `content.*`
     /// (e.g., "Make" becomes "content.Make"). Built-in keys (source.*, filename, etc.)
     /// are not modified, except the hash aliases, which read as the stored
     /// content hash (`BuiltinKey::reading`).
@@ -459,18 +459,25 @@ fn parse_accessor(s: &str) -> Result<PathAccessor> {
     }
 }
 
-/// Known namespace prefixes for fact keys
-const KNOWN_PREFIXES: &[&str] = &["source.", "content.", "policy.", "object."];
+/// The prefixes a written key keeps as written: the ones a stored key can
+/// carry. Import stores every key under `content.` and refuses `source.`,
+/// which the source row answers — so any other prefix is read the way import
+/// stored it, under `content.`. `object.` names a key only in patterns
+/// (`OBJECT_HASH`), which never reach this reader. A prefix listed here that
+/// no writer produces makes a filter look for a name no fact has, and select
+/// nothing in silence — which `policy.` did once its one fact moved to the
+/// exclusion columns.
+const KNOWN_PREFIXES: &[&str] = &["source.", "content."];
 
 /// Normalize a base fact key by adding `content.` prefix if needed.
-/// Returns the key unchanged if it's a built-in key or already has a namespace prefix.
+/// Returns the key unchanged if it's a built-in key or carries a kept prefix (`KNOWN_PREFIXES`).
 pub fn normalize_fact_key(key: &str) -> String {
     // Check if it's a built-in key (source.ext, filename, etc.)
     if BuiltinKey::from_str(key).is_some() {
         return key.to_string();
     }
 
-    // Check if it already has a known namespace prefix
+    // Check if it already carries a kept prefix
     for prefix in KNOWN_PREFIXES {
         if key.starts_with(prefix) {
             return key.to_string();
@@ -528,7 +535,7 @@ pub fn normalize_key_string(key: &str) -> String {
 /// Parse a key string that may contain accessors and modifiers: "source.rel_path[-1]|stem"
 /// Returns (base_key, accessor, modifiers)
 ///
-/// Keys without a namespace prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
+/// Keys without a kept prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
 /// Built-in keys (source.*, filename, etc.) are not modified, except the hash
 /// aliases, which read as the stored content hash (`BuiltinKey::reading`).
 pub fn parse_key_with_modifiers(
@@ -565,6 +572,17 @@ pub fn parse_key_with_modifiers(
 mod tests {
     use super::super::transform::Modifier;
     use super::*;
+
+    /// The kept prefixes are the ones a stored key can carry: `content.`,
+    /// which import writes, and `source.`, which the source row answers and
+    /// import refuses. This is a change detector, not a derivation: any edit
+    /// to the list fails here, and the editor owes the check that import
+    /// stores keys under the new prefix as written — the agreement itself is
+    /// pinned beside import (`facts/domain.rs`) over sampled prefixes only.
+    #[test]
+    fn the_kept_prefixes_are_the_ones_a_stored_key_can_carry() {
+        assert_eq!(KNOWN_PREFIXES, &["source.", "content."]);
+    }
 
     /// The filter reads a key twice — `normalize_key_string` at parse, then
     /// `parse_key_with_modifiers` at evaluation — so a reading must survive

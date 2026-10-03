@@ -74,7 +74,7 @@ pub enum FactValue {
 /// between source-level and object-level facts.
 #[derive(Debug, Clone)]
 pub struct FactEntry {
-    /// The fact key (e.g., "content.Make", "source.policy.reviewed")
+    /// The fact key (e.g., "content.Make", "content.hash.sha256")
     pub key: String,
     /// The typed fact value
     pub value: FactValue,
