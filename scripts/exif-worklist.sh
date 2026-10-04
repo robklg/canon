@@ -44,11 +44,12 @@ while IFS= read -r line; do
     continue
   fi
 
-  # Extract EXIF as JSON, filter to useful fields (images, videos, and audio)
+  # Extract EXIF as JSON, filter to useful fields (images, videos, and audio).
+  # QuickTime dates stay as stored, in UTC: exiftool's QuickTimeUTC option would read
+  # them on this machine's zone and attach its offset, as if the camera's clock ran at it.
   if ! exif_json=$(
     exiftool -json -n \
       -api LargeFileSupport=1 \
-      -api QuickTimeUTC=1 \
       -api Geolocation \
       -charset filename=utf8 \
       -DateTimeOriginal -SubSecDateTimeOriginal \
@@ -114,7 +115,25 @@ while IFS= read -r line; do
         "Artist", "Album", "Title", "Genre", "Year", "Track"
       );
 
+    # A date of zeros is the format saying "unset": absent, so the next field is tried
+    def nz: if type == "string" and test("^0000:00:00") then null else . end;
+
+    # A field the format defines as UTC, with no room for an offset (QuickTime header
+    # dates, GPS time): only the UTC instant is known, which -00:00 says
+    def utc: if . then (tostring | sub("Z$"; "")) + "-00:00" else null end;
+
     . as $ex
+    # QuickTime header dates mark a QuickTime file. There the shared CreateDate and
+    # ModifyDate may be the QuickTime UTC date or a clock reading from another format,
+    # and the script cannot tell which, so they are not used
+    | ([$ex.MediaCreateDate, $ex.TrackCreateDate, $ex.MediaModifyDate, $ex.TrackModifyDate]
+        | any(. != null)) as $quicktime
+    | ($ex.MediaCreateDate | nz | utc) as $media_create
+    | ($ex.TrackCreateDate | nz | utc) as $track_create
+    | ($ex.MediaModifyDate | nz | utc) as $media_modify
+    | ($ex.TrackModifyDate | nz | utc) as $track_modify
+    | (if $quicktime then null else ($ex.CreateDate | nz) end) as $create
+    | (if $quicktime then null else ($ex.ModifyDate | nz) end) as $modify
     | (to_entries
         | map(select(
             .key != "SourceFile" and
@@ -128,18 +147,17 @@ while IFS= read -r line; do
 
     | ($facts + {
         "media.capture_datetime":
-          ( $ex.SubSecDateTimeOriginal // $ex.DateTimeOriginal
-            // $ex.MediaCreateDate // $ex.TrackCreateDate
-            // $ex.SubSecCreateDate // $ex.CreateDate
+          ( ($ex.SubSecDateTimeOriginal | nz) // ($ex.DateTimeOriginal | nz)
+            // $media_create // $track_create
+            // ($ex.SubSecCreateDate | nz) // $create
           ) | typed("datetime"),
         "media.create_datetime":
-          ( $ex.MediaCreateDate // $ex.TrackCreateDate
-            // $ex.SubSecCreateDate // $ex.CreateDate
+          ( $media_create // $track_create
+            // ($ex.SubSecCreateDate | nz) // $create
           ) | typed("datetime"),
         "media.modify_datetime":
-          ( $ex.MediaModifyDate // $ex.TrackModifyDate
-            // $ex.SubSecModifyDate // $ex.ModifyDate
-            // $ex.FileModifyDate
+          ( $media_modify // $track_modify
+            // ($ex.SubSecModifyDate | nz) // $modify
           ) | typed("datetime"),
 
         "device.make": ($ex.Make | if type == "number" then tostring else . end),
@@ -163,7 +181,7 @@ while IFS= read -r line; do
         "geo.lat": $ex.GPSLatitude,
         "geo.lon": $ex.GPSLongitude,
         "geo.alt": $ex.GPSAltitude,
-        "geo.datetime": ($ex.GPSDateTime | typed("datetime")),
+        "geo.datetime": ($ex.GPSDateTime | nz | utc | typed("datetime")),
 
         "geo.city": ($ex.GeolocationCity | if type == "number" then tostring else . end),
         "geo.region": ($ex.GeolocationRegion | if type == "number" then tostring else . end),

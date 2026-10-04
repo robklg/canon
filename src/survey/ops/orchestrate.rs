@@ -1,6 +1,6 @@
 // =============================================================================
 // Orchestration — the fetch, resolution, and note-context wiring around
-// compute_survey(). Ops owns the fetch: the interface passes through
+// compute_survey(, zone). Ops owns the fetch: the interface passes through
 // pre-resolved scope prefixes and raw filter/orchestration inputs, and
 // gets back a fully computed run.
 // =============================================================================
@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::core::domain;
+use crate::core::domain::time::zone::UserZone;
 use crate::expr::Filter;
 use crate::notes::SurveyNoteContext;
 use crate::survey::ops::compute::{
@@ -69,6 +70,7 @@ pub fn run_survey(
     filter_strs: &[String],
     orchestration: &SurveyOrchestration,
     params: &SurveyParams,
+    zone: &UserZone,
 ) -> Result<SurveyRun> {
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -170,6 +172,7 @@ pub fn run_survey(
         &all_sources,
         &other_resolved,
         archive_root_id,
+        zone,
     )?;
 
     let mut location_note_counts = HashMap::new();
@@ -255,6 +258,7 @@ mod tests {
             &[],
             &orchestration(),
             &params(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -289,6 +293,7 @@ mod tests {
             &[],
             &orchestration(),
             &params(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -326,6 +331,7 @@ mod tests {
             &[],
             &orchestration(),
             &params(),
+            &UserZone::utc(),
         )
         .unwrap();
         assert!(matches!(
@@ -341,6 +347,7 @@ mod tests {
             &[],
             &orchestration(),
             &params(),
+            &UserZone::utc(),
         )
         .unwrap();
         assert!(matches!(source_run.outcome, SurveyOutcome::Empty));
@@ -361,6 +368,7 @@ mod tests {
             &[],
             &orchestration(),
             &params(),
+            &UserZone::utc(),
         )
         .unwrap();
         assert!(matches!(run.outcome, SurveyOutcome::ArchiveScope(_)));
@@ -388,6 +396,7 @@ mod tests {
             &[],
             &orchestration,
             &params(),
+            &UserZone::utc(),
         );
         let err = match result {
             Err(e) => e.to_string(),

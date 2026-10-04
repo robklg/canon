@@ -760,6 +760,7 @@ fn show_and_the_timeline_agree_on_what_matched() {
             timeframe: None,
             include_notes: false,
             limit: None,
+            clock: crate::core::domain::time::zone::UserZone::utc(),
         },
     )
     .unwrap();

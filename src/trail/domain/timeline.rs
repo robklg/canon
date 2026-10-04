@@ -2,14 +2,15 @@
 //!
 //! Merges decisions and notes into one ascending timeline, classifies
 //! decisions into rollup families via `core::domain::fate`, and aggregates
-//! by day. Timestamps arrive as epoch seconds; local-timezone day mapping
-//! happens in the ops layer, which passes precomputed dates in.
+//! by day. Timestamps arrive as epoch seconds; the day each falls on, on the user's
+//! clock, is read in the ops layer, which passes precomputed dates in.
 //!
 //! No I/O.
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, Duration, NaiveDate, Weekday};
+use jiff::civil::{Date, Weekday};
+use jiff::ToSpan;
 
 use crate::core::domain::decision::Decision;
 use crate::core::domain::fate::{decision_family, fate_transition, DecisionFamily, FateAspect};
@@ -76,26 +77,41 @@ pub fn merge_events(decisions: Vec<Decision>, notes: Vec<Note>) -> Vec<TimelineE
 /// A parsed time-lens value: `--since` (from date onward) or `--on` (one day).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhenValue {
-    Since(NaiveDate),
-    On(NaiveDate),
+    Since(Date),
+    On(Date),
+}
+
+/// A weekday by its English name or three-letter abbreviation, already lower-cased — the
+/// names the lens has always accepted.
+fn weekday_named(name: &str) -> Option<Weekday> {
+    Some(match name {
+        "mon" | "monday" => Weekday::Monday,
+        "tue" | "tuesday" => Weekday::Tuesday,
+        "wed" | "wednesday" => Weekday::Wednesday,
+        "thu" | "thursday" => Weekday::Thursday,
+        "fri" | "friday" => Weekday::Friday,
+        "sat" | "saturday" => Weekday::Saturday,
+        "sun" | "sunday" => Weekday::Sunday,
+        _ => return None,
+    })
 }
 
 /// Parse a time-lens value: `today`, `yesterday`, a weekday name (most recent
 /// occurrence, today included), or `YYYY-MM-DD`. Case-insensitive.
-pub fn parse_when(input: &str, today: NaiveDate) -> Result<NaiveDate, String> {
+pub fn parse_when(input: &str, today: Date) -> Result<Date, String> {
     let lower = input.trim().to_lowercase();
     match lower.as_str() {
         "today" => return Ok(today),
-        "yesterday" => return Ok(today - Duration::days(1)),
+        "yesterday" => return Ok(today - 1.day()),
         _ => {}
     }
-    if let Ok(weekday) = lower.parse::<Weekday>() {
-        let diff = (7 + i64::from(today.weekday().num_days_from_monday())
-            - i64::from(weekday.num_days_from_monday()))
+    if let Some(weekday) = weekday_named(&lower) {
+        let diff = (7 + i64::from(today.weekday().to_monday_zero_offset())
+            - i64::from(weekday.to_monday_zero_offset()))
             % 7;
-        return Ok(today - Duration::days(diff));
+        return Ok(today - diff.days());
     }
-    NaiveDate::parse_from_str(&lower, "%Y-%m-%d").map_err(|_| {
+    Date::strptime("%Y-%m-%d", &lower).map_err(|_| {
         format!(
             "invalid time value '{input}' (expected today, yesterday, a weekday, or YYYY-MM-DD)"
         )
@@ -222,7 +238,7 @@ fn add_bytes(current: Option<i64>, count: i64, bytes: i64) -> Option<i64> {
 /// One day of the time lens: date, rollup, and the day's events in
 /// chronological order.
 pub struct DayGroup {
-    pub date: NaiveDate,
+    pub date: Date,
     pub rollup: DayRollup,
     pub events: Vec<TimelineEvent>,
 }
@@ -231,7 +247,7 @@ pub struct DayGroup {
 /// (local-timezone mapping is not domain logic); input order is preserved, so
 /// days come out oldest → newest.
 pub fn group_by_day(
-    dated: Vec<(NaiveDate, TimelineEvent)>,
+    dated: Vec<(Date, TimelineEvent)>,
     stamps: &HashMap<i64, StampAgg>,
 ) -> Vec<DayGroup> {
     let mut groups: Vec<DayGroup> = Vec::new();
@@ -293,8 +309,8 @@ mod tests {
         }
     }
 
-    fn date(s: &str) -> NaiveDate {
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    fn date(s: &str) -> Date {
+        s.parse().unwrap()
     }
 
     // parse_when
@@ -330,6 +346,39 @@ mod tests {
         assert!(parse_when("someday", today).is_err());
         assert!(parse_when("2026-13-01", today).is_err());
         assert!(parse_when("", today).is_err());
+    }
+
+    /// The lens accepts what it always has: the weekday names and abbreviations and no
+    /// other spelling, single-digit months and days, and no date past what a date holds.
+    #[test]
+    fn parse_when_accepts_what_it_always_has() {
+        let today = date("2026-07-12");
+        for name in [
+            "mon",
+            "Monday",
+            "TUE",
+            "wednesday",
+            "thu",
+            "fri",
+            "sat",
+            "sunday",
+        ] {
+            assert!(parse_when(name, today).is_ok(), "{name}");
+        }
+        for refused in [
+            "tues",
+            "thurs",
+            "mo",
+            "sundays",
+            "2024/01/05",
+            "20240105",
+            "2024-01-05x",
+        ] {
+            assert!(parse_when(refused, today).is_err(), "{refused}");
+        }
+        assert_eq!(parse_when("2024-1-5", today).unwrap(), date("2024-01-05"));
+        assert!(parse_when("2024-02-30", today).is_err());
+        assert!(parse_when("+10000-01-01", today).is_err());
     }
 
     // merge_events

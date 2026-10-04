@@ -7,7 +7,7 @@ use crate::core::domain::format_count;
 use crate::core::domain::resolution::standing_first;
 use crate::core::domain::root::DoorVerb;
 use crate::core::ops::scope::ResolvedScope;
-use crate::notes::{format_note_date, relative_to_scope, SurveyNoteContext};
+use crate::notes::{relative_to_scope, SurveyNoteContext};
 use crate::survey::domain::analysis::ScopeLocation;
 use crate::survey::ops::compute::{ArchivedLocationDetail, LocationResult};
 
@@ -192,7 +192,7 @@ pub(super) fn print_notes_section(ctx: &SurveyNoteContext, scope_rel_path: &str,
         for (note, rel) in display_notes.iter().zip(rel_paths.iter()) {
             println!(
                 "    {}  {:rel_w$}  {}",
-                format_note_date(note.created_at),
+                crate::core::domain::format::format_date(note.created_at, crate::user_zone()),
                 rel,
                 note.text,
                 rel_w = max_rel_len,

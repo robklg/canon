@@ -38,6 +38,7 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
         // below reaches every role: whatever set can reach, clear can undo.
         // The same policy guards plan_duplicates and plan_set_objects.
         role_policy: RolePolicy::SourceOnly,
+        clock: params.clock.clone(),
     };
     let selection = select_sources(conn, &sel_params)?;
 
@@ -118,7 +119,7 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
         filtered
     } else {
         let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids: HashSet<i64> = apply_filters(conn, &ids, &params.filters)?
+        let filtered_ids: HashSet<i64> = apply_filters(conn, &ids, &params.filters, &params.clock)?
             .source_ids
             .into_iter()
             .collect();
@@ -158,6 +159,7 @@ pub fn plan_duplicates(
         include: IncludeSet::default(),
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceOnly,
+        clock: params.clock.clone(),
     };
     let selection = select_sources(conn, &sel_params)?;
     let scope_count = selection.sources.len();
@@ -285,6 +287,7 @@ pub fn plan_set_objects(
         },
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceOnly,
+        clock: params.clock.clone(),
     };
     let selection = select_sources(conn, &sel_params)?;
     // **What this plan searches and what its act reaches are different sets.**

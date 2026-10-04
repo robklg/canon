@@ -427,6 +427,63 @@ fn migrations() -> Migrations<'static> {
             "CREATE INDEX IF NOT EXISTS sources_inode
                  ON sources(inode) WHERE present = 1;",
         ),
+        // 8: a time keeps its form and its precision. Four columns beside
+        //    value_time: the fraction of a second (nanoseconds, only at
+        //    'fraction' precision), the form ('instant' with no recorded
+        //    offset, 'instant_offset', or 'clock' — a clock reading with no
+        //    offset), the recorded offset in seconds (only for
+        //    'instant_offset'), and the precision. The cross-column CHECKs
+        //    make a half-written time unstorable, which is why this is a
+        //    rebuild rather than ALTER TABLE ADD COLUMN; `IS` is null-safe,
+        //    because a CHECK that evaluates to NULL passes. value_time keeps
+        //    its encoding: an instant's UTC seconds; a clock reading counted
+        //    as if it were UTC, cut to its grain. Every existing time becomes
+        //    a clock reading at second precision — exactly how it printed
+        //    before, since it was printed in UTC.
+        M::up(
+            "CREATE TABLE facts_v8 (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('source', 'object')),
+                entity_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value_text TEXT,
+                value_num REAL,
+                value_time INTEGER,
+                time_nanos INTEGER CHECK (time_nanos BETWEEN 0 AND 999999999),
+                time_form TEXT CHECK (time_form IN ('instant', 'instant_offset', 'clock')),
+                time_offset INTEGER CHECK (time_offset BETWEEN -93599 AND 93599),
+                time_precision TEXT CHECK (time_precision IN
+                    ('year', 'month', 'day', 'minute', 'second', 'fraction')),
+                observed_at INTEGER NOT NULL,
+                observed_basis_rev INTEGER,
+                CHECK (
+                    (value_text IS NOT NULL) + (value_num IS NOT NULL) +
+                    (value_time IS NOT NULL) = 1
+                ),
+                CHECK ((value_time IS NULL) = (time_form IS NULL)),
+                CHECK ((value_time IS NULL) = (time_precision IS NULL)),
+                CHECK ((time_form IS 'instant_offset') = (time_offset IS NOT NULL)),
+                CHECK ((time_precision IS 'fraction') = (time_nanos IS NOT NULL)),
+                CHECK (time_form IS 'clock' OR time_form IS NULL
+                       OR time_precision IN ('minute', 'second', 'fraction')),
+                CHECK (entity_type != 'source' OR observed_basis_rev IS NOT NULL),
+                CHECK (entity_type != 'object' OR observed_basis_rev IS NULL)
+             );
+             INSERT INTO facts_v8 (id, entity_type, entity_id, key, value_text, value_num,
+                                   value_time, time_nanos, time_form, time_offset,
+                                   time_precision, observed_at, observed_basis_rev)
+                 SELECT id, entity_type, entity_id, key, value_text, value_num, value_time,
+                        NULL, CASE WHEN value_time IS NOT NULL THEN 'clock' END,
+                        NULL, CASE WHEN value_time IS NOT NULL THEN 'second' END,
+                        observed_at, observed_basis_rev
+                 FROM facts;
+             DROP TABLE facts;
+             ALTER TABLE facts_v8 RENAME TO facts;
+             CREATE INDEX facts_entity ON facts(entity_type, entity_id);
+             CREATE INDEX facts_key ON facts(key);
+             CREATE INDEX facts_key_entity ON facts(key, entity_type, entity_id);
+             CREATE UNIQUE INDEX facts_entity_key_uq ON facts(entity_type, entity_id, key);",
+        ),
     ])
 }
 
@@ -1028,5 +1085,213 @@ mod tests {
         assert_eq!(files, 245);
         assert_eq!(dest, "/arch/m");
         assert_eq!(disposition, "retained");
+    }
+
+    fn index_names(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL ORDER BY name")
+            .unwrap();
+        stmt.query_map([table], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// A version-7 database's facts carry over: every time row becomes a clock reading at
+    /// second precision, rows keep their ids and observation columns, the four indexes come
+    /// back, and each value prints as it did before (in UTC).
+    #[test]
+    fn migration8_carries_every_time_fact_over_as_a_clock_reading_at_second_precision() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 7).unwrap();
+        conn.execute_batch(
+            "INSERT INTO facts (id, entity_type, entity_id, key, value_time, observed_at, observed_basis_rev)
+                 VALUES (11, 'source', 1, 'content.DateTimeOriginal', 1704067200, 500, 3);
+             INSERT INTO facts (id, entity_type, entity_id, key, value_time, observed_at, observed_basis_rev)
+                 VALUES (12, 'object', 7, 'content.CreateDate', 1104537600, 600, NULL);
+             INSERT INTO facts (id, entity_type, entity_id, key, value_text, observed_at, observed_basis_rev)
+                 VALUES (13, 'object', 7, 'content.Make', 'Canon', 700, NULL);
+             INSERT INTO facts (id, entity_type, entity_id, key, value_num, observed_at, observed_basis_rev)
+                 VALUES (14, 'source', 1, 'content.Width', 4032, 800, 3);",
+        )
+        .unwrap();
+
+        migrations().to_latest(&mut conn).unwrap();
+
+        /// (id, time_form, time_precision, time_offset, time_nanos, observed_at, observed_basis_rev)
+        type Row = (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            i64,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT id, time_form, time_precision, time_offset, time_nanos, observed_at, observed_basis_rev
+                 FROM facts ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let clock = |id, at, rev| {
+            (
+                id,
+                Some("clock".to_string()),
+                Some("second".to_string()),
+                None,
+                None,
+                at,
+                rev,
+            )
+        };
+        assert_eq!(
+            rows,
+            vec![
+                clock(11, 500, Some(3)),
+                clock(12, 600, None),
+                (13, None, None, None, None, 700, None),
+                (14, None, None, None, None, 800, Some(3)),
+            ]
+        );
+        assert_eq!(
+            index_names(&conn, "facts"),
+            vec![
+                "facts_entity",
+                "facts_entity_key_uq",
+                "facts_key",
+                "facts_key_entity"
+            ]
+        );
+
+        // Each value prints as before: the old display printed the stored number in UTC.
+        let utc = crate::core::domain::time::zone::UserZone::utc();
+        let printed: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT {} FROM facts ORDER BY id",
+                crate::core::repo::fact::FACT_VALUE_COLUMNS
+            ))
+            .unwrap()
+            .query_map([], |r| crate::core::repo::fact::fact_value_at(r, 0))
+            .unwrap()
+            .map(|r| match r.unwrap().unwrap() {
+                crate::core::domain::fact::FactValue::Time(tv) => tv.printed(&utc),
+                crate::core::domain::fact::FactValue::Text(t) => t,
+                crate::core::domain::fact::FactValue::Num(n) => n.to_string(),
+                crate::core::domain::fact::FactValue::Path(p) => p,
+            })
+            .collect();
+        assert_eq!(
+            printed,
+            vec![
+                "2024-01-01 00:00:00",
+                "2005-01-01 00:00:00",
+                "Canon",
+                "4032"
+            ]
+        );
+    }
+
+    fn insert_time_row(conn: &Connection, columns: &str, values: &str) -> rusqlite::Result<usize> {
+        conn.execute(
+            &format!(
+                "INSERT INTO facts (entity_type, entity_id, key, observed_at, observed_basis_rev, {columns})
+                 VALUES ('object', 1, 'content.T', 0, NULL, {values})"
+            ),
+            [],
+        )
+    }
+
+    /// Each broken combination of the time columns is refused by the schema, and each
+    /// well-formed one is stored.
+    #[test]
+    fn migration8_refuses_a_half_written_time() {
+        let conn = open_in_memory_for_test();
+        let refused = [
+            ("value_time", "0"),
+            ("value_time, time_form", "0, 'clock'"),
+            ("value_time, time_precision", "0, 'second'"),
+            (
+                "value_text, time_form, time_precision",
+                "'x', 'clock', 'second'",
+            ),
+            (
+                "value_time, time_form, time_precision, time_offset",
+                "0, 'clock', 'second', 3600",
+            ),
+            (
+                "value_time, time_form, time_precision",
+                "0, 'instant_offset', 'second'",
+            ),
+            (
+                "value_time, time_form, time_precision, time_offset",
+                "0, 'instant', 'second', 0",
+            ),
+            (
+                "value_time, time_form, time_precision",
+                "0, 'instant', 'day'",
+            ),
+            (
+                "value_time, time_form, time_precision, time_nanos",
+                "0, 'clock', 'second', 5",
+            ),
+            (
+                "value_time, time_form, time_precision",
+                "0, 'clock', 'fraction'",
+            ),
+            (
+                "value_time, time_form, time_precision, time_offset",
+                "0, 'instant_offset', 'second', 93600",
+            ),
+            (
+                "value_time, time_form, time_precision",
+                "0, 'local', 'second'",
+            ),
+            (
+                "value_time, time_form, time_precision",
+                "0, 'clock', 'hour'",
+            ),
+            (
+                "value_time, time_form, time_precision, time_nanos",
+                "0, 'clock', 'fraction', 1000000000",
+            ),
+        ];
+        for (columns, values) in refused {
+            assert!(
+                insert_time_row(&conn, columns, values).is_err(),
+                "({columns}) = ({values}) must be refused"
+            );
+            conn.execute("DELETE FROM facts", []).unwrap();
+        }
+        let stored = [
+            (
+                "value_time, time_form, time_precision",
+                "0, 'clock', 'year'",
+            ),
+            (
+                "value_time, time_form, time_precision",
+                "0, 'instant', 'minute'",
+            ),
+            (
+                "value_time, time_form, time_precision, time_offset",
+                "0, 'instant_offset', 'second', -18000",
+            ),
+            (
+                "value_time, time_form, time_precision, time_nanos",
+                "0, 'clock', 'fraction', 450000000",
+            ),
+            ("value_text", "'x'"),
+        ];
+        for (columns, values) in stored {
+            insert_time_row(&conn, columns, values)
+                .unwrap_or_else(|e| panic!("({columns}) = ({values}) must be stored: {e}"));
+            conn.execute("DELETE FROM facts", []).unwrap();
+        }
     }
 }

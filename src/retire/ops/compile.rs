@@ -24,13 +24,17 @@ use crate::retire::domain::{
 use crate::trail::TimelineEvent;
 use crate::trail::{TrailParams, TrailResult, TrailView};
 
-use super::{iso_date, iso_utc, strip_hash_prefix};
+use super::{iso_utc, strip_hash_prefix};
+use crate::core::domain::format::format_date;
+use crate::core::domain::time::zone::UserZone;
 
 pub struct CompileParams {
     /// The user's `--reason`, bound onto the identity page.
     pub reason: Option<String>,
     /// Compile timestamp (unix seconds), stamped as `compiled_at`.
     pub now: i64,
+    /// The clock the prose dates read on: the user's. Machine fields stay UTC.
+    pub zone: UserZone,
     /// Target directory. Must not exist — a leftover directory is an
     /// explicit collision, never silently overwritten. The ceremony passes
     /// a temp name beside the shelf; the final rename is the placement step.
@@ -91,6 +95,7 @@ pub fn compile_book(
             // Uncapped on purpose: the book's timeline claims every decision
             // this root ever saw, oldest first.
             limit: None,
+            clock: params.zone.clone(),
         },
     )?;
 
@@ -143,8 +148,13 @@ pub fn compile_book(
     );
 
     write_inventory(&params.dest_dir, &entries)?;
-    write_timeline(&params.dest_dir, &trail, params.ceremony_decision_id)?;
-    write_notes(&params.dest_dir, &notes, &story.roots)?;
+    write_timeline(
+        &params.dest_dir,
+        &trail,
+        params.ceremony_decision_id,
+        &params.zone,
+    )?;
+    write_notes(&params.dest_dir, &notes, &story.roots, &params.zone)?;
     let ledger_files = gather_ledger(&params.dest_dir, story, &mut gaps)?;
     // The story before the meta that claims it, and both before the README
     // (written last — a partial compile stays self-evident).
@@ -364,7 +374,12 @@ fn write_inventory(dir: &Path, entries: &[BookEntry]) -> Result<()> {
     Ok(())
 }
 
-fn write_timeline(dir: &Path, trail: &TrailResult, exclude_decision_id: Option<i64>) -> Result<()> {
+fn write_timeline(
+    dir: &Path,
+    trail: &TrailResult,
+    exclude_decision_id: Option<i64>,
+    zone: &UserZone,
+) -> Result<()> {
     let mut out = String::from(
         "# Decision timeline\n\nEvery decision that touched this root, oldest first.\n\n",
     );
@@ -388,7 +403,7 @@ fn write_timeline(dir: &Path, trail: &TrailResult, exclude_decision_id: Option<i
                 let mut lines = text.lines();
                 out.push_str(&format!(
                     "- {}  #{} {}: {}\n",
-                    iso_date(decision.created_at),
+                    format_date(decision.created_at, zone),
                     decision.id,
                     decision.command,
                     lines.next().unwrap_or("")
@@ -423,7 +438,7 @@ fn write_timeline(dir: &Path, trail: &TrailResult, exclude_decision_id: Option<i
     Ok(())
 }
 
-fn write_notes(dir: &Path, notes: &[Note], roots: &[Root]) -> Result<()> {
+fn write_notes(dir: &Path, notes: &[Note], roots: &[Root], zone: &UserZone) -> Result<()> {
     let mut out = String::from(
         "# Notes\n\nEvery note on this root, oldest first — the thinking between the actions.\n\n",
     );
@@ -440,7 +455,7 @@ fn write_notes(dir: &Path, notes: &[Note], roots: &[Root]) -> Result<()> {
         for note in sorted {
             out.push_str(&format!(
                 "- {}  {}: {}\n",
-                iso_date(note.created_at),
+                format_date(note.created_at, zone),
                 note_display_path(note, &by_id, false),
                 note.text
             ));
@@ -700,7 +715,7 @@ fn write_readme(
     out.push_str(&format!(
         "The bound story of a retired root — complete, self-contained, and readable\n\
          without Canon. Compiled {}.\n\n",
-        iso_date(params.now)
+        format_date(params.now, &params.zone)
     ));
     if params.telling.is_some() {
         // The front door names the way in: the book opens as a story, not
@@ -718,10 +733,16 @@ fn write_readme(
         out.push_str(&format!("- comment: {comment}\n"));
     }
     if let Some(first) = story.first_indexed {
-        out.push_str(&format!("- first indexed: {}\n", iso_date(first)));
+        out.push_str(&format!(
+            "- first indexed: {}\n",
+            format_date(first, &params.zone)
+        ));
     }
     if let Some(last) = story.root.last_scanned_at {
-        out.push_str(&format!("- last scan: {}\n", iso_date(last)));
+        out.push_str(&format!(
+            "- last scan: {}\n",
+            format_date(last, &params.zone)
+        ));
     }
     if let Some(reason) = &params.reason {
         out.push_str(&format!("- reason: {reason}\n"));
@@ -803,12 +824,12 @@ fn write_readme(
         VerificationPosture::ScanVerified { last_scan } => {
             out.push_str(&format!(
                 "Scan-verified; last scan {}.\n\n",
-                iso_date(*last_scan)
+                format_date(*last_scan, &params.zone)
             ));
         }
         VerificationPosture::OnFaith { last_scan, reason } => {
             let when = last_scan
-                .map(|ts| format!("; last scan {}", iso_date(ts)))
+                .map(|ts| format!("; last scan {}", format_date(ts, &params.zone)))
                 .unwrap_or_default();
             out.push_str(&format!(
                 "Bound on faith ({reason}){when} — the story as last observed.\n\n"

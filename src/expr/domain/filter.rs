@@ -8,8 +8,8 @@
 
 use anyhow::{bail, Result};
 
-use super::cache::FactValue;
 use super::key::normalize_key_string;
+use crate::core::domain::fact::FactValue;
 
 // ============================================================================
 // Expression AST
@@ -667,9 +667,11 @@ fn detect_status_in_expr(expr: &Expr, used: &mut UsedStatus) {
 
 pub fn compare_fact_value(fact: &FactValue, op: CompareOp, filter_value: &str) -> bool {
     match fact {
-        FactValue::Text(t) => compare_text(t, op, filter_value),
+        FactValue::Text(t) | FactValue::Path(t) => compare_text(t, op, filter_value),
         FactValue::Num(n) => compare_numeric(*n, op, filter_value),
-        FactValue::Time(ts) => compare_numeric(*ts as f64, op, filter_value),
+        // AUDIT: a time compares by its stored number until binding compares spans on the user's
+        // clock.
+        FactValue::Time(tv) => compare_numeric(tv.legacy_epoch_number() as f64, op, filter_value),
     }
 }
 
@@ -849,25 +851,39 @@ fn compare_numeric(stored: f64, op: CompareOp, filter_value: &str) -> bool {
     }
 }
 
-/// Parse a filter value string into a numeric value for comparison.
+/// Parse a filter value string into a numeric value for comparison: a number as written, a
+/// typed date or time as its seconds since 1970.
+// AUDIT: a date typed in `--where` is read as a UTC instant, until a typed date is read as its
+// key's kind on the user's clock.
 fn parse_filter_value(value: &str) -> Option<f64> {
+    use jiff::civil::{Date, DateTime, Time};
+    use jiff::tz::Offset;
+    use jiff::Timestamp;
+
     // Try as number first
     if let Ok(n) = value.parse::<f64>() {
         return Some(n);
     }
 
-    // Try date formats - convert to Unix timestamp
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Some(dt.timestamp() as f64);
+    let utc_seconds = |at: DateTime| {
+        Offset::UTC
+            .to_timestamp(at)
+            .ok()
+            .map(|ts| ts.as_second() as f64)
+    };
+    // An instant written with its offset
+    if let Ok(ts) = value.parse::<Timestamp>() {
+        return Some(ts.as_second() as f64);
     }
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
-        return Some(dt.and_utc().timestamp() as f64);
+    // A date and time with no offset, read as UTC
+    for format in ["%Y-%m-%dT%H:%M:%S", "%Y:%m:%d %H:%M:%S"] {
+        if let Ok(at) = DateTime::strptime(format, value) {
+            return utc_seconds(at);
+        }
     }
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S") {
-        return Some(dt.and_utc().timestamp() as f64);
-    }
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        return Some(date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as f64);
+    // A date alone: its midnight, read as UTC
+    if let Ok(date) = Date::strptime("%Y-%m-%d", value) {
+        return utc_seconds(date.to_datetime(Time::midnight()));
     }
 
     None
@@ -879,6 +895,25 @@ fn parse_filter_value(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every typed form reads as the same UTC instant it did before the reading moved to
+    /// jiff: midnight UTC on 1 January 2024 is 1704067200.
+    #[test]
+    fn a_typed_date_reads_as_the_utc_instant_it_always_did() {
+        for typed in [
+            "1704067200",
+            "2024-01-01",
+            "2024-01-01T00:00:00",
+            "2024:01:01 00:00:00",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T01:00:00+01:00",
+        ] {
+            assert_eq!(parse_filter_value(typed), Some(1704067200.0), "{typed}");
+        }
+        for not_a_value in ["not a date", "2024-13-01", ""] {
+            assert_eq!(parse_filter_value(not_a_value), None, "{not_a_value:?}");
+        }
+    }
 
     // ========================================================================
     // Tokenizer: context-aware value parsing

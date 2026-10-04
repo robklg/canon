@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
-use crate::core::domain::fact::FactType;
+use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::repo::db::{populate_temp_sources, Connection};
-use crate::facts::domain::{FactValueType, SourceFact};
+use crate::core::repo::fact::{fact_value_at, fact_value_params, FACT_VALUE_COLUMNS};
+use crate::facts::domain::SourceFact;
 
 /// Count fact keys across sources.
 ///
@@ -90,8 +91,9 @@ pub fn count_fact_keys(
 ///
 /// # Returns
 /// HashMap where key is the fact key (e.g., "content.Make") and value is
-/// the detected FactValueType based on which column has data.
-pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactValueType>> {
+/// the detected kind based on which column has data. A kind-only read: it asks which
+/// column a key's rows use, never a value.
+pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactType>> {
     let mut type_map = HashMap::new();
 
     let mut stmt = conn.prepare(
@@ -111,9 +113,9 @@ pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactValueType
     for row in rows {
         let (key, type_str) = row?;
         let fact_type = match type_str.as_str() {
-            "time" => FactValueType::Time,
-            "num" => FactValueType::Num,
-            _ => FactValueType::Text,
+            "time" => FactType::Time,
+            "num" => FactType::Num,
+            _ => FactType::Text,
         };
         type_map.insert(key, fact_type);
     }
@@ -124,46 +126,53 @@ pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactValueType
 /// Upsert a fact (insert or update on conflict).
 ///
 /// Works for both source and object facts. Uses INSERT ON CONFLICT to
-/// atomically insert or update the fact.
+/// atomically insert or update the fact; the value is written through the one
+/// column conversion, so every value column is replaced together.
 ///
 /// # Arguments
 /// * `conn` - Database connection
 /// * `entity_type` - "source" or "object"
 /// * `entity_id` - The source_id or object_id
 /// * `key` - Fact key (e.g., "content.Make")
-/// * `value_text` - Text value (mutually exclusive with value_num/value_time)
-/// * `value_num` - Numeric value
-/// * `value_time` - Timestamp value
+/// * `value` - The value to store
 /// * `observed_at` - When this fact was observed
 /// * `observed_basis_rev` - For source facts, the basis_rev at observation time
-#[allow(clippy::too_many_arguments)]
 pub fn upsert(
     conn: &Connection,
     entity_type: &str,
     entity_id: i64,
     key: &str,
-    value_text: Option<&str>,
-    value_num: Option<f64>,
-    value_time: Option<i64>,
+    value: &FactValue,
     observed_at: i64,
     observed_basis_rev: Option<i64>,
 ) -> Result<()> {
+    let [text, num, time, nanos, form, offset, precision] = fact_value_params(value)?;
     conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
-           value_text = excluded.value_text,
-           value_num = excluded.value_num,
-           value_time = excluded.value_time,
-           observed_at = excluded.observed_at,
-           observed_basis_rev = excluded.observed_basis_rev",
+        &format!(
+            "INSERT INTO facts (entity_type, entity_id, key, {FACT_VALUE_COLUMNS}, observed_at, observed_basis_rev)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(entity_type, entity_id, key) DO UPDATE SET
+               value_text = excluded.value_text,
+               value_num = excluded.value_num,
+               value_time = excluded.value_time,
+               time_nanos = excluded.time_nanos,
+               time_form = excluded.time_form,
+               time_offset = excluded.time_offset,
+               time_precision = excluded.time_precision,
+               observed_at = excluded.observed_at,
+               observed_basis_rev = excluded.observed_basis_rev"
+        ),
         rusqlite::params![
             entity_type,
             entity_id,
             key,
-            value_text,
-            value_num,
-            value_time,
+            text,
+            num,
+            time,
+            nanos,
+            form,
+            offset,
+            precision,
             observed_at,
             observed_basis_rev,
         ],
@@ -174,28 +183,30 @@ pub fn upsert(
 /// Fetch all facts for a source (entity_type = 'source').
 ///
 /// Returns all facts directly attached to the source (not object facts).
-/// Used during fact promotion when linking a source to an object.
+/// Used during fact promotion when linking a source to an object. A stored time Canon
+/// cannot read is left out, and so stays where it is.
 pub fn fetch_source_facts(conn: &Connection, source_id: i64) -> Result<Vec<SourceFact>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, key, value_text, value_num, value_time, observed_at
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, key, observed_at, {FACT_VALUE_COLUMNS}
          FROM facts
-         WHERE entity_type = 'source' AND entity_id = ?",
-    )?;
+         WHERE entity_type = 'source' AND entity_id = ?"
+    ))?;
 
     let facts = stmt
         .query_map([source_id], |row| {
-            Ok(SourceFact {
+            let Some(value) = fact_value_at(row, 3)? else {
+                return Ok(None);
+            };
+            Ok(Some(SourceFact {
                 id: row.get(0)?,
                 key: row.get(1)?,
-                value_text: row.get(2)?,
-                value_num: row.get(3)?,
-                value_time: row.get(4)?,
-                observed_at: row.get(5)?,
-            })
+                value,
+                observed_at: row.get(2)?,
+            }))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(facts)
+    Ok(facts.into_iter().flatten().collect())
 }
 
 /// Check if an object has a specific fact key.
@@ -230,20 +241,25 @@ pub fn insert_object_fact(
     conn: &Connection,
     object_id: i64,
     key: &str,
-    value_text: Option<&str>,
-    value_num: Option<f64>,
-    value_time: Option<i64>,
+    value: &FactValue,
     observed_at: i64,
 ) -> Result<()> {
+    let [text, num, time, nanos, form, offset, precision] = fact_value_params(value)?;
     conn.execute(
-        "INSERT INTO facts (entity_type, entity_id, key, value_text, value_num, value_time, observed_at, observed_basis_rev)
-         VALUES ('object', ?, ?, ?, ?, ?, ?, NULL)",
+        &format!(
+            "INSERT INTO facts (entity_type, entity_id, key, {FACT_VALUE_COLUMNS}, observed_at, observed_basis_rev)
+             VALUES ('object', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)"
+        ),
         rusqlite::params![
             object_id,
             key,
-            value_text,
-            value_num,
-            value_time,
+            text,
+            num,
+            time,
+            nanos,
+            form,
+            offset,
+            precision,
             observed_at,
         ],
     )?;
@@ -638,8 +654,9 @@ mod tests {
         value: i64,
     ) {
         conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_time, observed_at, observed_basis_rev)
-             VALUES (?1, ?2, ?3, ?4, 0, CASE WHEN ?1 = 'source' THEN 0 ELSE NULL END)",
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision,
+                                observed_at, observed_basis_rev)
+             VALUES (?1, ?2, ?3, ?4, 'clock', 'second', 0, CASE WHEN ?1 = 'source' THEN 0 ELSE NULL END)",
             rusqlite::params![entity_type, entity_id, key, value],
         )
         .unwrap();
@@ -773,7 +790,7 @@ mod tests {
         let result = fetch_type_map(&conn).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("content.Make"), Some(&FactValueType::Text));
+        assert_eq!(result.get("content.Make"), Some(&FactType::Text));
     }
 
     #[test]
@@ -784,7 +801,7 @@ mod tests {
 
         let result = fetch_type_map(&conn).unwrap();
 
-        assert_eq!(result.get("content.Width"), Some(&FactValueType::Num));
+        assert_eq!(result.get("content.Width"), Some(&FactType::Num));
     }
 
     #[test]
@@ -797,7 +814,7 @@ mod tests {
 
         assert_eq!(
             result.get("content.DateTimeOriginal"),
-            Some(&FactValueType::Time)
+            Some(&FactType::Time)
         );
     }
 
@@ -812,11 +829,11 @@ mod tests {
         let result = fetch_type_map(&conn).unwrap();
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result.get("content.Make"), Some(&FactValueType::Text));
-        assert_eq!(result.get("content.Width"), Some(&FactValueType::Num));
+        assert_eq!(result.get("content.Make"), Some(&FactType::Text));
+        assert_eq!(result.get("content.Width"), Some(&FactType::Num));
         assert_eq!(
             result.get("content.DateTimeOriginal"),
-            Some(&FactValueType::Time)
+            Some(&FactType::Time)
         );
     }
 
@@ -834,9 +851,7 @@ mod tests {
             "object",
             100,
             "content.Make",
-            Some("Canon"),
-            None,
-            None,
+            &FactValue::Text("Canon".into()),
             1700000000,
             None,
         )
@@ -860,9 +875,7 @@ mod tests {
             "object",
             100,
             "content.Width",
-            None,
-            Some(4000.0),
-            None,
+            &FactValue::Num(4000.0),
             1700000000,
             None,
         )
@@ -886,9 +899,7 @@ mod tests {
             "object",
             100,
             "content.DateTimeOriginal",
-            None,
-            None,
-            Some(1704067200),
+            &FactValue::Time(crate::core::testing::migrated_time(1704067200)),
             1700000000,
             None,
         )
@@ -913,9 +924,7 @@ mod tests {
             "object",
             100,
             "content.Make",
-            Some("Canon"),
-            None,
-            None,
+            &FactValue::Text("Canon".into()),
             1700000000,
             None,
         )
@@ -927,9 +936,7 @@ mod tests {
             "object",
             100,
             "content.Make",
-            Some("Nikon"),
-            None,
-            None,
+            &FactValue::Text("Nikon".into()),
             1700000001,
             None,
         )
@@ -962,9 +969,7 @@ mod tests {
             "source",
             1,
             "content.Make",
-            Some("Canon"),
-            None,
-            None,
+            &FactValue::Text("Canon".into()),
             1700000000,
             Some(5), // basis_rev
         )
@@ -1114,9 +1119,7 @@ mod tests {
             &conn,
             100,
             "content.Make",
-            Some("Canon"),
-            None,
-            None,
+            &FactValue::Text("Canon".into()),
             1700000000,
         )
         .unwrap();
@@ -1138,9 +1141,7 @@ mod tests {
             &conn,
             100,
             "content.Width",
-            None,
-            Some(4000.0),
-            None,
+            &FactValue::Num(4000.0),
             1700000000,
         )
         .unwrap();
@@ -1162,9 +1163,7 @@ mod tests {
             &conn,
             100,
             "content.DateTimeOriginal",
-            None,
-            None,
-            Some(1704067200),
+            &FactValue::Time(crate::core::testing::migrated_time(1704067200)),
             1700000000,
         )
         .unwrap();

@@ -9,24 +9,16 @@ fn strip_hash_prefix(hash: &str) -> &str {
 }
 
 /// A machine-readable instant for the book's structured fields: UTC, with the
-/// `Z` that says so. The book's prose dates are local (see [`iso_date`]) —
-/// these are the fields a program reads, and they say which zone they mean.
+/// `Z` that says so. The book's prose dates read on the user's clock
+/// (`core::domain::format::format_date`, which also names the book's
+/// directory) — these are the fields a program reads, and they say which zone
+/// they mean. A year before 0000 is written in ISO 8601's expanded form; past
+/// the instants a time can hold (a save time can be anything), the stored
+/// seconds are written as they are.
 fn iso_utc(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_else(|| ts.to_string())
-}
-
-/// A calendar date for the book's prose and the book's own directory name:
-/// the reader's local day, like every other date Canon shows a person. Rendered
-/// in UTC, an evening retirement dated the book a day ahead of the story told
-/// inside it.
-fn iso_date(ts: i64) -> String {
-    use chrono::TimeZone;
-    match chrono::Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
-        _ => ts.to_string(),
-    }
+    jiff::Timestamp::from_second(ts)
+        .map(|at| at.to_string())
+        .unwrap_or_else(|_| ts.to_string())
 }
 
 /// The shelf's directory name at the archive ledger root: a visible place,

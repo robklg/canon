@@ -3,13 +3,12 @@
 
 use std::collections::HashMap;
 
-use chrono::{Local, TimeZone};
-
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::RegisteredFate;
-use crate::core::domain::format::{cap_path, format_count, format_size};
+use crate::core::domain::format::{cap_path, clock_of, format_count, format_date, format_size};
 use crate::core::domain::root::{Root, ROOT_SUSPENDED_MARKER};
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::scope::ResolvedScope;
 use crate::trail::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect, ScopeMatch};
@@ -60,6 +59,7 @@ pub(super) fn print_human(
     limit: Option<usize>,
     card: Option<&CompositionCard>,
     long: bool,
+    zone: &UserZone,
 ) {
     println!("{}", trail_header("Decision trail", resolved, time_label));
 
@@ -144,6 +144,7 @@ pub(super) fn print_human(
                             roots,
                             &result.placements,
                             &result.scope_matches,
+                            zone,
                         );
                     }
                 } else {
@@ -164,6 +165,7 @@ pub(super) fn print_human(
                             aw,
                             &result.placements,
                             &result.scope_matches,
+                            zone,
                         );
                     }
                 }
@@ -186,7 +188,7 @@ pub(super) fn print_human(
             };
             for day in days {
                 println!();
-                let weekday = day.date.format("%A %Y-%m-%d");
+                let weekday = day.date.strftime("%A %Y-%m-%d");
                 if day.rollup.is_empty() {
                     println!("{weekday}");
                 } else {
@@ -201,6 +203,7 @@ pub(super) fn print_human(
                             roots,
                             &result.placements,
                             &result.scope_matches,
+                            zone,
                         );
                         println!();
                     } else {
@@ -214,6 +217,7 @@ pub(super) fn print_human(
                             aw,
                             &result.placements,
                             &result.scope_matches,
+                            zone,
                         );
                     }
                 }
@@ -261,7 +265,7 @@ pub(super) fn print_human(
     // here" can honestly diverge (content arrived, then some of it was later
     // deleted or moved on). Scope-lens only, same as both rollups above.
     if let (TrailView::Recent(_), Some(card)) = (&result.view, card) {
-        print_composition_card(card);
+        print_composition_card(card, zone);
     }
 }
 
@@ -313,12 +317,13 @@ pub(super) fn print_crossings(
     result: &CrossingsResult,
     resolved: &ResolvedScope,
     params: &CrossingsParams,
+    zone: &UserZone,
 ) {
     println!("{}", trail_header("Crossings", resolved, None));
 
     for section in &result.sections {
         println!();
-        for line in crossing_section_lines(section, resolved, params) {
+        for line in crossing_section_lines(section, resolved, params, zone) {
             println!("{line}");
         }
     }
@@ -477,6 +482,7 @@ fn crossing_section_lines(
     section: &CrossingSection,
     resolved: &ResolvedScope,
     params: &CrossingsParams,
+    zone: &UserZone,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let counts = files_with_size(section.files, section.bytes);
@@ -538,7 +544,7 @@ fn crossing_section_lines(
     match &section.body {
         CrossingBody::Counterparts { lines, more } => {
             for line in lines {
-                out.extend(counterpart_lines(line));
+                out.extend(counterpart_lines(line, zone));
             }
             if *more > 0 {
                 let noun = match section.aspect {
@@ -556,7 +562,7 @@ fn crossing_section_lines(
         }
         CrossingBody::Deliveries { lines, more } => {
             for line in lines {
-                out.extend(delivery_lines(line, section, resolved, params));
+                out.extend(delivery_lines(line, section, resolved, params, zone));
             }
             if *more > 0 {
                 out.push(format!(
@@ -625,12 +631,12 @@ fn keyed_entry_lines(head: &str, marker: &str, counts: &str, indents: (&str, &st
 }
 
 /// One counterpart entry, in the shared keyed-entry shape.
-fn counterpart_lines(line: &CounterpartLine) -> Vec<String> {
+fn counterpart_lines(line: &CounterpartLine, zone: &UserZone) -> Vec<String> {
     let mut counts = format!(
         "{} \u{00b7} {} \u{00b7} {}",
         files_with_size(line.files, line.bytes),
         decision_chip(&line.decision_ids),
-        format_date_range(line.first_at, line.last_at)
+        format_date_range(line.first_at, line.last_at, zone)
     );
     // A coarsened key must say how much it stands for, or it reads as the
     // whole truth. One folder needs no saying — the path above *is* it.
@@ -682,6 +688,7 @@ fn delivery_lines(
     section: &CrossingSection,
     resolved: &ResolvedScope,
     params: &CrossingsParams,
+    zone: &UserZone,
 ) -> Vec<String> {
     let disposition = match section.aspect {
         RowAspect::Arrival => disposition_suffix(
@@ -708,7 +715,7 @@ fn delivery_lines(
     let mut out = vec![format!(
         "  #{:<4} {}   {}{}",
         line.decision_id,
-        format_date_only(line.at),
+        format_date(line.at, zone),
         files_with_size(line.files, line.bytes),
         if disposition.is_empty() {
             String::new()
@@ -1008,10 +1015,10 @@ pub(super) fn drew_from_lines(extractions: &[ShowExtraction]) -> Vec<String> {
 /// failing.
 const CARD_LINE_PREFIX: &str = "  ";
 
-fn print_composition_card(card: &CompositionCard) {
+fn print_composition_card(card: &CompositionCard, zone: &UserZone) {
     println!();
     println!("Standing here: {}", format_bucket(card.files, card.bytes));
-    for line in composition_card_lines(card) {
+    for line in composition_card_lines(card, zone) {
         println!("{CARD_LINE_PREFIX}{line}");
     }
 }
@@ -1021,13 +1028,13 @@ fn print_composition_card(card: &CompositionCard) {
 /// transitioned gaps (capped likewise), indexed-here, untracked. Pure data —
 /// kept separate from `print_composition_card` so the caps and ordering are
 /// testable without capturing stdout.
-fn composition_card_lines(card: &CompositionCard) -> Vec<String> {
+fn composition_card_lines(card: &CompositionCard, zone: &UserZone) -> Vec<String> {
     let mut lines = Vec::new();
     // The cap counts **origins, not physical lines**: an origin now emits
     // several, and capping the emitted lines would truncate one entry
     // mid-shape.
     for line in card.origins.iter().take(CARD_ORIGIN_CAP) {
-        lines.extend(format_origin_line(line));
+        lines.extend(format_origin_line(line, zone));
     }
     // Whether an origin line puts a path on screen that `--origin` can take.
     //
@@ -1216,7 +1223,7 @@ fn disposition_suffix(
 /// the shape too, because a
 /// card whose line shape varies with content length scans worse than one that
 /// does not.
-fn format_origin_line(line: &OriginLine) -> Vec<String> {
+fn format_origin_line(line: &OriginLine, zone: &UserZone) -> Vec<String> {
     match line {
         OriginLine::FromRoot {
             root_path,
@@ -1248,7 +1255,7 @@ fn format_origin_line(line: &OriginLine) -> Vec<String> {
                     "{} \u{00b7} {} \u{00b7} {}",
                     format_bucket(*files, *bytes),
                     decision_chip(decision_ids),
-                    format_date_range(*first_at, *last_at)
+                    format_date_range(*first_at, *last_at, zone)
                 ),
                 CARD_INDENTS,
             )
@@ -1267,7 +1274,7 @@ fn format_origin_line(line: &OriginLine) -> Vec<String> {
                 "via apply #{decision_id} from {} origins: {} \u{00b7} {}",
                 format_count(*origin_count),
                 format_bucket(*files, *bytes),
-                format_date_only(*at)
+                format_date(*at, zone)
             )]
         }
     }
@@ -1302,22 +1309,15 @@ fn format_transitioned_line(line: &TransitionedLine) -> String {
 
 /// A single date, or a `first – last` range when the two differ (several
 /// contributing decisions).
-fn format_date_range(first_at: i64, last_at: i64) -> String {
+fn format_date_range(first_at: i64, last_at: i64, zone: &UserZone) -> String {
     if first_at == last_at {
-        format_date_only(first_at)
+        format_date(first_at, zone)
     } else {
         format!(
             "{} \u{2013} {}",
-            format_date_only(first_at),
-            format_date_only(last_at)
+            format_date(first_at, zone),
+            format_date(last_at, zone)
         )
-    }
-}
-
-pub(super) fn format_date_only(ts: i64) -> String {
-    match Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
-        _ => "????-??-??".to_string(),
     }
 }
 
@@ -1345,13 +1345,14 @@ fn print_event(
     act_width: usize,
     placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
     scope_matches: &HashMap<i64, ScopeMatch>,
+    zone: &UserZone,
 ) {
     match event {
         TimelineEvent::Decision(d) => {
             let time = if with_date {
-                format_datetime(d.created_at)
+                format_datetime(d.created_at, zone)
             } else {
-                format_time(d.created_at)
+                format_time(d.created_at, zone)
             };
             let suffix = |line: &mut String| line.push_str(&decision_suffix(d));
             let cells = event_cells(event, resolved, roots, view_root, placements, scope_matches);
@@ -1403,9 +1404,9 @@ fn print_event(
                 SCOPE_CELL_MAX,
             );
             let time = if with_date {
-                format_datetime(n.created_at)
+                format_datetime(n.created_at, zone)
             } else {
-                format_time(n.created_at)
+                format_time(n.created_at, zone)
             };
             // A note carries no act: it is a thought, not a decision. The
             // column is held open rather than closed up, so the scope cells
@@ -1446,8 +1447,9 @@ fn print_long_event(
     roots: &HashMap<i64, Root>,
     placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
     scope_matches: &HashMap<i64, ScopeMatch>,
+    zone: &UserZone,
 ) {
-    for line in long_event_lines(event, with_date, roots, placements, scope_matches) {
+    for line in long_event_lines(event, with_date, roots, placements, scope_matches, zone) {
         println!("{line}");
     }
 }
@@ -1461,14 +1463,15 @@ fn long_event_lines(
     roots: &HashMap<i64, Root>,
     placements: &HashMap<i64, Vec<(DecisionExtraction, RowAspect)>>,
     scope_matches: &HashMap<i64, ScopeMatch>,
+    zone: &UserZone,
 ) -> Vec<String> {
     let mut out = Vec::new();
     match event {
         TimelineEvent::Decision(d) => {
             let time = if with_date {
-                format_datetime(d.created_at)
+                format_datetime(d.created_at, zone)
             } else {
-                format_time(d.created_at)
+                format_time(d.created_at, zone)
             };
             out.push(format!("#{:<4} {time}  {}", d.id, decision_act(&d.command)));
 
@@ -1507,9 +1510,9 @@ fn long_event_lines(
         }
         TimelineEvent::Note(n) => {
             let time = if with_date {
-                format_datetime(n.created_at)
+                format_datetime(n.created_at, zone)
             } else {
-                format_time(n.created_at)
+                format_time(n.created_at, zone)
             };
             // No act word: a thought is not an act, and the `~` below is what
             // marks the voice — the same rule the column mode's blank act
@@ -1905,17 +1908,17 @@ pub(super) fn format_counts(d: &Decision) -> String {
     )
 }
 
-pub(super) fn format_datetime(ts: i64) -> String {
-    match Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
-        _ => "????-??-?? ??:??".to_string(),
+pub(super) fn format_datetime(ts: i64, zone: &UserZone) -> String {
+    match clock_of(ts, zone) {
+        Some(at) => at.strftime("%Y-%m-%d %H:%M").to_string(),
+        None => "????-??-?? ??:??".to_string(),
     }
 }
 
-fn format_time(ts: i64) -> String {
-    match Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%H:%M").to_string(),
-        _ => "??:??".to_string(),
+fn format_time(ts: i64, zone: &UserZone) -> String {
+    match clock_of(ts, zone) {
+        Some(at) => at.strftime("%H:%M").to_string(),
+        None => "??:??".to_string(),
     }
 }
 
@@ -2536,6 +2539,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[1],
@@ -2563,7 +2567,14 @@ mod tests {
                 other_count: 0,
             },
         )]);
-        let lines = long_event_lines(&event, true, &HashMap::new(), &HashMap::new(), &matches);
+        let lines = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &matches,
+            &UserZone::utc(),
+        );
         assert_eq!(lines[1], "      /archive/2016");
     }
 
@@ -2577,6 +2588,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &UserZone::utc(),
         );
         assert_eq!(lines[1], "      global");
     }
@@ -2588,7 +2600,14 @@ mod tests {
             "old laptop/albums/trip_2007_2010",
             "bulk-transfer this",
         ));
-        let lines = long_event_lines(&event, true, &roots, &HashMap::new(), &HashMap::new());
+        let lines = long_event_lines(
+            &event,
+            true,
+            &roots,
+            &HashMap::new(),
+            &HashMap::new(),
+            &UserZone::utc(),
+        );
         assert_eq!(
             lines[1],
             "      /Volumes/backup-drive/Media Archive/old laptop/albums/trip_2007_2010"
@@ -2609,7 +2628,14 @@ mod tests {
                 other_count: 30,
             },
         )]);
-        let lines = long_event_lines(&event, true, &HashMap::new(), &HashMap::new(), &matches);
+        let lines = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &matches,
+            &UserZone::utc(),
+        );
         assert_eq!(lines[1], "      /a/foto   (+30 other places)");
 
         let one = HashMap::from([(
@@ -2619,7 +2645,14 @@ mod tests {
                 other_count: 1,
             },
         )]);
-        let lines = long_event_lines(&event, true, &HashMap::new(), &HashMap::new(), &one);
+        let lines = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &one,
+            &UserZone::utc(),
+        );
         assert_eq!(lines[1], "      /a/foto   (+1 other place)");
     }
 
@@ -2639,7 +2672,14 @@ mod tests {
             ],
         )]);
 
-        let long = long_event_lines(&event, true, &HashMap::new(), &placements, &HashMap::new());
+        let long = long_event_lines(
+            &event,
+            true,
+            &HashMap::new(),
+            &placements,
+            &HashMap::new(),
+            &UserZone::utc(),
+        );
         let global = ResolvedScope {
             prefixes: Vec::new(),
             set_aside: Vec::new(),
@@ -2672,8 +2712,22 @@ mod tests {
         let decision = TimelineEvent::Decision(Box::new(mk_decision(1, None)));
         let note = TimelineEvent::Note(mk_note("x", "thought"));
 
-        let d = long_event_lines(&decision, true, &roots, &HashMap::new(), &HashMap::new());
-        let n = long_event_lines(&note, true, &roots, &HashMap::new(), &HashMap::new());
+        let d = long_event_lines(
+            &decision,
+            true,
+            &roots,
+            &HashMap::new(),
+            &HashMap::new(),
+            &UserZone::utc(),
+        );
+        let n = long_event_lines(
+            &note,
+            true,
+            &roots,
+            &HashMap::new(),
+            &HashMap::new(),
+            &UserZone::utc(),
+        );
 
         // The header's `#{id:<4} ` field is the rail's width: the timestamp
         // starts exactly where every line below it does.
@@ -2697,6 +2751,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &UserZone::utc(),
         );
         let grouped = long_event_lines(
             &event,
@@ -2704,6 +2759,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &UserZone::utc(),
         );
         assert!(dated[0].starts_with("#7"));
         assert!(grouped[0].starts_with("#7"));
@@ -3015,6 +3071,7 @@ mod tests {
             &arrivals,
             &scope_of(&["/archive"]),
             &crossings_params_of(None, None),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[0],
@@ -3034,6 +3091,7 @@ mod tests {
             &extractions,
             &scope_of(&["/vol/sd"]),
             &crossings_params_of(None, None),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[0],
@@ -3064,6 +3122,7 @@ mod tests {
             &out,
             &scope_of(&["/vol/sd"]),
             &crossings_params_of(Some("/vol/sd/photos"), None),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[0],
@@ -3080,6 +3139,7 @@ mod tests {
             &inbound,
             &scope_of(&["/archive"]),
             &crossings_params_of(None, Some("/archive/Media")),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[0],
@@ -3091,6 +3151,7 @@ mod tests {
             &inbound,
             &scope_of(&["/archive"]),
             &crossings_params_of(None, None),
+            &UserZone::utc(),
         );
         assert_eq!(lines[0], "Arrived here: 2 files (200 B) from 1 origin.");
     }
@@ -3120,6 +3181,7 @@ mod tests {
             &named(RowAspect::Arrival, "/vol/sd"),
             &scope_of(&["/archive"]),
             &crossings_params_of(Some("/vol/sd"), Some("/archive/Raw")),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[0],
@@ -3130,6 +3192,7 @@ mod tests {
             &named(RowAspect::Extraction, "/archive/Raw"),
             &scope_of(&["/vol/sd"]),
             &crossings_params_of(Some("/vol/sd/2019"), Some("/archive/Raw")),
+            &UserZone::utc(),
         );
         assert_eq!(
             lines[0],
@@ -3142,6 +3205,7 @@ mod tests {
             &named(RowAspect::Arrival, "/vol/sd"),
             &scope_of(&["/archive"]),
             &crossings_params_of(Some("/vol/sd"), None),
+            &UserZone::utc(),
         );
         assert_eq!(lines[0], "Arrived here: 2 files (200 B) from /vol/sd.");
     }
@@ -3163,6 +3227,7 @@ mod tests {
             &section,
             &scope_of(&["/archive"]),
             &crossings_params_of(None, None),
+            &UserZone::utc(),
         );
         assert!(lines.iter().any(|l| l.trim() == long), "{lines:?}");
         assert!(!lines
@@ -3186,6 +3251,7 @@ mod tests {
             &named,
             &scope_of(&["/archive"]),
             &crossings_params_of(Some(long), None),
+            &UserZone::utc(),
         );
         assert!(lines[0].ends_with(&format!("from {long}.")), "{}", lines[0]);
     }
@@ -3202,6 +3268,7 @@ mod tests {
             &section,
             &scope_of(&["/archive"]),
             &crossings_params_of(None, None),
+            &UserZone::utc(),
         );
         assert_eq!(lines.last().unwrap().trim(), "\u{2026} and 8 more origins.");
 
@@ -3237,6 +3304,7 @@ mod tests {
             &named,
             &scope_of(&["/archive"]),
             &crossings_params_of(Some("/vol/sd"), None),
+            &UserZone::utc(),
         );
         assert!(
             lines
@@ -3289,6 +3357,7 @@ mod tests {
             &section,
             &scope,
             &crossings_params_of(Some("/vol/sd"), None),
+            &UserZone::utc(),
         );
         assert!(
             capped.iter().any(|l| l.contains("more places")),
@@ -3308,6 +3377,7 @@ mod tests {
                 limit: None,
                 ..crossings_params_of(Some("/vol/sd"), None)
             },
+            &UserZone::utc(),
         );
         assert!(
             !uncapped.iter().any(|l| l.contains("more places")),
@@ -3331,7 +3401,7 @@ mod tests {
         line.counterpart.root_removed = true;
         line.counterpart.retired_book = Some(book.to_string());
 
-        let lines = counterpart_lines(&line);
+        let lines = counterpart_lines(&line, &UserZone::utc());
         assert_eq!(lines[0], "  /Volumes/gone");
         assert!(lines[1].contains(book), "{lines:?}");
 
@@ -3346,16 +3416,19 @@ mod tests {
     fn a_coverage_count_renders_only_past_one_folder() {
         let ts = local_ts_on("2026-07-11");
 
-        let grouped = counterpart_lines(&covering(
-            counterpart_line("/archive/Media/2016/03", 262, 2, ts),
-            44,
-        ));
+        let grouped = counterpart_lines(
+            &covering(counterpart_line("/archive/Media/2016/03", 262, 2, ts), 44),
+            &UserZone::utc(),
+        );
         assert!(
             grouped.last().unwrap().contains("44 folders"),
             "{grouped:?}"
         );
 
-        let leaf = counterpart_lines(&counterpart_line("/archive/Media/2016/03/08", 262, 2, ts));
+        let leaf = counterpart_lines(
+            &counterpart_line("/archive/Media/2016/03/08", 262, 2, ts),
+            &UserZone::utc(),
+        );
         assert!(
             !leaf.last().unwrap().contains("folder"),
             "a leaf entry states no coverage: {leaf:?}"
@@ -3363,7 +3436,10 @@ mod tests {
 
         // And the singular is never reached by the count itself, since one
         // folder is exactly the case that renders nothing.
-        let one = counterpart_lines(&covering(counterpart_line("/archive/Docs", 3, 1, ts), 1));
+        let one = counterpart_lines(
+            &covering(counterpart_line("/archive/Docs", 3, 1, ts), 1),
+            &UserZone::utc(),
+        );
         assert!(!one.last().unwrap().contains("folder"), "{one:?}");
     }
 
@@ -3378,7 +3454,7 @@ mod tests {
 
         let mut line = counterpart_line("/archive/Docs", 3, 1, ts);
         line.decision_ids = vec![57];
-        let rendered = counterpart_lines(&line);
+        let rendered = counterpart_lines(&line, &UserZone::utc());
         assert!(
             rendered.last().unwrap().contains("decision #57"),
             "{rendered:?}"
@@ -3389,7 +3465,10 @@ mod tests {
             "{rendered:?}"
         );
 
-        let plural = counterpart_lines(&counterpart_line("/archive/Media", 9, 3, ts));
+        let plural = counterpart_lines(
+            &counterpart_line("/archive/Media", 9, 3, ts),
+            &UserZone::utc(),
+        );
         assert!(plural.last().unwrap().contains("3 decisions"), "{plural:?}");
         assert!(!plural.last().unwrap().contains('#'), "{plural:?}");
     }
@@ -3565,6 +3644,7 @@ mod tests {
             &section,
             &scope_of(&["/archive"]),
             &crossings_params_of(Some("/Volumes/gone"), None),
+            &UserZone::utc(),
         );
         assert_eq!(lines[0], "Arrived here: 5 files (500 B) from /Volumes/gone");
         assert_eq!(
@@ -3606,6 +3686,7 @@ mod tests {
             &section,
             &scope_of(&["/archive"]),
             &crossings_params_of(Some("/Volumes/gone"), None),
+            &UserZone::utc(),
         );
         assert!(lines[1].starts_with("  #48 "), "{}", lines[1]);
         // Inbound voice, and the disposition word is the registered one.
@@ -4004,21 +4085,27 @@ mod tests {
     /// An origin entry's lines joined, for the assertions that are about its
     /// *content* rather than its shape. The shape has its own pins below.
     fn origin_text(line: &OriginLine) -> String {
-        format_origin_line(line).join("\n")
+        format_origin_line(line, &UserZone::utc()).join("\n")
     }
 
-    /// A timestamp that maps back to `date_str` under the local timezone
-    /// used by `format_date_only` — noon avoids DST-transition edge cases.
-    /// Timezone-independent by construction: the date is chosen first, the
-    /// timestamp derived from it, never the reverse.
+    /// The trail's times read on the user's clock in their own layouts: 23:30 UTC on New
+    /// Year's Eve 2023 is 18:30 on 31 December in New York.
+    #[test]
+    fn the_trail_times_read_on_the_users_clock() {
+        let new_york = UserZone::for_test("America/New_York");
+        assert_eq!(format_datetime(1704065400, &new_york), "2023-12-31 18:30");
+        assert_eq!(format_time(1704065400, &new_york), "18:30");
+        assert_eq!(
+            format_date_range(1704065400, 1704065400 + 86400, &new_york),
+            "2023-12-31 \u{2013} 2024-01-01"
+        );
+    }
+
+    /// Noon on `date_str` on the clock these tests render on (UTC): the date is chosen
+    /// first, the timestamp derived from it, never the reverse.
     fn local_ts_on(date_str: &str) -> i64 {
-        let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
-        let naive = date.and_hms_opt(12, 0, 0).unwrap();
-        Local
-            .from_local_datetime(&naive)
-            .single()
-            .unwrap()
-            .timestamp()
+        let date: jiff::civil::Date = date_str.parse().unwrap();
+        UserZone::utc().day_start(date).unwrap().as_second() + 12 * 3600
     }
 
     /// The card's origin entry in the door's shape: the path ends its own
@@ -4030,7 +4117,7 @@ mod tests {
         let ts = local_ts_on("2024-01-05");
         let line = mk_from_root("/Volumes/old-laptop", false, 47, vec![12], ts, ts);
         assert_eq!(
-            format_origin_line(&line),
+            format_origin_line(&line, &UserZone::utc()),
             vec![
                 "arrived from /Volumes/old-laptop".to_string(),
                 "    47 files (4.7 KB) \u{b7} decision #12 \u{b7} 2024-01-05".to_string(),
@@ -4054,7 +4141,7 @@ mod tests {
             last_at: ts,
         };
         assert_eq!(
-            format_origin_line(&line),
+            format_origin_line(&line, &UserZone::utc()),
             vec![
                 "arrived from elsewhere in /archive".to_string(),
                 "    47 files (3.9 GB) \u{b7} decision #42 \u{b7} 2026-05-12".to_string(),
@@ -4071,7 +4158,10 @@ mod tests {
         let ts = local_ts_on("2026-07-11");
         let book = "/archive/books/2026-08-11-backup-archived";
 
-        let card = format_origin_line(&mk_retired_from_root("/Volumes/gone", book, ts));
+        let card = format_origin_line(
+            &mk_retired_from_root("/Volumes/gone", book, ts),
+            &UserZone::utc(),
+        );
         assert_eq!(card.len(), 3, "path, marker, counts: {card:?}");
         let indent = |l: &String| l.len() - l.trim_start().len();
         assert_eq!(indent(&card[1]), indent(&card[2]), "{card:?}");
@@ -4079,7 +4169,7 @@ mod tests {
         let mut entry = counterpart_line("/Volumes/gone", 5, 1, ts);
         entry.counterpart.root_removed = true;
         entry.counterpart.retired_book = Some(book.to_string());
-        let door = counterpart_lines(&entry);
+        let door = counterpart_lines(&entry, &UserZone::utc());
 
         // Measured **through the prefix the printer actually applies**, not a
         // hand-written stand-in for it: the claim is about the column on
@@ -4101,7 +4191,8 @@ mod tests {
         let origins: Vec<OriginLine> = (0..12)
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], ts, ts))
             .collect();
-        let lines = composition_card_lines(&mk_card(origins, Vec::new(), None, None));
+        let lines =
+            composition_card_lines(&mk_card(origins, Vec::new(), None, None), &UserZone::utc());
         // Ten origins at two lines each, then one remainder line.
         assert_eq!(lines.len(), 21, "{lines:?}");
         assert_eq!(
@@ -4130,7 +4221,7 @@ mod tests {
             first_at: ts,
             last_at: ts,
         };
-        let lines = format_origin_line(&line);
+        let lines = format_origin_line(&line, &UserZone::utc());
         assert_eq!(lines[0], "arrived from elsewhere in /archive");
         assert_eq!(lines[1], format!("    {}", ROOT_REMOVED_MARKER.trim()));
     }
@@ -4188,7 +4279,7 @@ mod tests {
             at: local_ts_on("2026-05-12"),
         };
         assert_eq!(
-            format_origin_line(&line),
+            format_origin_line(&line, &UserZone::utc()),
             vec!["via apply #42 from 3 origins: 5 files (500 B) \u{b7} 2026-05-12".to_string()]
         );
     }
@@ -4204,14 +4295,14 @@ mod tests {
             bytes: 500,
             at: local_ts_on("2026-05-12"),
         };
-        assert_eq!(format_origin_line(&line).len(), 1);
+        assert_eq!(format_origin_line(&line, &UserZone::utc()).len(), 1);
     }
 
     #[test]
     fn format_origin_line_from_root_marks_removed_root() {
         let ts = local_ts_on("2024-01-05");
         let line = mk_from_root("/Volumes/gone", true, 1, vec![1], ts, ts);
-        let lines = format_origin_line(&line);
+        let lines = format_origin_line(&line, &UserZone::utc());
         assert_eq!(lines[0], "arrived from /Volumes/gone");
         assert_eq!(lines[1], format!("    {}", ROOT_REMOVED_MARKER.trim()));
     }
@@ -4223,7 +4314,10 @@ mod tests {
     fn an_origin_line_reads_arrived_from() {
         let ts = local_ts_on("2024-01-05");
         assert_eq!(
-            format_origin_line(&mk_from_root("/vol/sd", false, 1, vec![1], ts, ts))[0],
+            format_origin_line(
+                &mk_from_root("/vol/sd", false, 1, vec![1], ts, ts),
+                &UserZone::utc()
+            )[0],
             "arrived from /vol/sd"
         );
 
@@ -4253,7 +4347,7 @@ mod tests {
             other => other,
         };
         assert_eq!(
-            format_origin_line(&within)[0],
+            format_origin_line(&within, &UserZone::utc())[0],
             "arrived from elsewhere in /archive"
         );
     }
@@ -4267,7 +4361,10 @@ mod tests {
     fn a_retired_origin_root_carries_the_book_pointer_in_drew_froms_wording() {
         let ts = local_ts_on("2024-01-05");
         let book = "/archive/books/2026-08-11-backup-archived";
-        let card_line = format_origin_line(&mk_retired_from_root("/Volumes/gone", book, ts));
+        let card_line = format_origin_line(
+            &mk_retired_from_root("/Volumes/gone", book, ts),
+            &UserZone::utc(),
+        );
 
         let drew = drew_from_lines(&[ShowExtraction {
             location: "/Volumes/gone".to_string(),
@@ -4314,7 +4411,7 @@ mod tests {
         assert!(!text.contains(ROOT_REMOVED_MARKER.trim()), "{text}");
         assert!(!text.contains("root retired"), "{text}");
         // A live root has no marker line at all: path, then counts.
-        assert_eq!(format_origin_line(&line).len(), 2);
+        assert_eq!(format_origin_line(&line, &UserZone::utc()).len(), 2);
     }
 
     /// The label names the absence and stops. The cause is unknowable from
@@ -4338,7 +4435,7 @@ mod tests {
                 bytes: 200,
             }),
         };
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         let last = lines.last().unwrap();
         assert_eq!(last, "arrival unrecorded: 2 files (200 B)");
         for cause in ["predates", "recording", "untracked"] {
@@ -4425,7 +4522,7 @@ mod tests {
                 bytes: 100,
             }),
         );
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         // The one origin takes two lines (path, counts) and the origins block
         // teaches its door; the siblings are one line each and unchanged.
         assert_eq!(lines.len(), 6);
@@ -4443,7 +4540,7 @@ mod tests {
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
             .collect();
         let card = mk_card(origins, Vec::new(), None, None);
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         // 10 origins at two lines each + one remainder line.
         assert_eq!(lines.len(), 21);
         assert!(
@@ -4461,7 +4558,8 @@ mod tests {
         let origins: Vec<OriginLine> = (0..12)
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
             .collect();
-        let capped = composition_card_lines(&mk_card(origins, Vec::new(), None, None));
+        let capped =
+            composition_card_lines(&mk_card(origins, Vec::new(), None, None), &UserZone::utc());
         assert_eq!(
             capped
                 .iter()
@@ -4486,7 +4584,7 @@ mod tests {
         let few: Vec<OriginLine> = (0..2)
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
             .collect();
-        let lines = composition_card_lines(&mk_card(few, Vec::new(), None, None));
+        let lines = composition_card_lines(&mk_card(few, Vec::new(), None, None), &UserZone::utc());
         assert_eq!(
             lines
                 .iter()
@@ -4500,16 +4598,19 @@ mod tests {
         assert!(CARD_ORIGIN_HINT.contains("to list the folders behind an origin"));
 
         // A card with no origins has no handles, so it teaches nothing.
-        let originless = composition_card_lines(&mk_card(
-            Vec::new(),
-            vec![TransitionedLine::Standing {
-                label: "excluded".to_string(),
-                files: 1,
-                bytes: 100,
-            }],
-            None,
-            None,
-        ));
+        let originless = composition_card_lines(
+            &mk_card(
+                Vec::new(),
+                vec![TransitionedLine::Standing {
+                    label: "excluded".to_string(),
+                    files: 1,
+                    bytes: 100,
+                }],
+                None,
+                None,
+            ),
+            &UserZone::utc(),
+        );
         for line in &originless {
             assert!(!line.contains("canon trail crossings"), "{line}");
         }
@@ -4533,7 +4634,7 @@ mod tests {
             None,
             None,
         );
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         assert!(!lines.iter().any(|l| l.contains("<path>")), "{lines:?}");
         for line in &lines {
             assert!(!line.contains("canon trail crossings"), "{line}");
@@ -4558,7 +4659,7 @@ mod tests {
             None,
             None,
         );
-        let capped = composition_card_lines(&capped);
+        let capped = composition_card_lines(&capped, &UserZone::utc());
         assert!(
             capped
                 .last()
@@ -4585,7 +4686,9 @@ mod tests {
             })
             .collect();
         beyond.push(mk_from_root("/vol/sd", false, 1, vec![99], 0, 0));
-        for line in composition_card_lines(&mk_card(beyond, Vec::new(), None, None)) {
+        for line in
+            composition_card_lines(&mk_card(beyond, Vec::new(), None, None), &UserZone::utc())
+        {
             assert!(
                 !line.contains("canon trail crossings"),
                 "the only path is beyond the cap: {line}"
@@ -4609,7 +4712,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            composition_card_lines(&mixed)
+            composition_card_lines(&mixed, &UserZone::utc())
                 .iter()
                 .filter(|l| l.contains("canon trail crossings"))
                 .count(),
@@ -4772,10 +4875,10 @@ mod tests {
         // folders themselves. The whole shape is a head, an optional marker and a
         // counts line, so a listing of any kind, at any indent, shows up as
         // one line more than that.
-        let bare_entry = counterpart_lines(&covering(
-            counterpart_line("/archive/Media/2016/03", 262, 2, ts),
-            9,
-        ));
+        let bare_entry = counterpart_lines(
+            &covering(counterpart_line("/archive/Media/2016/03", 262, 2, ts), 9),
+            &UserZone::utc(),
+        );
         assert_eq!(
             bare_entry.len(),
             2,
@@ -4792,7 +4895,7 @@ mod tests {
         // by a drift that happens to replace the marker line.
         let mut marked = covering(counterpart_line("/Volumes/gone", 5, 1, ts), 4);
         marked.counterpart.root_removed = true;
-        let marked = counterpart_lines(&marked);
+        let marked = counterpart_lines(&marked, &UserZone::utc());
         assert_eq!(marked.len(), 3, "head, marker, counts: {marked:?}");
         assert_eq!(pairs(&marked), 0, "{marked:?}");
 
@@ -4832,6 +4935,7 @@ mod tests {
             &named,
             &scope_of(&["/vol/sd"]),
             &crossings_params_of(None, Some("/archive/Media/2016/03")),
+            &UserZone::utc(),
         );
         assert_eq!(pairs(&named_entry), 2, "{named_entry:?}");
 
@@ -4851,8 +4955,10 @@ mod tests {
         // the string check above is only half a pin, and covering one site's
         // structure while asserting about two is the shape this whole test
         // exists to refuse.
-        let card_origin =
-            format_origin_line(&mk_from_root("/vol/sd", false, 262, vec![12], ts, ts));
+        let card_origin = format_origin_line(
+            &mk_from_root("/vol/sd", false, 262, vec![12], ts, ts),
+            &UserZone::utc(),
+        );
         assert_eq!(
             card_origin.len(),
             2,
@@ -5023,6 +5129,7 @@ mod tests {
             &section,
             &scope_of(&["/archive"]),
             &crossings_params_of(None, None),
+            &UserZone::utc(),
         ) {
             assert!(!line.contains("canon trail crossings"), "{line}");
         }
@@ -5065,7 +5172,7 @@ mod tests {
             })
             .collect();
         let card = mk_card(Vec::new(), gaps, None, None);
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         // 5 gap lines + one remainder line.
         assert_eq!(lines.len(), 6);
         assert_eq!(lines[5], "\u{2026} and 3 more gaps.");
@@ -5083,7 +5190,7 @@ mod tests {
             })
             .collect();
         let card = mk_card(Vec::new(), standings, None, None);
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         assert_eq!(lines.len(), 8);
         assert!(!lines.iter().any(|l| l.contains("more")));
     }
@@ -5094,7 +5201,7 @@ mod tests {
             .map(|i| mk_from_root(&format!("/vol{i}"), false, 1, vec![i], 0, 0))
             .collect();
         let card = mk_card(origins, Vec::new(), None, None);
-        let lines = composition_card_lines(&card);
+        let lines = composition_card_lines(&card, &UserZone::utc());
         // Three origins at two lines each, then the hint — and nothing left
         // over to name.
         assert_eq!(lines.len(), 7);
@@ -5296,7 +5403,7 @@ mod tests {
             },
             other => other,
         };
-        let lines = format_origin_line(&parked);
+        let lines = format_origin_line(&parked, &UserZone::utc());
         assert!(lines.iter().any(|l| l.contains("(suspended)")), "{lines:?}");
         assert!(
             !lines.iter().any(|l| l.contains("root removed")),

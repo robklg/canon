@@ -1175,149 +1175,6 @@ fn architecture_rules_hold() {
 // Pinned exceptions
 // ============================================================================
 
-/// Calls that reach the database directly, rather than through a repository.
-const SQL_CALLS: &[&str] = &[
-    ".query_row(",
-    ".query_map(",
-    ".query(",
-    ".prepare(",
-    ".execute(",
-    ".execute_batch(",
-];
-
-/// The expression facility's operations stratum leaves SQL to its repository
-/// stratum — with exactly one accepted exception, pinned here.
-///
-/// `check_fact_compare` is the per-source comparison for built-in keys and
-/// stored facts, and it queries the database itself: the source row a built-in
-/// is read from, and the object link stored facts hang off. It is accepted
-/// rather than repaired: moving it whole into `repo` would put comparison
-/// logic there instead, which is the same law broken from the other side. The
-/// repair that does work is moving those two reads into `repo` and leaving the
-/// comparison in `ops`, after which the function speaks no SQL — so the
-/// exception ends by being removed, not by being relocated.
-///
-/// The exception predates the stratum. What changed when the code moved is
-/// that the file it sits in now claims a layer, so the claim needs a stated
-/// exception rather than silence.
-///
-/// This pin fails three ways, each of them wanted:
-///
-/// - a second SQL-speaking function appears in the stratum — the exception was
-///   being treated as a precedent;
-/// - the marker on the function is dropped while the SQL stays — the site
-///   would vanish from the audit count while still owing the repair;
-/// - the function goes away, which is the repair landing. The pin is then
-///   stale and fails, so the marker, this test, and the reason for both are
-///   removed by one change. That is the property that keeps it from being
-///   overlooked: the repair cannot land quietly.
-#[test]
-fn the_facility_leaves_sql_to_its_repo_but_for_one_pinned_exception() {
-    const PINNED: &str = "check_fact_compare";
-
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let ops_root = Path::new(&manifest_dir).join("src/expr/ops");
-    let mut files = collect_rs_files(&ops_root);
-    files.push(Path::new(&manifest_dir).join("src/expr/ops.rs"));
-
-    let mut speaks_sql: Vec<(String, String, bool)> = Vec::new();
-
-    for path in &files {
-        let text = fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-        let rel = path
-            .strip_prefix(&manifest_dir)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        // Test modules build databases by writing rows; that is fixture work,
-        // not the stratum reaching past its layer.
-        // Everything from the test module on is out of scope. Cutting at the
-        // first `#[cfg(test)]` is only sound while there is at most one: a
-        // test-only helper placed early would otherwise hide every production
-        // function below it from this scan, and the pin would go quiet without
-        // saying so. So the assumption is asserted rather than relied on.
-        assert!(
-            text.matches("#[cfg(test)]").count() <= 1,
-            "{rel}: more than one #[cfg(test)] — the SQL scan cuts at the first \
-             one and would stop seeing production code below it"
-        );
-        let production = match text.find("#[cfg(test)]") {
-            #[expect(clippy::string_slice, reason = "a `find` position")]
-            Some(i) => &text[..i],
-            #[expect(clippy::string_slice, reason = "the whole string")]
-            None => &text[..],
-        };
-
-        let mut current: Option<String> = None;
-        let mut marked = false;
-        let mut pending_marker = false;
-
-        for line in production.lines() {
-            if line.contains("// AUDIT:") {
-                pending_marker = true;
-            }
-            // Indentation is stripped before matching, so a method inside an
-            // `impl` block is attributed to itself rather than silently
-            // inheriting the last top-level function's name — which would let
-            // a second SQL speaker hide behind the first one's identity and
-            // then be dropped as a duplicate. Visibility is matched by taking
-            // whatever precedes `fn`, so no spelling of `pub(in ...)` slips by
-            // through not being listed.
-            let head = line.trim_start();
-            if let Some(rest) = head.strip_prefix("fn ").or_else(|| {
-                head.split_once(" fn ").and_then(|(qualifiers, rest)| {
-                    let qualifiers = qualifiers.trim_end_matches(" async");
-                    (qualifiers == "pub"
-                        || qualifiers == "async"
-                        || (qualifiers.starts_with("pub(") && qualifiers.ends_with(')')))
-                    .then_some(rest)
-                })
-            }) {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                current = Some(name);
-                marked = pending_marker;
-                pending_marker = false;
-            } else if line.trim().is_empty() {
-                // A blank line separates a marker from anything it could mark.
-                pending_marker = false;
-            }
-
-            if SQL_CALLS.iter().any(|c| line.contains(c)) {
-                let owner = current
-                    .clone()
-                    .unwrap_or_else(|| "<file scope>".to_string());
-                if !speaks_sql.iter().any(|(f, n, _)| f == &rel && n == &owner) {
-                    speaks_sql.push((rel.clone(), owner, marked));
-                }
-            }
-        }
-    }
-
-    let names: Vec<&str> = speaks_sql.iter().map(|(_, n, _)| n.as_str()).collect();
-    assert_eq!(
-        names,
-        vec![PINNED],
-        "the facility's operations stratum speaks SQL in {} place(s): {:?}.\n  \
-         Exactly one is pinned ({PINNED}). If a new one appeared, it is drift — route it \
-         through `expr/repo.rs`.\n  \
-         If {PINNED} is gone, the repair landed: delete this test and its `// AUDIT:` marker \
-         in the same commit.",
-        speaks_sql.len(),
-        speaks_sql
-    );
-
-    assert!(
-        speaks_sql[0].2,
-        "{PINNED} still queries the database but has lost its `// AUDIT:` marker, so it no \
-         longer appears in the audit count that tracks work still owed."
-    );
-}
-
 /// The context-supplied set is spelled inside the expression facility and
 /// nowhere else.
 ///
@@ -1408,10 +1265,7 @@ const PROBE_SPELLINGS: &[&str] = &[
 
 /// Each exemption, with the verb it serves and how many times it spells a
 /// probe.
-const PROBE_EXEMPT: &[(&str, usize)] = &[
-    // reading fixed-offset fields out of a timestamp — not a path
-    ("src/facts/ops/import.rs", 2),
-];
+const PROBE_EXEMPT: &[(&str, usize)] = &[];
 
 /// How many probe spellings a file's text contains.
 fn positional_probes(text: &str) -> usize {
@@ -1662,6 +1516,105 @@ fn the_containment_probe_is_spelled_only_inside_the_path_law() {
          If a new site genuinely reads a fixed offset out of something that is not a path, \
          add it here with that verb named and its exact count; if an exemption is genuinely \
          gone, delete its row in the same commit."
+    );
+}
+
+/// Where a read of the machine's time zone may be spelled: its owner, and this file, which
+/// declares the spellings and plants them in its self-test.
+const ZONE_HOMES: &[&str] = &["src/core/domain/time/zone.rs", "tests/architecture.rs"];
+
+/// The ways a program reads the machine's zone: chrono's local clock, jiff's system zone
+/// and its zone-carrying "now", and the `TZ` variable read directly.
+const ZONE_SPELLINGS: &[&str] = &[
+    "chrono::Local",
+    "Local::now(",
+    "Local.timestamp",
+    "Local.from_local",
+    "TimeZone::system(",
+    "TimeZone::try_system(",
+    "Zoned::now(",
+    "var(\"TZ\")",
+    "var_os(\"TZ\")",
+];
+
+/// Each exemption, with the verb it serves and how many times it spells a read.
+const ZONE_EXEMPT: &[(&str, usize)] = &[];
+
+/// How many reads the owner itself spells, outside comments and its tests: `TZ` once and
+/// the system zone once.
+const ZONE_OWNER_READS: usize = 2;
+
+/// How many machine-zone spellings a text contains.
+fn machine_zone_reads(text: &str) -> usize {
+    ZONE_SPELLINGS.iter().map(|s| text.matches(s).count()).sum()
+}
+
+/// **The user's-zone owner**: the machine's zone is read in one place,
+/// `core::domain::time::zone::UserZone::machine`, and a read anywhere else fails the build.
+///
+/// Every time Canon shows a person reads on the user's clock through one rule, with the
+/// zone handed to it as a parameter. A second read of the machine's zone is a second answer
+/// to "which clock?" — correct on the machine it was written on and wrong on the next — and
+/// a manifest's run must never read it at all. So the read has one owner, and this guard
+/// holds the rest of the tree to it.
+///
+/// Matched both directions: a read outside the owner fails unless it is a named exemption
+/// with its exact count, an exemption whose read has gone fails, and the owner must still
+/// spell exactly its own reads — so the owner moving, or growing a second read, fails too.
+///
+/// **What this does not catch.** The scan is textual. An aliased import
+/// (`use jiff::tz::TimeZone as Tz;` then `Tz::system()`), a read of `/etc/localtime` by
+/// path, `std::env::vars()` searched for `TZ`, and a compile-time `env!("TZ")` all go
+/// unseen, as would a dependency that reads the zone itself.
+#[test]
+fn the_machine_zone_is_read_only_by_its_owner() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let base = Path::new(&manifest_dir);
+
+    let found = spelled_only_here(base, ZONE_HOMES, machine_zone_reads);
+    let expected: Vec<(String, usize)> = ZONE_EXEMPT
+        .iter()
+        .map(|(f, n)| ((*f).to_string(), *n))
+        .collect();
+    assert_eq!(
+        found, expected,
+        "\n  The machine's time zone is read outside its owner.\n  \
+         Found: {found:?}\n  Exempt: {expected:?}\n  \
+         Take the user's zone as a parameter, handed down from the interface \
+         (`crate::user_zone()` in `main.rs`), and read times through the frame rule.\n  \
+         If an exemption is genuinely gone, delete its row in the same commit."
+    );
+
+    let owner = ZONE_HOMES[0];
+    let raw = fs::read_to_string(base.join(owner)).expect("the owner's file");
+    let code: String = production_text(owner, &raw)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        machine_zone_reads(&code),
+        ZONE_OWNER_READS,
+        "\n  The owner `{owner}` no longer spells exactly its own reads of the machine's zone.\n  \
+         If the owner moved, move `ZONE_HOMES` with it; if it reads the zone a new way, \
+         say so in `ZONE_OWNER_READS`."
+    );
+}
+
+/// The zone matcher counts each spelling it declares — the matcher red-smoked on its own
+/// fixtures, so a spelling dropped from the list fails here rather than going quiet.
+#[test]
+fn the_zone_matcher_counts_each_spelling() {
+    for spelling in ZONE_SPELLINGS {
+        assert_eq!(machine_zone_reads(spelling), 1, "{spelling}");
+    }
+    assert_eq!(
+        machine_zone_reads("let now = chrono::Local::now(); std::env::var(\"TZ\")"),
+        3
+    );
+    assert_eq!(
+        machine_zone_reads("Timestamp::now(); TimeZone::get(\"UTC\"); env(\"TZ\", z)"),
+        0
     );
 }
 
@@ -2202,11 +2155,6 @@ const REACHABILITY_CLAIMS: &[ReachabilityClaims] = &[
         unwraps: 2,
     },
     ReachabilityClaims {
-        file: "trail/ops/compute.rs",
-        expects: 0,
-        unwraps: 2,
-    },
-    ReachabilityClaims {
         file: "trail/ops/crossings.rs",
         expects: 3,
         unwraps: 0,
@@ -2710,7 +2658,7 @@ fn f(door: Door) -> usize {
         "full_path.starts_with(dir) && full_path.as_bytes().get(dir.len()) == Some(&b'/')",
         // the same idiom reached by indexing rather than by `get`
         "prefix_len < s.len() && s.as_bytes()[prefix_len] == b'/'",
-        // src/facts/ops/import.rs — a fixed offset into a timestamp
+        // src/facts/ops/import.rs, as it stood — a fixed offset into a timestamp
         "s.len() >= 19 && s.chars().nth(4) == Some(':')",
         // the byte-iterator form
         "p.bytes().nth(d.len()) == Some(b'/')",
@@ -3905,6 +3853,7 @@ mod source {
                 "Pattern",
                 "EvalContext",
                 "Unmeasured",
+                "PatternNoValue",
                 "ScopeVantage",
                 "prefetch_pattern_facts",
                 "PatternFacts",
@@ -3920,8 +3869,8 @@ mod source {
                 "OBJECT_HASH",
                 "Modifier",
                 "ModifierCategory",
-                "apply_accessor",
-                "apply_modifier",
+                "apply_chain",
+                "Modified",
                 // Completing the surface: parameter types of the above,
                 // named by nothing today.
                 "PathAccessor",
@@ -4069,7 +4018,6 @@ mod source {
                 "relative_to_scope",
                 "survey_note_context",
                 "SurveyNoteContext",
-                "format_note_date",
             ],
         ),
         (

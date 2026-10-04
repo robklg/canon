@@ -5,36 +5,37 @@
 //! a prefetched cache rather than a query per source, with a per-source
 //! fallback for the built-in keys that are derived from source columns instead
 //! of stored as facts. Those values are read through the resolver that owns
-//! them (`get_builtin_value`), never derived again here.
-//!
-//! That fallback reads the source row and the object link straight from the
-//! database rather than going through the repository stratum beside it — the
-//! one place here that does. It is a known exception, marked and pinned at the
-//! function itself.
+//! them (`get_builtin_value`), never derived again here; the source row they
+//! are read from comes from the repository stratum beside this one.
 
 use anyhow::{bail, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
-use crate::core::domain::fact;
-use crate::expr::domain::cache::{to_local_fact_value, FactCache, FactValue};
+use crate::core::domain::fact::FactValue;
+use crate::core::domain::time::zone::UserZone;
+use crate::expr::domain::cache::FactCache;
 use crate::expr::domain::filter::{
     compare_fact_value, detect_status_predicates, extract_comparable_keys, extract_keys, CompareOp,
     Expr, Filter, FilterResult, StatusPredicate,
 };
 use crate::expr::domain::key::{parse_key_with_modifiers, BuiltinKey};
-use crate::expr::domain::transform::{apply_accessor, apply_modifier, ModifierCall, PathAccessor};
-use crate::expr::domain::value::{get_builtin_value, SourceAttributes};
-use crate::expr::repo::{get_fact_value, is_known_key, prefetch_facts, prefetch_status_data};
+use crate::expr::domain::transform::{apply_chain, Modified, ModifierCall, PathAccessor};
+use crate::expr::domain::value::get_builtin_value;
+use crate::expr::repo::{
+    fetch_source_row, get_fact_value, is_known_key, prefetch_facts, prefetch_status_data, SourceRow,
+};
 
 // ============================================================================
 // Filter Evaluation
 // ============================================================================
 
-/// Apply a list of filters to a set of source IDs (AND logic between filters)
+/// Apply a list of filters to a set of source IDs (AND logic between filters). Every time
+/// is read on `zone`, the user's clock.
 pub fn apply_filters(
     conn: &mut Connection,
     source_ids: &[i64],
     filters: &[Filter],
+    zone: &UserZone,
 ) -> Result<FilterResult> {
     let used_status = detect_status_predicates(filters);
 
@@ -67,7 +68,7 @@ pub fn apply_filters(
 
     let mut result = Vec::new();
     for &source_id in source_ids {
-        if eval_expr_cached(conn, source_id, &combined, &cache)? {
+        if eval_expr_cached(conn, source_id, &combined, &cache, zone)? {
             result.push(source_id);
         }
     }
@@ -104,107 +105,58 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
 /// Check one comparison for a source: a built-in key is read through the
 /// resolver from the source row, anything else is a stored fact. This is used
 /// by the cached version for the built-in keys and for nothing it holds.
-///
-/// This is the one function in this stratum that queries the database itself
-/// rather than going through the repository beside it, and the exception is
-/// pinned by a test so it cannot spread or be forgotten. Moving it whole into
-/// the repository would not help — that would put comparison logic there
-/// instead, which breaks the same rule from the other side. What removes the
-/// exception is moving the two reads it makes — the source row and the object
-/// link — into the repository, leaving the comparison here.
-// AUDIT: queries the database from the operations stratum, accepted until its
-// source-row and object-link reads move into the repository stratum.
 fn check_fact_compare(
     conn: &Connection,
     source_id: i64,
     key: &str,
     op: CompareOp,
     value: &str,
+    zone: &UserZone,
 ) -> Result<bool> {
-    // Parse key, accessor, and modifiers
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+    let Some(row) = fetch_source_row(conn, source_id)? else {
+        return Ok(false);
+    };
+    let matches = |fact_value: FactValue| {
+        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key, zone)
+            .is_some_and(|modified| compare_fact_value(&modified, op, value))
+    };
 
-    // Built-in keys are read through the resolver that owns their meaning. A
-    // key it cannot answer from the source row (the hash keys) falls through
-    // to the stored-fact lookup below.
+    // Built-in keys the source row computes are read through the resolver that
+    // owns their meaning, and only through it: where the row cannot answer one
+    // (a NULL device or inode, a save time outside the years Canon reads) no
+    // comparison matches, and never a stored row of its name. (`?` reads a NULL
+    // device or inode as 0, as `facts` reports it.) The hash keys, which no
+    // source row computes, fall through to the stored-fact lookup.
     if let Some(builtin) = BuiltinKey::from_str(&base_key) {
-        let row: Option<(SourceAttributes, bool, bool)> = conn
-            .query_row(
-                "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.mtime, s.device, s.inode
-                 FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
-                [source_id],
-                |row| {
-                    let device: Option<i64> = row.get(6)?;
-                    let inode: Option<i64> = row.get(7)?;
-                    Ok((
-                        SourceAttributes {
-                            id: row.get(0)?,
-                            root_id: row.get(1)?,
-                            root_path: row.get(2)?,
-                            rel_path: row.get(3)?,
-                            size: row.get(4)?,
-                            mtime: row.get(5)?,
-                            device: device.unwrap_or(0),
-                            inode: inode.unwrap_or(0),
-                        },
-                        device.is_some(),
-                        inode.is_some(),
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((attributes, has_device, has_inode)) = row {
-            // A NULL device or inode column has no value to compare.
-            if (builtin == BuiltinKey::SourceDevice && !has_device)
-                || (builtin == BuiltinKey::SourceInode && !has_inode)
-            {
-                return Ok(false);
-            }
-            if let Some(builtin_value) = get_builtin_value(&attributes, builtin) {
-                let fact_value = to_local_fact_value(&builtin_value);
-                if let Ok(modified) =
-                    apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-                {
-                    return Ok(compare_fact_value(&modified, op, value));
-                }
-                return Ok(false);
-            }
+        if builtin.is_computed() {
+            return Ok(builtin_value(&row, builtin).is_some_and(matches));
         }
     }
-
-    // Get object_id for checking object facts
-    let object_id: Option<i64> = conn
-        .query_row(
-            "SELECT object_id FROM sources WHERE id = ?",
-            [source_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None);
 
     // Check source facts then object facts
-    // Note: if modifier fails (e.g., time modifier on text value due to bad data),
-    // treat as "no match" rather than error
-    if let Some(fact_value) = get_fact_value(conn, "source", source_id, &base_key)? {
-        if let Ok(modified) = apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key) {
-            if compare_fact_value(&modified, op, value) {
-                return Ok(true);
-            }
-        }
+    if get_fact_value(conn, "source", source_id, &base_key)?.is_some_and(matches) {
+        return Ok(true);
     }
-
-    if let Some(obj_id) = object_id {
-        if let Some(fact_value) = get_fact_value(conn, "object", obj_id, &base_key)? {
-            if let Ok(modified) =
-                apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key)
-            {
-                if compare_fact_value(&modified, op, value) {
-                    return Ok(true);
-                }
-            }
+    if let Some(obj_id) = row.object_id {
+        if get_fact_value(conn, "object", obj_id, &base_key)?.is_some_and(matches) {
+            return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+/// A built-in's value for one source row, through the resolver that owns it — `None` where
+/// the row cannot answer it: a hash key, a NULL device or inode, or a save time outside the
+/// years Canon reads.
+fn builtin_value(row: &SourceRow, builtin: BuiltinKey) -> Option<FactValue> {
+    if (builtin == BuiltinKey::SourceDevice && !row.has_device)
+        || (builtin == BuiltinKey::SourceInode && !row.has_inode)
+    {
+        return None;
+    }
+    get_builtin_value(&row.attributes, builtin)
 }
 
 // ============================================================================
@@ -217,11 +169,12 @@ fn eval_expr_cached(
     source_id: i64,
     expr: &Expr,
     cache: &FactCache,
+    zone: &UserZone,
 ) -> Result<bool> {
     match expr {
         Expr::And(exprs) => {
             for e in exprs {
-                if !eval_expr_cached(conn, source_id, e, cache)? {
+                if !eval_expr_cached(conn, source_id, e, cache, zone)? {
                     return Ok(false);
                 }
             }
@@ -229,18 +182,18 @@ fn eval_expr_cached(
         }
         Expr::Or(exprs) => {
             for e in exprs {
-                if eval_expr_cached(conn, source_id, e, cache)? {
+                if eval_expr_cached(conn, source_id, e, cache, zone)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        Expr::Not(e) => Ok(!eval_expr_cached(conn, source_id, e, cache)?),
-        Expr::Exists { key } => check_fact_exists_cached(conn, source_id, key, cache),
+        Expr::Not(e) => Ok(!eval_expr_cached(conn, source_id, e, cache, zone)?),
+        Expr::Exists { key } => check_fact_exists_cached(conn, source_id, key, cache, zone),
         Expr::Compare { key, op, value } => {
-            check_fact_compare_cached(conn, source_id, key, *op, value, cache)
+            check_fact_compare_cached(conn, source_id, key, *op, value, cache, zone)
         }
-        Expr::In { key, values } => check_fact_in_cached(conn, source_id, key, values, cache),
+        Expr::In { key, values } => check_fact_in_cached(conn, source_id, key, values, cache, zone),
         Expr::Status(predicate) => match predicate {
             StatusPredicate::Hashed => Ok(cache.get_object_id(source_id).is_some()),
             StatusPredicate::Archived => {
@@ -261,29 +214,53 @@ fn eval_expr_cached(
     }
 }
 
+/// Whether a key exists for a source: exactly where it has a value, so `NOT K?` selects the
+/// sources a report shows under `(no value)` for `K`.
+///
+/// Read through the key's accessor and modifiers — `K|month?` is false for a time known
+/// only to the year. A transform that cannot apply at all (a time modifier on text) keeps
+/// the base key's answer: refusing the wrong type is not this check's to do.
 fn check_fact_exists_cached(
-    _conn: &Connection,
+    conn: &Connection,
     source_id: i64,
     key: &str,
     cache: &FactCache,
+    zone: &UserZone,
 ) -> Result<bool> {
-    let (base_key, _accessor, _modifiers) = parse_key_with_modifiers(key)?;
+    let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+    let exists_through =
+        |value: FactValue| match apply_chain(value, accessor.as_ref(), &modifiers, key, true, zone)
+        {
+            Ok(Modified::Value(_)) | Err(_) => true,
+            Ok(Modified::NoValue(_)) => false,
+        };
 
     // Check cache for stored facts
     if cache.has_key(&base_key) {
-        if cache.get_source_fact(source_id, &base_key).is_some() {
-            return Ok(true);
-        }
-        if cache.get_object_fact(source_id, &base_key).is_some() {
-            return Ok(true);
+        for value in [
+            cache.get_source_fact(source_id, &base_key),
+            cache.get_object_fact(source_id, &base_key),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if exists_through(value.clone()) {
+                return Ok(true);
+            }
         }
     }
 
-    // A built-in the resolver answers from the source row (`is_computed`)
-    // exists for every source; the keys it cannot answer that way (the hash
-    // keys) exist when the source is linked to an object.
+    // A built-in the source row answers (`is_computed`) exists where the resolver gives it
+    // a value for this source — the same answer its value comes from, so a save time Canon
+    // cannot read does not exist. The keys the row cannot answer (the hash keys) exist when
+    // the source is linked to an object.
     if let Some(builtin) = BuiltinKey::from_str(&base_key) {
-        return Ok(builtin.is_computed() || cache.get_object_id(source_id).is_some());
+        if builtin.is_computed() {
+            return Ok(fetch_source_row(conn, source_id)?
+                .and_then(|row| get_builtin_value(&row.attributes, builtin))
+                .is_some_and(exists_through));
+        }
+        return Ok(cache.get_object_id(source_id).is_some());
     }
     Ok(false)
 }
@@ -295,19 +272,20 @@ fn check_fact_compare_cached(
     op: CompareOp,
     value: &str,
     cache: &FactCache,
+    zone: &UserZone,
 ) -> Result<bool> {
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
 
     // Handle built-in keys (still need DB for source columns)
     if BuiltinKey::from_str(&base_key).is_some() {
         // For built-ins, fall back to uncached version (they query source table, not facts)
-        return check_fact_compare(conn, source_id, key, op, value);
+        return check_fact_compare(conn, source_id, key, op, value, zone);
     }
 
     // Use cache for stored facts
     if let Some(fact_value) = cache.get_source_fact(source_id, &base_key) {
-        let local_value = to_local_fact_value(fact_value);
-        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key)
+        if let Some(modified) =
+            apply_accessor_and_modifiers(fact_value.clone(), &accessor, &modifiers, key, zone)
         {
             if compare_fact_value(&modified, op, value) {
                 return Ok(true);
@@ -316,8 +294,8 @@ fn check_fact_compare_cached(
     }
 
     if let Some(fact_value) = cache.get_object_fact(source_id, &base_key) {
-        let local_value = to_local_fact_value(fact_value);
-        if let Ok(modified) = apply_accessor_and_modifiers(local_value, &accessor, &modifiers, key)
+        if let Some(modified) =
+            apply_accessor_and_modifiers(fact_value.clone(), &accessor, &modifiers, key, zone)
         {
             if compare_fact_value(&modified, op, value) {
                 return Ok(true);
@@ -334,9 +312,10 @@ fn check_fact_in_cached(
     key: &str,
     values: &[String],
     cache: &FactCache,
+    zone: &UserZone,
 ) -> Result<bool> {
     for value in values {
-        if check_fact_compare_cached(conn, source_id, key, CompareOp::Eq, value, cache)? {
+        if check_fact_compare_cached(conn, source_id, key, CompareOp::Eq, value, cache, zone)? {
             return Ok(true);
         }
     }
@@ -347,37 +326,22 @@ fn check_fact_in_cached(
 // Modifier and Accessor Application
 // ============================================================================
 
-/// Apply accessor and modifiers to a FactValue using the value transforms
+/// The value a comparison reads: the key's value through its accessor and modifiers, or
+/// `None` where there is nothing to compare — a modifier that gave no value reads as a
+/// missing fact, and one that cannot apply (a time modifier on text, from bad data) as no
+/// match rather than an error.
 fn apply_accessor_and_modifiers(
     value: FactValue,
     accessor: &Option<PathAccessor>,
     modifiers: &[ModifierCall],
     key: &str,
-) -> Result<FactValue> {
-    // Convert to fact::FactValue
-    let mut expr_value = match value {
-        FactValue::Text(t) => fact::FactValue::Text(t),
-        FactValue::Num(n) => fact::FactValue::Num(n),
-        FactValue::Time(ts) => fact::FactValue::Time(ts),
-    };
-
-    // Apply accessor if present
-    if let Some(acc) = accessor {
-        expr_value = apply_accessor(&expr_value, acc, key)?;
+    zone: &UserZone,
+) -> Option<FactValue> {
+    // for_display: true since filters are typically for display/comparison
+    match apply_chain(value, accessor.as_ref(), modifiers, key, true, zone) {
+        Ok(Modified::Value(v)) => Some(v),
+        Ok(Modified::NoValue(_)) | Err(_) => None,
     }
-
-    // Apply modifiers (for_display: true since filters are typically for display/comparison)
-    for modifier_call in modifiers {
-        expr_value = apply_modifier(&expr_value, modifier_call, key, true)?;
-    }
-
-    // Convert back to FactValue
-    Ok(match expr_value {
-        fact::FactValue::Text(t) => FactValue::Text(t),
-        fact::FactValue::Num(n) => FactValue::Num(n),
-        fact::FactValue::Time(ts) => FactValue::Time(ts),
-        fact::FactValue::Path(p) => FactValue::Text(p),
-    })
 }
 
 // ============================================================================
@@ -389,6 +353,7 @@ mod tests {
     use super::*;
     use crate::core::repo::open_in_memory_for_test;
     use crate::expr::domain::filter::STATUS_KEYWORDS;
+    use crate::expr::domain::value::SourceAttributes;
     use rusqlite::Connection as RawConnection;
 
     fn setup_test_db() -> RawConnection {
@@ -424,7 +389,7 @@ mod tests {
         let s3 = insert_source(&conn, root, "2024/doc.txt");
 
         let filter = Filter::parse("source.rel_path[1]~'*tion*'").unwrap();
-        let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter], &UserZone::utc()).unwrap();
 
         // s1 silently skipped (out of bounds), s2 matches, s3 doesn't match glob
         assert_eq!(result.source_ids, vec![s2]);
@@ -441,7 +406,7 @@ mod tests {
         let s2 = insert_source(&conn, root, "2024/vacation/photo.jpg");
 
         let filter = Filter::parse("source.rel_path[-3]=2024").unwrap();
-        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter], &UserZone::utc()).unwrap();
 
         assert_eq!(result.source_ids, vec![s2]);
     }
@@ -457,7 +422,7 @@ mod tests {
         let s2 = insert_source(&conn, root, "a/b/c/d");
 
         let filter = Filter::parse("source.rel_path[2:4]~'c*'").unwrap();
-        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter], &UserZone::utc()).unwrap();
 
         assert_eq!(result.source_ids, vec![s2]);
     }
@@ -471,7 +436,7 @@ mod tests {
         let s1 = insert_source(&conn, root, "photo.jpg");
 
         let filter = Filter::parse("source.ext|year=2024").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
 
         // Modifier failure treated as non-match, not error
         assert!(result.source_ids.is_empty());
@@ -488,7 +453,9 @@ mod tests {
 
         let ids = |conn: &mut RawConnection, expr: &str| {
             let filter = Filter::parse(expr).unwrap();
-            apply_filters(conn, &all, &[filter]).unwrap().source_ids
+            apply_filters(conn, &all, &[filter], &UserZone::utc())
+                .unwrap()
+                .source_ids
         };
 
         assert_eq!(ids(&mut conn, "stem=IMG_001"), vec![s1]);
@@ -578,7 +545,7 @@ mod tests {
         insert_source_with_object(&conn, arc_root, "a.jpg", Some(obj));
 
         let filter = Filter::parse("archived?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -590,7 +557,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, src_root, "a.jpg", None);
 
         let filter = Filter::parse("archived?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(result.source_ids.is_empty());
     }
 
@@ -603,7 +570,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, src_root, "a.jpg", Some(obj));
 
         let filter = Filter::parse("archived?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(result.source_ids.is_empty());
     }
 
@@ -614,7 +581,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, src_root, "a.jpg", None);
 
         let filter = Filter::parse("NOT archived?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -627,7 +594,7 @@ mod tests {
         let s2 = insert_source_with_object(&conn, root, "b.jpg", None);
 
         let filter = Filter::parse("hashed?").unwrap();
-        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -643,8 +610,8 @@ mod tests {
 
         let f1 = Filter::parse("hashed?").unwrap();
         let f2 = Filter::parse("content.hash.sha256?").unwrap();
-        let r1 = apply_filters(&mut conn, &ids, &[f1]).unwrap();
-        let r2 = apply_filters(&mut conn, &ids, &[f2]).unwrap();
+        let r1 = apply_filters(&mut conn, &ids, &[f1], &UserZone::utc()).unwrap();
+        let r2 = apply_filters(&mut conn, &ids, &[f2], &UserZone::utc()).unwrap();
         assert_eq!(r1.source_ids, r2.source_ids);
     }
 
@@ -658,7 +625,9 @@ mod tests {
 
         let run = |conn: &mut RawConnection, where_clause: &str| {
             let filter = Filter::parse(where_clause).unwrap();
-            apply_filters(conn, &ids, &[filter]).unwrap().source_ids
+            apply_filters(conn, &ids, &[filter], &UserZone::utc())
+                .unwrap()
+                .source_ids
         };
         assert_eq!(run(&mut conn, "source.ext=JPG"), vec![upper]);
         assert_eq!(run(&mut conn, "ext=jpg"), vec![lower]);
@@ -705,16 +674,17 @@ mod tests {
             let expected = get_builtin_value(&attributes, builtin)
                 .unwrap_or_else(|| panic!("{name} is computed but the resolver has no answer"));
             let text = match expected {
-                fact::FactValue::Text(t) | fact::FactValue::Path(t) => t,
-                fact::FactValue::Num(n) => format!("{n}"),
-                fact::FactValue::Time(t) => t.to_string(),
+                FactValue::Text(t) | FactValue::Path(t) => t,
+                FactValue::Num(n) => format!("{n}"),
+                FactValue::Time(t) => t.legacy_epoch_number().to_string(),
             };
 
             for (op, want) in [("=", subject), ("!=", other)] {
                 let filter = Filter::parse(&format!("{name}{op}{text}")).unwrap();
-                let matched = apply_filters(&mut conn, &[subject, other], &[filter])
-                    .unwrap_or_else(|e| panic!("{name}{op}{text} failed: {e}"))
-                    .source_ids;
+                let matched =
+                    apply_filters(&mut conn, &[subject, other], &[filter], &UserZone::utc())
+                        .unwrap_or_else(|e| panic!("{name}{op}{text} failed: {e}"))
+                        .source_ids;
                 assert_eq!(
                     matched,
                     vec![want],
@@ -773,9 +743,10 @@ mod tests {
                 (format!("{name} IN (\"{value}\")"), vec![subject]),
             ] {
                 let filter = Filter::parse(&clause).unwrap();
-                let matched = apply_filters(&mut conn, &[subject, other], &[filter])
-                    .unwrap_or_else(|e| panic!("{clause} failed: {e}"))
-                    .source_ids;
+                let matched =
+                    apply_filters(&mut conn, &[subject, other], &[filter], &UserZone::utc())
+                        .unwrap_or_else(|e| panic!("{clause} failed: {e}"))
+                        .source_ids;
                 assert_eq!(matched, want, "{clause} must read the content hash");
             }
         }
@@ -800,14 +771,14 @@ mod tests {
             "source.inode!=5",
         ] {
             let filter = Filter::parse(clause).unwrap();
-            let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+            let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
             assert!(
                 result.source_ids.is_empty(),
                 "{clause} must not select a NULL column"
             );
         }
         let filter = Filter::parse("source.size=1000").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -825,7 +796,7 @@ mod tests {
         for builtin in BuiltinKey::iter() {
             let name: &'static str = builtin.into();
             let filter = Filter::parse(&format!("{name}?")).unwrap();
-            let matched = apply_filters(&mut conn, &ids, &[filter])
+            let matched = apply_filters(&mut conn, &ids, &[filter], &UserZone::utc())
                 .unwrap()
                 .source_ids;
             let expected = if builtin.is_computed() {
@@ -851,7 +822,7 @@ mod tests {
         let s1 = conn.last_insert_rowid();
 
         let filter = Filter::parse("excluded?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -863,7 +834,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
 
         let filter = Filter::parse("excluded?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -874,7 +845,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
 
         let filter = Filter::parse("excluded?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(result.source_ids.is_empty());
     }
 
@@ -888,7 +859,7 @@ mod tests {
         insert_fact_entry(&conn, "object", obj, "content.mime", "image/jpeg");
 
         let filter = Filter::parse("enriched?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -901,7 +872,7 @@ mod tests {
         insert_fact_entry(&conn, "source", s1, "policy.tag", "keep");
 
         let filter = Filter::parse("enriched?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s1]);
     }
 
@@ -915,7 +886,7 @@ mod tests {
         insert_fact_entry(&conn, "object", obj, "content.hash.sha256", "hash_f");
 
         let filter = Filter::parse("enriched?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(result.source_ids.is_empty());
     }
 
@@ -926,7 +897,7 @@ mod tests {
         let s1 = insert_source_with_object(&conn, root, "a.jpg", None);
 
         let filter = Filter::parse("enriched?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(result.source_ids.is_empty());
     }
 
@@ -947,7 +918,7 @@ mod tests {
         let s3 = insert_source_with_object(&conn, src_root, "c.jpg", None);
 
         let filter = Filter::parse("NOT archived? AND hashed?").unwrap();
-        let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2, s3], &[filter], &UserZone::utc()).unwrap();
         assert_eq!(result.source_ids, vec![s2]);
     }
 
@@ -962,7 +933,7 @@ mod tests {
         let s1 = insert_source(&conn, root, "a.jpg");
 
         let filter = Filter::parse("archived?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(result.used_status.archived);
         assert!(!result.used_status.hashed);
         assert!(!result.used_status.excluded);
@@ -976,7 +947,7 @@ mod tests {
         let s1 = insert_source(&conn, root, "a.jpg");
 
         let filter = Filter::parse("source.ext=jpg").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
         assert!(!result.used_status.archived);
         assert!(!result.used_status.hashed);
         assert!(!result.used_status.excluded);
@@ -1004,7 +975,7 @@ mod tests {
 
         // No facts ingested — content.mime doesn't exist in facts table
         let filter = Filter::parse("NOT content.mime?").unwrap();
-        let result = apply_filters(&mut conn, &[s1, s2], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1, s2], &[filter], &UserZone::utc()).unwrap();
 
         // All sources should match (content.mime doesn't exist for any)
         assert_eq!(result.source_ids.len(), 2);
@@ -1018,7 +989,7 @@ mod tests {
         let s1 = insert_source(&conn, root, "a.jpg");
 
         let filter = Filter::parse("content.mime?").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]).unwrap();
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc()).unwrap();
 
         assert!(result.source_ids.is_empty());
     }
@@ -1031,7 +1002,7 @@ mod tests {
         let s1 = insert_source(&conn, root, "a.jpg");
 
         let filter = Filter::parse("content.mime=image/jpeg").unwrap();
-        let result = apply_filters(&mut conn, &[s1], &[filter]);
+        let result = apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc());
 
         let err = result
             .err()
@@ -1063,12 +1034,186 @@ mod tests {
                 .unwrap_or_else(|| panic!("{predicate:?} has no keyword to ask for it by"));
 
             let filter = Filter::parse(&format!("{keyword}?")).unwrap();
-            apply_filters(&mut conn, &[s1], &[filter])
+            apply_filters(&mut conn, &[s1], &[filter], &UserZone::utc())
                 .unwrap_or_else(|e| panic!("{keyword}? failed: {e}"));
 
             let negated = Filter::parse(&format!("NOT {keyword}?")).unwrap();
-            apply_filters(&mut conn, &[s1], &[negated])
+            apply_filters(&mut conn, &[s1], &[negated], &UserZone::utc())
                 .unwrap_or_else(|e| panic!("NOT {keyword}? failed: {e}"));
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Times on the user's clock
+    // ------------------------------------------------------------------------
+
+    /// A source with a given save time.
+    fn insert_source_saved_at(
+        conn: &RawConnection,
+        root_id: i64,
+        rel_path: &str,
+        mtime: i64,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO sources (root_id, rel_path, size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?, ?, 1000, ?, '', 0, 0, 0, 0)",
+            rusqlite::params![root_id, rel_path, mtime],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Store a time fact on a source through the one conversion pair.
+    fn insert_time_fact(conn: &RawConnection, source_id: i64, key: &str, written: &str) {
+        let value =
+            FactValue::Time(crate::core::domain::time::reading::read_time(written).unwrap());
+        let p = crate::core::repo::fact::fact_value_params(&value).unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO facts (entity_type, entity_id, key, {}, observed_at, observed_basis_rev)
+                 VALUES ('source', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0)",
+                crate::core::repo::fact::FACT_VALUE_COLUMNS
+            ),
+            rusqlite::params![source_id, key, p[0], p[1], p[2], p[3], p[4], p[5], p[6]],
+        )
+        .unwrap();
+    }
+
+    fn selected(conn: &mut RawConnection, ids: &[i64], filter: &str, zone: &UserZone) -> Vec<i64> {
+        apply_filters(conn, ids, &[Filter::parse(filter).unwrap()], zone)
+            .unwrap()
+            .source_ids
+    }
+
+    /// 2023-12-31T23:30:00Z — 00:30 on New Year's Day in Amsterdam.
+    const NEW_YEARS_EVE_2330_UTC: i64 = 1704065400;
+    /// Past the last instant Canon reads (jiff's `Timestamp::MAX`).
+    const PAST_THE_LINE: i64 = 253402207201;
+
+    #[test]
+    fn a_save_time_selects_by_its_year_on_the_users_clock() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let s = insert_source_saved_at(&conn, root, "a.jpg", NEW_YEARS_EVE_2330_UTC);
+        let amsterdam = UserZone::for_test("Europe/Amsterdam");
+
+        assert_eq!(
+            selected(&mut conn, &[s], "source.mtime|year=2024", &amsterdam),
+            vec![s]
+        );
+        assert!(selected(&mut conn, &[s], "source.mtime|year=2023", &amsterdam).is_empty());
+        assert_eq!(
+            selected(&mut conn, &[s], "source.mtime|year=2023", &UserZone::utc()),
+            vec![s]
+        );
+    }
+
+    /// A date typed in `--where` keeps today's reading — a UTC instant — whatever the
+    /// user's zone, until typed dates are read on the user's clock.
+    #[test]
+    fn a_typed_date_selects_what_it_selected_before() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let eve = insert_source_saved_at(&conn, root, "eve.jpg", NEW_YEARS_EVE_2330_UTC);
+        let midnight = insert_source_saved_at(&conn, root, "midnight.jpg", 1704067200);
+        let amsterdam = UserZone::for_test("Europe/Amsterdam");
+
+        for zone in [amsterdam, UserZone::utc()] {
+            assert_eq!(
+                selected(
+                    &mut conn,
+                    &[eve, midnight],
+                    "source.mtime>=2024-01-01",
+                    &zone
+                ),
+                vec![midnight]
+            );
+        }
+    }
+
+    /// A save time Canon cannot read has no value at the existence door: `NOT source.mtime?`
+    /// selects exactly it, `source.mtime?` leaves it out — the same answer its value has.
+    #[test]
+    fn a_save_time_canon_cannot_read_does_not_exist() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let readable = insert_source_saved_at(&conn, root, "a.jpg", NEW_YEARS_EVE_2330_UTC);
+        let past = insert_source_saved_at(&conn, root, "b.jpg", PAST_THE_LINE);
+        // 9999-12-31 23:59:59 UTC: a moment some zone already reads in year 10000.
+        let sentinel = insert_source_saved_at(&conn, root, "c.jpg", 253402300799);
+        let all = [readable, past, sentinel];
+        let zone = UserZone::for_test("Europe/Amsterdam");
+
+        assert_eq!(
+            selected(&mut conn, &all, "NOT source.mtime?", &zone),
+            vec![past, sentinel]
+        );
+        assert_eq!(
+            selected(&mut conn, &all, "source.mtime?", &zone),
+            vec![readable]
+        );
+        // Every other computed built-in still exists for every source.
+        assert_eq!(
+            selected(&mut conn, &all, "source.size?", &zone),
+            all.to_vec()
+        );
+    }
+
+    /// A computed key the source row cannot answer has no value at the compare, and a stored
+    /// row wearing its name is never read in its place. Its twin at the report's resolver is
+    /// `a_computed_key_never_falls_through_to_a_stored_row`.
+    #[test]
+    fn a_computed_key_the_row_cannot_answer_matches_no_stored_row() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let sentinel = insert_source_saved_at(&conn, root, "c.jpg", 253402300799);
+        insert_time_fact(&conn, sentinel, "source.mtime", "2020");
+        let zone = UserZone::utc();
+
+        for filter in ["source.mtime|year = 2020", "mtime < 2021-01-01"] {
+            assert!(
+                selected(&mut conn, &[sentinel], filter, &zone).is_empty(),
+                "{filter}"
+            );
+        }
+    }
+
+    /// `?` reads through the key's modifiers: a time known only to the year has no month, so
+    /// `NOT K|month?` selects exactly what a report shows under `(no value)` for `K|month`.
+    #[test]
+    fn existence_honours_the_keys_modifiers() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let year_only = insert_source_saved_at(&conn, root, "a.jpg", 0);
+        let full = insert_source_saved_at(&conn, root, "b.jpg", 0);
+        let texted = insert_source_saved_at(&conn, root, "c.jpg", 0);
+        insert_time_fact(&conn, year_only, "content.When", "2024");
+        insert_time_fact(&conn, full, "content.When", "2024-06-15T14:30:05");
+        insert_fact_entry(&conn, "source", texted, "content.Make", "Canon");
+        let all = [year_only, full, texted];
+        let zone = UserZone::for_test("Europe/Amsterdam");
+
+        assert_eq!(
+            selected(&mut conn, &all, "content.When|month?", &zone),
+            vec![full]
+        );
+        assert_eq!(
+            selected(&mut conn, &all, "NOT content.When|month?", &zone),
+            vec![year_only, texted]
+        );
+        assert_eq!(
+            selected(&mut conn, &all, "content.When|year?", &zone),
+            vec![year_only, full]
+        );
+        // A modifier that applies keeps the base key's answer; one that cannot apply at all
+        // (a time modifier on text) keeps it too — refusing the type is not this check's job.
+        assert_eq!(
+            selected(&mut conn, &all, "content.Make|lowercase?", &zone),
+            selected(&mut conn, &all, "content.Make?", &zone)
+        );
+        assert_eq!(
+            selected(&mut conn, &all, "content.Make|year?", &zone),
+            vec![texted]
+        );
     }
 }

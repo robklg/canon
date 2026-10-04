@@ -3,7 +3,7 @@
 //! `init_state()` loads the existing fact type map from the database.
 //! `process_record()` handles all business logic for a single import record:
 //! source validation, key normalization, hash linking, fact promotion, type
-//! checking, value classification, and fact upsert.
+//! checking, reading each value once as its hint says, and fact upsert.
 //!
 //! No stdout/stderr/stdin — the interface reads stdin and displays outcomes.
 
@@ -13,9 +13,11 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::domain::time::now_epoch_secs;
+use crate::core::domain::time::reading::{self, TimeReadError};
 use crate::core::repo::{self, Connection};
-use crate::facts::domain::{is_content_fact, normalize_fact_key, FactValueType};
+use crate::facts::domain::{is_content_fact, normalize_fact_key};
 use crate::facts::repo as facts_repo;
 
 // ============================================================================
@@ -45,8 +47,8 @@ pub struct ImportRecord {
 
 /// Mutable state accumulated across records during an import session.
 pub struct ImportState {
-    pub fact_type_map: HashMap<String, FactValueType>,
-    pub type_mismatch_keys: HashMap<String, (FactValueType, FactValueType)>,
+    pub fact_type_map: HashMap<String, FactType>,
+    pub type_mismatch_keys: HashMap<String, (FactType, FactType)>,
     pub stats: ImportStats,
     /// Roots whose sources this import acted on — the decision's durable
     /// scope (one whole-root entry per root, recorded at completion).
@@ -227,21 +229,19 @@ pub fn process_record(
             .push(format!("[{root_path}] {rel_path}"));
     }
     for (key, value) in &normalized_facts {
-        let typed = TypedValue::parse(value);
-
-        // Check type consistency
-        let new_type = match get_typed_value_type(&typed) {
-            Some(t) => t,
-            None => {
-                if let Err(e) = classify_typed_value(&typed) {
-                    outcome
-                        .warnings
-                        .push(format!("{e} for '{key}' in {root_path}/{rel_path}"));
-                }
+        let fact_value = match read_hinted(&TypedValue::parse(value)) {
+            Ok(v) => v,
+            Err(refusal) => {
+                outcome
+                    .warnings
+                    .push(refusal.warning(key, &format!("{root_path}/{rel_path}")));
                 state.stats.skipped_type_mismatch += 1;
                 continue;
             }
         };
+
+        // Check type consistency
+        let new_type = fact_value.kind();
 
         if let Some(&existing_type) = state.fact_type_map.get(key) {
             if existing_type != new_type {
@@ -252,7 +252,9 @@ pub fn process_record(
                     .or_insert((existing_type, new_type));
                 if is_new_key {
                     outcome.warnings.push(format!(
-                        "type mismatch for '{key}' in {root_path}/{rel_path}: existing {existing_type}, got {new_type} (value: {value})"
+                        "type mismatch for '{key}' in {root_path}/{rel_path}: existing {}, got {} (value: {value})",
+                        existing_type.as_str(),
+                        new_type.as_str()
                     ));
                 }
                 state.stats.skipped_type_mismatch += 1;
@@ -261,16 +263,6 @@ pub fn process_record(
         } else {
             state.fact_type_map.insert(key.clone(), new_type);
         }
-
-        // Classify for storage
-        let (value_text, value_num, value_time) = match classify_typed_value(&typed) {
-            Ok(v) => v,
-            Err(e) => {
-                outcome.warnings.push(e);
-                state.stats.skipped_type_mismatch += 1;
-                continue;
-            }
-        };
 
         if let Some(oid) = object_id {
             outcome
@@ -281,9 +273,7 @@ pub fn process_record(
                 "object",
                 oid,
                 key,
-                value_text.as_deref(),
-                value_num,
-                value_time,
+                &fact_value,
                 record.observed_at,
                 None,
             )?;
@@ -301,9 +291,7 @@ pub fn process_record(
                 "source",
                 record.source_id,
                 key,
-                value_text.as_deref(),
-                value_num,
-                value_time,
+                &fact_value,
                 record.observed_at,
                 Some(record.basis_rev),
             )?;
@@ -340,64 +328,70 @@ impl TypedValue {
     }
 }
 
-/// Try to parse a string as a datetime, returning the Unix timestamp if successful.
-fn try_parse_datetime(s: &str) -> Option<i64> {
-    // RFC3339 format (2020-01-15T10:30:00+00:00)
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Some(dt.timestamp());
-    }
-    // ISO format without timezone (2020-01-15T10:30:00)
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Some(dt.and_utc().timestamp());
-    }
-
-    // EXIF format uses colons in date: "2020:07:23 11:06:32"
-    if s.len() >= 19 && s.chars().nth(4) == Some(':') && s.chars().nth(7) == Some(':') {
-        let iso: String = s
-            .chars()
-            .enumerate()
-            .map(|(i, c)| match i {
-                4 | 7 => '-',
-                10 if c == ' ' => 'T',
-                _ => c,
-            })
-            .collect();
-
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&iso) {
-            return Some(dt.timestamp());
-        }
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&format!("{}Z", &iso)) {
-            return Some(dt.timestamp());
-        }
-        // `get`, not a slice: the length check above counts bytes, so byte 19
-        // can fall inside a character, and then there is no date to read.
-        if let Some(head) = iso.get(..19) {
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(head, "%Y-%m-%dT%H:%M:%S") {
-                return Some(dt.and_utc().timestamp());
-            }
-        }
-    }
-
-    // Plain 4-digit year string (e.g., "2005")
-    if s.len() == 4 {
-        if let Ok(year) = s.parse::<i32>() {
-            return year_to_timestamp(year);
-        }
-    }
-
-    None
+/// Why a value could not be read: a time the list of spellings refused, or anything else.
+enum Refusal {
+    Time { value: Value, why: TimeReadError },
+    Other(String),
 }
 
-/// Convert a year to a Unix timestamp (Jan 1 midnight UTC).
-fn year_to_timestamp(year: i32) -> Option<i64> {
-    use chrono::TimeZone;
-    if (1900..=2100).contains(&year) {
-        chrono::Utc
-            .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
-            .single()
-            .map(|dt| dt.timestamp())
-    } else {
-        None
+impl Refusal {
+    /// The warning, with the place named before the reason so a reason sentence ends the line.
+    fn warning(&self, key: &str, at: &str) -> String {
+        match self {
+            Refusal::Time { value, why } => {
+                format!("cannot read {value} as a time for '{key}' in {at}: {why}")
+            }
+            Refusal::Other(e) => format!("{e} for '{key}' in {at}"),
+        }
+    }
+}
+
+/// Read an imported value once, as what its hint says it is. A time is read through the one
+/// list of spellings, never by a parser of import's own; a number is never epoch seconds.
+fn read_hinted(typed: &TypedValue) -> Result<FactValue, Refusal> {
+    match typed {
+        TypedValue::Plain(v) => Ok(read_plain(v)),
+        TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
+            "duration" => try_parse_duration(value)
+                .map(FactValue::Num)
+                .ok_or_else(|| Refusal::Other(format!("cannot parse as duration: {value}"))),
+            "datetime" => {
+                let read = match value {
+                    Value::String(s) => reading::read_time(s),
+                    Value::Number(n) => n.as_f64().map_or(
+                        Err(TimeReadError::YearOutOfRange),
+                        reading::read_year_number,
+                    ),
+                    _ => {
+                        return Err(Refusal::Other(format!(
+                            "datetime requires string or year, got: {value}"
+                        )))
+                    }
+                };
+                read.map(FactValue::Time).map_err(|why| Refusal::Time {
+                    value: value.clone(),
+                    why,
+                })
+            }
+            unknown => Err(Refusal::Other(format!("unknown type hint: {unknown}"))),
+        },
+    }
+}
+
+/// A plain value (no type hint): a string is text, a number or a boolean a number, anything
+/// else its JSON text.
+fn read_plain(value: &Value) -> FactValue {
+    match value {
+        Value::String(s) => FactValue::Text(s.clone()),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => FactValue::Num(i as f64),
+            None => n
+                .as_f64()
+                .map_or_else(|| FactValue::Text(n.to_string()), FactValue::Num),
+        },
+        Value::Bool(b) => FactValue::Num(if *b { 1.0 } else { 0.0 }),
+        Value::Null => FactValue::Text(String::new()),
+        Value::Array(_) | Value::Object(_) => FactValue::Text(value.to_string()),
     }
 }
 
@@ -428,113 +422,6 @@ fn try_parse_duration(value: &Value) -> Option<f64> {
     }
 }
 
-/// A classified fact value: (value_text, value_num, value_time).
-type ClassifiedValue = (Option<String>, Option<f64>, Option<i64>);
-
-/// Classify a plain value (no type hint).
-fn classify_value(value: &Value) -> ClassifiedValue {
-    match value {
-        Value::String(s) => (Some(s.clone()), None, None),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                (None, Some(i as f64), None)
-            } else if let Some(f) = n.as_f64() {
-                (None, Some(f), None)
-            } else {
-                (Some(n.to_string()), None, None)
-            }
-        }
-        Value::Bool(b) => (None, Some(if *b { 1.0 } else { 0.0 }), None),
-        Value::Null => (Some(String::new()), None, None),
-        Value::Array(_) | Value::Object(_) => (Some(value.to_string()), None, None),
-    }
-}
-
-/// Classify a value with optional type hint.
-fn classify_typed_value(typed: &TypedValue) -> Result<ClassifiedValue, String> {
-    match typed {
-        TypedValue::Plain(v) => Ok(classify_value(v)),
-        TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
-            "duration" => {
-                if let Some(secs) = try_parse_duration(value) {
-                    Ok((None, Some(secs), None))
-                } else {
-                    Err(format!("cannot parse as duration: {value}"))
-                }
-            }
-            "datetime" => {
-                if let Value::String(s) = value {
-                    if let Some(ts) = try_parse_datetime(s) {
-                        Ok((None, None, Some(ts)))
-                    } else {
-                        Err(format!("cannot parse as datetime: {value}"))
-                    }
-                } else if let Value::Number(n) = value {
-                    if let Some(year) = n.as_i64() {
-                        if let Some(ts) = year_to_timestamp(year as i32) {
-                            Ok((None, None, Some(ts)))
-                        } else {
-                            Err(format!("year out of range: {year}"))
-                        }
-                    } else {
-                        Err(format!("datetime requires integer year, got: {value}"))
-                    }
-                } else {
-                    Err(format!("datetime requires string or year, got: {value}"))
-                }
-            }
-            unknown => Err(format!("unknown type hint: {unknown}")),
-        },
-    }
-}
-
-/// Determine storage type for plain value.
-fn get_value_type(value: &Value) -> FactValueType {
-    match value {
-        Value::String(_) => FactValueType::Text,
-        Value::Number(_) | Value::Bool(_) => FactValueType::Num,
-        Value::Null | Value::Array(_) | Value::Object(_) => FactValueType::Text,
-    }
-}
-
-/// Determine storage type with type hint.
-fn get_typed_value_type(typed: &TypedValue) -> Option<FactValueType> {
-    match typed {
-        TypedValue::Plain(v) => Some(get_value_type(v)),
-        TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
-            "duration" => {
-                if try_parse_duration(value).is_some() {
-                    Some(FactValueType::Num)
-                } else {
-                    None
-                }
-            }
-            "datetime" => {
-                if let Value::String(s) = value {
-                    if try_parse_datetime(s).is_some() {
-                        Some(FactValueType::Time)
-                    } else {
-                        None
-                    }
-                } else if let Value::Number(n) = value {
-                    if let Some(year) = n.as_i64() {
-                        if year_to_timestamp(year as i32).is_some() {
-                            Some(FactValueType::Time)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        },
-    }
-}
-
 /// Promote content facts from a source to its newly-linked object.
 ///
 /// The source copy is deleted whichever way the branch goes: content facts
@@ -553,9 +440,7 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
                     conn,
                     object_id,
                     &fact.key,
-                    fact.value_text.as_deref(),
-                    fact.value_num,
-                    fact.value_time,
+                    &fact.value,
                     fact.observed_at,
                 )?;
                 promoted += 1;
@@ -574,52 +459,91 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     // =========================================================================
-    // try_parse_datetime
+    // read_hinted: times
     // =========================================================================
 
-    #[test]
-    fn test_try_parse_datetime_rfc3339() {
-        let ts = try_parse_datetime("2020-01-15T10:30:00+00:00").unwrap();
-        assert_eq!(ts, 1579084200);
+    fn hinted(value: Value) -> TypedValue {
+        TypedValue::Hinted {
+            value,
+            type_hint: "datetime".to_string(),
+        }
+    }
+
+    fn read_as_time(value: Value) -> TimeValue {
+        match read_hinted(&hinted(value)) {
+            Ok(FactValue::Time(tv)) => tv,
+            Ok(other) => panic!("read as {}, not a time", other.kind()),
+            Err(refusal) => panic!("refused: {}", refusal.warning("k", "here")),
+        }
+    }
+
+    fn refusal_of(value: Value) -> TimeReadError {
+        match read_hinted(&hinted(value)) {
+            Err(Refusal::Time { why, .. }) => why,
+            Err(Refusal::Other(e)) => panic!("refused, but not as a time: {e}"),
+            Ok(v) => panic!("read as {}", v.kind()),
+        }
     }
 
     #[test]
-    fn test_try_parse_datetime_iso() {
-        let ts = try_parse_datetime("2020-01-15T10:30:00").unwrap();
-        assert_eq!(ts, 1579084200);
+    fn an_rfc3339_time_with_an_offset_is_an_instant_that_keeps_it() {
+        let tv = read_as_time(Value::from("2020-01-15T10:30:00+00:00"));
+        assert_eq!(tv.form(), TimeForm::InstantWithOffset);
+        assert_eq!(tv.recorded_offset(), Some(jiff::tz::Offset::UTC));
+        assert_eq!(tv.precision(), Precision::Second);
+        assert_eq!(tv.legacy_epoch_number(), 1579084200);
     }
 
     #[test]
-    fn test_try_parse_datetime_exif() {
-        let ts = try_parse_datetime("2020:07:23 11:06:32").unwrap();
-        // 2020-07-23T11:06:32 UTC
-        assert_eq!(ts, 1595502392);
-    }
-
-    /// An EXIF-shaped value with a multi-byte character straddling byte 19 is
-    /// not a date, and saying so must not stop the import.
-    #[test]
-    fn an_exif_shaped_value_cut_inside_a_character_is_not_a_date() {
-        assert_eq!(try_parse_datetime("2020:07:23 11:06:3é"), None);
-        // A trailing character past the first 19 bytes still reads, as before.
-        assert_eq!(try_parse_datetime("2020:07:23 11:06:32é"), Some(1595502392));
+    fn an_iso_time_without_an_offset_is_a_clock_reading() {
+        let tv = read_as_time(Value::from("2020-01-15T10:30:00"));
+        assert_eq!(tv.form(), TimeForm::Clock);
+        assert_eq!(tv.precision(), Precision::Second);
+        assert_eq!(tv.legacy_epoch_number(), 1579084200);
     }
 
     #[test]
-    fn test_try_parse_datetime_plain_year() {
-        let ts = try_parse_datetime("2005").unwrap();
-        // Jan 1 2005 00:00:00 UTC
-        assert_eq!(ts, 1104537600);
+    fn an_exif_time_without_an_offset_is_a_clock_reading() {
+        let tv = read_as_time(Value::from("2020:07:23 11:06:32"));
+        assert_eq!(tv.form(), TimeForm::Clock);
+        assert_eq!(tv.legacy_epoch_number(), 1595502392);
+    }
+
+    /// Text after a time is never cut off and dropped — a multi-byte character included, at
+    /// any position — so an import never stops on it and never keeps part of it.
+    #[test]
+    fn an_exif_shaped_value_with_trailing_text_is_refused() {
+        assert_eq!(
+            refusal_of(Value::from("2020:07:23 11:06:3é")),
+            TimeReadError::NotInList
+        );
+        assert_eq!(
+            refusal_of(Value::from("2020:07:23 11:06:32é")),
+            TimeReadError::NotInList
+        );
     }
 
     #[test]
-    fn test_try_parse_datetime_invalid() {
-        assert!(try_parse_datetime("not a date").is_none());
-        assert!(try_parse_datetime("").is_none());
-        assert!(try_parse_datetime("99999").is_none());
+    fn a_plain_year_string_is_a_clock_reading_at_year_precision() {
+        let tv = read_as_time(Value::from("2005"));
+        assert_eq!(tv.form(), TimeForm::Clock);
+        assert_eq!(tv.precision(), Precision::Year);
+        assert_eq!(tv.legacy_epoch_number(), 1104537600);
+    }
+
+    #[test]
+    fn text_that_is_not_a_time_is_refused() {
+        for text in ["not a date", "", "99999"] {
+            assert_eq!(
+                refusal_of(Value::from(text)),
+                TimeReadError::NotInList,
+                "{text:?}"
+            );
+        }
     }
 
     // =========================================================================
@@ -657,100 +581,53 @@ mod tests {
     }
 
     // =========================================================================
-    // classify_value
+    // read_hinted: plain values and the other hints
     // =========================================================================
 
     #[test]
-    fn test_classify_value_string() {
-        let (text, num, time) = classify_value(&serde_json::json!("hello"));
-        assert_eq!(text.as_deref(), Some("hello"));
-        assert!(num.is_none());
-        assert!(time.is_none());
+    fn a_plain_string_is_text() {
+        let read = read_hinted(&TypedValue::Plain(serde_json::json!("hello")));
+        assert!(matches!(read, Ok(FactValue::Text(t)) if t == "hello"));
     }
 
     #[test]
-    fn test_classify_value_number() {
-        let (text, num, time) = classify_value(&serde_json::json!(42));
-        assert!(text.is_none());
-        assert_eq!(num, Some(42.0));
-        assert!(time.is_none());
+    fn a_plain_number_is_a_number() {
+        let read = read_hinted(&TypedValue::Plain(serde_json::json!(42)));
+        assert!(matches!(read, Ok(FactValue::Num(n)) if n == 42.0));
     }
 
     #[test]
-    fn test_classify_value_bool() {
-        let (text, num, _) = classify_value(&serde_json::json!(true));
-        assert!(text.is_none());
-        assert_eq!(num, Some(1.0));
-    }
-
-    // =========================================================================
-    // classify_typed_value
-    // =========================================================================
-
-    #[test]
-    fn test_classify_typed_datetime() {
-        let typed = TypedValue::Hinted {
-            value: Value::String("2020-01-15T10:30:00+00:00".to_string()),
-            type_hint: "datetime".to_string(),
-        };
-        let (text, num, time) = classify_typed_value(&typed).unwrap();
-        assert!(text.is_none());
-        assert!(num.is_none());
-        assert_eq!(time, Some(1579084200));
+    fn a_plain_boolean_is_a_number() {
+        let read = read_hinted(&TypedValue::Plain(serde_json::json!(true)));
+        assert!(matches!(read, Ok(FactValue::Num(n)) if n == 1.0));
     }
 
     #[test]
-    fn test_classify_typed_duration() {
+    fn the_datetime_hint_on_a_string_reads_a_time() {
+        let read = read_hinted(&hinted(Value::from("2020-01-15T10:30:00+00:00")));
+        assert_eq!(read.ok().map(|v| v.kind()), Some(FactType::Time));
+    }
+
+    #[test]
+    fn the_duration_hint_reads_a_number_of_seconds() {
         let typed = TypedValue::Hinted {
             value: Value::String("3:30".to_string()),
             type_hint: "duration".to_string(),
         };
-        let (text, num, time) = classify_typed_value(&typed).unwrap();
-        assert!(text.is_none());
-        assert!((num.unwrap() - 210.0).abs() < 0.01);
-        assert!(time.is_none());
+        let read = read_hinted(&typed);
+        assert!(matches!(read, Ok(FactValue::Num(n)) if (n - 210.0).abs() < 0.01));
     }
 
     #[test]
-    fn test_classify_typed_unknown_hint() {
+    fn an_unknown_hint_is_refused() {
         let typed = TypedValue::Hinted {
             value: Value::String("hello".to_string()),
             type_hint: "bogus".to_string(),
         };
-        let result = classify_typed_value(&typed);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unknown type hint"));
-    }
-
-    // =========================================================================
-    // get_typed_value_type
-    // =========================================================================
-
-    #[test]
-    fn test_get_typed_value_type_plain() {
-        assert_eq!(
-            get_typed_value_type(&TypedValue::Plain(serde_json::json!("hello"))),
-            Some(FactValueType::Text)
-        );
-        assert_eq!(
-            get_typed_value_type(&TypedValue::Plain(serde_json::json!(42))),
-            Some(FactValueType::Num)
-        );
-    }
-
-    #[test]
-    fn test_get_typed_value_type_hinted() {
-        let dt = TypedValue::Hinted {
-            value: Value::String("2020-01-15T10:30:00+00:00".to_string()),
-            type_hint: "datetime".to_string(),
-        };
-        assert_eq!(get_typed_value_type(&dt), Some(FactValueType::Time));
-
-        let dur = TypedValue::Hinted {
-            value: Value::String("3:30".to_string()),
-            type_hint: "duration".to_string(),
-        };
-        assert_eq!(get_typed_value_type(&dur), Some(FactValueType::Num));
+        match read_hinted(&typed) {
+            Err(refusal) => assert!(refusal.warning("k", "here").contains("unknown type hint")),
+            Ok(v) => panic!("read as {}", v.kind()),
+        }
     }
 
     // =========================================================================
@@ -1002,6 +879,216 @@ mod tests {
         assert_eq!(state.stats.skipped_type_mismatch, 1);
     }
 
+    /// The columns one imported time is stored with: form, offset in seconds, precision, and
+    /// the fraction in nanoseconds.
+    type TimeColumns = (String, Option<i64>, String, Option<i64>);
+
+    fn time_columns(conn: &Connection, source_id: i64, key: &str) -> Option<TimeColumns> {
+        conn.query_row(
+            "SELECT time_form, time_offset, time_precision, time_nanos FROM facts
+             WHERE entity_type = 'source' AND entity_id = ?1 AND key = ?2",
+            rusqlite::params![source_id, key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .ok()
+    }
+
+    fn import_one(
+        conn: &Connection,
+        state: &mut ImportState,
+        source_id: i64,
+        facts: &[(String, Value)],
+    ) -> RecordOutcome {
+        let record = make_record(source_id, 0, facts.iter().cloned().collect());
+        process_record(conn, &record, state, false).unwrap()
+    }
+
+    #[test]
+    fn each_written_form_is_stored_with_its_form_offset_and_precision() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let src = insert_source(&conn, root, "photo.jpg", None);
+        let mut state = init_state(&conn).unwrap();
+
+        // What was written, then the form, offset, precision and fraction it is stored with.
+        type Case = (Value, &'static str, Option<i64>, &'static str, Option<i64>);
+        let cases: [Case; 13] = [
+            (
+                "2023-12-31T21:00:00-05:00".into(),
+                "instant_offset",
+                Some(-18000),
+                "second",
+                None,
+            ),
+            (
+                "2023-12-31T23:30:00Z".into(),
+                "instant_offset",
+                Some(0),
+                "second",
+                None,
+            ),
+            (
+                "2023-12-31T23:30:00+00:00".into(),
+                "instant_offset",
+                Some(0),
+                "second",
+                None,
+            ),
+            (
+                "2023-12-31T23:30:00-00:00".into(),
+                "instant",
+                None,
+                "second",
+                None,
+            ),
+            ("2023:12:31 21:00:00".into(), "clock", None, "second", None),
+            ("2024".into(), "clock", None, "year", None),
+            ("2024-06".into(), "clock", None, "month", None),
+            ("2024-06-15".into(), "clock", None, "day", None),
+            ("2024-06-15T14:30".into(), "clock", None, "minute", None),
+            (
+                "2024-06-15T14:30:05.45+02:00".into(),
+                "instant_offset",
+                Some(7200),
+                "fraction",
+                Some(450_000_000),
+            ),
+            (
+                "2024:07:23 11:06:32.45+02:00".into(),
+                "instant_offset",
+                Some(7200),
+                "fraction",
+                Some(450_000_000),
+            ),
+            (serde_json::json!(2019), "clock", None, "year", None),
+            (serde_json::json!(2019.0), "clock", None, "year", None),
+        ];
+        let facts: Vec<(String, Value)> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (v, ..))| {
+                let wrapped = serde_json::json!({"value": v, "type": "datetime"});
+                (format!("content.form{i}"), wrapped)
+            })
+            .collect();
+
+        let outcome = import_one(&conn, &mut state, src, &facts);
+
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        for (i, (written, form, offset, precision, nanos)) in cases.iter().enumerate() {
+            assert_eq!(
+                time_columns(&conn, src, &format!("content.form{i}")),
+                Some((form.to_string(), *offset, precision.to_string(), *nanos)),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_time_is_skipped_counted_and_warned_never_stored() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let src = insert_source(&conn, root, "photo.jpg", None);
+        let mut state = init_state(&conn).unwrap();
+
+        let cases: [(Value, TimeReadError); 6] = [
+            ("2020:07:23 11:06:32é".into(), TimeReadError::NotInList),
+            ("2024-02-30".into(), TimeReadError::ImpossibleDate),
+            ("2024-06-15+02:00".into(), TimeReadError::OffsetOnDateAlone),
+            (
+                "9999-12-31T23:00:00-05:00".into(),
+                TimeReadError::OutOfRange,
+            ),
+            // A number with the time hint is a year or nothing — never epoch seconds.
+            (serde_json::json!(1.5e9), TimeReadError::YearOutOfRange),
+            (serde_json::json!(2019.5), TimeReadError::YearOutOfRange),
+        ];
+        let facts: Vec<(String, Value)> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (v, _))| {
+                let wrapped = serde_json::json!({"value": v, "type": "datetime"});
+                (format!("content.bad{i}"), wrapped)
+            })
+            .collect();
+
+        let outcome = import_one(&conn, &mut state, src, &facts);
+
+        assert_eq!(state.stats.skipped_type_mismatch, cases.len() as u64);
+        assert_eq!(state.stats.facts_imported, 0);
+        assert_eq!(
+            source_fact_count(&conn, src),
+            0,
+            "nothing is stored, not even as a clock reading"
+        );
+        assert_eq!(outcome.warnings.len(), cases.len());
+        for (i, (written, why)) in cases.iter().enumerate() {
+            let key = format!("content.bad{i}");
+            let expected =
+                format!("cannot read {written} as a time for '{key}' in /photos/photo.jpg: {why}");
+            assert!(
+                outcome.warnings.contains(&expected),
+                "{expected}\n{:?}",
+                outcome.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn an_unhinted_number_stays_a_number() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let src = insert_source(&conn, root, "photo.jpg", None);
+        let mut state = init_state(&conn).unwrap();
+
+        import_one(
+            &conn,
+            &mut state,
+            src,
+            &[("content.When".to_string(), serde_json::json!(1500000000))],
+        );
+
+        let stored: (Option<f64>, Option<i64>) = conn
+            .query_row(
+                "SELECT value_num, value_time FROM facts WHERE key = 'content.When'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (Some(1500000000.0), None));
+    }
+
+    #[test]
+    fn one_key_holding_every_form_is_never_a_type_change() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let mut state = init_state(&conn).unwrap();
+        let written: [Value; 6] = [
+            "2023-12-31T21:00:00-05:00".into(),
+            "2023-12-31T23:30:00-00:00".into(),
+            "2023:12:31 21:00:00".into(),
+            "2024".into(),
+            "2024-06-15T14:30:05.45+02:00".into(),
+            serde_json::json!(2019),
+        ];
+
+        for (i, v) in written.iter().enumerate() {
+            let src = insert_source(&conn, root, &format!("{i}.jpg"), None);
+            let wrapped = serde_json::json!({"value": v, "type": "datetime"});
+            let outcome = import_one(
+                &conn,
+                &mut state,
+                src,
+                &[("content.When".to_string(), wrapped)],
+            );
+            assert!(outcome.warnings.is_empty(), "{v}: {:?}", outcome.warnings);
+        }
+
+        assert_eq!(state.stats.facts_imported, written.len() as u64);
+        assert_eq!(state.stats.skipped_type_mismatch, 0);
+        assert!(state.type_mismatch_keys.is_empty());
+    }
+
     // =========================================================================
     // promote_content_facts
     // =========================================================================
@@ -1050,8 +1137,14 @@ mod tests {
         let obj = insert_object(&conn, "hash1", false);
         let src = insert_source(&conn, root, "photo.jpg", Some(obj));
         crate::core::testing::insert_fact(&conn, src, "content.Make", "Nikon");
-        facts_repo::insert_object_fact(&conn, obj, "content.Make", Some("Canon"), None, None, 0)
-            .unwrap();
+        facts_repo::insert_object_fact(
+            &conn,
+            obj,
+            "content.Make",
+            &FactValue::Text("Canon".into()),
+            0,
+        )
+        .unwrap();
 
         let promoted = promote_content_facts(&conn, src, obj).unwrap();
 

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::core::domain::object::Object;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::expr::Filter;
 
@@ -97,6 +98,8 @@ pub struct DuplicateGroupData {
 pub struct ExcludeSetParams {
     pub scopes: Vec<ScopeMatch>,
     pub filters: Vec<Filter>,
+    /// The user's clock, which every time in a filter is read on.
+    pub clock: UserZone,
 }
 
 /// Computed plan for excluding sources. Contains all data the interface
@@ -123,6 +126,8 @@ impl ExcludeSetPlan {
 pub struct ExcludeClearParams {
     pub scopes: Vec<ScopeMatch>,
     pub filters: Vec<Filter>,
+    /// The user's clock, which every time in a filter is read on.
+    pub clock: UserZone,
 }
 
 /// Computed plan for clearing source-level exclusions.
@@ -147,6 +152,8 @@ pub struct ExcludeDuplicatesParams {
     pub scopes: Vec<ScopeMatch>,
     pub filters: Vec<Filter>,
     pub prefer_prefix: String,
+    /// The user's clock, which every time in a filter is read on.
+    pub clock: UserZone,
 }
 
 /// Computed plan for excluding duplicate sources. Contains all data the
@@ -192,6 +199,8 @@ impl ExcludeDuplicatesPlan {
 pub struct ExcludeSetObjectsParams {
     pub scopes: Vec<ScopeMatch>,
     pub filters: Vec<Filter>,
+    /// The user's clock, which every time in a filter is read on.
+    pub clock: UserZone,
 }
 
 /// Computed plan for excluding objects. Contains all data the interface

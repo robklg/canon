@@ -5,16 +5,59 @@
 //! against it. Planning and the apply command both expand patterns, so the pair
 //! is shared rather than owned by either.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
 
 use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::path::path_strip_prefix;
+use crate::core::domain::time::zone::UserZone;
 use crate::expr::{
-    evaluate, EvalContext, Pattern, PatternFacts, SourceAttributes, Unmeasured, OBJECT_HASH,
+    evaluate, EvalContext, Pattern, PatternFacts, PatternNoValue, SourceAttributes, Unmeasured,
+    OBJECT_HASH,
 };
+
+/// Which causes a run's pattern failures met — what the archive's way out is composed from.
+///
+/// Read off the facility's typed cause, never off a refusal's wording, so the advice cannot
+/// drift from what actually failed. A failure the facility gives no cause for is a fact the
+/// source does not carry, which is what every pattern failure was before the causes existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PatternGaps {
+    /// The pattern places files relative to the manifest's scope and the lock records none
+    /// to place them from (`ops::manifest::LockFile::pattern_needs_a_scope_it_lacks`): the
+    /// lock's answer, never this run's subset of entries.
+    pub needs_a_scope_it_lacks: bool,
+    /// A file's save time Canon cannot read gave the pattern no value.
+    pub unreadable_save_time: bool,
+    /// A time written coarser than its modifier reads gave the pattern no value: each
+    /// `key|modifier` that failed so, in order, for the way out to name.
+    pub too_coarse: BTreeSet<String>,
+    /// A fact the source does not carry.
+    pub fact_not_carried: bool,
+}
+
+impl PatternGaps {
+    /// The gaps a run starts with: the lock's own answer about the scope, nothing met yet.
+    pub fn for_lock(needs_a_scope_it_lacks: bool) -> Self {
+        PatternGaps {
+            needs_a_scope_it_lacks,
+            ..Default::default()
+        }
+    }
+
+    /// Record the cause of one entry's failure.
+    pub fn met(&mut self, failure: &anyhow::Error) {
+        match failure.downcast_ref::<PatternNoValue>() {
+            Some(PatternNoValue::UnreadableSaveTime) => self.unreadable_save_time = true,
+            Some(coarse @ PatternNoValue::TooCoarse { .. }) => {
+                self.too_coarse.extend(coarse.too_coarse_chain());
+            }
+            None => self.fact_not_carried = true,
+        }
+    }
+}
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
 ///
@@ -27,8 +70,9 @@ fn build_eval_context<'a>(
     unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     facts: &PatternFacts,
+    zone: &'a UserZone,
 ) -> Result<EvalContext<'a>> {
-    let mut ctx = EvalContext::new();
+    let mut ctx = EvalContext::new(zone);
 
     let root_path = root_paths
         .get(&source.root_id)
@@ -90,14 +134,17 @@ fn build_eval_context<'a>(
 /// handed in the same way the root cache and the prefetched facts are, because
 /// an entry cannot answer it and a refusal that guesses prescribes a remedy
 /// that may not work.
+///
+/// `zone` is the clock the pattern's times are read on.
 pub fn evaluate_pattern(
     pattern: &Pattern,
     source: &LockEntry,
     unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     facts: &PatternFacts,
+    zone: &UserZone,
 ) -> Result<String> {
-    let ctx = build_eval_context(source, unmeasured, root_paths, facts)?;
+    let ctx = build_eval_context(source, unmeasured, root_paths, facts, zone)?;
     evaluate(pattern, &ctx)
 }
 
@@ -141,6 +188,7 @@ mod tests {
             Unmeasured::NoScopeRecorded,
             &roots(),
             &PatternFacts::from_entries(HashMap::new()),
+            &UserZone::utc(),
         )
     }
 
@@ -223,6 +271,7 @@ mod tests {
             Unmeasured::NoScopeRecorded,
             &roots,
             &facts,
+            &UserZone::utc(),
         )
         .unwrap();
         assert_eq!(dest, "2024/IMG_001.jpg");

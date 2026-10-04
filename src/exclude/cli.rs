@@ -139,7 +139,14 @@ pub fn set(
         .collect::<Result<Vec<_>>>()?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
-    let plan = plan_set(conn, &ExcludeSetParams { scopes, filters })?;
+    let plan = plan_set(
+        conn,
+        &ExcludeSetParams {
+            scopes,
+            filters,
+            clock: crate::user_zone().clone(),
+        },
+    )?;
 
     if plan.source_ids().is_empty() {
         println!("No sources to exclude (0 matching non-excluded sources)");
@@ -208,7 +215,14 @@ pub fn clear(
         .collect::<Result<Vec<_>>>()?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
-    let plan = plan_clear(conn, &ExcludeClearParams { scopes, filters })?;
+    let plan = plan_clear(
+        conn,
+        &ExcludeClearParams {
+            scopes,
+            filters,
+            clock: crate::user_zone().clone(),
+        },
+    )?;
 
     if plan.source_ids().is_empty() {
         println!("No excluded sources match the given filters");
@@ -433,6 +447,7 @@ pub fn exclude_duplicates(
         scopes,
         filters,
         prefer_prefix,
+        clock: crate::user_zone().clone(),
     };
     let plan = plan_duplicates(conn, &params)?;
 
@@ -693,7 +708,14 @@ pub fn set_objects_by_filter(
         .collect::<Result<Vec<_>>>()?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
-    let plan = plan_set_objects(conn, &ExcludeSetObjectsParams { scopes, filters })?;
+    let plan = plan_set_objects(
+        conn,
+        &ExcludeSetObjectsParams {
+            scopes,
+            filters,
+            clock: crate::user_zone().clone(),
+        },
+    )?;
 
     if plan.objects.is_empty() {
         println!("No objects to exclude.");
@@ -1141,103 +1163,118 @@ mod tests {
 
     #[test]
     fn test_set_objects_by_filter_excludes_objects() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                let mut db = make_test_db();
+                let conn = db.conn_mut();
 
-        let root = insert_root(conn, "/photos", "source", false);
-        let obj = insert_object(conn, "abc123hash", false);
-        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
+                let root = insert_root(conn, "/photos", "source", false);
+                let obj = insert_object(conn, "abc123hash", false);
+                insert_source(conn, root, "photo.jpg", Some(obj), true, false);
 
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: true,
-        };
+                let options = SetOptions {
+                    dry_run: false,
+                    verbose: false,
+                    yes: true,
+                };
 
-        let result = set_objects_by_filter(
-            &mut db,
-            &[], // no scope restriction
-            &[], // no filters
-            &options,
-            "test",
-            &LedgerConfig::default(),
-            false,
-            None,
-        );
+                let result = set_objects_by_filter(
+                    &mut db,
+                    &[], // no scope restriction
+                    &[], // no filters
+                    &options,
+                    "test",
+                    &LedgerConfig::default(),
+                    false,
+                    None,
+                );
 
-        assert!(result.is_ok());
-        assert!(
-            is_object_excluded_in_db(db.conn(), obj),
-            "Object should be excluded after set_objects_by_filter"
-        );
+                assert!(result.is_ok());
+                assert!(
+                    is_object_excluded_in_db(db.conn(), obj),
+                    "Object should be excluded after set_objects_by_filter"
+                );
+            },
+        )
     }
 
     #[test]
     fn test_set_objects_by_filter_dry_run() {
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                let mut db = make_test_db();
+                let conn = db.conn_mut();
 
-        let root = insert_root(conn, "/photos", "source", false);
-        let obj = insert_object(conn, "dry_run_hash", false);
-        insert_source(conn, root, "photo.jpg", Some(obj), true, false);
+                let root = insert_root(conn, "/photos", "source", false);
+                let obj = insert_object(conn, "dry_run_hash", false);
+                insert_source(conn, root, "photo.jpg", Some(obj), true, false);
 
-        let options = SetOptions {
-            dry_run: true, // DRY RUN
-            verbose: false,
-            yes: true,
-        };
+                let options = SetOptions {
+                    dry_run: true, // DRY RUN
+                    verbose: false,
+                    yes: true,
+                };
 
-        let result = set_objects_by_filter(
-            &mut db,
-            &[],
-            &[],
-            &options,
-            "test",
-            &LedgerConfig::default(),
-            false,
-            None,
-        );
+                let result = set_objects_by_filter(
+                    &mut db,
+                    &[],
+                    &[],
+                    &options,
+                    "test",
+                    &LedgerConfig::default(),
+                    false,
+                    None,
+                );
 
-        assert!(result.is_ok());
-        // Object should NOT be excluded (dry run)
-        assert!(
-            !is_object_excluded_in_db(db.conn(), obj),
-            "Dry run should NOT actually exclude objects"
-        );
+                assert!(result.is_ok());
+                // Object should NOT be excluded (dry run)
+                assert!(
+                    !is_object_excluded_in_db(db.conn(), obj),
+                    "Dry run should NOT actually exclude objects"
+                );
+            },
+        )
     }
 
     #[test]
     fn test_set_single_source_no_confirmation() {
-        // When count = 1, set() should execute directly without confirmation.
-        // We verify by running set() with yes=false — if it tried to confirm,
-        // it would block on stdin. Since the test doesn't hang, confirmation was skipped.
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                // When count = 1, set() should execute directly without confirmation.
+                // We verify by running set() with yes=false — if it tried to confirm,
+                // it would block on stdin. Since the test doesn't hang, confirmation was skipped.
+                let mut db = make_test_db();
+                let conn = db.conn_mut();
 
-        let root = insert_root(conn, "/source", "source", false);
-        let source_id = insert_source(conn, root, "only_file.jpg", None, true, false);
+                let root = insert_root(conn, "/source", "source", false);
+                let source_id = insert_source(conn, root, "only_file.jpg", None, true, false);
 
-        let options = SetOptions {
-            dry_run: false,
-            verbose: false,
-            yes: false, // Would block on stdin if confirmation triggered
-        };
+                let options = SetOptions {
+                    dry_run: false,
+                    verbose: false,
+                    yes: false, // Would block on stdin if confirmation triggered
+                };
 
-        // Use empty scopes so we don't try to canonicalize non-existent paths
-        let result = set(
-            &mut db,
-            &[],
-            &[],
-            &options,
-            "test",
-            &LedgerConfig::default(),
-            false,
-            None,
-        );
-        assert!(result.is_ok());
+                // Use empty scopes so we don't try to canonicalize non-existent paths
+                let result = set(
+                    &mut db,
+                    &[],
+                    &[],
+                    &options,
+                    "test",
+                    &LedgerConfig::default(),
+                    false,
+                    None,
+                );
+                assert!(result.is_ok());
 
-        // Verify the source was excluded
-        assert!(is_source_excluded(db.conn(), source_id));
+                // Verify the source was excluded
+                assert!(is_source_excluded(db.conn(), source_id));
+            },
+        )
     }
 
     // =========================================================================
@@ -1246,38 +1283,44 @@ mod tests {
 
     #[test]
     fn test_duplicates_single_source_no_confirmation() {
-        // Count = 1: execution directly, no confirmation prompt.
-        // Verify by running with yes=false — if it tried to confirm,
-        // it would block on stdin.
-        let mut db = make_test_db();
-        let conn = db.conn_mut();
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                // Count = 1: execution directly, no confirmation prompt.
+                // Verify by running with yes=false — if it tried to confirm,
+                // it would block on stdin.
+                let mut db = make_test_db();
+                let conn = db.conn_mut();
 
-        let source_root = insert_root(conn, "/source", "source", false);
-        let archive_root = insert_root(conn, "/archive", "archive", false);
+                let source_root = insert_root(conn, "/source", "source", false);
+                let archive_root = insert_root(conn, "/archive", "archive", false);
 
-        let obj = insert_object(conn, "single_dup_hash", false);
-        let source_id = insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
-        insert_source(conn, archive_root, "photo.jpg", Some(obj), true, false);
+                let obj = insert_object(conn, "single_dup_hash", false);
+                let source_id =
+                    insert_source(conn, source_root, "photo.jpg", Some(obj), true, false);
+                insert_source(conn, archive_root, "photo.jpg", Some(obj), true, false);
 
-        // yes=false — would block if confirmation triggered for count=1
-        let result = exclude_duplicates(
-            &mut db,
-            Path::new("/archive"),
-            Some(Path::new("/source")),
-            &[],
-            false,
-            false, // yes=false, but count=1 so no prompt
-            "test",
-            &LedgerConfig::default(),
-            false,
-            None,
-        );
+                // yes=false — would block if confirmation triggered for count=1
+                let result = exclude_duplicates(
+                    &mut db,
+                    Path::new("/archive"),
+                    Some(Path::new("/source")),
+                    &[],
+                    false,
+                    false, // yes=false, but count=1 so no prompt
+                    "test",
+                    &LedgerConfig::default(),
+                    false,
+                    None,
+                );
 
-        assert!(result.is_ok());
-        assert!(
-            is_source_excluded(db.conn(), source_id),
-            "Single source should be excluded without confirmation"
-        );
+                assert!(result.is_ok());
+                assert!(
+                    is_source_excluded(db.conn(), source_id),
+                    "Single source should be excluded without confirmation"
+                );
+            },
+        )
     }
 
     // =========================================================================

@@ -13,7 +13,6 @@ use anyhow::Result;
 use crate::core::domain::format::{format_count, format_size, shell_quote};
 use crate::core::domain::root::WayBack;
 use crate::core::repo::Db;
-use crate::notes::format_note_date;
 use crate::sweep::domain::{
     HubEntry, LeaderboardEntry, Location, ParentEntry, RelationClass, RelationShape, RootEntry,
     StructuralFinding, SuspendedRootTally, SweepParams,
@@ -747,7 +746,7 @@ fn print_notes(loc: &Location, report: &SweepReport, indent: &str, label: Option
             let suffix = label.map(|l| format!(", {l}")).unwrap_or_default();
             println!(
                 "{indent}note ({}{suffix}): \"{}\"",
-                format_note_date(note.created_at),
+                crate::core::domain::format::format_date(note.created_at, crate::user_zone()),
                 note.text
             );
         }

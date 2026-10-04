@@ -12,7 +12,7 @@ mod domain;
 mod ops;
 mod repo;
 
-pub use cli::{format_note_date, run};
+pub use cli::run;
 pub use domain::{note_display_path, relative_to_scope, Note};
 pub use ops::{survey_note_context, SurveyNoteContext};
 // Fully qualified so the scanner's textual repo-reach check reads this as

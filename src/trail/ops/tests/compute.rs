@@ -1,13 +1,13 @@
-use chrono::NaiveDate;
+use jiff::civil::date;
+
+use crate::core::domain::time::zone::UserZone;
 
 use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::trail::domain::placement::RowAspect;
 use crate::trail::domain::timeline::{TimelineEvent, WhenValue};
-use crate::trail::ops::compute::{
-    classify_extraction_rows, compute_trail, local_midnight, TrailView,
-};
+use crate::trail::ops::compute::{classify_extraction_rows, compute_trail, day_start, TrailView};
 
 use super::fixtures::{
     aspects_of, decision_ids, extraction_row, insert_decision_at, insert_note_at, params, scope,
@@ -361,9 +361,7 @@ fn extraction_rollup_none_for_time_lens_view() {
     .unwrap();
 
     let mut p = params(vec!["/a".to_string()]);
-    p.timeframe = Some(WhenValue::Since(
-        NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
-    ));
+    p.timeframe = Some(WhenValue::Since(date(2020, 1, 1)));
     let result = compute_trail(&conn, &p).unwrap();
     assert!(result.extraction_rollup.is_none());
 }
@@ -590,8 +588,8 @@ fn time_lens_applies_the_same_placement_law() {
     let conn = open_in_memory_for_test();
     let source_root = insert_test_root(&conn, "/a", "source", false);
     insert_test_root(&conn, "/archive", "archive", false);
-    let day = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let apply = insert_decision_at(&conn, "apply", local_midnight(day) + 3_600);
+    let day = date(2026, 7, 10);
+    let apply = insert_decision_at(&conn, "apply", day_start(day, &UserZone::utc()) + 3_600);
     repo::decision::replace_extractions(
         &conn,
         &[extraction_row(
@@ -865,8 +863,8 @@ fn arrival_rollup_none_for_time_lens_view_but_decision_still_listed() {
     let conn = open_in_memory_for_test();
     let source_root = insert_test_root(&conn, "/a", "source", false);
     insert_test_root(&conn, "/archive", "archive", false);
-    let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let ts1 = local_midnight(day1) + 3600;
+    let day1 = date(2026, 7, 10);
+    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
     let apply = insert_decision_at(&conn, "apply", ts1);
     repo::decision::replace_extractions(
         &conn,
@@ -1075,8 +1073,8 @@ fn rearrangement_rollup_is_whole_history_despite_the_cap() {
 fn rearrangement_rollup_none_for_global_and_time_lens_views() {
     let conn = open_in_memory_for_test();
     let archive = insert_test_root(&conn, "/archive", "archive", false);
-    let day = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let d = insert_decision_at(&conn, "apply", local_midnight(day) + 3600);
+    let day = date(2026, 7, 10);
+    let d = insert_decision_at(&conn, "apply", day_start(day, &UserZone::utc()) + 3600);
     repo::decision::replace_extractions(
         &conn,
         &[extraction_row(
@@ -1192,10 +1190,10 @@ fn time_lens_groups_days_and_rolls_up() {
     let root = insert_test_root(&conn, "/a", "source", false);
     // Two dates, epochs built through the same local mapping the
     // implementation uses, so the test is timezone-independent.
-    let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let day2 = NaiveDate::from_ymd_opt(2026, 7, 11).unwrap();
-    let ts1 = local_midnight(day1) + 3600;
-    let ts2 = local_midnight(day2) + 3600;
+    let day1 = date(2026, 7, 10);
+    let day2 = date(2026, 7, 11);
+    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
+    let ts2 = day_start(day2, &UserZone::utc()) + 3600;
 
     let scan = insert_decision_at(&conn, "scan", ts1);
     scope(&conn, scan, root, "");
@@ -1244,8 +1242,8 @@ fn time_lens_groups_days_and_rolls_up() {
 fn time_lens_includes_extraction_touching_decision_in_right_day() {
     let conn = open_in_memory_for_test();
     let root = insert_test_root(&conn, "/a", "source", false);
-    let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let ts1 = local_midnight(day1) + 3600;
+    let day1 = date(2026, 7, 10);
+    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
 
     // Global selection scope (no decision_scopes row) — only the
     // extraction row ties it to this view.
@@ -1293,8 +1291,8 @@ fn time_lens_day_archived_rollup_reflects_apply_stamps_regardless_of_extraction_
     let conn = open_in_memory_for_test();
     let root = insert_test_root(&conn, "/a", "source", false);
     let archive_root = insert_test_root(&conn, "/archive", "archive", false);
-    let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let ts1 = local_midnight(day1) + 3600;
+    let day1 = date(2026, 7, 10);
+    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
 
     let apply = insert_decision_at(&conn, "apply", ts1);
     scope(&conn, apply, root, "");
@@ -1347,8 +1345,8 @@ fn time_lens_day_archived_rollup_reflects_apply_stamps_regardless_of_extraction_
 fn time_lens_global_view_unchanged_by_extraction_rows() {
     let conn = open_in_memory_for_test();
     let root = insert_test_root(&conn, "/a", "source", false);
-    let day1 = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-    let ts1 = local_midnight(day1) + 3600;
+    let day1 = date(2026, 7, 10);
+    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
     let apply = insert_decision_at(&conn, "apply", ts1);
     repo::decision::replace_extractions(
         &conn,
@@ -1558,4 +1556,93 @@ fn jsonl_scope_is_unchanged_when_a_match_is_carried() {
         decision.scope.as_deref(),
         Some(["/a/admin".to_string(), "/a/foto".to_string()].as_slice())
     );
+}
+
+// ------------------------------------------------------------------
+// The time lens on the user's clock, through its clock-change days
+// ------------------------------------------------------------------
+
+/// `--on` a clock-change day takes that day as the user's clock has it: 25 hours on
+/// 27 October 2024 in Amsterdam (from 22:00 UTC the evening before to 23:00 UTC), and in
+/// São Paulo on 4 November 2018, whose midnight was skipped, from 01:00 at −02:00 — the
+/// boundaries the lens drew before it read the zone through its owner.
+#[test]
+fn the_time_lens_keeps_the_clock_change_days_boundaries() {
+    for (zone, day, start, end) in [
+        (
+            "Europe/Amsterdam",
+            date(2024, 10, 27),
+            1_729_980_000,
+            1_730_070_000,
+        ),
+        (
+            "America/Sao_Paulo",
+            date(2018, 11, 4),
+            1_541_300_400,
+            1_541_383_200,
+        ),
+        (
+            "America/Sao_Paulo",
+            date(2018, 11, 3),
+            1_541_214_000,
+            1_541_300_400,
+        ),
+    ] {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let mut inside = Vec::new();
+        for (ts, within) in [
+            (start - 1, false),
+            (start, true),
+            (end - 1, true),
+            (end, false),
+        ] {
+            let id = insert_decision_at(&conn, "scan", ts);
+            scope(&conn, id, root, "");
+            if within {
+                inside.push(id);
+            }
+        }
+        let mut p = params(vec!["/a".to_string()]);
+        p.clock = UserZone::for_test(zone);
+        p.timeframe = Some(WhenValue::On(day));
+        let result = compute_trail(&conn, &p).unwrap();
+        assert_eq!(decision_ids(&result.view), inside, "{zone} {day}");
+        match &result.view {
+            TrailView::Days(days) => {
+                assert_eq!(days.len(), 1, "{zone} {day}");
+                assert_eq!(days[0].date, day, "{zone} {day}");
+            }
+            TrailView::Recent(_) => panic!("time lens must be Days"),
+        }
+    }
+}
+
+/// The last days a time can be read on answer as they always did: `--on 9999-12-31` and
+/// `--since 9999-12-31` find nothing, rather than panicking or widening to the whole history,
+/// and `--on 9999-12-30` holds the last instant Canon reads — `Timestamp::MAX`,
+/// 9999-12-30T22:00Z, readable by `the_readable_line_holds_at_both_edges` — so the next
+/// midnight on either clock lies past every readable time.
+#[test]
+fn the_time_lens_answers_at_the_edge_of_the_years() {
+    for zone in ["Europe/Amsterdam", "America/New_York"] {
+        let conn = open_in_memory_for_test();
+        let root = insert_test_root(&conn, "/a", "source", false);
+        let ordinary = insert_decision_at(&conn, "scan", 1_700_000_000);
+        scope(&conn, ordinary, root, "");
+        let last = insert_decision_at(&conn, "scan", jiff::Timestamp::MAX.as_second());
+        scope(&conn, last, root, "");
+
+        for (when, expected) in [
+            (WhenValue::On(date(9999, 12, 31)), vec![]),
+            (WhenValue::Since(date(9999, 12, 31)), vec![]),
+            (WhenValue::On(date(9999, 12, 30)), vec![last]),
+        ] {
+            let mut p = params(vec!["/a".to_string()]);
+            p.clock = UserZone::for_test(zone);
+            p.timeframe = Some(when);
+            let result = compute_trail(&conn, &p).unwrap();
+            assert_eq!(decision_ids(&result.view), expected, "{zone} {when:?}");
+        }
+    }
 }

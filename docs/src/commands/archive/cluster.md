@@ -219,9 +219,9 @@ The rebuild is withheld in two further cases, and each says what it owes instead
 If the only thing a rebuild would change is the *wording* of the refusal you are already reading,
 it is not offered — the report names an act when the act gets you further, not when it merely gives
 the same answer differently. That refusal is a pattern the lock cannot answer, so what you get in
-the rebuild's place is the pattern remedy — the same two lines [`apply`](apply.md) prints when it
-reaches the pattern, and which pair depends on what the pattern is missing, because the two take
-opposite advice. `apply` checks the lock before the pattern, so on a lock written before the
+the rebuild's place is the pattern remedy — the same lines [`apply`](apply.md) prints when it
+reaches the pattern, and which pair depends on what the pattern is missing, because each takes
+different advice. `apply` checks the lock before the pattern, so on a lock written before the
 measurement it says to rebuild first. The report offers a rebuild where it clears what stops the
 apply: a lock without a header, a hash mismatch, a lost lock, and a pattern that needs a scope
 the lock lacks when `meta.scope` names a place with sources to measure from. A pattern that fails
@@ -249,6 +249,33 @@ fact your sources do not carry gets the other answer:
 Adjust the pattern in your manifest, or import the facts it names.
 Use 'canon facts' to see which sources carry them.
 ```
+
+A pattern reading a file's save time that Canon cannot read, one at the edge of the years
+0000–9999 or beyond, gets a third pair. The file has a save time, so no import supplies it:
+
+```
+1 of 240 entries have no destination:
+  Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond
+  /photos/2016/IMG_0001.jpg
+```
+
+```
+A save time Canon cannot read gives the pattern no value.
+Add "source.mtime?" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh.
+```
+
+Where both a missing fact and such a save time stop the pattern, both pairs print, the fact pair
+first; where the pattern also needs a scope the lock lacks, the scope pair prints alone. A modifier
+that reads a finer part than a time carries gets a fourth pair, naming the key and modifier that
+failed as the query entry that leaves such files out:
+
+```
+A time known only to a coarser grain than the pattern reads gives the pattern no value.
+Add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, and refresh.
+```
+
+The query and a file's save time are both read when the lock is built, so these ways out take
+effect at the refresh, and `cluster status` names the apply once the rebuilt lock places every file.
 
 If the recorded scope resolves to nothing — every path in it set aside, so the report has just
 printed `no sources known at …` — a refresh is refused outright, and pointing at one would only

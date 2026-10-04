@@ -7,10 +7,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
-use chrono::{Duration, Local, NaiveDate, TimeZone};
+use jiff::civil::Date;
+use jiff::ToSpan;
 
 use crate::core::domain::extraction::DecisionExtraction;
+use crate::core::domain::format::clock_of;
 use crate::core::domain::root::{find_containing_root, Root};
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::notes::{fetch_all, fetch_by_roots};
 use crate::trail::domain::grouping::group_destinations;
@@ -33,6 +36,8 @@ pub struct TrailParams {
     pub include_notes: bool,
     /// Decision-window cap; `None` = `--all`.
     pub limit: Option<usize>,
+    /// The user's clock: the time lens's day boundaries and the day each event falls on.
+    pub clock: UserZone,
 }
 
 pub enum TrailView {
@@ -134,7 +139,7 @@ pub struct TrailResult {
 }
 
 pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailResult> {
-    let range = params.timeframe.map(when_range);
+    let range = params.timeframe.map(|when| when_range(when, &params.clock));
 
     let (mut decisions, unscoped, notes, placements, rollups, scope_matches, view_root) =
         if params.prefixes.is_empty() {
@@ -301,9 +306,9 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
             })
             .collect();
         let stamps = crate::trail::repo::aggregate_stamped_by_decisions(conn, &ids)?;
-        let dated: Vec<(NaiveDate, TimelineEvent)> = events
+        let dated: Vec<(Date, TimelineEvent)> = events
             .into_iter()
-            .map(|e| (local_date(e.created_at()), e))
+            .map(|e| (day_of(e.created_at(), &params.clock), e))
             .collect();
         TrailView::Days(group_by_day(dated, &stamps))
     } else {
@@ -644,38 +649,39 @@ fn build_rollups(
     }
 }
 
-/// Epoch range [start, end) for a time-lens value, in local time.
-fn when_range(when: WhenValue) -> (i64, i64) {
+/// Epoch range [start, end) for a time-lens value, on the user's clock.
+fn when_range(when: WhenValue, zone: &UserZone) -> (i64, i64) {
     match when {
-        WhenValue::Since(date) => (local_midnight(date), i64::MAX),
+        WhenValue::Since(date) => (day_start(date, zone), i64::MAX),
+        // A day with no next day (9999-12-31) runs to the end of what the lens reads.
         WhenValue::On(date) => (
-            local_midnight(date),
-            local_midnight(date + Duration::days(1)),
+            day_start(date, zone),
+            date.checked_add(1.day())
+                .map_or(i64::MAX, |next| day_start(next, zone)),
         ),
     }
 }
 
-/// `pub(super)`, not private: several tests in the externalized test module
-/// build epoch timestamps directly (`local_midnight(day) + 3600`) to stay
-/// timezone-independent, rather than hardcoding an epoch.
-pub(super) fn local_midnight(date: NaiveDate) -> i64 {
-    let naive = date.and_hms_opt(0, 0, 0).unwrap();
-    match Local.from_local_datetime(&naive) {
-        chrono::LocalResult::Single(dt) => dt.timestamp(),
-        // DST gap/fold at midnight: take the earliest valid instant.
-        chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
-        chrono::LocalResult::None => Local
-            .from_local_datetime(&date.and_hms_opt(1, 0, 0).unwrap())
-            .earliest()
-            .map(|dt| dt.timestamp())
-            .unwrap_or_default(),
-    }
+/// The first instant of `date` on the user's clock, in epoch seconds — the earlier one
+/// where midnight repeats, the first after the gap where it is skipped (`UserZone::day_start`).
+///
+/// `pub(super)`, not private: several tests in the externalized test module build epoch
+/// timestamps directly (`day_start(day, &zone) + 3600`) rather than hardcoding an epoch.
+///
+/// A day whose midnight no instant reaches is bounded past the readable line on its side
+/// (`i64::MAX` after year 0, `i64::MIN` before), so every readable time — the last one,
+/// `Timestamp::MAX`, included — falls on the day it reads as.
+pub(super) fn day_start(date: Date, zone: &UserZone) -> i64 {
+    zone.day_start(date)
+        .map_or(if date.year() > 0 { i64::MAX } else { i64::MIN }, |at| {
+            at.as_second()
+        })
 }
 
-fn local_date(ts: i64) -> NaiveDate {
-    Local
-        .timestamp_opt(ts, 0)
-        .single()
-        .map(|dt| dt.date_naive())
-        .unwrap_or_default()
+/// The day an event falls on, on the user's clock, read through the frame rule. No decision
+/// or note time lies outside the years Canon reads; were one to, it files under 1970-01-01.
+fn day_of(ts: i64, zone: &UserZone) -> Date {
+    clock_of(ts, zone)
+        .map(|at| at.date())
+        .unwrap_or(jiff::civil::date(1970, 1, 1))
 }

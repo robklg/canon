@@ -70,8 +70,14 @@ fn the_coverage_rollup_carries_the_empty_files_it_set_aside() {
     // covered universe reads below 100% while every line above it reads
     // 100%.
     let mut c = canary();
-    let (_, overall, _, _) =
-        crate::coverage::compute_per_root(&mut c.conn, &[], None, &Default::default()).unwrap();
+    let (_, overall, _, _) = crate::coverage::compute_per_root(
+        &mut c.conn,
+        &[],
+        None,
+        &Default::default(),
+        &crate::core::domain::time::zone::UserZone::utc(),
+    )
+    .unwrap();
     assert_eq!(overall.hashed_sources, 2);
     assert_eq!(overall.contentless_sources, 1, "the empty file is counted");
     assert_eq!(overall.coverable_sources(), 1);
@@ -188,6 +194,7 @@ fn set_object_planning_sets_the_empty_file_aside() {
         &crate::exclude::ExcludeSetObjectsParams {
             scopes: vec![],
             filters: vec![],
+            clock: crate::core::domain::time::zone::UserZone::utc(),
         },
     )
     .unwrap();
@@ -224,6 +231,7 @@ fn survey_counts_the_empty_files_it_sets_aside() {
         &all_sources,
         &[],
         None,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
     match outcome {
@@ -256,6 +264,7 @@ fn compare_counts_the_empty_files_it_sets_aside() {
         std::path::Path::new("/archive"),
         &[],
         &Default::default(),
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
     assert_eq!(

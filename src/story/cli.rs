@@ -24,7 +24,7 @@ pub fn story(db: &Db, spec: &str, limit: usize, all: bool) -> Result<()> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let cap = if all { usize::MAX } else { limit };
-    for line in story_lines(&report, cap, now) {
+    for line in story_lines(&report, cap, now, crate::user_zone()) {
         println!("{line}");
     }
     Ok(())

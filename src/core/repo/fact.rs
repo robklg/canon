@@ -29,8 +29,14 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use jiff::civil::{self, DateTime};
+use jiff::tz::Offset;
+use jiff::{SignedDuration, Timestamp};
+use rusqlite::types::Value as SqlValue;
+
 use super::db::{populate_temp_sources, Connection};
 use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 
 // Note: We use temp tables (populate_temp_sources) instead of IN clause chunking,
 // so BATCH_SIZE is not needed here. The temp table pattern handles large sets better.
@@ -56,45 +62,45 @@ pub fn batch_fetch_for_sources(
     populate_temp_sources(conn, source_ids)?;
 
     // Query all facts using UNION ALL
-    let query = r#"
-        SELECT ts.id as source_id, f.key, f.value_text, f.value_num, f.value_time,
-               f.entity_type, f.entity_id
+    let query = format!(
+        r#"
+        SELECT ts.id as source_id, f.key, f.entity_type, f.entity_id, {cols}
         FROM temp_sources ts
         JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
 
         UNION ALL
 
-        SELECT ts.id as source_id, f.key, f.value_text, f.value_num, f.value_time,
-               f.entity_type, f.entity_id
+        SELECT ts.id as source_id, f.key, f.entity_type, f.entity_id, {cols}
         FROM temp_sources ts
         JOIN sources s ON s.id = ts.id
         JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
         WHERE s.object_id IS NOT NULL
-    "#;
+    "#,
+        cols = fact_value_columns_of("f")
+    );
 
-    let mut stmt = conn.prepare(query)?;
+    let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map([], |row| {
         let source_id: i64 = row.get(0)?;
         let key: String = row.get(1)?;
-        let value_text: Option<String> = row.get(2)?;
-        let value_num: Option<f64> = row.get(3)?;
-        let value_time: Option<i64> = row.get(4)?;
-        let entity_type: String = row.get(5)?;
-        let entity_id: i64 = row.get(6)?;
+        let entity_type: String = row.get(2)?;
+        let entity_id: i64 = row.get(3)?;
+        let value = fact_value_at(row, 4)?;
 
-        let value = fact_value_from_columns(value_text, value_num, value_time);
-
-        Ok((
-            source_id,
-            FactEntry::new(key, value, entity_type, entity_id),
-        ))
+        Ok(value.map(|value| {
+            (
+                source_id,
+                FactEntry::new(key, value, entity_type, entity_id),
+            )
+        }))
     })?;
 
     // Group facts by source_id
     let mut result: HashMap<i64, Vec<FactEntry>> = HashMap::new();
     for row in rows {
-        let (source_id, entry) = row?;
-        result.entry(source_id).or_default().push(entry);
+        if let Some((source_id, entry)) = row? {
+            result.entry(source_id).or_default().push(entry);
+        }
     }
 
     // Clean up temp table
@@ -121,38 +127,37 @@ pub fn batch_fetch_key_for_sources(
     populate_temp_sources(conn, source_ids)?;
 
     // Query specific key using UNION ALL
-    let query = r#"
-        SELECT ts.id as source_id, f.key, f.value_text, f.value_num, f.value_time,
-               f.entity_type, f.entity_id
+    let query = format!(
+        r#"
+        SELECT ts.id as source_id, f.key, f.entity_type, f.entity_id, {cols}
         FROM temp_sources ts
         JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
 
         UNION ALL
 
-        SELECT ts.id as source_id, f.key, f.value_text, f.value_num, f.value_time,
-               f.entity_type, f.entity_id
+        SELECT ts.id as source_id, f.key, f.entity_type, f.entity_id, {cols}
         FROM temp_sources ts
         JOIN sources s ON s.id = ts.id
         JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
         WHERE s.object_id IS NOT NULL
-    "#;
+    "#,
+        cols = fact_value_columns_of("f")
+    );
 
-    let mut stmt = conn.prepare(query)?;
+    let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map([key], |row| {
         let source_id: i64 = row.get(0)?;
         let key: String = row.get(1)?;
-        let value_text: Option<String> = row.get(2)?;
-        let value_num: Option<f64> = row.get(3)?;
-        let value_time: Option<i64> = row.get(4)?;
-        let entity_type: String = row.get(5)?;
-        let entity_id: i64 = row.get(6)?;
+        let entity_type: String = row.get(2)?;
+        let entity_id: i64 = row.get(3)?;
+        let value = fact_value_at(row, 4)?;
 
-        let value = fact_value_from_columns(value_text, value_num, value_time);
-
-        Ok((
-            source_id,
-            FactEntry::new(key, value, entity_type, entity_id),
-        ))
+        Ok(value.map(|value| {
+            (
+                source_id,
+                FactEntry::new(key, value, entity_type, entity_id),
+            )
+        }))
     })?;
 
     // Initialize result with None for all source IDs
@@ -161,8 +166,9 @@ pub fn batch_fetch_key_for_sources(
 
     // Fill in found facts
     for row in rows {
-        let (source_id, entry) = row?;
-        result.insert(source_id, Some(entry));
+        if let Some((source_id, entry)) = row? {
+            result.insert(source_id, Some(entry));
+        }
     }
 
     // Clean up temp table
@@ -171,29 +177,133 @@ pub fn batch_fetch_key_for_sources(
     Ok(result)
 }
 
-/// Convert database columns to FactValue.
+/// The value columns of `facts`, in the order [`fact_value_at`] reads them and
+/// [`fact_value_params`] binds them. Every SELECT that reads a fact's value spells this list.
+pub const FACT_VALUE_COLUMNS: &str =
+    "value_text, value_num, value_time, time_nanos, time_form, time_offset, time_precision";
+
+/// The value columns of `facts` prefixed with a table alias (`f.value_text, …`), for a
+/// SELECT that joins.
+pub fn fact_value_columns_of(alias: &str) -> String {
+    FACT_VALUE_COLUMNS
+        .split(", ")
+        .map(|c| format!("{alias}.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Read a fact's value from the seven columns starting at `first`.
 ///
-/// The facts table stores values in mutually exclusive columns:
-/// - value_text for Text
-/// - value_num for Num
-/// - value_time for Time
-///
-/// Note: Path variant is not stored in the database (it's derived).
-fn fact_value_from_columns(
-    value_text: Option<String>,
-    value_num: Option<f64>,
-    value_time: Option<i64>,
-) -> FactValue {
-    if let Some(t) = value_time {
-        FactValue::Time(t)
-    } else if let Some(n) = value_num {
-        FactValue::Num(n)
-    } else if let Some(s) = value_text {
-        FactValue::Text(s)
-    } else {
-        // This shouldn't happen due to CHECK constraint, but handle gracefully
-        FactValue::Text(String::new())
+/// A row the table's CHECKs forbid is an error. A stored time Canon cannot read — outside
+/// the years every zone reads in 0000–9999, or with a part its constructor refuses — is no
+/// value for that fact (`Ok(None)`), never an error that fails the command.
+pub fn fact_value_at(row: &rusqlite::Row, first: usize) -> rusqlite::Result<Option<FactValue>> {
+    let text: Option<String> = row.get(first)?;
+    let num: Option<f64> = row.get(first + 1)?;
+    let time: Option<i64> = row.get(first + 2)?;
+    let nanos: Option<i32> = row.get(first + 3)?;
+    let form: Option<String> = row.get(first + 4)?;
+    let offset: Option<i32> = row.get(first + 5)?;
+    let precision: Option<String> = row.get(first + 6)?;
+    let forbidden = |what: &str| {
+        rusqlite::Error::FromSqlConversionFailure(
+            first,
+            rusqlite::types::Type::Null,
+            format!("facts row the schema forbids: {what}").into(),
+        )
+    };
+    match (text, num, time) {
+        (Some(t), None, None) => Ok(Some(FactValue::Text(t))),
+        (None, Some(n), None) => Ok(Some(FactValue::Num(n))),
+        (None, None, Some(secs)) => {
+            let precision = precision
+                .as_deref()
+                .and_then(precision_from_column)
+                .ok_or_else(|| forbidden("time precision"))?;
+            let nanos = match (precision, nanos) {
+                (Precision::Fraction, Some(n)) => n,
+                (Precision::Fraction, None) | (_, Some(_)) => {
+                    return Err(forbidden("time fraction"))
+                }
+                (_, None) => 0,
+            };
+            let value = match (form.as_deref(), offset) {
+                (Some("clock"), None) => clock_from_column(secs, nanos)
+                    .and_then(|at| TimeValue::clock(at, precision).ok()),
+                (Some("instant"), None) => Timestamp::new(secs, nanos)
+                    .ok()
+                    .and_then(|at| TimeValue::instant(at, None, precision).ok()),
+                (Some("instant_offset"), Some(o)) => Timestamp::new(secs, nanos)
+                    .ok()
+                    .zip(Offset::from_seconds(o).ok())
+                    .and_then(|(at, o)| TimeValue::instant(at, Some(o), precision).ok()),
+                _ => return Err(forbidden("time form")),
+            };
+            Ok(value.map(FactValue::Time))
+        }
+        _ => Err(forbidden("one value column")),
     }
+}
+
+/// The seven column values a fact's value is written as, in [`FACT_VALUE_COLUMNS`]' order.
+/// A path is derived, never stored.
+pub fn fact_value_params(value: &FactValue) -> Result<[SqlValue; 7]> {
+    use SqlValue::{Integer, Null, Real, Text};
+    Ok(match value {
+        FactValue::Text(t) => [Text(t.clone()), Null, Null, Null, Null, Null, Null],
+        FactValue::Num(n) => [Null, Real(*n), Null, Null, Null, Null, Null],
+        FactValue::Time(tv) => [
+            Null,
+            Null,
+            Integer(tv.legacy_epoch_number()),
+            tv.fraction_nanos().map_or(Null, |n| Integer(n.into())),
+            Text(form_column(tv.form()).to_string()),
+            tv.recorded_offset()
+                .map_or(Null, |o| Integer(o.seconds().into())),
+            Text(precision_column(tv.precision()).to_string()),
+        ],
+        FactValue::Path(_) => anyhow::bail!("a path value is derived and never stored"),
+    })
+}
+
+fn precision_column(p: Precision) -> &'static str {
+    match p {
+        Precision::Year => "year",
+        Precision::Month => "month",
+        Precision::Day => "day",
+        Precision::Minute => "minute",
+        Precision::Second => "second",
+        Precision::Fraction => "fraction",
+    }
+}
+
+fn precision_from_column(s: &str) -> Option<Precision> {
+    Some(match s {
+        "year" => Precision::Year,
+        "month" => Precision::Month,
+        "day" => Precision::Day,
+        "minute" => Precision::Minute,
+        "second" => Precision::Second,
+        "fraction" => Precision::Fraction,
+        _ => return None,
+    })
+}
+
+fn form_column(f: TimeForm) -> &'static str {
+    match f {
+        TimeForm::Instant => "instant",
+        TimeForm::InstantWithOffset => "instant_offset",
+        TimeForm::Clock => "clock",
+    }
+}
+
+/// A clock reading stored as if it were UTC: the seconds and fraction since 1970-01-01T00:00
+/// on the reading's own clock. `None` past the civil range.
+fn clock_from_column(secs: i64, nanos: i32) -> Option<DateTime> {
+    civil::date(1970, 1, 1)
+        .at(0, 0, 0, 0)
+        .checked_add(SignedDuration::new(secs, nanos))
+        .ok()
 }
 
 #[cfg(test)]
@@ -381,5 +491,130 @@ mod tests {
         let result = batch_fetch_key_for_sources(&mut conn, &[1, 2], "content.Make").unwrap();
         assert!(result.get(&1).unwrap().is_some());
         assert!(result.get(&2).unwrap().is_none());
+    }
+
+    // =========================================================================
+    // The one conversion pair
+    // =========================================================================
+
+    use crate::core::domain::time::reading::read_time;
+
+    fn write_and_read(conn: &Connection, value: &FactValue) -> Option<FactValue> {
+        conn.execute("DELETE FROM facts", []).unwrap();
+        let params = fact_value_params(value).unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO facts (entity_type, entity_id, key, observed_at, observed_basis_rev, {FACT_VALUE_COLUMNS})
+                 VALUES ('object', 1, 'content.T', 0, NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            ),
+            rusqlite::params_from_iter(params.iter()),
+        )
+        .unwrap();
+        conn.query_row(
+            &format!("SELECT {FACT_VALUE_COLUMNS} FROM facts"),
+            [],
+            |r| fact_value_at(r, 0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_time_form_and_precision_round_trips_through_storage() {
+        let conn = setup_test_db();
+        for text in [
+            "2024",
+            "2024-06",
+            "2024-06-15",
+            "2024-06-15T14:30",
+            "2024-06-15T14:30:05",
+            "2024-06-15T14:30:05.45",
+            "1969-12-31T23:59:59.5",
+            "2023-12-31T21:00-05:00",
+            "2023-12-31T21:00:00-05:00",
+            "2024-06-15T14:30:05.123456789+02:00",
+            "1969-12-31T23:59:59.5+01:00",
+            "2023-12-31T20:00:00-00:00",
+            "2023-12-31T20:00:00.5-00:00",
+            "2023-12-31T23:30:00Z",
+            "9999-12-31T23:59:59",
+            "0000-01-01",
+        ] {
+            let value = read_time(text).unwrap();
+            match write_and_read(&conn, &FactValue::Time(value)) {
+                Some(FactValue::Time(back)) => assert_eq!(back, value, "{text}"),
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let saved =
+            crate::core::domain::time::value::TimeValue::from_epoch_secs(1_718_452_800).unwrap();
+        assert!(
+            matches!(write_and_read(&conn, &FactValue::Time(saved)), Some(FactValue::Time(t)) if t == saved)
+        );
+        assert!(
+            matches!(write_and_read(&conn, &FactValue::Text("x".into())), Some(FactValue::Text(t)) if t == "x")
+        );
+        assert!(
+            matches!(write_and_read(&conn, &FactValue::Num(4.5)), Some(FactValue::Num(n)) if n == 4.5)
+        );
+        assert!(fact_value_params(&FactValue::Path("/a".into())).is_err());
+    }
+
+    /// Rows the schema forbids, fed to the decoder as literal columns: each is an error.
+    #[test]
+    fn a_row_the_schema_forbids_reads_as_an_error() {
+        let conn = setup_test_db();
+        let forbidden = [
+            "NULL, NULL, NULL, NULL, NULL, NULL, NULL",
+            "'x', 1.0, NULL, NULL, NULL, NULL, NULL",
+            "NULL, NULL, 0, NULL, NULL, NULL, NULL",
+            "NULL, NULL, 0, NULL, 'clock', NULL, 'hour'",
+            "NULL, NULL, 0, NULL, 'local', NULL, 'second'",
+            "NULL, NULL, 0, NULL, 'clock', 3600, 'second'",
+            "NULL, NULL, 0, NULL, 'instant_offset', NULL, 'second'",
+            "NULL, NULL, 0, 5, 'clock', NULL, 'second'",
+            "NULL, NULL, 0, NULL, 'clock', NULL, 'fraction'",
+        ];
+        for columns in forbidden {
+            let read = conn.query_row(&format!("SELECT {columns}"), [], |r| fact_value_at(r, 0));
+            assert!(
+                read.is_err(),
+                "({columns}) must read as an error, got {read:?}"
+            );
+        }
+    }
+
+    /// A stored time outside the years every zone reads in 0000–9999 — reachable only by a
+    /// pre-upgrade import late in year 9999 with a negative offset, which the old parser
+    /// stored as a second in year 10000 — is no value for that fact, and the fetches over it
+    /// complete.
+    #[test]
+    fn a_stored_time_outside_the_readable_line_is_no_value_and_the_fetch_completes() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/photos");
+        insert_source(&conn, 1, 1, "a.jpg", None);
+        insert_source(&conn, 2, 1, "b.jpg", None);
+        // 10000-01-01T04:00:00 counted as if UTC, as the old parser stored
+        // `9999-12-31T23:00:00-05:00`.
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision, observed_at, observed_basis_rev)
+             VALUES ('source', 1, 'content.T', 253402315200, 'clock', 'second', 0, 0),
+                    ('source', 2, 'content.T', 1704067200, 'clock', 'second', 0, 0)",
+            [],
+        )
+        .unwrap();
+        // A seconds offset the constructor refuses reads as no value too.
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_offset, time_precision, observed_at, observed_basis_rev)
+             VALUES ('source', 2, 'content.U', 1704067200, 'instant_offset', 3601, 'second', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        let by_key = batch_fetch_key_for_sources(&mut conn, &[1, 2], "content.T").unwrap();
+        assert!(by_key[&1].is_none(), "the unreadable time has no value");
+        assert!(by_key[&2].is_some());
+        let all = batch_fetch_for_sources(&mut conn, &[1, 2]).unwrap();
+        assert!(!all.contains_key(&1));
+        assert_eq!(all[&2].len(), 1, "only the readable fact");
     }
 }

@@ -20,11 +20,16 @@ use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
 use crate::core::domain::scope::{DecisionScope, ScopeMatch, ScopeResolution};
-use crate::core::domain::{FactEntry, FactType, FactValue};
+use crate::core::domain::source::Source;
+use crate::core::domain::time::now_epoch_secs;
+use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::{FactEntry, FactType};
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
+use crate::expr::{
+    get_builtin_value, BuiltinKey, ScopeVantage, SourceAttributes, OBJECT_HASH, SCOPE_REL_PATH,
+};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
-use crate::expr::{BuiltinKey, ScopeVantage, OBJECT_HASH, SCOPE_REL_PATH};
 
 use super::manifest::{write_and_sync, write_lock_file};
 
@@ -51,6 +56,9 @@ pub struct ClusterGeneratePlan {
     pub archived: Vec<(String, String)>,
     /// Facts with 100% coverage across all lock entries: (key, type, description).
     pub full_coverage_facts: Vec<(String, FactType, String)>,
+    /// The listed built-ins every lock entry has a value for, in vocabulary order — all of
+    /// them, unless a save time Canon cannot read leaves one short.
+    pub full_coverage_builtins: Vec<BuiltinKey>,
     /// Fact keys with mixed types across sources: (key, type_breakdown_string).
     pub mixed_type_warnings: Vec<(String, String)>,
     /// Root breakdown: (root_path, count) sorted by path.
@@ -86,6 +94,9 @@ pub fn plan_generate(
         },
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
+        // AUDIT: a manifest's selection reads UTC until a manifest records the zone it was made in;
+        // placement must never read the machine's zone.
+        clock: UserZone::utc(),
     };
     let selection = select_sources(conn, &selection_params)?;
 
@@ -180,6 +191,9 @@ pub fn plan_generate(
     // 9. Compute full coverage facts and mixed-type warnings
     let (full_coverage_facts, mixed_type_warnings) =
         compute_full_coverage_facts(&lock_entries, &all_facts);
+    let lock_ids: HashSet<i64> = lock_entries.iter().map(|e| e.id).collect();
+    let full_coverage_builtins =
+        full_coverage_builtins(hashed_sources.iter().filter(|s| lock_ids.contains(&s.id)));
 
     // 10. Compute root breakdown from final lock entries
     let mut root_counts: HashMap<i64, usize> = HashMap::new();
@@ -211,6 +225,7 @@ pub fn plan_generate(
         lock_entries,
         archived,
         full_coverage_facts,
+        full_coverage_builtins,
         mixed_type_warnings,
         root_breakdown,
         not_archived_count,
@@ -233,6 +248,7 @@ impl ClusterGeneratePlan {
             lock_entries: vec![],
             archived: vec![],
             full_coverage_facts: vec![],
+            full_coverage_builtins: vec![],
             mixed_type_warnings: vec![],
             root_breakdown: vec![],
             not_archived_count: 0,
@@ -646,6 +662,7 @@ fn assemble_manifest(
     // to enumerate over nothing. The section is absent, not dropped.
     let fact_help = generate_fact_help(
         plan.lock_entries.len(),
+        &plan.full_coverage_builtins,
         &plan.full_coverage_facts,
         !config.meta.scope.is_empty(),
     );
@@ -760,12 +777,7 @@ fn compute_full_coverage_facts(
     for entry in entries {
         if let Some(facts) = all_facts.get(&entry.id) {
             for fact in facts {
-                let fact_type = match &fact.value {
-                    FactValue::Text(_) => FactType::Text,
-                    FactValue::Num(_) => FactType::Num,
-                    FactValue::Time(_) => FactType::Time,
-                    FactValue::Path(_) => FactType::Path,
-                };
+                let fact_type = fact.value.kind();
 
                 // Track uniqueness per source
                 let seen_key = format!("{}:{}", entry.id, fact.key);
@@ -804,6 +816,25 @@ fn compute_full_coverage_facts(
     (full_coverage, mixed_type_warnings)
 }
 
+/// The default-listed built-ins every source has a value for, counted from the resolver's
+/// own answers — never assumed to cover everything, because a save time Canon cannot read
+/// has no value.
+fn full_coverage_builtins<'s>(
+    sources: impl Iterator<Item = &'s Source> + Clone,
+) -> Vec<BuiltinKey> {
+    use crate::expr::BuiltinKeyVisibility;
+    use strum::IntoEnumIterator;
+
+    BuiltinKey::iter()
+        .filter(|key| key.visibility() == BuiltinKeyVisibility::Default)
+        .filter(|key| {
+            sources
+                .clone()
+                .all(|s| get_builtin_value(&SourceAttributes::from(s), *key).is_some())
+        })
+        .collect()
+}
+
 /// Get a human-readable description for a fact key.
 fn get_fact_description(key: &str) -> String {
     BuiltinKey::from_str(key)
@@ -816,8 +847,12 @@ fn get_fact_description(key: &str) -> String {
 // Manifest content helpers
 // ============================================================================
 
+/// The manifest's generation stamp: a machine field, UTC with the `Z` that says so, read
+/// from the one owner of "now".
 fn current_timestamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    jiff::Timestamp::from_second(now_epoch_secs())
+        .map(|at| at.to_string())
+        .unwrap_or_default()
 }
 
 /// Generate cluster summary comment block for the manifest.
@@ -872,10 +907,11 @@ fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
 /// Generate fact help comments for the manifest.
 fn generate_fact_help(
     source_count: usize,
+    full_coverage_builtins: &[BuiltinKey],
     full_coverage_facts: &[(String, FactType, String)],
     has_scope: bool,
 ) -> String {
-    use crate::expr::{BuiltinKeyVisibility, Modifier, ModifierCategory};
+    use crate::expr::{Modifier, ModifierCategory};
     use strum::IntoEnumIterator;
 
     if source_count == 0 {
@@ -890,10 +926,7 @@ fn generate_fact_help(
 
     // Built-in facts
     help.push_str("# Built-in:\n");
-    for key in BuiltinKey::iter() {
-        if key.visibility() != BuiltinKeyVisibility::Default {
-            continue;
-        }
+    for &key in full_coverage_builtins {
         let name: &'static str = key.into();
         let desc = key.description().unwrap_or("");
         help.push_str(&format!(
@@ -1318,6 +1351,66 @@ mod tests {
         );
     }
 
+    /// The generation stamp is UTC with `Z`, whole seconds, read from the one owner of "now".
+    #[test]
+    fn the_generation_stamp_is_utc_from_the_one_now() {
+        let stamp = crate::core::domain::time::with_test_now(1704065400, current_timestamp);
+        assert_eq!(stamp, "2023-12-31T23:30:00Z");
+    }
+
+    /// The manifest's facts comment lists a built-in only where every source has a value
+    /// for it: a save time Canon cannot read (9999-12-31 23:59:59 UTC here) takes
+    /// `source.mtime` off the list and leaves the rest.
+    #[test]
+    fn a_save_time_canon_cannot_read_leaves_the_coverage_list() {
+        use crate::core::testing::insert_source_with_metadata;
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "hash1", false);
+        let obj2 = insert_object(&conn, "hash2", false);
+        insert_source_with_metadata(&conn, root, "a.jpg", Some(obj1), 1000, 1704065400);
+        insert_source_with_metadata(&conn, root, "b.jpg", Some(obj2), 1000, 253402300799);
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        assert_eq!(plan.lock_entries.len(), 2);
+        assert!(!plan
+            .full_coverage_builtins
+            .contains(&BuiltinKey::SourceMtime));
+        assert!(plan.full_coverage_builtins.contains(&BuiltinKey::SourceExt));
+
+        let help = generate_fact_help(2, &plan.full_coverage_builtins, &[], false);
+        assert!(!help.contains("source.mtime"), "{help}");
+        assert!(help.contains("source.ext"), "{help}");
+    }
+
+    /// A manifest's selection reads UTC whatever the machine's zone: a file saved at
+    /// 2023-12-31 23:30 UTC — already 2024 in Amsterdam — answers `source.mtime|year = 2023`
+    /// with Amsterdam on the machine. What a manifest takes must not depend on where it was
+    /// generated. The pin goes with the `// AUDIT:` marker it holds, when a manifest
+    /// records the zone it was made in.
+    #[test]
+    fn the_selection_reads_utc_whatever_the_machines_zone() {
+        use crate::core::domain::time::zone::{with_test_zone, UserZone};
+        use crate::core::testing::insert_source_with_metadata;
+        use crate::expr::Filter;
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source_with_metadata(&conn, root, "a.jpg", Some(obj), 1000, 1704065400);
+
+        let selected = |conn: &mut Connection, filter: &str| {
+            let params = ClusterGenerateParams {
+                filters: vec![Filter::parse(filter).unwrap()],
+                ..default_params()
+            };
+            with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
+                plan_generate(conn, &params).unwrap().lock_entries.len()
+            })
+        };
+        assert_eq!(selected(&mut conn, "source.mtime|year = 2023"), 1);
+        assert_eq!(selected(&mut conn, "source.mtime|year = 2024"), 0);
+    }
+
     // =========================================================================
     // generate_summary_comments
     // =========================================================================
@@ -1356,6 +1449,7 @@ mod tests {
             lock_entries,
             archived,
             full_coverage_facts: vec![],
+            full_coverage_builtins: vec![],
             mixed_type_warnings: vec![],
             root_breakdown,
             not_archived_count,

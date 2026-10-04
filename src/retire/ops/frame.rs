@@ -8,6 +8,7 @@
 use anyhow::{bail, Result};
 
 use crate::core::domain::format::{format_count, format_date, format_size};
+use crate::core::domain::time::zone::UserZone;
 use crate::story::{
     fmt_locations, reference_place_lines, LocationAggregate, StoryParams, StoryReport, Voicing,
 };
@@ -20,6 +21,8 @@ pub struct TellingFrame {
     pub retirement_reason: Option<String>,
     /// The day the book is written (unix seconds; rendered as a date).
     pub bound_on: i64,
+    /// The clock the prose dates read on: the user's.
+    pub zone: UserZone,
     /// `CARGO_PKG_VERSION` — the closing stamp names its writer.
     pub canon_version: String,
     /// Where the chosen content lives now: the aggregate over the apply
@@ -120,7 +123,7 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push("This is the record of one place: what was on it, what was kept, what was".into());
     lines.push(format!(
         "let go, and why. It was written on {}, the day the place was retired.",
-        format_date(frame.bound_on)
+        format_date(frame.bound_on, &frame.zone)
     ));
     lines.push("It is plain text and needs nothing but a reader.".into());
     lines.push(String::new());
@@ -131,10 +134,10 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push(String::new());
     let mut spans: Vec<String> = Vec::new();
     if let Some(ts) = report.first_indexed {
-        spans.push(format!("first indexed {}", format_date(ts)));
+        spans.push(format!("first indexed {}", format_date(ts, &frame.zone)));
     }
     if let Some(ts) = report.root.last_scanned_at {
-        spans.push(format!("last scanned {}", format_date(ts)));
+        spans.push(format!("last scanned {}", format_date(ts, &frame.zone)));
     }
     if spans.is_empty() {
         lines.push(format!("`{}`", report.root.path));
@@ -275,7 +278,7 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push(String::new());
     lines.push(format!(
         "On {} this place was retired. With this book written, the place itself",
-        format_date(frame.bound_on)
+        format_date(frame.bound_on, &frame.zone)
     ));
     lines.push("was free to go. The archive carries what was chosen. This book carries".into());
     lines.push("the rest.".into());
@@ -548,6 +551,7 @@ mod tests {
             title: "r — Old backup".to_string(),
             retirement_reason: Some("the story is complete".to_string()),
             bound_on: 0,
+            zone: UserZone::utc(),
             canon_version: "0.9.0".to_string(),
             archived_destinations: locations(&[("/archive/media", 5)]),
             drive_ledger: Some(3),
@@ -591,12 +595,7 @@ mod tests {
             "sections out of order: {positions:?}\n{text}"
         );
         assert!(text.contains("This is the record of one place"));
-        // The day is the reader's own — derived, not spelled, so the
-        // assertion holds wherever the machine stands.
-        assert!(text.contains(&format!(
-            "It was written on {}, the day the place was retired.",
-            format_date(0)
-        )));
+        assert!(text.contains("It was written on 1970-01-01, the day the place was retired."));
         assert!(text.contains("It was retired with these words: *\"the story is complete\"*"));
         assert!(text.contains(FOREWORD_SENTINEL));
         assert!(text.contains("Nothing here is a summary you have to take on faith."));
@@ -625,6 +624,34 @@ mod tests {
         assert!(text.contains("record of what was lost here."));
         assert!(!text.contains("holds the original receipts"));
         assert!(text.contains("`inventory.jsonl`, `timeline.md`, `notes.md`, `ledger/` —"));
+    }
+
+    /// The book's prose dates read on the binder's clock: a retirement at 23:30 UTC on New
+    /// Year's Eve 2023 is written on 31 December in New York and on 1 January in Amsterdam,
+    /// in the same layout either way.
+    #[test]
+    fn the_prose_dates_read_on_the_binders_clock() {
+        for (zone, day) in [
+            ("America/New_York", "2023-12-31"),
+            ("Europe/Amsterdam", "2024-01-01"),
+        ] {
+            let f = TellingFrame {
+                bound_on: 1704065400,
+                zone: UserZone::for_test(zone),
+                ..frame()
+            };
+            let text = compose_reference_telling(&report_with(place(""), full_account()), &f);
+            assert!(
+                text.contains(&format!(
+                    "It was written on {day}, the day the place was retired."
+                )),
+                "{zone}: {text}"
+            );
+            assert!(
+                text.contains(&format!("On {day} this place was retired.")),
+                "{zone}"
+            );
+        }
     }
 
     #[test]

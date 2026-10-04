@@ -680,9 +680,7 @@ fn write_next_step(
                 OwedWayBack::ScanOrEditScope => {
                     super::scope_kept_nothing_way_back(manifest_path, &status.set_aside_scope)
                 }
-                OwedWayBack::AdjustPattern => {
-                    super::adjust_pattern_remedy(status.pattern_needs_a_scope_it_lacks)
-                }
+                OwedWayBack::AdjustPattern => super::adjust_pattern_remedy(&status.pattern_gaps),
             };
             if !lines.is_empty() {
                 let _ = writeln!(handle);
@@ -1292,7 +1290,7 @@ mod tests {
             parked_destination: None,
             pattern_unexpandable: false,
             expansion_failures: Vec::new(),
-            pattern_needs_a_scope_it_lacks: false,
+            pattern_gaps: Default::default(),
             expansion_failure_count: 0,
         };
         // The ordinary manifest, so a row that is not about the scope poses no
@@ -1451,7 +1449,8 @@ mod tests {
             for needs_a_scope in [false, true] {
                 let mut status = status_with(pending, at_destination, 0, sound_lock());
                 status.pattern_unexpandable = true;
-                status.pattern_needs_a_scope_it_lacks = needs_a_scope;
+                status.pattern_gaps.needs_a_scope_it_lacks = needs_a_scope;
+                status.pattern_gaps.fact_not_carried = !needs_a_scope;
                 // The scope arm is the manifest that records no scope that
                 // confirms. Where one does, the rebuild measures and *is* the
                 // step (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`).
@@ -1489,7 +1488,7 @@ mod tests {
         // exactly the fix, whatever the header says.
         let mut status = status_with(2, 0, 0, old_lock());
         status.pattern_unexpandable = true;
-        status.pattern_needs_a_scope_it_lacks = true;
+        status.pattern_gaps.needs_a_scope_it_lacks = true;
         assert_eq!(
             next_step(&status),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n"
@@ -1592,7 +1591,7 @@ mod tests {
     fn a_rebuild_that_only_changes_the_reason_is_not_offered() {
         let mut confirms = status_with(2, 0, 0, old_lock());
         confirms.pattern_unexpandable = true;
-        confirms.pattern_needs_a_scope_it_lacks = true;
+        confirms.pattern_gaps.needs_a_scope_it_lacks = true;
         assert_eq!(
             next_step(&confirms),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n",
@@ -1601,7 +1600,7 @@ mod tests {
 
         let mut nothing_to_measure = status_with(2, 0, 0, old_lock());
         nothing_to_measure.pattern_unexpandable = true;
-        nothing_to_measure.pattern_needs_a_scope_it_lacks = true;
+        nothing_to_measure.pattern_gaps.needs_a_scope_it_lacks = true;
         with_scope(&mut nothing_to_measure, RecordedScope::Nothing);
         let printed = next_step(&nothing_to_measure);
         assert!(

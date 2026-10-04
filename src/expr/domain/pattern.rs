@@ -9,11 +9,12 @@ use std::collections::HashMap;
 
 use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
 use super::transform::{
-    apply_accessor, apply_modifier, fact_value_to_string, parse_modifier, ModifierCall,
+    apply_chain, fact_value_to_string, parse_modifier, Modified, ModifierCall, NoValueCause,
     PathAccessor,
 };
 use super::value::{get_builtin_value, SourceAttributes};
 use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::time::zone::UserZone;
 
 // ============================================================================
 // Types
@@ -120,6 +121,54 @@ pub enum Unmeasured {
     LockPredatesMeasurement,
 }
 
+/// Why a pattern expression has no value for a source, where the cause is not a fact the
+/// source does not carry. Carried as the evaluation's error, so a reader that composes a way
+/// out can tell the causes apart without reading a sentence.
+///
+/// **The reason names the cause alone**: a remedy is for whoever composes one — this facility
+/// cannot see the manifest the pattern came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternNoValue {
+    /// The file's save time lies where Canon reads no time: at the edge of the years
+    /// 0000–9999 or beyond.
+    UnreadableSaveTime,
+    /// A modifier reads a finer grain than the time was written at.
+    TooCoarse { key: String, cause: NoValueCause },
+}
+
+impl PatternNoValue {
+    /// The key and the modifier that read too fine a grain, as a filter writes them
+    /// (`content.DateTimeOriginal|month`); `None` for a cause no modifier met.
+    pub fn too_coarse_chain(&self) -> Option<String> {
+        match self {
+            PatternNoValue::UnreadableSaveTime => None,
+            PatternNoValue::TooCoarse { key, cause } => {
+                let NoValueCause::TooCoarse { modifier, .. } = cause;
+                let name: &'static str = (*modifier).into();
+                Some(format!("{key}|{name}"))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PatternNoValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PatternNoValue::UnreadableSaveTime => write!(
+                f,
+                "Canon cannot read this file's save time: it lies at the edge of the years \
+                 0000–9999 or beyond"
+            ),
+            PatternNoValue::TooCoarse { cause, .. } => {
+                let chain = self.too_coarse_chain().unwrap_or_default();
+                write!(f, "{chain} has no value: {cause}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PatternNoValue {}
+
 /// Context for pattern evaluation - provides fact values and source info
 pub struct EvalContext<'a> {
     /// Fact values by key, stored rather than computed. Under the
@@ -141,10 +190,12 @@ pub struct EvalContext<'a> {
     /// indistinguishable from the entry alone and a refusal that guesses
     /// between them prescribes a remedy that may not work.
     unmeasured: Unmeasured,
+    /// The clock every time is read on, through the frame rule.
+    clock: &'a UserZone,
 }
 
 impl<'a> EvalContext<'a> {
-    pub fn new() -> Self {
+    pub fn new(clock: &'a UserZone) -> Self {
         EvalContext {
             facts: HashMap::new(),
             source: None,
@@ -152,6 +203,7 @@ impl<'a> EvalContext<'a> {
             // A bare context has no lock behind it and no scope in front of
             // it, which is exactly this reading.
             unmeasured: Unmeasured::NoScopeRecorded,
+            clock,
         }
     }
 
@@ -176,12 +228,6 @@ impl<'a> EvalContext<'a> {
     pub fn set_scope_rel(&mut self, scope_rel: Option<&'a str>, unmeasured: Unmeasured) {
         self.scope_rel = scope_rel;
         self.unmeasured = unmeasured;
-    }
-}
-
-impl Default for EvalContext<'_> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -422,24 +468,24 @@ fn normalize_pattern_result(path: &str) -> String {
 
 /// Evaluate a single expression
 fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
-    // Get the base value
     let value = get_value(&expr.key, ctx)?;
 
-    // Apply accessor if present
-    let value = if let Some(ref accessor) = expr.accessor {
-        apply_accessor(&value, accessor, &expr.key)?
-    } else {
-        value
-    };
-
-    // Apply modifiers in order (for_display: false since patterns are used for paths)
-    let mut result = value;
-    for modifier_call in &expr.modifiers {
-        result = apply_modifier(&result, modifier_call, &expr.key, false)?;
+    // for_display: false since patterns are used for paths
+    match apply_chain(
+        value,
+        expr.accessor.as_ref(),
+        &expr.modifiers,
+        &expr.key,
+        false,
+        ctx.clock,
+    )? {
+        Modified::Value(result) => Ok(fact_value_to_string(&result, ctx.clock)),
+        Modified::NoValue(cause) => Err(PatternNoValue::TooCoarse {
+            key: expr.key.clone(),
+            cause,
+        }
+        .into()),
     }
-
-    // Convert to string
-    Ok(fact_value_to_string(&result))
 }
 
 /// Get a fact value by key.
@@ -498,8 +544,14 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
                 .source
                 .as_ref()
                 .ok_or_else(|| anyhow!("{key} is not available: no source in context"))?;
-            return get_builtin_value(source, builtin)
-                .ok_or_else(|| anyhow!("{key} is not available"));
+            // The one computed built-in that can have no value is a save time outside the
+            // years Canon reads; that cause is its own, never a fact not carried.
+            return get_builtin_value(source, builtin).ok_or_else(|| match builtin {
+                BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
+                    PatternNoValue::UnreadableSaveTime.into()
+                }
+                _ => anyhow!("{key} is not available"),
+            });
         }
     }
 
@@ -676,7 +728,8 @@ mod tests {
     #[test]
     fn test_evaluate_simple() {
         let pattern = parse_pattern("{filename}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/2024/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "image.jpg");
@@ -685,7 +738,8 @@ mod tests {
     #[test]
     fn test_evaluate_path_index() {
         let pattern = parse_pattern("{source.rel_path[-2]}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/2024/vacation/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "vacation");
@@ -694,7 +748,8 @@ mod tests {
     #[test]
     fn test_evaluate_path_slice() {
         let pattern = parse_pattern("{source.rel_path[0:2]}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/2024/vacation/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "photos/2024");
@@ -703,7 +758,8 @@ mod tests {
     #[test]
     fn test_evaluate_time_modifier() {
         let pattern = parse_pattern("{source.mtime|year}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         // The mtime comes from the source, not from a planted fact. It used
         // to come from a fact here, which is why this test passed while the
         // production path — where nothing plants one — could not expand this
@@ -718,7 +774,8 @@ mod tests {
     #[test]
     fn test_evaluate_stem_modifier() {
         let pattern = parse_pattern("{stem}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "image");
@@ -727,7 +784,8 @@ mod tests {
     #[test]
     fn test_evaluate_ext_modifier() {
         let pattern = parse_pattern("{ext}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "jpg");
@@ -736,7 +794,8 @@ mod tests {
     #[test]
     fn test_out_of_bounds_error() {
         let pattern = parse_pattern("{source.rel_path[10]}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx);
         assert!(result.is_err());
@@ -746,7 +805,8 @@ mod tests {
     #[test]
     fn test_scope_rel_path() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(source("/Photos", "Home/2024/vacation/image.jpg"));
         ctx.set_scope_rel(
             measured("2024/vacation/image.jpg"),
@@ -774,7 +834,8 @@ mod tests {
             // `/vol/work`, so the scope name survives and the ancestor above
             // it does not.
             let recorded = rel.trim_start_matches("work/");
-            let mut ctx = EvalContext::new();
+            let zone = UserZone::utc();
+            let mut ctx = EvalContext::new(&zone);
             ctx.set_source(source("/vol", rel));
             ctx.set_scope_rel(measured(recorded), Unmeasured::NoScopeRecorded);
             assert_eq!(evaluate(&pattern, &ctx).unwrap(), recorded);
@@ -793,7 +854,8 @@ mod tests {
         assert_eq!(path_strip_prefix("/vol/photos2/x.jpg", "/vol/photos"), None);
 
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(source("/vol", "photos2/x.jpg"));
         ctx.set_scope_rel(None, Unmeasured::LockPredatesMeasurement);
         let result = evaluate(&pattern, &ctx);
@@ -817,7 +879,9 @@ mod tests {
     fn an_unmeasured_entry_is_refused_by_the_reason_it_is_unmeasured() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
 
-        let mut old_lock = EvalContext::new();
+        let zone = UserZone::utc();
+
+        let mut old_lock = EvalContext::new(&zone);
         old_lock.set_source(source("/media/backup", "proj-v1/src/main.c"));
         old_lock.set_scope_rel(None, Unmeasured::LockPredatesMeasurement);
         let err = evaluate(&pattern, &old_lock).unwrap_err().to_string();
@@ -829,7 +893,9 @@ mod tests {
              applicable, and this facility cannot see which: {err}"
         );
 
-        let mut unscoped = EvalContext::new();
+        let zone = UserZone::utc();
+
+        let mut unscoped = EvalContext::new(&zone);
         unscoped.set_source(source("/media/backup", "proj-v1/src/main.c"));
         unscoped.set_scope_rel(None, Unmeasured::NoScopeRecorded);
         let err = evaluate(&pattern, &unscoped).unwrap_err().to_string();
@@ -857,7 +923,8 @@ mod tests {
     #[test]
     fn an_unmeasured_entry_never_falls_back_to_a_destination() {
         let pattern = parse_pattern("{scope.rel_path}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(source("/vol", "work/proj-v1/src/main.c"));
         ctx.set_scope_rel(None, Unmeasured::NoScopeRecorded);
         assert!(evaluate(&pattern, &ctx).is_err());
@@ -874,7 +941,8 @@ mod tests {
     #[test]
     fn an_unknown_key_lists_the_computed_builtins_as_available() {
         let pattern = parse_pattern("{content.NotHere}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/image.jpg"));
         ctx.set_fact("content.Make", FactValue::Text("Canon".to_string()));
 
@@ -904,7 +972,8 @@ mod tests {
     #[test]
     fn a_source_at_its_root_yields_an_empty_extension() {
         let pattern = parse_pattern("photos/{source.ext}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at(""));
         assert_eq!(evaluate(&pattern, &ctx).unwrap(), "photos");
     }
@@ -921,7 +990,8 @@ mod tests {
     #[test]
     fn test_hash_short_alias() {
         let pattern = parse_pattern("{hash_short}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_fact(
             "object.hash",
             FactValue::Text("abcdef1234567890".to_string()),
@@ -959,7 +1029,8 @@ mod tests {
         let pattern =
             parse_pattern("{source.rel_path[0]}/{source.mtime|year}/{stem}_{hash_short}.{ext}")
                 .unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("vacation/photos/IMG_001.jpg"));
         ctx.set_fact(
             "object.hash",
@@ -1051,7 +1122,8 @@ mod tests {
         // rel_path = "5.avi", rel_path[:-1] = "" (empty)
         // Raw concatenation: "/5.avi" -> Normalized: "5.avi"
         let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("5.avi"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "5.avi");
@@ -1064,7 +1136,8 @@ mod tests {
         // rel_path = "subdir/file.jpg", rel_path[:-1] = "subdir"
         // Result: "subdir/file.jpg" — unchanged by normalization
         let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
-        let mut ctx = EvalContext::new();
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("subdir/file.jpg"));
         let result = evaluate(&pattern, &ctx).unwrap();
         assert_eq!(result, "subdir/file.jpg");
@@ -1143,6 +1216,68 @@ mod tests {
         // A prefix that normalizes to nothing is no prefix.
         assert_eq!(shape("/{filename}"), (None, false));
         assert_eq!(shape("./{filename}"), (None, false));
+    }
+
+    /// A pattern reading a save time Canon cannot read refuses with that cause — never the
+    /// missing-fact wording — and its reason states the cause alone. The second save time
+    /// is the sentinel 9999-12-31 23:59:59 UTC, past the last instant Canon reads.
+    #[test]
+    fn a_save_time_canon_cannot_read_refuses_with_its_own_cause() {
+        let zone = UserZone::utc();
+        for mtime in [300_000_000_000, 253402300799] {
+            for written in [
+                "{source.mtime|year}/{filename}",
+                "{source.mtime}",
+                "{mtime}",
+            ] {
+                let mut ctx = EvalContext::new(&zone);
+                let mut file = at("photos/a.jpg");
+                file.mtime = mtime;
+                ctx.set_source(file);
+                let err = evaluate(&parse_pattern(written).unwrap(), &ctx).unwrap_err();
+                assert_eq!(
+                    err.downcast_ref::<PatternNoValue>(),
+                    Some(&PatternNoValue::UnreadableSaveTime),
+                    "{written} at {mtime}: {err}"
+                );
+                assert_eq!(
+                    err.to_string(),
+                    "Canon cannot read this file's save time: it lies at the edge of the \
+                     years 0000–9999 or beyond"
+                );
+            }
+        }
+    }
+
+    /// A modifier finer than the time was written refuses with that cause, naming the key,
+    /// the modifier and the grain the time is known to.
+    #[test]
+    fn a_value_too_coarse_for_its_modifier_refuses_with_its_cause() {
+        use crate::core::domain::time::reading::read_time;
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
+        ctx.set_source(at("photos/a.jpg"));
+        ctx.set_fact(
+            "content.DateTimeOriginal",
+            FactValue::Time(read_time("2024").unwrap()),
+        );
+
+        let err = evaluate(
+            &parse_pattern("{content.DateTimeOriginal|month}/{filename}").unwrap(),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<PatternNoValue>(),
+            Some(PatternNoValue::TooCoarse { .. })
+        ));
+        assert_eq!(
+            err.to_string(),
+            "content.DateTimeOriginal|month has no value: the time is known only to the year"
+        );
+
+        let year = parse_pattern("{content.DateTimeOriginal|year}/{filename}").unwrap();
+        assert_eq!(evaluate(&year, &ctx).unwrap(), "2024/a.jpg");
     }
 
     #[test]

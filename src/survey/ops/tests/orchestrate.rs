@@ -34,6 +34,7 @@ fn run_survey_returns_note_context_for_single_prefix_scope() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 
@@ -65,6 +66,7 @@ fn run_survey_omits_note_context_for_multi_prefix_scope() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 
@@ -92,6 +94,7 @@ fn run_survey_note_context_survives_empty_outcome() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 
@@ -117,6 +120,7 @@ fn run_survey_note_context_survives_all_unhashed_outcome() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 
@@ -148,6 +152,7 @@ fn run_survey_rejects_other_identical_to_scope() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     ) {
         Err(e) => e,
         Ok(_) => panic!("expected --other == scope to be rejected"),
@@ -180,6 +185,7 @@ fn run_survey_sets_archive_label_from_archive_spec() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 
@@ -210,6 +216,7 @@ fn run_survey_archive_spec_rejects_non_archive_root() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     ) {
         Err(e) => e,
         Ok(_) => panic!("expected a non-archive root to be rejected"),
@@ -245,6 +252,7 @@ fn run_survey_computes_location_note_counts_when_requested() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 
@@ -285,6 +293,7 @@ fn run_survey_skips_location_note_counts_when_not_requested() {
         &[],
         &orchestration,
         &params,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap();
 

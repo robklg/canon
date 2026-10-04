@@ -17,7 +17,14 @@ pub fn run(
     filter_strs: &[String],
     options: &CompareOptions,
 ) -> Result<bool> {
-    let run = ops::run_compare(db.conn_mut(), path_a, path_b, filter_strs, &options.include)?;
+    let run = ops::run_compare(
+        db.conn_mut(),
+        path_a,
+        path_b,
+        filter_strs,
+        &options.include,
+        crate::user_zone(),
+    )?;
 
     // Print header
     {

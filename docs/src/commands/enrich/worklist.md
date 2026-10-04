@@ -49,7 +49,7 @@ Each line is a JSON object with source metadata:
 | `path` | Full absolute path to the file |
 | `root_id` | ID of the root containing this source |
 | `size` | File size in bytes |
-| `mtime` | Modification time (Unix timestamp) |
+| `mtime` | The file's save time, in seconds since 1970 (UTC) |
 | `basis_rev` | Revision counter for staleness detection |
 
 ## Emitting Existing Facts
@@ -64,6 +64,22 @@ canon worklist --emit content.geo.lat --emit content.geo.lon
 {"source_id":123,"path":"/...","basis_rev":0,"facts":{"content.geo.lat":52.37,"content.geo.lon":4.89}}
 {"source_id":124,"path":"/...","basis_rev":0,"facts":{"content.geo.lat":null,"content.geo.lon":null}}
 ```
+
+A time is written as ISO 8601 text, in the form and at the precision it is stored: with its offset (a zero offset as `+00:00`), with `-00:00` for an instant whose local offset is unknown, or with no offset for a clock reading. A fraction of a second is written where one is stored:
+
+```bash
+canon worklist --emit content.DateTimeOriginal
+```
+
+```json
+{"source_id":125,"path":"/photos/IMG_0125.jpg","root_id":1,"size":2048,"mtime":1718454605,"basis_rev":0,"facts":{"content.DateTimeOriginal":"2023-12-31T21:00:00-05:00"}}
+{"source_id":126,"path":"/photos/IMG_0126.mov","root_id":1,"size":2048,"mtime":1718454605,"basis_rev":0,"facts":{"content.DateTimeOriginal":"2023-12-31T20:00:00-00:00"}}
+{"source_id":127,"path":"/photos/IMG_0127.jpg","root_id":1,"size":2048,"mtime":1718454605,"basis_rev":0,"facts":{"content.DateTimeOriginal":"2023-12-31T21:00:00"}}
+{"source_id":128,"path":"/photos/IMG_0128.jpg","root_id":1,"size":2048,"mtime":1718454605,"basis_rev":0,"facts":{"content.DateTimeOriginal":"2024-06-15T14:30:05.45+02:00"}}
+{"source_id":129,"path":"/photos/IMG_0129.jpg","root_id":1,"size":2048,"mtime":1718454605,"basis_rev":0,"facts":{"content.DateTimeOriginal":"2024"}}
+```
+
+The entry's own `mtime` field is a number of seconds, as in every entry.
 
 **`--emit` takes the key as stored — write it in full.** Unlike `--where`, it does not add the
 optional `content.` prefix for you: `--emit geo.lat` looks for a fact whose key is literally

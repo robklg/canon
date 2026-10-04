@@ -164,3 +164,14 @@ pub fn is_object_excluded(conn: &Connection, object_id: i64) -> bool {
     )
     .unwrap()
 }
+
+/// A time fact as migration 8 carries an old one over: the stored number read as a clock
+/// reading, counted as if it were UTC, at second precision.
+pub fn migrated_time(secs: i64) -> crate::core::domain::time::value::TimeValue {
+    let at = jiff::Timestamp::from_second(secs).expect("a test time in range");
+    crate::core::domain::time::value::TimeValue::clock(
+        jiff::tz::Offset::UTC.to_datetime(at),
+        crate::core::domain::time::value::Precision::Second,
+    )
+    .expect("a whole-second clock reading")
+}

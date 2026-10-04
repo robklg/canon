@@ -30,8 +30,10 @@
 //! }
 //! ```
 
-/// Fact type classification (without the actual value).
-/// Matches the typed columns in the facts table plus Path for derived facts.
+use super::time::value::TimeValue;
+
+/// A value's kind, without the value: text, number, time, or a derived path. The one
+/// value-kind noun — import's type check, the `facts` report and the filter all speak it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactType {
     Text,
@@ -51,14 +53,34 @@ impl FactType {
     }
 }
 
-/// Fact value types.
-/// Matches the typed columns in the facts table: value_text, value_num, value_time.
+impl std::fmt::Display for FactType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A fact's value: text, a number, a time, or a derived path.
+///
+/// A time is the time noun ([`TimeValue`]): its form and precision as written, read on the
+/// user's clock through the frame rule. A path is derived, never stored.
 #[derive(Debug, Clone)]
 pub enum FactValue {
     Text(String),
     Num(f64),
-    Time(i64),    // Unix timestamp
+    Time(TimeValue),
     Path(String), // Path that supports segment indexing (for derived path facts)
+}
+
+impl FactValue {
+    /// The value's kind.
+    pub fn kind(&self) -> FactType {
+        match self {
+            FactValue::Text(_) => FactType::Text,
+            FactValue::Num(_) => FactType::Num,
+            FactValue::Time(_) => FactType::Time,
+            FactValue::Path(_) => FactType::Path,
+        }
+    }
 }
 
 /// A single fact entry associated with a source.
@@ -149,15 +171,16 @@ mod tests {
 
     #[test]
     fn fact_entry_with_time_value() {
+        let time = TimeValue::from_epoch_secs(1704067200).unwrap(); // 2024-01-01 00:00:00 UTC
         let entry = FactEntry::new(
             "content.DateTimeOriginal".to_string(),
-            FactValue::Time(1704067200), // 2024-01-01 00:00:00 UTC
+            FactValue::Time(time),
             "object".to_string(),
             100,
         );
 
         match entry.value {
-            FactValue::Time(ts) => assert_eq!(ts, 1704067200),
+            FactValue::Time(tv) => assert_eq!(tv, time),
             _ => panic!("Expected Time variant"),
         }
     }

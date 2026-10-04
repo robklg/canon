@@ -11,6 +11,7 @@ pub(super) mod cluster;
 use std::path::Path;
 
 use crate::archive::domain::LockStanding;
+use crate::archive::ops::pattern::PatternGaps;
 use crate::core::domain::format::shell_quote;
 
 /// Whether a `cluster refresh` would run, as far as the caller telling the
@@ -295,34 +296,65 @@ fn scan_or_edit_scope(manifest: &Path, set_aside: &[String]) -> Vec<String> {
 /// The way back from a pattern that cannot expand, where no rebuild would
 /// change that.
 ///
-/// **Two failures, two remedies, and neither is right for the other.** A
+/// **One pair per cause the run met, and none is right for another.** A
 /// pattern that places files relative to the manifest's scope fails when there
 /// is no scope to place them from, and nothing about facts helps: the scope
 /// key is not a fact, so checking fact coverage sends the reader to look for
 /// something that was never missing. A pattern naming a fact no source carries
 /// fails for the opposite reason, and scoping the manifest does nothing for
-/// it. Which one it is comes off the language facility's own reading of the
-/// pattern, never off the wording of the refusal.
+/// it. A save time Canon cannot read is neither: the file has one, so
+/// importing facts cannot supply it. Which ones the run met comes off the
+/// language facility's typed causes (`ops::pattern::PatternGaps`), never off
+/// the wording of a refusal.
 ///
-/// A pattern can fail both ways at once. The scope answer leads there, because
-/// the scope must be settled whatever else is wrong, and each source's own
-/// reason is printed above these lines either way.
+/// The scope answer stands alone where it is met, because the scope must be
+/// settled whatever else is wrong. A value too coarse for its modifier gets a
+/// pair naming each key and modifier that failed as the query entry that leaves
+/// such files out. That entry and a corrected save time are both read when the
+/// lock is built, so those two pairs name the refresh.
 ///
 /// Both commands say it because both meet the state: `apply` refuses on it,
 /// and `cluster status` reaches it as a withheld step whose cause names no act
 /// of its own. One composition, so the two cannot drift — which is what the
 /// two invitations to apply did before [`apply_command`] existed.
-fn adjust_pattern_remedy(needs_a_scope_it_lacks: bool) -> Vec<String> {
-    if needs_a_scope_it_lacks {
+fn adjust_pattern_remedy(gaps: &PatternGaps) -> Vec<String> {
+    if gaps.needs_a_scope_it_lacks {
         return vec![
             "The pattern places files relative to the scopes declared in the manifest, and this lock records none.".to_string(),
             "Use {source.rel_path} to keep each file's own folders, or add paths to meta.scope and refresh.".to_string(),
         ];
     }
-    vec![
-        "Adjust the pattern in your manifest, or import the facts it names.".to_string(),
-        "Use 'canon facts' to see which sources carry them.".to_string(),
-    ]
+    let mut lines = Vec::new();
+    if gaps.fact_not_carried {
+        lines
+            .push("Adjust the pattern in your manifest, or import the facts it names.".to_string());
+        lines.push("Use 'canon facts' to see which sources carry them.".to_string());
+    }
+    // Both ways out below change what the lock holds, a query edit and a save time alike
+    // (placement reads the lock entry's), so each names the refresh that rebuilds it.
+    if gaps.unreadable_save_time {
+        lines.push("A save time Canon cannot read gives the pattern no value.".to_string());
+        lines.push(
+            "Add \"source.mtime?\" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh."
+                .to_string(),
+        );
+    }
+    if !gaps.too_coarse.is_empty() {
+        let entries: Vec<String> = gaps
+            .too_coarse
+            .iter()
+            .map(|c| format!("\"{c}?\""))
+            .collect();
+        lines.push(
+            "A time known only to a coarser grain than the pattern reads gives the pattern no value."
+                .to_string(),
+        );
+        lines.push(format!(
+            "Add {} to the manifest's query to leave such files out, and refresh.",
+            entries.join(" and ")
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -390,6 +422,93 @@ mod tests {
                 r#"cli.rs: "If the files are there, `canon scan {}` to index them.","#.to_string(),
             ],
             "a command spelled with a path outside this file's three owners"
+        );
+    }
+
+    /// One pair per cause the run met, and every pair a run can meet says something; the
+    /// scope pair stands alone where it is met; each way out that changes what the lock holds
+    /// names the refresh.
+    #[test]
+    fn the_pattern_remedy_prints_one_pair_per_cause_met() {
+        use super::adjust_pattern_remedy;
+        use crate::archive::ops::pattern::PatternGaps;
+
+        let save_time = [
+            "A save time Canon cannot read gives the pattern no value.",
+            "Add \"source.mtime?\" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh.",
+        ];
+        let facts = [
+            "Adjust the pattern in your manifest, or import the facts it names.",
+            "Use 'canon facts' to see which sources carry them.",
+        ];
+        let coarse = |keys: &[&str]| -> PatternGaps {
+            PatternGaps {
+                too_coarse: keys.iter().map(|k| k.to_string()).collect(),
+                ..Default::default()
+            }
+        };
+
+        let only_save_time = PatternGaps {
+            unreadable_save_time: true,
+            ..Default::default()
+        };
+
+        // A withheld step still answers: every cause a run can meet alone composes a way
+        // back, so `cluster status` never ends on a cause with nothing after it. The
+        // destructure names every cause with no rest, so a new one fails the build here
+        // until it joins the walk below.
+        let PatternGaps {
+            needs_a_scope_it_lacks: _,
+            unreadable_save_time: _,
+            too_coarse: _,
+            fact_not_carried: _,
+        } = PatternGaps::default();
+        for alone in [
+            PatternGaps::for_lock(true),
+            only_save_time.clone(),
+            coarse(&["content.DateTimeOriginal|month"]),
+            PatternGaps {
+                fact_not_carried: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!adjust_pattern_remedy(&alone).is_empty(), "{alone:?}");
+        }
+
+        assert_eq!(adjust_pattern_remedy(&only_save_time), save_time);
+
+        let both = PatternGaps {
+            unreadable_save_time: true,
+            fact_not_carried: true,
+            ..Default::default()
+        };
+        assert_eq!(adjust_pattern_remedy(&both), [facts, save_time].concat());
+
+        let with_scope = PatternGaps {
+            needs_a_scope_it_lacks: true,
+            unreadable_save_time: true,
+            fact_not_carried: true,
+            ..coarse(&["content.DateTimeOriginal|month"])
+        };
+        let scope_alone = adjust_pattern_remedy(&with_scope);
+        assert_eq!(scope_alone.len(), 2);
+        assert!(
+            scope_alone[1].contains("{source.rel_path}"),
+            "{scope_alone:?}"
+        );
+
+        // A too-coarse failure names each key and modifier it met as a query entry, in
+        // order, because that entry is what the user types.
+        assert_eq!(
+            adjust_pattern_remedy(&coarse(&["content.DateTimeOriginal|month"])),
+            [
+                "A time known only to a coarser grain than the pattern reads gives the pattern no value.",
+                "Add \"content.DateTimeOriginal|month?\" to the manifest's query to leave such files out, and refresh.",
+            ]
+        );
+        assert_eq!(
+            adjust_pattern_remedy(&coarse(&["content.b|day", "content.a|month"]))[1],
+            "Add \"content.a|month?\" and \"content.b|day?\" to the manifest's query to leave such files out, and refresh."
         );
     }
 }

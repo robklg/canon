@@ -15,7 +15,7 @@ use crate::story::StoryParams;
 
 /// `canon roots retired` — the retired fleet, one line per book.
 pub fn retired(db: &Db, config: &LedgerConfig) -> Result<()> {
-    let listing = super::ops::compute_shelf_listing(db.conn(), config)?;
+    let listing = super::ops::compute_shelf_listing(db.conn(), config, crate::user_zone())?;
     let books = listing
         .lines
         .iter()
@@ -243,7 +243,7 @@ pub fn retire(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let plan = super::ops::plan_bind(&story, config, now)?;
+    let plan = super::ops::plan_bind(&story, config, now, crate::user_zone())?;
 
     println!();
     if !yes {
@@ -275,6 +275,7 @@ pub fn retire(
         super::ops::CeremonyParams {
             reason: reason.map(|r| r.to_string()),
             now,
+            zone: crate::user_zone().clone(),
             command_line: command_line.to_string(),
             config: config.clone(),
         },
@@ -482,14 +483,18 @@ fn print_review(review: &super::ops::ReadinessReview) {
     println!(
         "  first indexed  {}",
         match review.first_indexed {
-            Some(ts) => format_date(ts),
+            Some(ts) => format_date(ts, crate::user_zone()),
             None => "unknown".to_string(),
         }
     );
     println!(
         "  last scan      {}",
         match review.gaps.last_scanned_at {
-            Some(ts) => format!("{} ({})", format_date(ts), format_time_ago(Some(ts), now)),
+            Some(ts) => format!(
+                "{} ({})",
+                format_date(ts, crate::user_zone()),
+                format_time_ago(Some(ts), now)
+            ),
             None => "never".to_string(),
         }
     );

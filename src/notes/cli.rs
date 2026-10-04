@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use chrono::{Local, TimeZone};
 
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
@@ -222,13 +221,6 @@ fn resolve_single_scope_optional(
     Ok(Some(scope))
 }
 
-pub fn format_note_date(timestamp: i64) -> String {
-    match Local.timestamp_opt(timestamp, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
-        _ => "????-??-??".to_string(),
-    }
-}
-
 fn print_view(result: &NoteViewResult) {
     if result.notes.is_empty()
         && result.ancestor_count == 0
@@ -241,7 +233,11 @@ fn print_view(result: &NoteViewResult) {
     if !result.notes.is_empty() {
         println!("{}:", result.scope.display());
         for note in &result.notes {
-            println!("  {}  {}", format_note_date(note.created_at), note.text);
+            println!(
+                "  {}  {}",
+                crate::core::domain::format::format_date(note.created_at, crate::user_zone()),
+                note.text
+            );
         }
     }
 
@@ -324,7 +320,7 @@ fn print_temporal(result: &NoteListResult, use_full_path: bool) {
             handle,
             "{:<width$}  {}  {}",
             path,
-            format_note_date(note.created_at),
+            crate::core::domain::format::format_date(note.created_at, crate::user_zone()),
             note.text,
             width = max_path_len
         )
@@ -382,7 +378,7 @@ fn print_spatial(result: &NoteSpatialResult, use_full_path: bool) {
             "{:<pwidth$}  {:>cwidth$}  {}  {}",
             path,
             count,
-            format_note_date(loc.latest_created_at),
+            crate::core::domain::format::format_date(loc.latest_created_at, crate::user_zone()),
             loc.latest_text,
             pwidth = max_path_len,
             cwidth = max_count_len

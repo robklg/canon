@@ -117,9 +117,10 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   recorded gap. The gather copies `.canon-ledger/` verbatim via `core::ops::fs::copy_tree` (mtime
   and permissions preserved; filenames preserved so `previous_decision_id` chains stay walkable).
   **Machine-readable** dates are ISO-8601 UTC with the `Z` that says so (`iso_utc` — `meta.toml`'s
-  stamps, the inventory's `mtime`); **prose** dates and the book's own directory name are the
-  binder's local day (`iso_date`), the day the story inside and the trail's own filing both use —
-  without the split, a book bound in the evening dates its README a day after its story. Hashes
+  stamps, the inventory's `mtime`); **prose** dates and the book's directory name are the
+  binder's day (`core::domain::format::format_date`), the day the story
+  inside and the trail's own filing both use — without the split, a book bound in the evening
+  dates its README a day after its story. Hashes
   are `sha256:`-prefixed: Canon-independence is the format's point. `BookMeta` declares its values
   before its sub-tables, matching the order TOML writes them in.
 - **`verify_book` is production code, not a test helper** — the release movement's hinge: it

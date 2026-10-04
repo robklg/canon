@@ -2,24 +2,28 @@
 //! database before it can be evaluated.
 //!
 //! Two prefetches fill the cache the evaluation half reads — one for facts,
-//! one for the status predicates — and two point reads answer a single
-//! question about a single key. Batch in, domain types out.
+//! one for the status predicates — two point reads answer a single
+//! question about a single key, and one reads the source row a per-source
+//! comparison works from. Batch in, domain types out.
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 
-use super::domain::cache::{to_fact_value, FactCache, FactValue};
+use super::domain::cache::FactCache;
 use super::domain::filter::{StatusPredicate, UsedStatus};
 use super::domain::key::{is_builtin_key, parse_key_with_modifiers, BuiltinKey};
+use super::domain::value::SourceAttributes;
+use crate::core::domain::fact::FactValue;
 use crate::core::repo::db::populate_temp_sources;
+use crate::core::repo::fact::{fact_value_at, fact_value_columns_of, FACT_VALUE_COLUMNS};
 
 // ============================================================================
 // Fact Prefetching
 // ============================================================================
 
-/// A fact row: (entity_id, value_text, value_num, value_time).
-type FactRow = (i64, Option<String>, Option<f64>, Option<i64>);
+/// A fact row: the entity it hangs off, and its value where it has one Canon can read.
+type FactRow = (i64, Option<FactValue>);
 
 /// Prefetch facts for a batch of sources and keys
 pub fn prefetch_facts(
@@ -101,16 +105,17 @@ pub fn prefetch_facts(
     // Fetch source facts for all keys
     for key in &stored_keys {
         let facts: Vec<FactRow> = conn
-            .prepare(
-                "SELECT ts.id, f.value_text, f.value_num, f.value_time
+            .prepare(&format!(
+                "SELECT ts.id, {}
                  FROM temp_sources ts
-                 LEFT JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?"
-            )?
-            .query_map([*key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                 JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?",
+                fact_value_columns_of("f")
+            ))?
+            .query_map([*key], |row| Ok((row.get(0)?, fact_value_at(row, 1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
 
-        for (source_id, text_val, num_val, time_val) in facts {
-            if let Some(fv) = to_fact_value(text_val, num_val, time_val) {
+        for (source_id, value) in facts {
+            if let Some(fv) = value {
                 cache.source_facts.insert((source_id, (*key).clone()), fv);
             }
         }
@@ -141,16 +146,17 @@ pub fn prefetch_facts(
 
         for key in &stored_keys {
             let facts: Vec<FactRow> = conn
-                .prepare(
-                    "SELECT t.id, f.value_text, f.value_num, f.value_time
+                .prepare(&format!(
+                    "SELECT t.id, {}
                      FROM temp_objects t
-                     LEFT JOIN facts f ON f.entity_type = 'object' AND f.entity_id = t.id AND f.key = ?"
-                )?
-                .query_map([*key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                     JOIN facts f ON f.entity_type = 'object' AND f.entity_id = t.id AND f.key = ?",
+                    fact_value_columns_of("f")
+                ))?
+                .query_map([*key], |row| Ok((row.get(0)?, fact_value_at(row, 1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
 
-            for (object_id, text_val, num_val, time_val) in facts {
-                if let Some(fv) = to_fact_value(text_val, num_val, time_val) {
+            for (object_id, value) in facts {
+                if let Some(fv) = value {
                     cache.object_facts.insert((object_id, (*key).clone()), fv);
                 }
             }
@@ -285,6 +291,48 @@ pub fn is_known_key(conn: &Connection, base_key: &str) -> Result<bool> {
     Ok(exists)
 }
 
+/// A source row as a per-source comparison reads it: the attributes the built-in keys are
+/// resolved from, whether its device and inode columns hold a value (a NULL one has no value
+/// to read), and the object its content facts hang off.
+pub struct SourceRow {
+    pub attributes: SourceAttributes,
+    pub has_device: bool,
+    pub has_inode: bool,
+    pub object_id: Option<i64>,
+}
+
+/// One source's row, for a per-source comparison; `None` for an id with no row.
+pub fn fetch_source_row(conn: &Connection, source_id: i64) -> Result<Option<SourceRow>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.mtime, s.device, s.inode,
+                    s.object_id
+             FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
+            [source_id],
+            |row| {
+                let device: Option<i64> = row.get(6)?;
+                let inode: Option<i64> = row.get(7)?;
+                Ok(SourceRow {
+                    attributes: SourceAttributes {
+                        id: row.get(0)?,
+                        root_id: row.get(1)?,
+                        root_path: row.get(2)?,
+                        rel_path: row.get(3)?,
+                        size: row.get(4)?,
+                        mtime: row.get(5)?,
+                        device: device.unwrap_or(0),
+                        inode: inode.unwrap_or(0),
+                    },
+                    has_device: device.is_some(),
+                    has_inode: inode.is_some(),
+                    object_id: row.get(8)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 // ============================================================================
 // Value Handling
 // ============================================================================
@@ -295,22 +343,16 @@ pub fn get_fact_value(
     entity_id: i64,
     key: &str,
 ) -> Result<Option<FactValue>> {
-    let result: Option<(Option<String>, Option<f64>, Option<i64>)> = conn
+    use rusqlite::OptionalExtension;
+    let value = conn
         .query_row(
-            "SELECT value_text, value_num, value_time FROM facts
-             WHERE entity_type = ? AND entity_id = ? AND key = ?",
+            &format!(
+                "SELECT {FACT_VALUE_COLUMNS} FROM facts
+                 WHERE entity_type = ? AND entity_id = ? AND key = ?"
+            ),
             params![entity_type, entity_id, key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| fact_value_at(row, 0),
         )
-        .ok();
-
-    Ok(result.and_then(|(text, num, time)| {
-        if let Some(t) = text {
-            Some(FactValue::Text(t))
-        } else if let Some(n) = num {
-            Some(FactValue::Num(n))
-        } else {
-            time.map(FactValue::Time)
-        }
-    }))
+        .optional()?;
+    Ok(value.flatten())
 }

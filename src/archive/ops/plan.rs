@@ -22,10 +22,11 @@ use anyhow::{bail, Context, Result};
 use crate::archive::domain::LockEntry;
 use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::path_strip_prefix;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::{prefetch_pattern_facts, Pattern, Unmeasured};
 
-use super::pattern::evaluate_pattern;
+use super::pattern::{evaluate_pattern, PatternGaps};
 
 /// Progress notification for planning's own per-source sweep.
 ///
@@ -133,12 +134,11 @@ pub struct ApplyPlan {
 pub struct ApplyViolations {
     /// Sources that failed pattern expansion: (source_path, error_message).
     pub expansion_failures: Vec<(String, String)>,
-    /// Whether the pattern places files relative to the manifest's scope and
-    /// the lock carries no measurement to place them from — the one thing that
-    /// tells the two expansion failures apart, since they take opposite
-    /// advice. Carried through from the params unchanged: the lock answers it,
-    /// never the refusal's text and never this run's subset of entries.
-    pub pattern_needs_a_scope_it_lacks: bool,
+    /// Which causes the expansion failures met, which is what tells their
+    /// remedies apart: the scope the lock lacks is carried through from the
+    /// params unchanged (the lock answers it, never this run's subset of
+    /// entries), the rest are read off each failure's typed cause.
+    pub pattern_gaps: PatternGaps,
     /// Destination paths with multiple sources: (dest_rel_path, source_paths).
     pub collisions: Vec<(String, Vec<String>)>,
     /// Destination paths already occupied in DB (non-resume mode only).
@@ -274,7 +274,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // Settled before any entry is evaluated: it is a property of the pattern
     // and the lock, not of whichever entry happened to fail first.
     let mut violations = ApplyViolations {
-        pattern_needs_a_scope_it_lacks: params.pattern_needs_a_scope_it_lacks,
+        pattern_gaps: PatternGaps::for_lock(params.pattern_needs_a_scope_it_lacks),
         ..Default::default()
     };
 
@@ -325,6 +325,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
     let mut transfers: Vec<ApplyTransfer> = Vec::with_capacity(params.sources.len());
 
+    // AUDIT: placement reads UTC until a manifest records the zone it was made in; it must never
+    // read the machine's zone.
+    let zone = UserZone::utc();
     for source in params.sources {
         match evaluate_pattern(
             params.pattern,
@@ -332,6 +335,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             params.unmeasured,
             params.root_paths,
             &facts,
+            &zone,
         ) {
             Ok(dest_rel) => {
                 let archive_rel_path = compute_archive_rel_path(params.base_dir_rel, &dest_rel);
@@ -368,6 +372,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                 });
             }
             Err(e) => {
+                violations.pattern_gaps.met(&e);
                 violations
                     .expansion_failures
                     .push((source.path.clone(), e.to_string()));
@@ -1172,6 +1177,42 @@ mod tests {
         assert_eq!(plan.transfers[0].dest_rel_path, "Canon/photo.jpg");
         assert_eq!(plan.transfers[0].archive_rel_path, "Canon/photo.jpg");
         assert!(plan.violations.expansion_failures.is_empty());
+    }
+
+    /// **Placement reads UTC until a manifest records the zone it was made in**, whatever
+    /// the machine's zone: 23:30 UTC on New Year's Eve 2023 is 1 January 2024 in Amsterdam,
+    /// and `{source.mtime|year}` still places it under `2023`. The pin goes with the
+    /// `// AUDIT:` marker it holds, when the lock carries the zone.
+    #[test]
+    fn placement_reads_utc_whatever_the_machines_zone() {
+        use crate::core::domain::time::zone::{with_test_zone, UserZone};
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let archive_id = insert_root(&conn, "/archive", "archive", false);
+        let obj_id = insert_object(&conn, "hash1", false);
+        let src_id =
+            insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj_id), 1000, 1704065400);
+        let mut entry = make_lock_entry(
+            src_id,
+            root_id,
+            "/photos/a.jpg",
+            Some(obj_id),
+            Some("hash1"),
+        );
+        entry.mtime = 1704065400;
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = parse_pattern("{source.mtime|year}/{filename}").unwrap();
+        let needed_keys = extract_fact_keys(&pattern);
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, "/photos".to_string());
+        root_paths.insert(archive_id, "/archive".to_string());
+
+        let plan = with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
+            let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+            plan_apply(&mut conn, &params).unwrap()
+        });
+        assert_eq!(plan.transfers.len(), 1);
+        assert_eq!(plan.transfers[0].dest_rel_path, "2023/a.jpg");
     }
 
     #[test]

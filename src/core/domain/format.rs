@@ -1,3 +1,6 @@
+use super::time::value::TimeValue;
+use super::time::zone::UserZone;
+
 /// Format a number with thousands separators (e.g., 3847 → "3,847").
 pub fn format_count(n: impl std::fmt::Display) -> String {
     let s = n.to_string();
@@ -58,25 +61,32 @@ pub fn first_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// A timestamp as a local calendar date (`2026-08-04`).
+/// A timestamp as a calendar date on the user's clock (`2026-08-04`); `????-??-??` for one
+/// outside the years Canon reads, which no decision time reaches.
 ///
-/// **Canon dates a human's reading in that human's own day.** A decision made
-/// at 22:00 belongs to the evening it was made, and the trail's day lens
-/// (`--today`, `--since`) already draws its boundaries there — so every surface
-/// that shows a person a date or a time renders it locally, including the book,
-/// which is dated the day its author retired the place.
+/// **Every surface reads a time through the frame rule, on the user's clock.** A decision
+/// made at 22:00 belongs to the evening it was made, and the trail's day lens (`--today`,
+/// `--since`) draws its boundaries there — so every surface that shows a person a date or a
+/// time reads it on that clock, the book included, which is dated the day its author retired
+/// the place.
 ///
-/// Two deliberate exceptions, both where the output is not a sentence:
-/// machine-readable instants (the book's structured fields, a manifest's
-/// generation stamp) are UTC and carry the `Z` that says so; and the expression
-/// facility renders fact values in UTC, so a manifest pattern places a file in
-/// the same folder no matter where the machine stands.
-pub fn format_date(ts: i64) -> String {
-    use chrono::{Local, TimeZone};
-    match Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d").to_string(),
-        _ => format!("@{ts}"),
+/// Two deliberate exceptions. Machine-readable instants (the book's structured fields, a
+/// manifest's generation stamp) are UTC and carry the `Z` that says so. And a manifest's run
+/// — its selection and its placement — reads the zone the manifest was made in, so a pattern
+/// places a file in the same folder no matter where the machine stands.
+pub fn format_date(ts: i64, zone: &UserZone) -> String {
+    match clock_of(ts, zone) {
+        Some(at) => at.date().to_string(),
+        None => "????-??-??".to_string(),
     }
+}
+
+/// A timestamp read on the user's clock, for a surface that lays it out itself
+/// (`%Y-%m-%d %H:%M`, `%H:%M`); `None` outside the years Canon reads.
+pub fn clock_of(ts: i64, zone: &UserZone) -> Option<jiff::civil::DateTime> {
+    TimeValue::from_epoch_secs(ts)
+        .ok()
+        .map(|time| time.on_clock(zone).start())
 }
 
 /// A coarse "how long ago" beside a date — seconds up to days.
@@ -115,6 +125,27 @@ pub fn shell_quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A date reads on the user's clock: 23:30 UTC on New Year's Eve 2023 is 1 January 2024
+    /// in Amsterdam and still 31 December in New York; outside the years Canon reads there is
+    /// no date to print.
+    #[test]
+    fn a_date_reads_on_the_users_clock() {
+        let new_years_eve = 1704065400;
+        let amsterdam = UserZone::for_test("Europe/Amsterdam");
+        let new_york = UserZone::for_test("America/New_York");
+        assert_eq!(format_date(new_years_eve, &amsterdam), "2024-01-01");
+        assert_eq!(format_date(new_years_eve, &new_york), "2023-12-31");
+        assert_eq!(
+            clock_of(new_years_eve, &amsterdam)
+                .unwrap()
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string(),
+            "2024-01-01 00:30"
+        );
+        assert_eq!(format_date(253402300799, &amsterdam), "????-??-??");
+        assert_eq!(clock_of(253402300799, &amsterdam), None);
+    }
 
     #[test]
     fn format_count_small() {

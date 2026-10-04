@@ -39,7 +39,8 @@ pub use ops::alias::expand_filter_strings;
 // with the scope-relative path the run that selected the source settled for
 // it, and, where there is none, the run's own reason there is none.
 pub use domain::pattern::{
-    evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern, Unmeasured,
+    evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern,
+    PatternNoValue, Unmeasured,
 };
 pub use domain::vantage::ScopeVantage;
 
@@ -65,15 +66,15 @@ pub use domain::key::{
     SCOPE_REL_PATH,
 };
 
-// The transforms a value can be put through.
-pub use domain::transform::{apply_accessor, apply_modifier, Modifier, ModifierCategory};
+// The transforms a value can be put through, and what a modifier gives: a value, or none.
+pub use domain::transform::{apply_chain, Modified, Modifier, ModifierCategory};
 
 // ---------------------------------------------------------------------------
 // Completing the surface
 //
 // Parameter types of items above. Nothing outside names them today, but the
 // claim is structural rather than observed: `PathAccessor` and `ModifierCall`
-// are parameter types of `apply_accessor` and `apply_modifier`, so a caller
+// are parameter types of `apply_chain`, so a caller
 // that wants to factor out a helper taking one must be able to name it.
 //
 // Return types are deliberately absent, per the parameter-type rule: inference

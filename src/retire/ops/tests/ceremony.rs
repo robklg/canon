@@ -2,6 +2,8 @@ use rusqlite::Connection;
 
 use crate::core::domain::config::RecordingMode;
 use crate::core::domain::decision::Decision;
+use crate::core::domain::format::format_date;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo;
@@ -10,7 +12,7 @@ use crate::core::repo::insert_test_root;
 use crate::retire::domain::book_dir_name;
 use crate::retire::ops::ceremony::BindPlan;
 use crate::retire::ops::verify::verify_book;
-use crate::retire::ops::{iso_date, plan_bind, ReleaseOutcome, RetireCeremony, SHELF_DIR};
+use crate::retire::ops::{plan_bind, ReleaseOutcome, RetireCeremony, SHELF_DIR};
 
 use super::fixtures::{
     begin_with, compile_to, every_fate_fixture, insert_decision, insert_source, ledger_config,
@@ -19,7 +21,7 @@ use super::fixtures::{
 
 fn plan_for(conn: &Connection, root_id: i64) -> BindPlan {
     let story = fetch_root_story(conn, root_id).unwrap();
-    plan_bind(&story, &ledger_config(), CEREMONY_NOW).unwrap()
+    plan_bind(&story, &ledger_config(), CEREMONY_NOW, &UserZone::utc()).unwrap()
 }
 
 fn count_retire_decisions(conn: &Connection) -> i64 {
@@ -54,9 +56,34 @@ fn plan_bind_fresh_shelf_takes_the_plain_name() {
     assert_eq!(plan.shelf, shelf);
     assert!(!plan.shelf_exists);
     assert!(!plan.replaces_existing);
-    let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+    let name = book_dir_name(
+        &story.root.path,
+        &format_date(CEREMONY_NOW, &UserZone::utc()),
+    );
     assert_eq!(plan.final_dir, shelf.join(&name));
     assert_eq!(plan.temp_dir, shelf.join(format!(".compiling-{name}")));
+}
+
+/// The book's folder is named for the binder's own day: a retirement at 23:30 UTC on New
+/// Year's Eve 2023 is named `…-2023-12-31` in New York and `…-2024-01-01` in Amsterdam.
+#[test]
+fn the_book_folder_is_named_for_the_binders_day() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let story = fetch_root_story(&conn, root_id).unwrap();
+    for (zone, day) in [
+        ("America/New_York", "2023-12-31"),
+        ("Europe/Amsterdam", "2024-01-01"),
+    ] {
+        let plan = plan_bind(
+            &story,
+            &ledger_config(),
+            1704065400,
+            &UserZone::for_test(zone),
+        )
+        .unwrap();
+        let name = plan.final_dir.file_name().unwrap().to_string_lossy();
+        assert!(name.ends_with(&format!("-{day}")), "{zone}: {name}");
+    }
 }
 
 #[test]
@@ -64,7 +91,10 @@ fn plan_bind_same_root_book_is_a_replacement() {
     let (conn, _src, arch, root_id) = every_fate_fixture();
     let story = fetch_root_story(&conn, root_id).unwrap();
     let shelf = arch.path().join(SHELF_DIR);
-    let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+    let name = book_dir_name(
+        &story.root.path,
+        &format_date(CEREMONY_NOW, &UserZone::utc()),
+    );
     fake_book(&shelf, &name, &story.root.path);
 
     let plan = plan_for(&conn, root_id);
@@ -78,7 +108,10 @@ fn plan_bind_different_root_book_probes_to_a_sibling_name() {
     let (conn, _src, arch, root_id) = every_fate_fixture();
     let story = fetch_root_story(&conn, root_id).unwrap();
     let shelf = arch.path().join(SHELF_DIR);
-    let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+    let name = book_dir_name(
+        &story.root.path,
+        &format_date(CEREMONY_NOW, &UserZone::utc()),
+    );
     fake_book(&shelf, &name, "/somebody/else");
 
     let plan = plan_for(&conn, root_id);
@@ -111,13 +144,16 @@ fn plan_bind_recognises_a_book_whose_identity_is_written_in_the_other_form() {
 
     let story = fetch_root_story(&conn, root_id).unwrap();
     let shelf = arch_dir.path().join(SHELF_DIR);
-    let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+    let name = book_dir_name(
+        &story.root.path,
+        &format_date(CEREMONY_NOW, &UserZone::utc()),
+    );
     // The standing book names the same place, spelled the other way.
     let other_form = root_path.replace(NFD_DIR, NFC_DIR);
     assert_ne!(other_form, root_path, "the fixture must be two byte-forms");
     fake_book(&shelf, &name, &other_form);
 
-    let plan = plan_bind(&story, &ledger_config(), CEREMONY_NOW).unwrap();
+    let plan = plan_bind(&story, &ledger_config(), CEREMONY_NOW, &UserZone::utc()).unwrap();
     assert!(
         plan.replaces_existing,
         "the standing book is this root's own telling, however it was spelled"
@@ -130,7 +166,10 @@ fn plan_bind_refuses_an_unidentifiable_directory() {
     let (conn, _src, arch, root_id) = every_fate_fixture();
     let story = fetch_root_story(&conn, root_id).unwrap();
     let shelf = arch.path().join(SHELF_DIR);
-    let name = book_dir_name(&story.root.path, &iso_date(CEREMONY_NOW));
+    let name = book_dir_name(
+        &story.root.path,
+        &format_date(CEREMONY_NOW, &UserZone::utc()),
+    );
     // A directory at the book's name with no meta.toml at all.
     std::fs::create_dir_all(shelf.join(&name)).unwrap();
 
@@ -138,6 +177,7 @@ fn plan_bind_refuses_an_unidentifiable_directory() {
         &fetch_root_story(&conn, root_id).unwrap(),
         &ledger_config(),
         CEREMONY_NOW,
+        &UserZone::utc(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("refusing to replace"), "{err:#}");
@@ -156,7 +196,7 @@ fn plan_bind_names_a_parked_archive_fleet() {
         }
     }
 
-    let err = plan_bind(&story, &ledger_config(), CEREMONY_NOW)
+    let err = plan_bind(&story, &ledger_config(), CEREMONY_NOW, &UserZone::utc())
         .unwrap_err()
         .to_string();
     let parked = arch.path().to_string_lossy().to_string();

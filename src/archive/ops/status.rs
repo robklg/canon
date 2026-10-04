@@ -14,11 +14,13 @@ use crate::archive::domain::{
     LockEntry, LockStanding, ManifestStanding, NextStep, OwedWayBack, RefreshRefusal,
 };
 use crate::core::domain::root::{ParkedRoot, Root};
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
 use crate::expr::{prefetch_pattern_facts, Unmeasured};
 
 use super::manifest::{read_lock_file, read_manifest_config};
+use super::pattern::PatternGaps;
 
 /// What a destination path reads when the pattern could not be expanded for
 /// that entry. Spoken here because the interface recovers the same fact by
@@ -200,16 +202,17 @@ pub struct ManifestStatus {
     /// dest" and never this, so without it the run would report nothing at all
     /// about a manifest that cannot be applied.
     pub expansion_failures: Vec<String>,
-    /// Whether the pattern places files relative to the scope and the lock
-    /// carries no measurement to place them from.
+    /// Which causes the expansion failures met, and whether the pattern places
+    /// files relative to a scope the lock carries no measurement for.
     ///
-    /// The one thing that tells the two expansion failures apart, and they
-    /// take opposite advice: a scope the manifest does not have is repaired by
-    /// scoping it or by measuring from each file's own root, a fact no source
-    /// carries by supplying the fact. Asked of the language facility rather
-    /// than of the refusal's wording, so the remedy cannot drift from what
-    /// actually failed.
-    pub pattern_needs_a_scope_it_lacks: bool,
+    /// What tells the expansion failures apart, and they take different
+    /// advice: a scope the manifest does not have is repaired by scoping it or
+    /// by measuring from each file's own root, a fact no source carries by
+    /// supplying the fact, a save time Canon cannot read by leaving the file
+    /// out or correcting it. Asked of the language facility's typed cause
+    /// rather than of the refusal's wording, so the remedy cannot drift from
+    /// what actually failed.
+    pub pattern_gaps: PatternGaps,
     /// How many entries failed, which is not the length of the list above —
     /// that deduplicates by message, and a pattern usually fails the same way
     /// for every source. Carried rather than recovered by the interface,
@@ -239,7 +242,7 @@ impl ManifestStatus {
         ManifestStanding {
             lock: self.lock,
             pattern_expands: !self.pattern_unexpandable,
-            pattern_needs_a_scope_it_lacks: self.pattern_needs_a_scope_it_lacks,
+            pattern_needs_a_scope_it_lacks: self.pattern_gaps.needs_a_scope_it_lacks,
             parked_origins: !self.parked_entries.is_empty(),
             parked_destination: self.parked_destination.is_some(),
             parked_scope: !self.parked_scope.is_empty(),
@@ -391,44 +394,49 @@ pub fn compute_manifest_status(
 
     // 6. Evaluate patterns to get dest paths, then check filesystem + DB
     let mut pattern_unexpandable = false;
+    let mut pattern_gaps = PatternGaps::for_lock(pattern_needs_a_scope_it_lacks);
     let mut expansion_failures: Vec<String> = Vec::new();
     let mut expansion_failure_count = 0usize;
     let mut entries = Vec::with_capacity(lock_entry_count);
     let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
 
+    // AUDIT: placement reads UTC until a manifest records the zone it was made in; it must never
+    // read the machine's zone.
+    let zone = UserZone::utc();
     for lock_entry in &lock_entries {
-        let dest_rel = match evaluate_pattern(&pattern, lock_entry, unmeasured, &root_paths, &facts)
-        {
-            Ok(rel) => rel,
-            Err(e) => {
-                // If pattern expansion fails, we can't determine dest path.
-                // Use a placeholder and mark as not-at-dest. It is also the
-                // whole run's answer: apply aborts on expansion failures
-                // before it transfers anything, so a report that has seen one
-                // must not go on to name apply.
-                pattern_unexpandable = true;
-                expansion_failure_count += 1;
-                let reason = e.to_string();
-                if !expansion_failures.contains(&reason) {
-                    expansion_failures.push(reason);
+        let dest_rel =
+            match evaluate_pattern(&pattern, lock_entry, unmeasured, &root_paths, &facts, &zone) {
+                Ok(rel) => rel,
+                Err(e) => {
+                    // If pattern expansion fails, we can't determine dest path.
+                    // Use a placeholder and mark as not-at-dest. It is also the
+                    // whole run's answer: apply aborts on expansion failures
+                    // before it transfers anything, so a report that has seen one
+                    // must not go on to name apply.
+                    pattern_unexpandable = true;
+                    pattern_gaps.met(&e);
+                    expansion_failure_count += 1;
+                    let reason = e.to_string();
+                    if !expansion_failures.contains(&reason) {
+                        expansion_failures.push(reason);
+                    }
+                    let filename = Path::new(&lock_entry.path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| lock_entry.path.clone());
+                    let source_exists = Path::new(&lock_entry.path).exists();
+                    entries.push(StatusEntry {
+                        source_path: lock_entry.path.clone(),
+                        source_filename: filename,
+                        source_exists,
+                        dest_path: format!("{EXPANSION_FAILED}: {e}>"),
+                        db_registered: false,
+                        status: classify_entry(source_exists, false, false),
+                    });
+                    dest_rel_paths.push(String::new());
+                    continue;
                 }
-                let filename = Path::new(&lock_entry.path)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| lock_entry.path.clone());
-                let source_exists = Path::new(&lock_entry.path).exists();
-                entries.push(StatusEntry {
-                    source_path: lock_entry.path.clone(),
-                    source_filename: filename,
-                    source_exists,
-                    dest_path: format!("{EXPANSION_FAILED}: {e}>"),
-                    db_registered: false,
-                    status: classify_entry(source_exists, false, false),
-                });
-                dest_rel_paths.push(String::new());
-                continue;
-            }
-        };
+            };
 
         let archive_rel_path = if config.output.base_dir.is_empty() {
             dest_rel.clone()
@@ -520,7 +528,7 @@ pub fn compute_manifest_status(
         parked_destination: archive_root.parked(),
         pattern_unexpandable,
         expansion_failures,
-        pattern_needs_a_scope_it_lacks,
+        pattern_gaps,
         expansion_failure_count,
     })
 }
@@ -743,14 +751,14 @@ mod tests {
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
         let status = compute_manifest_status(&mut conn, &manifest).unwrap();
         assert!(
-            status.pattern_needs_a_scope_it_lacks,
+            status.pattern_gaps.needs_a_scope_it_lacks,
             "an unmeasured lock under a scope-relative pattern needs the scope it lacks"
         );
 
         rewrite_manifest_pattern(&manifest, "{source.rel_path}");
         let status = compute_manifest_status(&mut conn, &manifest).unwrap();
         assert!(
-            !status.pattern_needs_a_scope_it_lacks,
+            !status.pattern_gaps.needs_a_scope_it_lacks,
             "a pattern that never names the scope key needs no scope"
         );
 
@@ -758,9 +766,86 @@ mod tests {
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
         let status = compute_manifest_status(&mut conn, &manifest).unwrap();
         assert!(
-            !status.pattern_needs_a_scope_it_lacks,
+            !status.pattern_gaps.needs_a_scope_it_lacks,
             "a measured lock lacks nothing the pattern needs — the pattern alone cannot say this"
         );
+    }
+
+    /// Set one lock entry's recorded save time, by hand. The manifest's hash goes stale;
+    /// the read still parses the entries, and the hash is not the question here.
+    fn set_lock_mtime(dir: &Path, name: &str, mtime: i64) {
+        let lock_path = dir.join("cluster.lock");
+        let text = std::fs::read_to_string(&lock_path).unwrap();
+        let edited: Vec<String> = text
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                let named = value
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .is_some_and(|p| p.ends_with(name));
+                if named {
+                    value["mtime"] = serde_json::Value::from(mtime);
+                }
+                value.to_string()
+            })
+            .collect();
+        std::fs::write(&lock_path, edited.join("\n") + "\n").unwrap();
+    }
+
+    /// **The report records which cause each failure met**, read through the wiring
+    /// production uses: a save time Canon cannot read (the sentinel 9999-12-31 23:59:59
+    /// UTC) is its own cause and never a fact not carried, its entry's reason states that
+    /// cause, and a run meeting both causes records both.
+    #[test]
+    fn the_report_records_each_cause_a_pattern_failure_met() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg", "b.jpg"]);
+        set_lock_mtime(dir.path(), "a.jpg", 253402300799);
+
+        rewrite_manifest_pattern(&manifest, "{source.mtime|year}/{filename}");
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(status.pattern_gaps.unreadable_save_time);
+        assert!(!status.pattern_gaps.fact_not_carried);
+        assert!(status.pattern_gaps.too_coarse.is_empty());
+        let reasons: Vec<&str> = status
+            .entries
+            .iter()
+            .map(|e| e.dest_path.as_str())
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("Canon cannot read this file's save time")),
+            "{reasons:?}"
+        );
+
+        // a.jpg carries the fact and fails on its save time; b.jpg fails on the fact.
+        let a: i64 = conn
+            .query_row("SELECT id FROM sources WHERE rel_path = 'a.jpg'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        crate::core::testing::insert_fact(&conn, a, "content.Make", "Canon");
+        rewrite_manifest_pattern(&manifest, "{content.Make}/{source.mtime|year}");
+        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        assert!(status.pattern_gaps.unreadable_save_time);
+        assert!(status.pattern_gaps.fact_not_carried);
+    }
+
+    /// The report places by UTC too, until a manifest records the zone it was made in —
+    /// the same destination `apply` would compute, whatever the machine's zone.
+    #[test]
+    fn the_report_places_by_utc_whatever_the_machines_zone() {
+        use crate::core::domain::time::zone::{with_test_zone, UserZone};
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        set_lock_mtime(dir.path(), "a.jpg", 1704065400);
+        rewrite_manifest_pattern(&manifest, "{source.mtime|year}/{filename}");
+
+        let status = with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
+            compute_manifest_status(&mut conn, &manifest).unwrap()
+        });
+        let dest = &status.entries[0].dest_path;
+        assert!(dest.ends_with("/2023/a.jpg"), "{dest}");
     }
 
     /// Write `output.pattern` into a manifest, the way a user editing the file

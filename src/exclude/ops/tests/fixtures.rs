@@ -4,6 +4,7 @@
 //! since they're used only by receipt tests, not shared with plan/execute.
 
 use crate::core::domain::scope::ScopeMatch;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeItemData, ExcludeSetObjectsParams,
@@ -28,6 +29,7 @@ pub(super) fn make_set_params(scopes: Vec<ScopeMatch>) -> ExcludeSetParams {
     ExcludeSetParams {
         scopes,
         filters: vec![],
+        clock: UserZone::utc(),
     }
 }
 
@@ -35,6 +37,7 @@ pub(super) fn make_clear_params(scopes: Vec<ScopeMatch>) -> ExcludeClearParams {
     ExcludeClearParams {
         scopes,
         filters: vec![],
+        clock: UserZone::utc(),
     }
 }
 
@@ -59,6 +62,7 @@ pub(super) fn make_duplicates_params(
         scopes,
         filters: vec![],
         prefer_prefix: prefer_prefix.to_string(),
+        clock: UserZone::utc(),
     }
 }
 
@@ -66,5 +70,6 @@ pub(super) fn make_set_objects_params(scopes: Vec<ScopeMatch>) -> ExcludeSetObje
     ExcludeSetObjectsParams {
         scopes,
         filters: vec![],
+        clock: UserZone::utc(),
     }
 }

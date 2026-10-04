@@ -8,7 +8,7 @@ Filters select sources based on facts using a boolean expression language. Most 
 
 | Syntax | Meaning |
 |--------|---------|
-| `key?` | Fact exists |
+| `key?` | Fact has a value; for a key with modifiers, the modified value (`content.DateTimeOriginal\|month?` is false for a time known only to a year) |
 | `key=value` | Fact equals value (case-sensitive) |
 | `key!=value` | Fact doesn't equal value (case-sensitive) |
 | `key~pattern` | Glob pattern match (case-sensitive) |
@@ -179,7 +179,7 @@ Canon determines whether each alias is a key or an expression by parsing the val
 
 ## Using Modifiers
 
-Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list.
+Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list. A time modifier reads the time on [your clock](../concepts/facts.md#how-canon-shows-a-time); a manifest's query reads it in UTC.
 
 ```bash
 # Files from 2024

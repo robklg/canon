@@ -7,6 +7,10 @@
 //! `expect` reasoning, which is the failure this module exists to close by
 //! having exactly one place to read.
 
+pub mod reading;
+pub mod value;
+pub mod zone;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]

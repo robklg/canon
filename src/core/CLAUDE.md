@@ -44,10 +44,27 @@ Every subsystem speaks these; nothing here knows about any subsystem. Beside the
 shape the nouns need to be handled at all — `domain::{path, scope, format, include, config}`:
 path manipulation and offline resolution, `ScopeMatch` and `DecisionScope`, display
 formatting, the visibility set, ledger-config parsing. Same purity rule throughout: no I/O, so
-path matching and scope resolution are testable with known inputs. One sanctioned exception:
-`domain::time::now_epoch_secs`, the tree's single `SystemTime::now()` read — every other
-spelling of it is a duplicate re-derivation; test-only `with_test_now` pins it for a fixture
-needing a controlled timestamp.
+path matching and scope resolution are testable with known inputs. Two sanctioned exceptions,
+side by side in `domain::time`: `now_epoch_secs`, the owner of "now" — a `SystemTime::now()`
+read anywhere else is a duplicate re-derivation; test-only `with_test_now` pins it for a
+fixture needing a controlled timestamp — and `zone::UserZone::machine`, the one read of the
+machine's time zone.
+
+**Time is one noun, read one way.** `domain::time` holds `TimeValue` — an instant, an instant
+with its recorded offset, or a clock reading, each at the precision it was written at, never
+padded — and `FactValue::Time` carries it. Three owners sit there:
+- **The frame rule** (`TimeValue::on_clock`): every time reads on the user's clock — an instant
+  through the zone, a clock reading as written, never a clock reading turned into an instant;
+  `printed` is the one form shown, `iso_text` the stored form written out. Verifier
+  `the_frame_rule_reads_both_clock_change_hours_on_the_users_clock`.
+- **The user's-zone owner** (`zone::UserZone::machine`): reads `TZ` and the system zone once;
+  everything else takes a `UserZone` as a parameter, and no test reads the machine's zone
+  (`with_test_zone`). Build-refused by `the_machine_zone_is_read_only_by_its_owner`.
+- **The list of spellings** (`reading::read_time`): the one place a written time's form and
+  precision are decided, pinned per row; recognised here, with no roster row.
+
+**Where they do not apply**: machine fields (receipts, the book's structured fields, a
+manifest's stamp) are UTC with `Z`; a manifest's run reads UTC, not the machine's zone.
 
 **Text is cut by characters, never by byte index**, because a cut inside a multi-byte
 character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies

@@ -11,5 +11,5 @@ mod helpers;
 pub use helpers::{
     insert_fact, insert_note, insert_object, insert_root, insert_source, insert_source_excluded,
     insert_source_with_metadata, insert_source_with_size, is_object_excluded, is_source_excluded,
-    plant_failure, setup_test_db,
+    migrated_time, plant_failure, setup_test_db,
 };

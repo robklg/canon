@@ -34,7 +34,7 @@ pub mod time;
 // Re-exported for convenience where a caller wants the name without the
 // module. Only what is actually reached this way — the rest is spelled
 // through its module.
-pub use fact::{FactEntry, FactType, FactValue};
+pub use fact::{FactEntry, FactType};
 pub use format::format_count;
 pub use include::IncludeSet;
 pub use path::path_strip_prefix;

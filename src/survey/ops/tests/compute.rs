@@ -37,6 +37,7 @@ fn run_compute(
         &all_sources,
         &other,
         archive_root_id,
+        &crate::core::domain::time::zone::UserZone::utc(),
     )
     .unwrap()
 }

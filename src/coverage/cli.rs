@@ -69,8 +69,14 @@ pub fn run(
     // Compute and display stats
     let (used_status, excluded_count) = if !scope_prefixes.is_empty() {
         // Scoped mode
-        let (stats, used_status, excluded_count) =
-            ops::compute_scoped(conn, &scopes, &filters, archive_root_id, include)?;
+        let (stats, used_status, excluded_count) = ops::compute_scoped(
+            conn,
+            &scopes,
+            &filters,
+            archive_root_id,
+            include,
+            crate::user_zone(),
+        )?;
         if compact {
             display_compact_scoped(&stats, scope);
         } else {
@@ -80,7 +86,7 @@ pub fn run(
     } else {
         // Per-root breakdown mode (global)
         let (per_root_stats, overall, used_status, excluded_count) =
-            ops::compute_per_root(conn, &filters, archive_root_id, include)?;
+            ops::compute_per_root(conn, &filters, archive_root_id, include, crate::user_zone())?;
         if compact {
             display_compact_per_root(&per_root_stats, &overall, scope);
         } else {

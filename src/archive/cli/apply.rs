@@ -15,6 +15,7 @@ use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorRefused, DoorVerb, ParkedRoot};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
@@ -388,8 +389,11 @@ pub fn run(
         if v.expansion_failures.len() > 10 {
             eprintln!("  ... and {} more", v.expansion_failures.len() - 10);
         }
-        eprintln!();
-        for line in super::adjust_pattern_remedy(v.pattern_needs_a_scope_it_lacks) {
+        let remedy = super::adjust_pattern_remedy(&v.pattern_gaps);
+        if !remedy.is_empty() {
+            eprintln!();
+        }
+        for line in remedy {
             eprintln!("{line}");
         }
         bail!("Aborting due to pattern expansion failures");
@@ -777,10 +781,14 @@ fn compute_sample_destinations(
         return vec![];
     };
 
+    // AUDIT: placement reads UTC until a manifest records the zone it was made in; it must never
+    // read the machine's zone.
+    let zone = UserZone::utc();
     sample_sources
         .iter()
         .map(|source| {
-            match pattern::evaluate_pattern(pattern, source, unmeasured, root_paths, &facts) {
+            match pattern::evaluate_pattern(pattern, source, unmeasured, root_paths, &facts, &zone)
+            {
                 Ok(dest_rel) => {
                     let full_path = base_dir.join(&dest_rel);
                     SampleDestination {
@@ -1110,6 +1118,49 @@ impl plan::PlanProgress for CliTransferProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The confirmation's sample destinations read UTC whatever the machine's zone, as the
+    /// placement they preview does: a file saved at 2023-12-31 23:30 UTC — already 2024 in
+    /// Amsterdam — is shown under `2023` with Amsterdam on the machine. A sample on another
+    /// clock would confirm a destination the run does not use. The pin goes with the
+    /// `// AUDIT:` marker it holds, when the lock carries the zone.
+    #[test]
+    fn the_sample_destinations_read_utc_whatever_the_machines_zone() {
+        use crate::core::domain::time::zone::with_test_zone;
+        use crate::core::testing::{insert_root, setup_test_db};
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let entry = LockEntry {
+            id: 1,
+            root_id,
+            path: "/photos/a.jpg".to_string(),
+            scope_rel_path: None,
+            device: 0,
+            inode: 0,
+            size: 1000,
+            mtime: 1704065400,
+            partial_hash: "testhash".to_string(),
+            object_id: None,
+            hash_type: None,
+            hash_value: None,
+        };
+        let pattern = parse_pattern("{source.mtime|year}/{filename}").unwrap();
+        let root_paths = HashMap::from([(root_id, "/photos".to_string())]);
+
+        let samples = with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
+            compute_sample_destinations(
+                &mut conn,
+                &[&entry],
+                &pattern,
+                &[],
+                Unmeasured::NoScopeRecorded,
+                &root_paths,
+                Path::new("/archive"),
+            )
+        });
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].dest_path, "/archive/2023/a.jpg");
+    }
 
     /// A pattern that opens with literal directories places every file below
     /// them, so the previewed directory is the one files enter — not the

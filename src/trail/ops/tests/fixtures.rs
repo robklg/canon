@@ -117,6 +117,7 @@ pub(super) fn params(prefixes: Vec<String>) -> TrailParams {
         timeframe: None,
         include_notes: true,
         limit: Some(DEFAULT_LIMIT),
+        clock: crate::core::domain::time::zone::UserZone::utc(),
     }
 }
 

@@ -3,9 +3,9 @@
 //! Evaluating a filter over many sources one fact at a time is a query per
 //! source per key, so values are fetched in bulk first and read from here.
 //! The cache holds source facts, object facts, the source-to-object map, and
-//! the sets that answer the status predicates; the converters translate
-//! between the database's column triple, the fact noun's value, and the
-//! narrower value the comparisons work on.
+//! the sets that answer the status predicates. Values are the fact noun's own
+//! (`core::domain::fact::FactValue`), read from storage through the one
+//! column conversion in `core::repo::fact`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -63,55 +63,5 @@ impl FactCache {
 
     pub fn has_key(&self, key: &str) -> bool {
         self.prefetched_keys.contains(key)
-    }
-}
-
-/// Convert DB values to FactValue
-pub fn to_fact_value(
-    text: Option<String>,
-    num: Option<f64>,
-    time: Option<i64>,
-) -> Option<fact::FactValue> {
-    if let Some(t) = text {
-        Some(fact::FactValue::Text(t))
-    } else if let Some(n) = num {
-        Some(fact::FactValue::Num(n))
-    } else {
-        time.map(fact::FactValue::Time)
-    }
-}
-
-/// Convert fact::FactValue to local FactValue
-pub fn to_local_fact_value(fv: &fact::FactValue) -> FactValue {
-    match fv {
-        fact::FactValue::Text(t) => FactValue::Text(t.clone()),
-        fact::FactValue::Num(n) => FactValue::Num(*n),
-        fact::FactValue::Time(ts) => FactValue::Time(*ts),
-        fact::FactValue::Path(p) => FactValue::Text(p.clone()),
-    }
-}
-
-// ============================================================================
-// Value Handling
-// ============================================================================
-
-/// Stored fact value - can be text, number, or timestamp
-/// A fact value from the database
-#[derive(Clone)]
-pub enum FactValue {
-    Text(String),
-    Num(f64),
-    Time(i64),
-}
-
-impl From<FactValue> for serde_json::Value {
-    fn from(fv: FactValue) -> Self {
-        match fv {
-            FactValue::Text(s) => serde_json::Value::String(s),
-            FactValue::Num(n) => serde_json::Number::from_f64(n)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            FactValue::Time(ts) => serde_json::Value::Number(ts.into()),
-        }
     }
 }

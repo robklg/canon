@@ -422,10 +422,18 @@ the report invited the one command that refuses, in four separate ways.
   will use (`a_locks_age_is_stated_on_its_own_line`) — a raised obstacle the step does not
   answer is never left unspoken. Each is right at its own grain, and the rebuild `apply` names
   arrives at the report's answer one step later.
-  **Two pattern failures, two opposite remedies**: a pattern placing files relative to a scope
-  the **lock** was built without is repaired by `{source.rel_path}` or by declaring a scope and
-  refreshing, and never by checking fact coverage — the scope key is not a fact, so no import
-  supplies it; a pattern naming a fact no source carries is repaired only by the fact. The
+  **Each pattern failure is answered by its cause.** `ops/pattern.rs`'s `PatternGaps` records
+  which causes a run met, read off the facility's typed `expr::PatternNoValue`, never off a
+  refusal's wording: a scope the lock lacks, a fact a source does not carry, a save time Canon
+  cannot read, a time coarser than the pattern's modifier. `adjust_pattern_remedy` composes one
+  pair per cause met, and every cause met alone composes one, so the step withheld above always
+  has an answer (`the_pattern_remedy_prints_one_pair_per_cause_met`). A pattern placing files
+  relative to a scope the **lock** was built without is repaired by `{source.rel_path}` or by
+  declaring a scope and refreshing, and never by checking fact coverage — the scope key is not a
+  fact, so no import supplies it; a pattern naming a fact no source carries is repaired only by
+  the fact. The save-time and too-coarse pairs leave such files out through a query entry, the
+  too-coarse one naming each key and modifier that failed, or correct the save time; a query and
+  a save time are both read when the lock is built, so those lines name the refresh. The
   condition is the lock's, never the manifest's: a manifest may declare a scope its lock has not
   seen, and there the rebuild is the step — the table reads the same lock answer to decide it
   (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`; the table once read the header's
@@ -443,6 +451,13 @@ the report invited the one command that refuses, in four separate ways.
 
 ## Conventions
 
+- **Selection and placement read UTC until a manifest records the zone it was made in** — four
+  `// AUDIT:` sites hand `UserZone::utc()` to the facility, never the machine's zone, because what
+  a manifest takes and where it places must not depend on where a command runs: `ops/generate.rs`'s
+  selection, `ops/plan.rs`'s and `ops/status.rs`'s placement, and `cli/apply.rs`'s confirmation
+  samples. Each is pinned with the machine set to Amsterdam and UTC expected
+  (`the_selection_reads_utc_whatever_the_machines_zone` and its three siblings); marker and pin go
+  together when the lock carries the zone.
 - **The manifest's base_dir is gated at plan time** (`plan_apply` precondition, via
   `core::domain::path::rel_dir_escapes`): absolute or parent-traversing values are refused before
   any plan is computed — an absolute value replaces the archive root in the filesystem join, a `..`

@@ -13,6 +13,7 @@ use crate::core::domain::fate::Transition;
 use crate::core::domain::format::{
     format_count, format_date, format_size, format_time_ago, shell_quote,
 };
+use crate::core::domain::time::zone::UserZone;
 use crate::story::domain::acts::ActGroup;
 use crate::story::domain::locations::{LocationAggregate, LocationCount};
 use crate::story::domain::place::StoryPlace;
@@ -34,7 +35,7 @@ pub enum Voicing {
 }
 
 /// The whole report as lines — pure, so rendering is testable.
-pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
+pub fn story_lines(report: &StoryReport, cap: usize, now: i64, zone: &UserZone) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("Story: {}", report.root.path));
     lines.push(String::new());
@@ -48,14 +49,18 @@ pub fn story_lines(report: &StoryReport, cap: usize, now: i64) -> Vec<String> {
     lines.push(format!(
         "  first indexed  {}",
         match report.first_indexed {
-            Some(ts) => format_date(ts),
+            Some(ts) => format_date(ts, zone),
             None => "unknown".to_string(),
         }
     ));
     lines.push(format!(
         "  last scan      {}",
         match report.root.last_scanned_at {
-            Some(ts) => format!("{} ({})", format_date(ts), format_time_ago(Some(ts), now)),
+            Some(ts) => format!(
+                "{} ({})",
+                format_date(ts, zone),
+                format_time_ago(Some(ts), now)
+            ),
             None => "never".to_string(),
         }
     ));
@@ -730,6 +735,23 @@ mod tests {
         }
     }
 
+    /// The story's dates read on the user's clock, in the same layout: a root first indexed
+    /// and last scanned at 23:30 UTC on New Year's Eve 2023 reads 31 December in New York.
+    #[test]
+    fn the_story_dates_read_on_the_users_clock() {
+        let mut dated = report(place(""));
+        dated.first_indexed = Some(1704065400);
+        dated.root.last_scanned_at = Some(1704065400);
+        let lines = story_lines(
+            &dated,
+            usize::MAX,
+            1704065400 + 7200,
+            &UserZone::for_test("America/New_York"),
+        );
+        assert_has_line(&lines, "  first indexed  2023-12-31");
+        assert_has_line(&lines, "  last scan      2023-12-31 (2h ago)");
+    }
+
     fn assert_has_line(lines: &[String], needle: &str) {
         assert!(
             lines.iter().any(|l| l.contains(needle)),
@@ -761,7 +783,7 @@ mod tests {
         let mut root = place("");
         root.children.push(pictures);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "  pictures");
         assert_has_line(
             &lines,
@@ -794,7 +816,7 @@ mod tests {
         let mut root = place("");
         root.children.push(old);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "excluded 4,890 files   across 3 decisions");
         assert_has_line(&lines, "· \"installer junk\"   #57, #61");
         // The reasonless decision shows its id — "without reason" must
@@ -815,7 +837,7 @@ mod tests {
         let mut root = place("");
         root.children.push(old);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "excluded 176 files   #57 · \"installer junk\"");
         assert_no_line(&lines, "176 excluded");
     }
@@ -832,7 +854,7 @@ mod tests {
         let mut root = place("");
         root.children.push(old);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "excluded 3 files   #57");
         assert_has_line(&lines, "2 excluded");
     }
@@ -853,7 +875,7 @@ mod tests {
         let mut root = place("");
         root.children.push(old);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "1 covered");
         assert_has_line(&lines, "excluded 2 files"); // the act register narrates
         assert_no_line(&lines, "2 excluded"); // the standing restatement is gone
@@ -871,7 +893,7 @@ mod tests {
         let mut root = place("");
         root.children.push(old);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "excluded 4 files   #57");
         assert_no_line(&lines, "installer junk");
     }
@@ -896,7 +918,7 @@ mod tests {
         let mut root = place("");
         root.children.push(old);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "· \"old exports\"   #155");
         assert_has_line(&lines, "· #131");
         assert_has_line(&lines, "· #63 — no reason given");
@@ -912,7 +934,7 @@ mod tests {
         let mut root = place("");
         root.children.push(gone);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "deleted 1,204 files (scan-observed)   #70");
     }
 
@@ -929,7 +951,7 @@ mod tests {
         let mut root = place("");
         root.children.push(keep);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "note: beautiful pictures, still need a home");
     }
 
@@ -953,7 +975,7 @@ mod tests {
             root
         };
 
-        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        let judgment = story_lines(&report(build()), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&judgment, "nothing stands here now");
 
         let reference = reference_place_lines(&report(build()));
@@ -968,7 +990,7 @@ mod tests {
             child.standing.unresolved = 1;
             root.children.push(child);
         }
-        let lines = story_lines(&report(root), 1, 0);
+        let lines = story_lines(&report(root), 1, 0, &UserZone::utc());
         assert_has_line(&lines, "… and 2 more places (--all shows everything)");
         assert_has_line(&lines, "Standing: 0 sources");
     }
@@ -999,7 +1021,7 @@ mod tests {
         };
 
         for cap in [1, 2] {
-            let lines = story_lines(&report(build()), cap, 0);
+            let lines = story_lines(&report(build()), cap, 0, &UserZone::utc());
             let has_bare_cite = lines
                 .iter()
                 .any(|l| l.contains("#31") && !l.contains(reason));
@@ -1024,13 +1046,13 @@ mod tests {
         let mut root = place("");
         root.children.push(lone);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "excluded 1 files");
     }
 
     #[test]
     fn a_bare_root_still_tells_its_empty_story() {
-        let lines = story_lines(&report(place("")), usize::MAX, 0);
+        let lines = story_lines(&report(place("")), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "  (root)");
         assert_has_line(&lines, "nothing indexed here");
     }
@@ -1093,7 +1115,7 @@ mod tests {
             root
         };
 
-        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        let judgment = story_lines(&report(build()), usize::MAX, 0, &UserZone::utc());
         assert_has_line(
             &judgment,
             "10 archived from here — copies stand in /archive/media",
@@ -1158,7 +1180,7 @@ mod tests {
             "10 files · let go — for 7 of these, no record of the decision survives",
         );
 
-        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        let judgment = story_lines(&report(build()), usize::MAX, 0, &UserZone::utc());
         assert!(
             judgment
                 .iter()
@@ -1233,7 +1255,7 @@ mod tests {
             root
         };
 
-        let judgment = story_lines(&report(build()), usize::MAX, 0);
+        let judgment = story_lines(&report(build()), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&judgment, "(2 moved, 3 copied)");
 
         let lines = reference_place_lines(&report(build()));
@@ -1325,7 +1347,7 @@ mod tests {
         let mut root = place("");
         root.children.push(pictures);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         let expected = vec![
             "Story: /r",
             "",
@@ -1377,7 +1399,7 @@ mod tests {
         let mut root = place("");
         root.children.push(italy);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(&lines, "2 covered — copies stand in /archive/a (suspended)");
     }
 
@@ -1393,7 +1415,7 @@ mod tests {
         let mut root = place("");
         root.children.push(italy);
 
-        let lines = story_lines(&report(root), usize::MAX, 0);
+        let lines = story_lines(&report(root), usize::MAX, 0, &UserZone::utc());
         assert_has_line(
             &lines,
             "2 covered — copies stand in /archive/live (1), /archive/parked (1) (suspended)",
@@ -1472,7 +1494,7 @@ mod tests {
             last_scanned_at: None,
             suspended: true,
         }];
-        let lines = story_lines(&report, usize::MAX, 0);
+        let lines = story_lines(&report, usize::MAX, 0, &UserZone::utc());
 
         assert!(
             lines

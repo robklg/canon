@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
@@ -165,6 +166,16 @@ pub(super) fn set_decision_receipt(
 }
 
 pub(super) fn compile_to(conn: &Connection, root_id: i64, dest: &Path) -> CompiledBook {
+    compile_on(conn, root_id, dest, UserZone::utc())
+}
+
+/// [`compile_to`] with the binder's clock named.
+pub(super) fn compile_on(
+    conn: &Connection,
+    root_id: i64,
+    dest: &Path,
+    zone: UserZone,
+) -> CompiledBook {
     let story = fetch_root_story(conn, root_id).unwrap();
     compile_book(
         conn,
@@ -172,6 +183,7 @@ pub(super) fn compile_to(conn: &Connection, root_id: i64, dest: &Path) -> Compil
         &CompileParams {
             reason: Some("story complete".to_string()),
             now: 1_753_000_000,
+            zone,
             dest_dir: dest.to_path_buf(),
             ceremony_decision_id: None,
             telling: Some(test_telling()),
@@ -324,7 +336,7 @@ pub(super) fn begin_with(
     let story = fetch_root_story(conn, root_id).unwrap();
     let review = readiness_lens(&story);
     let config = config_with(recording);
-    let plan = plan_bind(&story, &config, CEREMONY_NOW).unwrap();
+    let plan = plan_bind(&story, &config, CEREMONY_NOW, &UserZone::utc()).unwrap();
     begin_ceremony(
         conn,
         story,
@@ -333,6 +345,7 @@ pub(super) fn begin_with(
         CeremonyParams {
             reason: Some("story complete".to_string()),
             now: CEREMONY_NOW,
+            zone: UserZone::utc(),
             command_line: "canon roots retire".to_string(),
             config,
         },

@@ -13,7 +13,9 @@ use crate::core::domain::format::first_chars;
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::repo;
 
-use super::{iso_date, SHELF_DIR};
+use super::SHELF_DIR;
+use crate::core::domain::format::format_date;
+use crate::core::domain::time::zone::UserZone;
 
 pub enum ShelfLine {
     /// A book standing on the shelf, enriched from its decision row when one
@@ -107,13 +109,13 @@ fn read_listing_probe(dir: &Path) -> Option<ListingProbe> {
     toml::from_str(&raw).ok()
 }
 
-/// The local day a book was compiled, from its own UTC compile stamp — the
-/// column reads one calendar either way, whether the line is dated from the
+/// The day a book was compiled on the user's clock, from its own UTC compile stamp —
+/// the column reads one calendar either way, whether the line is dated from the
 /// decision row or from the book alone. A stamp this cannot parse keeps its
 /// leading date verbatim: the probe identifies, it never refuses.
-fn book_day(compiled_at: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(compiled_at) {
-        Ok(dt) => iso_date(dt.timestamp()),
+fn book_day(compiled_at: &str, zone: &UserZone) -> String {
+    match compiled_at.parse::<jiff::Timestamp>() {
+        Ok(at) => format_date(at.as_second(), zone),
         Err(_) => first_chars(compiled_at, 10),
     }
 }
@@ -121,7 +123,11 @@ fn book_day(compiled_at: &str) -> String {
 /// Compute the retired fleet. Rows join books on one key: the decision's
 /// recorded artifact reference naming the book's directory — the key every
 /// bound book carries, past and future, so no book needs a special case.
-pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result<ShelfListing> {
+pub fn compute_shelf_listing(
+    conn: &Connection,
+    config: &LedgerConfig,
+    zone: &UserZone,
+) -> Result<ShelfListing> {
     let roots = repo::root::fetch_all(conn)?;
     let rows =
         crate::retire::repo::fetch_bound_retirements(conn, DecisionCommand::RootsRetire.as_str())?;
@@ -166,9 +172,15 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
                             .find(|r| basename(&r.receipt_rel_path) == dir_name);
                         lines.push(ShelfLine::Book {
                             root_path: probe.identity.path,
-                            retired_on: row
-                                .map(|r| iso_date(r.created_at))
-                                .or_else(|| probe.identity.compiled_at.as_deref().map(book_day)),
+                            retired_on: row.map(|r| format_date(r.created_at, zone)).or_else(
+                                || {
+                                    probe
+                                        .identity
+                                        .compiled_at
+                                        .as_deref()
+                                        .map(|at| book_day(at, zone))
+                                },
+                            ),
                             entries: probe.counts.and_then(|c| c.entries),
                             book_dir: dir_name.clone(),
                             reason: row.and_then(|r| r.reason.clone()),
@@ -201,7 +213,7 @@ pub fn compute_shelf_listing(conn: &Connection, config: &LedgerConfig) -> Result
         };
         lines.push(ShelfLine::RecordedOnly {
             root_path: row.root_path.clone(),
-            retired_on: iso_date(row.created_at),
+            retired_on: format_date(row.created_at, zone),
             book_path,
             reason: row.reason.clone(),
         });

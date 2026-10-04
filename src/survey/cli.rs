@@ -173,7 +173,14 @@ pub fn run(
         archive_side_set_aside,
         source_side_prefixes,
         location_note_counts,
-    } = run_survey(conn, scope_prefixes, filter_strs, &orchestration, &params)?;
+    } = run_survey(
+        conn,
+        scope_prefixes,
+        filter_strs,
+        &orchestration,
+        &params,
+        crate::user_zone(),
+    )?;
 
     let scope = narrowed_header_scope(
         &options.scope,
@@ -507,26 +514,31 @@ mod tests {
     /// so `main.rs` can give it a non-zero exit with no `Error:` prefix.
     #[test]
     fn cli_run_returns_frame_refused_for_an_archive_scope() {
-        let conn = open_in_memory_for_test();
-        let archive = insert_root(&conn, "/archive", "archive", false);
-        let obj = insert_object(&conn, "hash_001", false);
-        insert_source(&conn, archive, "media/a.jpg", Some(obj));
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                let conn = open_in_memory_for_test();
+                let archive = insert_root(&conn, "/archive", "archive", false);
+                let obj = insert_object(&conn, "hash_001", false);
+                insert_source(&conn, archive, "media/a.jpg", Some(obj));
 
-        let options = SurveyOptions {
-            scope: ResolvedScope {
-                prefixes: vec!["/archive/media".to_string()],
-                set_aside: Vec::new(),
-                parked: Vec::new(),
-                pause: Vec::new(),
+                let options = SurveyOptions {
+                    scope: ResolvedScope {
+                        prefixes: vec!["/archive/media".to_string()],
+                        set_aside: Vec::new(),
+                        parked: Vec::new(),
+                        pause: Vec::new(),
 
-                from_cwd: false,
-                auto_include_archived: true,
+                        from_cwd: false,
+                        auto_include_archived: true,
+                    },
+                    ..test_options()
+                };
+                let mut db = repo::Db::from_connection(conn);
+                let exit = run(&mut db, &["/archive/media".to_string()], &[], &options).unwrap();
+                assert_eq!(exit, SurveyExit::FrameRefused);
             },
-            ..test_options()
-        };
-        let mut db = repo::Db::from_connection(conn);
-        let exit = run(&mut db, &["/archive/media".to_string()], &[], &options).unwrap();
-        assert_eq!(exit, SurveyExit::FrameRefused);
+        )
     }
 
     #[test]

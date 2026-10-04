@@ -36,7 +36,7 @@ this one.
 
 **`repo.rs`** — what the language needs read out of the database before it can be evaluated:
 `prefetch_facts` and `prefetch_status_data` fill the cache, `is_known_key` and `get_fact_value`
-each answer one question about one key.
+each answer one question about one key, and `fetch_source_row` reads one source's row.
 
 ## The front door
 
@@ -48,7 +48,7 @@ itself is its own business, and rearranging it must not be visible to any caller
 
 - **Named externally** — what the rest of the engine actually writes down.
 - **Completing the surface** — `PathAccessor` and `ModifierCall`, the *parameter* types of
-  `apply_accessor` and `apply_modifier`, carried while nothing names them because the
+  `apply_chain`, carried while nothing names them because the
   constraint is structural: a caller that factors out a helper taking one must be able to name
   it. Return types are absent under the parameter-type rule — inference always lets a caller
   leave one unnamed, so carrying it would record demand that does not exist. The
@@ -186,33 +186,36 @@ shadows nothing, so it is fetched like any other stored fact — pinned by
 `a_key_the_context_does_not_supply_is_fetched` (`ops/pattern.rs`). No Canon writer can create
 such a row, which is why the widening is unreachable in practice and pinned anyway.
 
-## The one pinned exception
+## The per-source comparison reads its row through `repo`
 
-`ops/filter.rs`'s `check_fact_compare` queries the database from the operations stratum
-instead of going through the repository beside it: it reads the source row a built-in key is
-derived from, and the object link stored facts hang off. It carries an `// AUDIT:` marker and is
-pinned by `the_facility_leaves_sql_to_its_repo_but_for_one_pinned_exception`
-(`tests/architecture.rs`), which asserts the set of SQL-speaking functions in `ops/` is exactly
-this one *and* that it still carries its marker. The pin fails if a second such function
-appears, if the marker is dropped while the hazard stands, or if the site disappears — which is
-what the repair looks like.
-
-Moving the function whole into `repo` would put comparison logic in the repository, breaking the
-same rule from the other side. What retires the exception is moving its two reads into `repo`
-and leaving the comparison in `ops`. The marker and the pin are retired by the same commit.
+`ops/filter.rs` speaks no SQL. A built-in key compared or tested for existence is resolved per
+source, and the row it is resolved from — the source's attributes and the object its content
+facts hang off — comes from `repo.rs`'s `fetch_source_row`. The comparison stays in `ops`;
+moving it into `repo` would put comparison logic in the repository instead.
 
 ## Built-in values are derived once
 
 `get_builtin_value` (`domain/value.rs`) is the one place a built-in value is derived from a
 source row; `--where`, `facts --key` and `{source.*}` read it. Readers split built-in from stored
-by the resolver's answer (`is_computed()`, pinned equal to its `None`), never by listing
-visibility. Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
+by the key (`is_computed()`, pinned equal to the resolver's answer on a readable source), never
+by its `None` or by visibility: a computed key the row cannot answer has no value. Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
 `content.hash.sha256|short` (`BuiltinKey::reading`); patterns keep the lock's `object.hash`.
 Pinned per reader. Not bound: pattern aliases' own modifier chains.
 
 Separately, a written key keeps its prefix only where a stored key can carry one (`source.`,
 `content.`); `object.` names a key in patterns alone. Agreement with import is pinned on sampled
 prefixes beside import.
+
+## The clock is a parameter
+
+Times read through the frame rule on the clock the facility is handed — `SelectionParams.clock`,
+`EvalContext`'s `clock`, the display and report functions' `zone` — never the machine's; a
+manifest's run is handed UTC. A modifier answers `Modified`: a value, or
+`NoValueCause::TooCoarse` where the time is coarser than the modifier reads. Every reader treats
+no value as a missing fact, `?` included; a pattern refuses with `PatternNoValue`, a typed cause
+the archive composes its remedy from, never its sentence. Two older readings stay under
+`// AUDIT:`: a typed `--where` date is a UTC instant (`domain/filter.rs`), and a number given to a
+time modifier is epoch seconds (`domain/transform.rs`).
 
 ## Mechanics
 

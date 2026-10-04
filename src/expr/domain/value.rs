@@ -18,7 +18,7 @@
 //! use crate::expr::ParsedFactKey;
 //!
 //! let key = ParsedFactKey::parse("source.mtime|year")?;
-//! let value = resolve_fact_value(&source, &key, &stored_facts)?;
+//! let value = resolve_fact_value(&source, &key, &stored_facts, &zone)?;
 //! // value is Some("2024") or None if fact doesn't exist
 //! ```
 
@@ -27,10 +27,12 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::key::{BuiltinKey, ParsedFactKey};
-use super::transform;
+use super::transform::{self, Modified};
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::source::Source;
+use crate::core::domain::time::value::TimeValue;
+use crate::core::domain::time::zone::UserZone;
 
 /// Everything the built-in vocabulary can be computed from — the complete set,
 /// so a built-in either resolves from these or is a stored fact.
@@ -98,6 +100,10 @@ impl From<&Source> for SourceAttributes {
 /// * `source` - The source to get the fact value for
 /// * `key` - The parsed fact key (base key + accessor + modifiers)
 /// * `stored_facts` - Map of fact key → FactEntry for this source's stored facts
+/// * `zone` - The user's clock, which every time is read on
+///
+/// A modifier that gives no value (`|month` on a time known only to the year) resolves to
+/// `None`, as a missing fact does.
 ///
 /// # Errors
 ///
@@ -106,14 +112,20 @@ pub fn resolve_fact_value(
     source: &Source,
     key: &ParsedFactKey,
     stored_facts: &HashMap<String, FactEntry>,
+    zone: &UserZone,
 ) -> Result<Option<String>> {
-    // 1. Get raw value: the resolver for a built-in it answers from the
-    // source row, the stored facts for everything else — the hash keys
-    // included, which are built-ins the source row cannot answer. The
-    // resolver's own `None` is the partition, as in the filter's compare.
-    let raw_value = BuiltinKey::from_str(&key.base_key)
-        .and_then(|builtin| get_builtin_value(&SourceAttributes::from(source), builtin))
-        .or_else(|| stored_facts.get(&key.base_key).map(|e| e.value.clone()));
+    // 1. Get raw value: the resolver for a built-in the source row computes,
+    // the stored facts for everything else — the hash keys included, which are
+    // built-ins the source row cannot answer. The partition is the key's
+    // (`is_computed`), as in the filter's compare, never the resolver's `None`:
+    // a computed key the row cannot answer (a save time outside the years Canon
+    // reads) has no value, and never falls through to a stored row of its name.
+    let raw_value = match BuiltinKey::from_str(&key.base_key) {
+        Some(builtin) if builtin.is_computed() => {
+            get_builtin_value(&SourceAttributes::from(source), builtin)
+        }
+        _ => stored_facts.get(&key.base_key).map(|e| e.value.clone()),
+    };
 
     // 2. Apply transforms if value exists
     match raw_value {
@@ -126,8 +138,7 @@ pub fn resolve_fact_value(
             // a filter is asking a question whose honest answer is "no".
             // Deliberate, and not to be unified without first deciding which
             // of the two meanings wins.
-            let transformed = apply_transforms(value, key)?;
-            Ok(Some(transformed))
+            apply_transforms(value, key, zone)
         }
         None => Ok(None),
     }
@@ -152,7 +163,10 @@ pub fn get_builtin_value(source: &SourceAttributes, builtin: BuiltinKey) -> Opti
             Some(FactValue::Text(ext))
         }
         BuiltinKey::SourceSize | BuiltinKey::Size => Some(FactValue::Num(source.size as f64)),
-        BuiltinKey::SourceMtime | BuiltinKey::Mtime => Some(FactValue::Time(source.mtime)),
+        // A save time outside the years every zone reads in 0000–9999 has no value.
+        BuiltinKey::SourceMtime | BuiltinKey::Mtime => TimeValue::from_epoch_secs(source.mtime)
+            .ok()
+            .map(FactValue::Time),
         BuiltinKey::SourcePath => Some(FactValue::Path(source.path())),
         BuiltinKey::SourceRoot => Some(FactValue::Path(source.root_path.clone())),
         BuiltinKey::SourceRelPath => Some(FactValue::Path(source.rel_path.clone())),
@@ -181,31 +195,36 @@ pub fn get_builtin_value(source: &SourceAttributes, builtin: BuiltinKey) -> Opti
     }
 }
 
-/// Apply accessor and modifiers to a value, returning display string.
-fn apply_transforms(value: FactValue, key: &ParsedFactKey) -> Result<String> {
-    let mut result = value;
-
-    // Apply accessor if present
-    if let Some(ref acc) = key.accessor {
-        result = transform::apply_accessor(&result, acc, &key.raw)?;
-    }
-
-    // Apply modifiers (for_display: true since this is for facts output)
-    for modifier_call in &key.modifiers {
-        result = transform::apply_modifier(&result, modifier_call, &key.raw, true)?;
-    }
-
-    // Convert to display string
-    Ok(fact_value_to_display(&result))
+/// Apply accessor and modifiers to a value, returning its display string — or `None` where
+/// a modifier gave no value, which a reader counts as a source without one.
+fn apply_transforms(
+    value: FactValue,
+    key: &ParsedFactKey,
+    zone: &UserZone,
+) -> Result<Option<String>> {
+    // for_display: true since this is for facts output
+    Ok(
+        match transform::apply_chain(
+            value,
+            key.accessor.as_ref(),
+            &key.modifiers,
+            &key.raw,
+            true,
+            zone,
+        )? {
+            Modified::Value(v) => Some(fact_value_to_display(&v, zone)),
+            Modified::NoValue(_) => None,
+        },
+    )
 }
 
 /// Convert a FactValue to a display string.
 ///
 /// This handles formatting for human-readable output:
 /// - Numbers: integers shown without decimal, floats shown with decimals
-/// - Times: formatted as YYYY-MM-DD HH:MM:SS
+/// - Times: the printed form on the user's clock, at the value's precision
 /// - Text/Path: shown as-is
-pub fn fact_value_to_display(value: &FactValue) -> String {
+pub fn fact_value_to_display(value: &FactValue, zone: &UserZone) -> String {
     match value {
         FactValue::Text(t) => t.clone(),
         FactValue::Path(p) => p.clone(),
@@ -216,9 +235,7 @@ pub fn fact_value_to_display(value: &FactValue) -> String {
                 format!("{n}")
             }
         }
-        FactValue::Time(ts) => chrono::DateTime::from_timestamp(*ts, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| ts.to_string()),
+        FactValue::Time(tv) => tv.printed(zone),
     }
 }
 
@@ -249,7 +266,11 @@ mod tests {
     /// this wrong — `content.hash.sha256` is a built-in *and* a genuinely
     /// stored fact, and `hash`/`hash_short` are the resolver's other `None`
     /// arms — so the classification is asserted against the resolver itself
-    /// rather than against a list someone maintained.
+    /// rather than against a list someone maintained. The probe is a source
+    /// whose every attribute the resolver reads; a computed key the row cannot
+    /// answer (a save time outside the years Canon reads) is still computed —
+    /// it has no value, pinned at each reader that partitions on it
+    /// (`a_computed_key_never_falls_through_to_a_stored_row` and its twin).
     ///
     /// **Its limit, which is half the point.** The equality holds over
     /// `BuiltinKey` and says nothing wider. `scope.rel_path` and
@@ -321,7 +342,7 @@ mod tests {
     fn resolve_source_ext() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.ext").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("jpg".to_string()));
     }
 
@@ -330,11 +351,11 @@ mod tests {
         let mut source = make_source();
         source.rel_path = "2024/IMG_001.JPG".to_string();
         let key = ParsedFactKey::parse("source.ext").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("JPG".to_string()));
 
         let key = ParsedFactKey::parse("source.ext|lowercase").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("jpg".to_string()));
     }
 
@@ -343,7 +364,7 @@ mod tests {
         let mut source = make_source();
         source.rel_path = "Makefile".to_string();
         let key = ParsedFactKey::parse("source.ext").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("".to_string()));
     }
 
@@ -351,7 +372,7 @@ mod tests {
     fn resolve_source_size() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.size").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("1024000".to_string()));
     }
 
@@ -359,7 +380,7 @@ mod tests {
     fn resolve_source_mtime() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.mtime").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("2024-06-15 12:00:00".to_string()));
     }
 
@@ -367,7 +388,7 @@ mod tests {
     fn resolve_source_path() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.path").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(
             result,
             Some("/photos/2024/vacation/IMG_001.jpg".to_string())
@@ -379,7 +400,7 @@ mod tests {
         let mut source = make_source();
         source.rel_path = "".to_string();
         let key = ParsedFactKey::parse("source.path").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("/photos".to_string()));
     }
 
@@ -387,7 +408,7 @@ mod tests {
     fn resolve_source_root() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.root").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("/photos".to_string()));
     }
 
@@ -395,7 +416,7 @@ mod tests {
     fn resolve_filename() {
         let source = make_source();
         let key = ParsedFactKey::parse("filename").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("IMG_001.jpg".to_string()));
     }
 
@@ -403,7 +424,7 @@ mod tests {
     fn resolve_stem() {
         let source = make_source();
         let key = ParsedFactKey::parse("stem").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("IMG_001".to_string()));
     }
 
@@ -412,11 +433,11 @@ mod tests {
         let source = make_source();
 
         let key = ParsedFactKey::parse("source.device").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("16777220".to_string()));
 
         let key = ParsedFactKey::parse("source.inode").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("12345678".to_string()));
     }
 
@@ -430,7 +451,7 @@ mod tests {
         let stored =
             make_stored_facts(vec![("content.Make", FactValue::Text("Canon".to_string()))]);
         let key = ParsedFactKey::parse("content.Make").unwrap();
-        let result = resolve_fact_value(&source, &key, &stored).unwrap();
+        let result = resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap();
         assert_eq!(result, Some("Canon".to_string()));
     }
 
@@ -439,7 +460,7 @@ mod tests {
         let source = make_source();
         let stored = make_stored_facts(vec![("content.Width", FactValue::Num(4032.0))]);
         let key = ParsedFactKey::parse("content.Width").unwrap();
-        let result = resolve_fact_value(&source, &key, &stored).unwrap();
+        let result = resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap();
         assert_eq!(result, Some("4032".to_string()));
     }
 
@@ -448,10 +469,11 @@ mod tests {
         let source = make_source();
         let stored = make_stored_facts(vec![(
             "content.DateTimeOriginal",
-            FactValue::Time(1704067200), // 2024-01-01 00:00:00 UTC
+            // A migrated time fact: a clock reading at second precision.
+            FactValue::Time(crate::core::testing::migrated_time(1704067200)),
         )]);
         let key = ParsedFactKey::parse("content.DateTimeOriginal").unwrap();
-        let result = resolve_fact_value(&source, &key, &stored).unwrap();
+        let result = resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap();
         assert_eq!(result, Some("2024-01-01 00:00:00".to_string()));
     }
 
@@ -460,7 +482,7 @@ mod tests {
         let source = make_source();
         let stored = HashMap::new();
         let key = ParsedFactKey::parse("content.NonExistent").unwrap();
-        let result = resolve_fact_value(&source, &key, &stored).unwrap();
+        let result = resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap();
         assert_eq!(result, None);
     }
 
@@ -472,7 +494,7 @@ mod tests {
     fn resolve_with_accessor() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.rel_path[-1]").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("IMG_001.jpg".to_string()));
     }
 
@@ -480,7 +502,7 @@ mod tests {
     fn resolve_with_modifier() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.mtime|year").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("2024".to_string()));
     }
 
@@ -488,7 +510,7 @@ mod tests {
     fn resolve_with_accessor_and_modifier() {
         let source = make_source();
         let key = ParsedFactKey::parse("source.rel_path[-1]|stem").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, Some("IMG_001".to_string()));
     }
 
@@ -497,7 +519,7 @@ mod tests {
         let source = make_source();
         // Trying to apply |year to a text value should fail
         let key = ParsedFactKey::parse("source.ext|year").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new());
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("time-type"));
     }
@@ -515,16 +537,38 @@ mod tests {
             FactValue::Num(999.0), // This should be ignored
         )]);
         let key = ParsedFactKey::parse("source.size").unwrap();
-        let result = resolve_fact_value(&source, &key, &stored).unwrap();
+        let result = resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap();
         // Should use the builtin value (1024000), not the stored one (999)
         assert_eq!(result, Some("1024000".to_string()));
+    }
+
+    /// A computed key the source row cannot answer has no value, and a stored row wearing its
+    /// name is never read in its place: the partition is the key's, not the resolver's `None`.
+    /// Its twin at the filter's compare is
+    /// `a_computed_key_the_row_cannot_answer_matches_no_stored_row`.
+    #[test]
+    fn a_computed_key_never_falls_through_to_a_stored_row() {
+        let mut source = make_source();
+        source.mtime = 253402300799; // a save time some zone reads in year 10000
+        let stored = make_stored_facts(vec![(
+            "source.mtime",
+            FactValue::Time(crate::core::domain::time::reading::read_time("2020").unwrap()),
+        )]);
+        for raw in ["source.mtime", "mtime", "source.mtime|year"] {
+            let key = ParsedFactKey::parse(raw).unwrap();
+            assert_eq!(
+                resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap(),
+                None,
+                "{raw}"
+            );
+        }
     }
 
     #[test]
     fn resolve_unknown_key_no_stored() {
         let source = make_source();
         let key = ParsedFactKey::parse("unknown.key").unwrap();
-        let result = resolve_fact_value(&source, &key, &HashMap::new()).unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
         assert_eq!(result, None);
     }
 
@@ -535,7 +579,7 @@ mod tests {
         let source = make_source();
         let key = ParsedFactKey::parse("hash").unwrap();
         assert_eq!(
-            resolve_fact_value(&source, &key, &HashMap::new()).unwrap(),
+            resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap(),
             None
         );
 
@@ -545,7 +589,7 @@ mod tests {
         )]);
         let short = ParsedFactKey::parse("hash_short").unwrap();
         assert_eq!(
-            resolve_fact_value(&source, &short, &stored).unwrap(),
+            resolve_fact_value(&source, &short, &stored, &UserZone::utc()).unwrap(),
             Some("abcdef12".to_string())
         );
     }
@@ -556,19 +600,28 @@ mod tests {
 
     #[test]
     fn display_integer_num() {
-        assert_eq!(fact_value_to_display(&FactValue::Num(42.0)), "42");
+        assert_eq!(
+            fact_value_to_display(&FactValue::Num(42.0), &UserZone::utc()),
+            "42"
+        );
     }
 
     #[test]
     fn display_float_num() {
-        assert_eq!(fact_value_to_display(&FactValue::Num(12.375)), "12.375");
+        assert_eq!(
+            fact_value_to_display(&FactValue::Num(12.375), &UserZone::utc()),
+            "12.375"
+        );
     }
 
     #[test]
     fn display_time() {
         // 2024-06-15 12:00:00 UTC
         assert_eq!(
-            fact_value_to_display(&FactValue::Time(1718452800)),
+            fact_value_to_display(
+                &FactValue::Time(TimeValue::from_epoch_secs(1718452800).unwrap()),
+                &UserZone::utc()
+            ),
             "2024-06-15 12:00:00"
         );
     }

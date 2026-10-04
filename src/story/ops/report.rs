@@ -375,8 +375,18 @@ mod tests {
         let via_lens = report_over(&conn, &fetched, &no_dust()).unwrap();
         let via_command = compute_story(&conn, root, &no_dust()).unwrap();
         assert_eq!(
-            crate::story::ops::render::story_lines(&via_lens, usize::MAX, 0),
-            crate::story::ops::render::story_lines(&via_command, usize::MAX, 0),
+            crate::story::ops::render::story_lines(
+                &via_lens,
+                usize::MAX,
+                0,
+                &crate::core::domain::time::zone::UserZone::utc()
+            ),
+            crate::story::ops::render::story_lines(
+                &via_command,
+                usize::MAX,
+                0,
+                &crate::core::domain::time::zone::UserZone::utc()
+            ),
         );
     }
 

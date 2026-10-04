@@ -3,22 +3,33 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::core::domain::config::LedgerConfig;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::retire::ops::shelf::ShelfListing;
-use crate::retire::ops::{compute_shelf_listing, iso_date, ShelfLine, SHELF_DIR};
+use crate::retire::ops::{compute_shelf_listing, ShelfLine, SHELF_DIR};
 
 use super::fixtures::insert_bound_retirement;
 
 /// A minimal identifiable book on the shelf: a directory with a
 /// `meta.toml` carrying identity and counts.
 fn place_book(shelf: &Path, dir_name: &str, root_path: &str, entries: i64) {
+    place_book_compiled_at(shelf, dir_name, root_path, entries, "2026-08-02T10:00:00Z");
+}
+
+fn place_book_compiled_at(
+    shelf: &Path,
+    dir_name: &str,
+    root_path: &str,
+    entries: i64,
+    compiled_at: &str,
+) {
     let dir = shelf.join(dir_name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
             dir.join("meta.toml"),
             format!(
-                "version = 1\n\n[identity]\npath = \"{root_path}\"\ncompiled_at = \"2026-08-02T10:00:00Z\"\n\n[counts]\nentries = {entries}\n"
+                "version = 1\n\n[identity]\npath = \"{root_path}\"\ncompiled_at = \"{compiled_at}\"\n\n[counts]\nentries = {entries}\n"
             ),
         )
         .unwrap();
@@ -26,7 +37,7 @@ fn place_book(shelf: &Path, dir_name: &str, root_path: &str, entries: i64) {
 
 fn listing_with_archive(conn: &Connection, archive_path: &str) -> ShelfListing {
     insert_test_root(conn, archive_path, "archive", false);
-    compute_shelf_listing(conn, &LedgerConfig::default()).unwrap()
+    compute_shelf_listing(conn, &LedgerConfig::default(), &UserZone::utc()).unwrap()
 }
 
 #[test]
@@ -58,7 +69,7 @@ fn shelf_listing_enriches_a_book_from_its_decision_row() {
         } => {
             assert_eq!(root_path, "/gone");
             // The decision's date, not the meta's compile date.
-            assert_eq!(retired_on.as_deref(), Some(iso_date(100).as_str()));
+            assert_eq!(retired_on.as_deref(), Some("1970-01-01"));
             assert_eq!(*entries, Some(3980));
             assert_eq!(book_dir, "gone-2026-08-02");
             assert_eq!(reason.as_deref(), Some("drive failing"));
@@ -91,11 +102,7 @@ fn shelf_listing_renders_an_unindexed_book_from_meta_alone() {
         } => {
             // Dated from the book's own compile stamp, rendered on the same
             // calendar a row-dated line uses — not the raw UTC prefix.
-            let compiled_at = chrono::DateTime::parse_from_rfc3339("2026-08-02T10:00:00Z").unwrap();
-            assert_eq!(
-                retired_on.as_deref(),
-                Some(iso_date(compiled_at.timestamp()).as_str())
-            );
+            assert_eq!(retired_on.as_deref(), Some("2026-08-02"));
             assert!(!indexed);
             assert!(reason.is_none());
         }
@@ -206,7 +213,7 @@ fn a_parked_archive_fleet_leaves_the_shelf_out_of_view_not_absent() {
     let archive_path = archive.path().to_string_lossy().to_string();
     let archive_id = insert_test_root(&conn, &archive_path, "archive", true);
 
-    let listing = compute_shelf_listing(&conn, &LedgerConfig::default()).unwrap();
+    let listing = compute_shelf_listing(&conn, &LedgerConfig::default(), &UserZone::utc()).unwrap();
 
     assert_eq!(
         listing.shelf,
@@ -228,11 +235,56 @@ fn no_archive_root_leaves_the_shelf_absent() {
     let conn = open_in_memory_for_test();
     insert_test_root(&conn, "/source", "source", false);
 
-    let listing = compute_shelf_listing(&conn, &LedgerConfig::default()).unwrap();
+    let listing = compute_shelf_listing(&conn, &LedgerConfig::default(), &UserZone::utc()).unwrap();
 
     assert_eq!(
         listing.shelf,
         crate::core::ops::receipt::LedgerRootOutcome::NoArchiveRoot
     );
     assert_eq!(listing.shelf_path(), None);
+}
+
+/// **The shelf reads one calendar on both paths.** A book retired at 23:30 in New York on
+/// 1 August is compiled at 03:30 UTC on 2 August; its line is dated 1 August whether it is
+/// dated from the decision row or from the book's own compile stamp alone.
+#[test]
+fn a_book_is_dated_on_the_users_day_from_the_row_and_from_the_book_alone() {
+    let new_york = UserZone::for_test("America/New_York");
+    let retired_line = |with_row: bool| {
+        let conn = open_in_memory_for_test();
+        let archive = tempfile::tempdir().unwrap();
+        let shelf = archive.path().join(SHELF_DIR);
+        place_book_compiled_at(
+            &shelf,
+            "gone-2026-08-01",
+            "/gone",
+            3,
+            "2026-08-02T03:30:00Z",
+        );
+        if with_row {
+            insert_bound_retirement(
+                &conn,
+                "/gone",
+                1785641400,
+                1,
+                Some("retired/gone-2026-08-01"),
+                None,
+            );
+        }
+        insert_test_root(&conn, archive.path().to_str().unwrap(), "archive", false);
+        let listing = compute_shelf_listing(&conn, &LedgerConfig::default(), &new_york).unwrap();
+        match &listing.lines[0] {
+            ShelfLine::Book {
+                retired_on,
+                indexed,
+                ..
+            } => {
+                assert_eq!(*indexed, with_row);
+                retired_on.clone()
+            }
+            _ => panic!("expected a Book line"),
+        }
+    };
+    assert_eq!(retired_line(true).as_deref(), Some("2026-08-01"));
+    assert_eq!(retired_line(false).as_deref(), Some("2026-08-01"));
 }

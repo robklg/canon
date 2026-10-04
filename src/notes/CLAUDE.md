@@ -9,7 +9,7 @@ calls and formats (`canon note`).
 
 Sealed behind a barrel of `run` (cli.rs, called only by `main.rs`); `Note`,
 `note_display_path`, `relative_to_scope` (domain.rs); `survey_note_context`,
-`SurveyNoteContext` (ops.rs); `format_note_date` (cli.rs); and `fetch_by_roots`,
+`SurveyNoteContext` (ops.rs); and `fetch_by_roots`,
 `fetch_all`, `count_subtree_notes`, `batch_count_subtree`, `insert` (repo.rs). The repo
 tier is on the barrel because six sibling subsystems — trail, sweep, survey, story, retire,
 roots — read notes directly rather than through an ops call of their own.

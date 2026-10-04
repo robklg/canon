@@ -76,7 +76,7 @@ any index. Fields:
 |-------|----------|---------|
 | `path` | always | Path relative to the root |
 | `size` | always | Bytes |
-| `mtime` | usually | Modification time, ISO-8601 UTC (`2015-06-12T09:30:00Z`); absent only on entries recovered from receipts that predate per-item mtimes |
+| `mtime` | usually | The file's save time, ISO 8601 in UTC with `Z` (`2015-06-12T09:30:00Z`; a year before 0000 in ISO 8601's expanded form), or the stored number of seconds since 1970, as text, for a save time beyond the instants Canon can hold; absent only on entries recovered from receipts that predate per-item mtimes |
 | `hash` | where known | Content hash with algorithm prefix (`sha256:…`) |
 | `fate` | always | What happened to this source; see the vocabulary below |
 | `decision` | where recorded | The fate-determining decision: for `archived`, the apply; for `excluded`/`deleted`, the decision that stamped it; for the standings, the source's most recent recorded transition. Cross-references the timeline's `#N` and the `NNNNNN-command.toml` receipt filenames, in the gathered `ledger/` for drive-local receipts and in the archive's live ledger for apply and exclusion receipts |

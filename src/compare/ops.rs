@@ -10,6 +10,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::{
     classify_all, refuse_parked_locations, resolve_path, validate_sources_exist,
@@ -46,6 +47,7 @@ pub fn run_compare(
     path_b: &Path,
     filter_strs: &[String],
     include: &IncludeSet,
+    zone: &UserZone,
 ) -> Result<CompareRun> {
     let filters: Vec<Filter> = filter_strs
         .iter()
@@ -74,9 +76,9 @@ pub fn run_compare(
     // fully resolve before side B starts. Not parallelizable without a
     // second connection, which is a different design entirely.
     let (sources_a, unhashed_a, contentless_a, used_status_a, excluded_count_a) =
-        select_and_build_map(conn, &prefix_a, &filters, include)?;
+        select_and_build_map(conn, &prefix_a, &filters, include, zone)?;
     let (sources_b, unhashed_b, contentless_b, used_status_b, excluded_count_b) =
-        select_and_build_map(conn, &prefix_b, &filters, include)?;
+        select_and_build_map(conn, &prefix_b, &filters, include, zone)?;
 
     let objects_a: HashSet<i64> = sources_a.keys().copied().collect();
     let objects_b: HashSet<i64> = sources_b.keys().copied().collect();
@@ -134,6 +136,7 @@ fn select_and_build_map(
     scope_prefix: &str,
     filters: &[Filter],
     include: &IncludeSet,
+    zone: &UserZone,
 ) -> Result<ScopeContentMap> {
     let scopes = classify_all(&[scope_prefix.to_string()]);
     let params = SelectionParams {
@@ -141,6 +144,7 @@ fn select_and_build_map(
         include: include.clone(),
         filters: filters.to_vec(),
         role_policy: RolePolicy::AnyRole,
+        clock: zone.clone(),
     };
     let sel = select_sources(conn, &params)?;
 
@@ -202,6 +206,7 @@ mod tests {
             Path::new("/b/nothing-here"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("no sources known at /b/nothing-here"), "{err}");
@@ -222,6 +227,7 @@ mod tests {
             Path::new("/b"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -245,6 +251,7 @@ mod tests {
             Path::new("/b"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -267,6 +274,7 @@ mod tests {
             Path::new("/b"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -290,6 +298,7 @@ mod tests {
             Path::new("/b"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -312,6 +321,7 @@ mod tests {
             Path::new("/b"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -336,6 +346,7 @@ mod tests {
             Path::new("/b"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -358,6 +369,7 @@ mod tests {
             Path::new("/b"),
             &["excluded?".to_string()],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap();
 
@@ -378,6 +390,7 @@ mod tests {
             Path::new("/b"),
             &["excluded?".to_string()],
             &include_excluded,
+            &UserZone::utc(),
         )
         .unwrap();
         assert_eq!(run.in_both_count, 0);
@@ -395,6 +408,7 @@ mod tests {
             Path::new("/also/not/a/root"),
             &["archived = true".to_string()],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap_err();
 
@@ -418,6 +432,7 @@ mod tests {
             Path::new("/nowhere"),
             &[],
             &IncludeSet::default(),
+            &UserZone::utc(),
         )
         .unwrap_err();
 

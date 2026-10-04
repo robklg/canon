@@ -17,6 +17,7 @@ use anyhow::Result;
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::domain::filter::{Filter, UsedStatus};
 use crate::expr::ops::filter::apply_filters;
@@ -45,6 +46,8 @@ pub struct SelectionParams {
     pub filters: Vec<Filter>,
     /// Role filtering strategy.
     pub role_policy: RolePolicy,
+    /// The user's clock, which every time in a filter is read on.
+    pub clock: UserZone,
 }
 
 /// Result of source selection — filtered sources plus visibility metadata.
@@ -127,7 +130,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
 
     // Apply --where filters: get passing IDs, then keep matching sources
     let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filter_result = apply_filters(conn, &source_ids, &params.filters)?;
+    let filter_result = apply_filters(conn, &source_ids, &params.filters, &params.clock)?;
     let passing_set: HashSet<i64> = filter_result.source_ids.into_iter().collect();
 
     let result: Vec<Source> = filtered
@@ -158,6 +161,7 @@ mod tests {
             include: IncludeSet::default(),
             filters: vec![],
             role_policy,
+            clock: UserZone::utc(),
         }
     }
 

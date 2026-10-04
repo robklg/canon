@@ -8,8 +8,10 @@ use serde::Deserialize;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
+use crate::core::domain::format::format_date;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::RootStory;
@@ -19,7 +21,7 @@ use crate::story::StoryParams;
 
 use super::compile::{compile_book, CompileParams};
 use super::verify::{count_files, verify_book};
-use super::{iso_date, ReadinessReview, SHELF_DIR};
+use super::{ReadinessReview, SHELF_DIR};
 
 // ---------------------------------------------------------------------------
 // The ceremony — plan, begin, bind
@@ -49,7 +51,12 @@ pub struct BindPlan {
 /// the same root's book is replaced (a re-run converges); a different root's
 /// book pushes this one to a `-2`/`-3`… sibling; a directory that cannot be
 /// identified refuses the ceremony.
-pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<BindPlan> {
+pub fn plan_bind(
+    story: &RootStory,
+    config: &LedgerConfig,
+    now: i64,
+    zone: &UserZone,
+) -> Result<BindPlan> {
     // The entry gate (`validate_retire_target`) asks this same question and
     // refuses there; this is the backstop for the world moving between the
     // two — a `roots suspend` in another process — so it speaks the same two
@@ -68,7 +75,7 @@ pub fn plan_bind(story: &RootStory, config: &LedgerConfig, now: i64) -> Result<B
         }
     };
     let shelf = PathBuf::from(&ledger_root_path).join(SHELF_DIR);
-    let base = book_dir_name(&story.root.path, &iso_date(now));
+    let base = book_dir_name(&story.root.path, &format_date(now, zone));
 
     let mut chosen: Option<(String, bool)> = None;
     for attempt in 1u32..=99 {
@@ -142,6 +149,8 @@ pub struct CeremonyParams {
     /// The user's `--reason`: bound onto the book and the decision row.
     pub reason: Option<String>,
     pub now: i64,
+    /// The clock the book's prose dates read on: the user's.
+    pub zone: UserZone,
     pub command_line: String,
     pub config: LedgerConfig,
 }
@@ -158,6 +167,7 @@ pub struct RetireCeremony {
     pub(super) recorder: DecisionRecorder,
     reason: Option<String>,
     now: i64,
+    zone: UserZone,
     /// Review-time basis for the release movement's world-moved re-check.
     snapshot_source_count: i64,
     snapshot_max_decision_id: Option<i64>,
@@ -211,6 +221,7 @@ pub fn begin_ceremony(
         recorder,
         reason: params.reason,
         now: params.now,
+        zone: params.zone,
         snapshot_source_count: review.snapshot_source_count,
         snapshot_max_decision_id: review.snapshot_max_decision_id,
         released: false,
@@ -269,6 +280,7 @@ impl RetireCeremony {
             ),
             retirement_reason: self.reason.clone(),
             bound_on: self.now,
+            zone: self.zone.clone(),
             canon_version: env!("CARGO_PKG_VERSION").to_string(),
             archived_destinations: crate::story::aggregate_locations(
                 &dirs,
@@ -317,6 +329,7 @@ impl RetireCeremony {
             &CompileParams {
                 reason: self.reason.clone(),
                 now: self.now,
+                zone: self.zone.clone(),
                 dest_dir: self.plan.temp_dir.clone(),
                 ceremony_decision_id: self.recorder.decision_id(),
                 telling: Some(telling),

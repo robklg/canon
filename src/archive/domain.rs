@@ -811,9 +811,12 @@ impl ManifestStanding {
     /// itself.** A door is announced with `canon roots unsuspend`, so it needs
     /// nothing here. A recorded scope that kept nothing is announced as `no
     /// sources known at <p> — skipped`, which names no act. A pattern that
-    /// cannot expand states why it cannot, and where no rebuild clears it —
-    /// nothing to measure from, or a fact no refresh supplies — what moves it
-    /// is an edit, and saying so is the only thing left to say.
+    /// cannot expand states why it cannot, and where no rebuild clears it on
+    /// its own — nothing to measure from, a fact no refresh supplies, a save
+    /// time or a grain no refresh changes — what moves it is an edit: to the
+    /// pattern, the facts or the query, or the file's save time — the query
+    /// then refreshed, the file scanned and then refreshed. The way out the
+    /// report prints is composed per cause.
     ///
     /// **The scope outranks the pattern**, because a scope that kept nothing
     /// is also why the pattern has nothing to measure from: fixing the scope

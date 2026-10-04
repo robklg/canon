@@ -99,4 +99,32 @@ png (total: 8,200, 23.6%)
   id:3  ...laptop-import/media            3,200   39.0%
 ```
 
+A time prints on [your clock](../../concepts/facts.md#how-canon-shows-a-time), at the precision it was written. Times that print the same are one row, however they were written. On a clock set to `Europe/Amsterdam`, a capture time written `2023-12-31T20:00:00-00:00` and one written `2023:12:31 21:00:00` share a row, and one written only as `2024` prints as a year:
+
+```
+Facts: all roots
+Sources matching filters: 4
+
+content.DateTimeOriginal                      Count   Coverage
+──────────────────────────────────────────────────────────────
+2023-12-31 21:00:00                               2      50.0%
+2024                                              1      25.0%
+2024-01-01 03:00:00                               1      25.0%
+```
+
+A modifier that reads a finer part than a time carries counts that source under `(no value)`:
+
+```
+Facts: all roots
+Sources matching filters: 4
+
+DateTimeOriginal|month                        Count   Coverage
+──────────────────────────────────────────────────────────────
+12                                                2      50.0%
+01                                                1      25.0%
+(no value)                                        1      25.0%
+```
+
+`--key source.mtime` groups save times by year on your clock. A save time at the edge of the years 0000–9999 or beyond has no value: it is counted under `(no value)` there, and left out of the `source.mtime` count in the overview ([Save times](../../concepts/facts.md#save-times)).
+
 See also: [`facts delete`](../maintain/facts-delete.md) for removing incorrect metadata, [`prune`](../maintain/prune.md) for cleaning up stale or orphaned data.

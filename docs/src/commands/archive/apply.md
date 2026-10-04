@@ -150,6 +150,33 @@ While the manifest records no scope, a refresh does not help — there is nothin
 — and `cluster status` ends with the same two lines. Once a path with sources is in `meta.scope`,
 the refresh is what measures the lock, and `cluster status` names it instead.
 
+A pattern reading a file's save time that Canon cannot read, one at the edge of the years
+0000–9999 or beyond ([Save times](../../concepts/facts.md#save-times)), refuses for that cause:
+
+```
+Error: 1 sources failed pattern expansion:
+  /photos/2016/IMG_0003.jpg: Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond
+
+A save time Canon cannot read gives the pattern no value.
+Add "source.mtime?" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh.
+Error: Aborting due to pattern expansion failures
+```
+
+A pattern naming a fact some sources do not carry ends with the fact pair instead, `Adjust the
+pattern in your manifest, or import the facts it names.`; a run that meets both prints both pairs,
+unless the pattern also needs a scope the lock lacks, where the scope pair prints alone. A modifier that reads a finer part than a time carries gets a pair naming the key and modifier that failed, as the query entry that leaves such sources out:
+
+```
+Error: 1 sources failed pattern expansion:
+  /photos/2016/IMG_0004.jpg: content.DateTimeOriginal|month has no value: the time is known only to the year
+
+A time known only to a coarser grain than the pattern reads gives the pattern no value.
+Add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, and refresh.
+Error: Aborting due to pattern expansion failures
+```
+
+A query edit and a corrected save time each change what the lock holds, so each takes effect once `canon cluster refresh` rebuilds it.
+
 **Progress before anything moves:**
 
 Apply reads every source in the manifest before it transfers the first file: once while

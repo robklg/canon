@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use chrono::Local;
 
+use crate::core::domain::format::format_date;
 use crate::core::domain::root::Root;
 use crate::core::repo::{self, Db};
 use crate::trail::domain::composition::{card_applies, ViewShape};
@@ -21,7 +21,7 @@ use crate::trail::ops;
 use crate::trail::ops::compute::{TrailParams, DEFAULT_LIMIT};
 use crate::trail::ops::show::{PointerRelocation, ScopeRelation, ShowScope};
 use crate::trail::render::{
-    drew_from_lines, format_counts, format_date_only, format_datetime, print_crossings, print_human,
+    drew_from_lines, format_counts, format_datetime, print_crossings, print_human,
 };
 
 pub struct TrailArgs {
@@ -51,7 +51,8 @@ pub enum TrailExit {
 }
 
 pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
-    let today = Local::now().date_naive();
+    let zone = crate::user_zone();
+    let today = zone.today();
     let (timeframe, time_label) = if args.today {
         (Some(WhenValue::Since(today)), Some("today".to_string()))
     } else if let Some(input) = &args.since {
@@ -80,6 +81,7 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
         timeframe,
         include_notes: !args.no_notes,
         limit,
+        clock: zone.clone(),
     };
     let result = crate::trail::ops::compute::compute_trail(db.conn(), &params)?;
 
@@ -120,6 +122,7 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
             limit,
             card.as_ref(),
             args.long,
+            zone,
         );
     }
     Ok(TrailExit::Reported)
@@ -199,7 +202,7 @@ pub fn run_crossings(db: &mut Db, args: CrossingsArgs) -> Result<TrailExit> {
             &retired_books,
         )?;
     } else {
-        print_crossings(&result, &resolved, &params);
+        print_crossings(&result, &resolved, &params, crate::user_zone());
     }
     Ok(TrailExit::Reported)
 }
@@ -607,13 +610,13 @@ fn print_retired_statement(s: &crate::retire::RetiredScope) {
         Some(reason) => println!(
             "This place is retired: {} — retired {}, \"{}\".",
             s.root_path,
-            format_date_only(s.retired_at),
+            format_date(s.retired_at, crate::user_zone()),
             reason
         ),
         None => println!(
             "This place is retired: {} — retired {}.",
             s.root_path,
-            format_date_only(s.retired_at)
+            format_date(s.retired_at, crate::user_zone())
         ),
     }
     println!(
@@ -637,7 +640,10 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
     };
     let d = &show.decision;
     println!("Decision #{} — {}", d.id, d.command);
-    println!("  when:     {}", format_datetime(d.created_at));
+    println!(
+        "  when:     {}",
+        format_datetime(d.created_at, crate::user_zone())
+    );
     println!("  status:   {}", d.status);
     println!("  counts:   {}", format_counts(d));
     if let Some(reason) = &d.reason {

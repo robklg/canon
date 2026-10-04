@@ -19,7 +19,7 @@ Facts can hold three value types:
 |------|----------|-------|
 | Text | `"Apple"`, `"image/jpeg"` | Strings; quote if contains spaces |
 | Number | `1024`, `3.14`, `-5` | Integers or decimals |
-| Timestamp | `1704067200` | Unix timestamps; enable date modifiers |
+| Time | `2024-07-23 14:30:45`, `2024-07`, `2024` | Printed on your clock at the precision it was written; enable time modifiers. See [How Canon reads a time](../concepts/facts.md#how-canon-reads-a-time) |
 
 ## Modifiers
 
@@ -27,23 +27,27 @@ Transform values using `|` syntax:
 
 ### Time Modifiers
 
-For timestamp values (like `source.mtime` or EXIF dates):
+For time values (like `source.mtime` or EXIF dates). Each reads the time on [your clock](../concepts/facts.md#how-canon-shows-a-time), and no output carries an offset. The examples read the time `2024-07-23 14:30:45`:
 
-| Modifier | Output | Example |
-|----------|--------|---------|
-| `year` | 4-digit year | `2024` |
-| `month` | 2-digit month | `07` |
-| `day` | 2-digit day | `23` |
-| `hour` | 2-digit hour (24h) | `14` |
-| `minute` | 2-digit minute | `30` |
-| `second` | 2-digit second | `45` |
-| `date` | ISO date | `2024-07-23` |
-| `time` | ISO time | `14:30:45` |
-| `datetime` | ISO datetime | `2024-07-23T14:30:45` |
-| `yearmonth` | Year-month | `2024-07` |
-| `week` | ISO week number | `30` |
-| `weekday` | Day of week (Mon=1) | `2` |
-| `quarter` | Quarter (1-4) | `3` |
+| Modifier | Output | Example | Needs a time known to the |
+|----------|--------|---------|---------------------------|
+| `year` | 4-digit year | `2024` | year |
+| `month` | 2-digit month | `07` | month |
+| `day` | 2-digit day | `23` | day |
+| `hour` | 2-digit hour (24h) | `14` | minute |
+| `minute` | 2-digit minute | `30` | minute |
+| `second` | 2-digit second | `45` | second |
+| `date` | Date | `2024-07-23` | day |
+| `time` | Time of day, at the time's own precision | `14:30:45` | minute |
+| `datetime` | The time as Canon prints it, at its own precision | `2024-07-23 14:30:45` | year |
+| `yearmonth` | Year-month | `2024-07` | month |
+| `week` | ISO week number, 2 digits | `30` | day |
+| `weekday` | Day of the week, in English | `Tuesday` | day |
+| `quarter` | Quarter | `Q3` | month |
+
+A time written coarser than a modifier needs has no value for it: `|month` on a time known only to `2024` has none, and neither has `|hour` on a time known only to `2024-07-23`. A time is never padded to a precision nobody wrote. Where there is no value, [`canon facts`](../commands/query/facts.md) counts the source under `(no value)`, `--where 'content.DateTimeOriginal|month?'` leaves it out, and `--where 'NOT content.DateTimeOriginal|month?'` selects it ([Filters](filter.md)).
+
+`|datetime` and `|time` give a time at its own precision: `|datetime` prints exactly what Canon prints for the bare time (`2024-07`, `2024-07-23 14:30`), and `|time` prints `14:30` for a time known to the minute and `14:30:45` for one known to the second or finer.
 
 ### String Modifiers
 

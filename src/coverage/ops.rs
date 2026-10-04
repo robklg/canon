@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::repo::{self, Connection};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
@@ -219,12 +220,14 @@ pub fn compute_scoped(
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include: &IncludeSet,
+    zone: &UserZone,
 ) -> Result<(CoverageStats, UsedStatus, usize)> {
     let params = SelectionParams {
         scopes: scopes.to_vec(),
         include: include.clone(),
         filters: filters.to_vec(),
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: zone.clone(),
     };
     let sel = select_sources(conn, &params)?;
     let used_status = sel.used_status.clone();
@@ -241,6 +244,7 @@ pub fn compute_per_root(
     filters: &[Filter],
     archive_root_id: Option<i64>,
     include: &IncludeSet,
+    zone: &UserZone,
 ) -> Result<(Vec<CoverageStats>, CoverageStats, UsedStatus, usize)> {
     let all_roots = repo::root::fetch_all(conn)?;
     // Routed through the fleet partition rather than a bare `!is_suspended()`
@@ -259,6 +263,7 @@ pub fn compute_per_root(
         include: include.clone(),
         filters: filters.to_vec(),
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: zone.clone(),
     };
     let all_sel = select_sources(conn, &params)?;
     let all_sources = all_sel.sources;
@@ -414,8 +419,14 @@ mod tests {
         insert_source_with_size(&conn, archive, "a.bin", Some(data_a), 100);
         insert_source_with_size(&conn, archive, "b.bin", Some(data_b), 100);
 
-        let (per_root, overall, _, _) =
-            compute_per_root(&mut conn, &[], None, &IncludeSet::default()).unwrap();
+        let (per_root, overall, _, _) = compute_per_root(
+            &mut conn,
+            &[],
+            None,
+            &IncludeSet::default(),
+            &UserZone::utc(),
+        )
+        .unwrap();
 
         assert_eq!(per_root.len(), 2, "archive roots stay out of the breakdown");
         for stats in &per_root {

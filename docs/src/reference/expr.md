@@ -59,6 +59,15 @@ Multiple modifiers can be chained:
 {filename|stem|lowercase}     → img_001
 ```
 
+A time with no modifier writes the time as Canon prints it, at its precision:
+
+```
+{content.DateTimeOriginal}    → 2024-06-15 14:30:05
+{content.DateTimeOriginal}    → 2024        (a time known only to the year)
+```
+
+A time with a time of day, bare or through `|datetime` or `|time`, writes `:` into the folder or file name. exFAT, FAT32 and NTFS volumes and SMB shares refuse `:` in a name; for an archive on such storage, use `|date`, `|yearmonth` or `|year`.
+
 ## Path Accessors
 
 Extract segments from path values using Python-style indexing:
@@ -100,13 +109,15 @@ Example using aliases:
 
 ## Missing Values
 
-Canon requires all facts used in a pattern to have values for every source. If any source is missing a required fact, `canon apply` refuses to proceed and reports which facts are missing.
+Every fact a pattern uses needs a value for every source. If any source has none, `canon apply` refuses to proceed and names the cause for each source; see [`apply`](../commands/archive/apply.md) for the remedy it prints.
 
-When you run `canon cluster generate`, the manifest includes comments listing all facts with 100% coverage. These are safe to use in your pattern.
+When you run `canon cluster generate`, the manifest's comments list the facts with 100% coverage: every selected source has a value for them.
 
-If sources are missing required facts, you can:
-- Filter them out during generation: `--where 'DateTimeOriginal?'`
-- Import the missing facts via the [enrichment pipeline](../commands/enrich/index.md)
+A pattern has no value for a source in three cases:
+
+- **The source does not carry the fact.** Filter such sources out during generation, `--where 'DateTimeOriginal?'`, or import the missing facts via the [enrichment pipeline](../commands/enrich/index.md).
+- **A modifier reads a finer part than the time carries**, such as `{content.DateTimeOriginal|month}` on a time known only to `2024`. The reason reads `content.DateTimeOriginal|month has no value: the time is known only to the year`. `--where 'content.DateTimeOriginal|month?'` leaves such sources out (in a manifest, add `content.DateTimeOriginal|month?` to the query and refresh), and `--where 'NOT content.DateTimeOriginal|month?'` lists them.
+- **The file's save time is one Canon cannot read**, at the edge of the years 0000–9999 or beyond ([Save times](../concepts/facts.md#save-times)). This is not a missing fact, and no import supplies it. The reason reads `Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond`. `--where 'NOT source.mtime?'` finds such files; add `source.mtime?` to the manifest's query to leave them out, or correct the file's save time and scan again; either takes effect at the next `canon cluster refresh`.
 
 ## Common Patterns
 

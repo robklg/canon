@@ -10,10 +10,11 @@ use anyhow::Result;
 
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::{FactType, FactValue};
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::{
-    apply_accessor, apply_modifier, fact_value_to_display, get_builtin_value, resolve_fact_value,
-    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey, SourceAttributes,
+    apply_chain, fact_value_to_display, get_builtin_value, resolve_fact_value, BuiltinKey,
+    BuiltinKeyCategory, BuiltinKeyVisibility, Modified, ParsedFactKey, SourceAttributes,
 };
 use crate::facts::repo as facts_repo;
 
@@ -136,7 +137,7 @@ fn computed_builtin(key: &str) -> Option<BuiltinKey> {
 
 /// Apply default grouping for builtin keys without transforms.
 /// Returns a human-readable bucket/group string for the value.
-fn default_grouping(builtin: BuiltinKey, value: FactValue) -> String {
+fn default_grouping(builtin: BuiltinKey, value: FactValue, zone: &UserZone) -> String {
     match builtin {
         BuiltinKey::SourceSize | BuiltinKey::Size => {
             if let FactValue::Num(size) = value {
@@ -156,19 +157,17 @@ fn default_grouping(builtin: BuiltinKey, value: FactValue) -> String {
                 }
                 .to_string()
             } else {
-                fact_value_to_display(&value)
+                fact_value_to_display(&value, zone)
             }
         }
         BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
-            if let FactValue::Time(ts) = value {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.format("%Y").to_string())
-                    .unwrap_or_else(|| "(unknown)".to_string())
+            if let FactValue::Time(tv) = value {
+                format!("{:04}", tv.on_clock(zone).start().year())
             } else {
-                fact_value_to_display(&value)
+                fact_value_to_display(&value, zone)
             }
         }
-        _ => fact_value_to_display(&value),
+        _ => fact_value_to_display(&value, zone),
     }
 }
 
@@ -197,7 +196,9 @@ fn aggregate_and_sort(
 /// Enumerate all fact keys with counts and coverage.
 ///
 /// Combines builtin keys (filtered by visibility + show_hidden) with stored fact
-/// keys from the database. Builtins always have count == total_sources.
+/// keys from the database. A built-in counts the sources the resolver gives a value
+/// for — every source, but for a save time Canon cannot read — so the listing agrees
+/// with the key's own `(no value)` line and with `K?`.
 pub fn compute_all_keys(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -212,8 +213,12 @@ pub fn compute_all_keys(
     }
 
     let mut keys: Vec<KeyInfo> = Vec::new();
+    let sources: Vec<SourceAttributes> = repo::source::batch_fetch_by_ids(conn, source_ids)?
+        .values()
+        .map(SourceAttributes::from)
+        .collect();
 
-    // Add built-in and derived facts (they always have 100% coverage)
+    // Add built-in and derived facts, counted from the resolver's answers
     use strum::IntoEnumIterator;
     for builtin in BuiltinKey::iter() {
         let vis = builtin.visibility();
@@ -224,9 +229,13 @@ pub fn compute_all_keys(
             continue;
         }
         let name: &'static str = builtin.into();
+        let count = sources
+            .iter()
+            .filter(|source| get_builtin_value(source, builtin).is_some())
+            .count();
         keys.push(KeyInfo {
             key: name.to_string(),
-            count: total_sources as i64,
+            count: count as i64,
             category: builtin.category(),
             fact_type: builtin.fact_type(),
         });
@@ -265,6 +274,7 @@ pub fn compute_distribution(
     source_ids: &[i64],
     key: &ParsedFactKey,
     limit: usize,
+    zone: &UserZone,
 ) -> Result<DistributionResult> {
     let total_sources = source_ids.len();
     if source_ids.is_empty() {
@@ -278,11 +288,11 @@ pub fn compute_distribution(
     }
 
     if let Some(builtin) = computed_builtin(&key.base_key) {
-        compute_builtin_distribution(conn, source_ids, key, builtin, total_sources, limit)
+        compute_builtin_distribution(conn, source_ids, key, builtin, total_sources, limit, zone)
     } else if key.has_transforms() {
-        compute_transformed_distribution(conn, source_ids, key, total_sources, limit)
+        compute_transformed_distribution(conn, source_ids, key, total_sources, limit, zone)
     } else {
-        compute_stored_distribution(conn, source_ids, key, total_sources, limit)
+        compute_stored_distribution(conn, source_ids, key, total_sources, limit, zone)
     }
 }
 
@@ -294,6 +304,7 @@ fn compute_builtin_distribution(
     builtin: BuiltinKey,
     total_sources: usize,
     limit: usize,
+    zone: &UserZone,
 ) -> Result<DistributionResult> {
     let sources = repo::source::batch_fetch_by_ids(conn, source_ids)?;
     let has_transforms = key.has_transforms();
@@ -303,14 +314,14 @@ fn compute_builtin_distribution(
     for source in sources.values() {
         let val = if has_transforms {
             // Use resolve_fact_value for the full transform pipeline
-            match resolve_fact_value(source, key, &HashMap::new())? {
+            match resolve_fact_value(source, key, &HashMap::new(), zone)? {
                 Some(v) => v,
                 None => continue,
             }
         } else {
             // Use default grouping for the no-transform case
             match get_builtin_value(&SourceAttributes::from(source), builtin) {
-                Some(raw) => default_grouping(builtin, raw),
+                Some(raw) => default_grouping(builtin, raw, zone),
                 None => continue,
             }
         };
@@ -335,6 +346,7 @@ fn compute_stored_distribution(
     key: &ParsedFactKey,
     total_sources: usize,
     limit: usize,
+    zone: &UserZone,
 ) -> Result<DistributionResult> {
     let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, &key.base_key)?;
 
@@ -343,7 +355,7 @@ fn compute_stored_distribution(
 
     for entry in fact_map.values().flatten() {
         sources_with_value += 1;
-        let display_val = fact_value_to_display(&entry.value);
+        let display_val = fact_value_to_display(&entry.value, zone);
         *counts.entry(display_val).or_insert(0) += 1;
     }
 
@@ -364,6 +376,7 @@ fn compute_transformed_distribution(
     key: &ParsedFactKey,
     total_sources: usize,
     limit: usize,
+    zone: &UserZone,
 ) -> Result<DistributionResult> {
     let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, &key.base_key)?;
 
@@ -372,34 +385,29 @@ fn compute_transformed_distribution(
     let mut skipped_type_mismatch: i64 = 0;
 
     for entry in fact_map.values().flatten() {
-        sources_with_value += 1;
-        // Apply accessor + modifiers via the same transform pipeline
-        let mut result = entry.value.clone();
-        if let Some(ref acc) = key.accessor {
-            match apply_accessor(&result, acc, &key.raw) {
-                Ok(v) => result = v,
-                Err(_) => {
-                    skipped_type_mismatch += 1;
-                    continue;
-                }
+        // Accessor then modifiers through the facility's one chain. A modifier that gives no
+        // value leaves the source among those without one; a step that cannot apply counts
+        // the source as holding a value of the wrong type.
+        match apply_chain(
+            entry.value.clone(),
+            key.accessor.as_ref(),
+            &key.modifiers,
+            &key.raw,
+            true,
+            zone,
+        ) {
+            Ok(Modified::Value(value)) => {
+                sources_with_value += 1;
+                *counts
+                    .entry(fact_value_to_display(&value, zone))
+                    .or_insert(0) += 1;
+            }
+            Ok(Modified::NoValue(_)) => {}
+            Err(_) => {
+                sources_with_value += 1;
+                skipped_type_mismatch += 1;
             }
         }
-        let mut transform_failed = false;
-        for modifier_call in &key.modifiers {
-            match apply_modifier(&result, modifier_call, &key.raw, true) {
-                Ok(v) => result = v,
-                Err(_) => {
-                    skipped_type_mismatch += 1;
-                    transform_failed = true;
-                    break;
-                }
-            }
-        }
-        if transform_failed {
-            continue;
-        }
-        let display_val = fact_value_to_display(&result);
-        *counts.entry(display_val).or_insert(0) += 1;
     }
 
     let (entries, total_distinct_values) = aggregate_and_sort(counts, limit);
@@ -423,6 +431,7 @@ pub fn compute_grouped_distribution(
     main_key: &ParsedFactKey,
     grouping_keys: &[ParsedFactKey],
     limit: usize,
+    zone: &UserZone,
 ) -> Result<GroupedDistributionResult> {
     let total_sources = source_ids.len();
     if source_ids.is_empty() {
@@ -493,7 +502,7 @@ pub fn compute_grouped_distribution(
         let stored_facts = all_facts.get(source_id).unwrap_or(&empty_facts);
 
         // Resolve main value
-        let main_value = match resolve_fact_value(source, main_key, stored_facts)? {
+        let main_value = match resolve_fact_value(source, main_key, stored_facts, zone)? {
             Some(v) => {
                 sources_with_value += 1;
                 v
@@ -507,7 +516,7 @@ pub fn compute_grouped_distribution(
         let mut root_path_for_display: Option<String> = None;
 
         for gk in grouping_keys {
-            let gk_value = match resolve_fact_value(source, gk, stored_facts) {
+            let gk_value = match resolve_fact_value(source, gk, stored_facts, zone) {
                 Ok(Some(v)) => v,
                 Ok(None) => "(no value)".to_string(),
                 Err(_) => "(transform error)".to_string(),
@@ -588,8 +597,9 @@ mod tests {
     /// Insert a source fact with a time value.
     fn insert_time_fact(conn: &Connection, source_id: i64, key: &str, timestamp: i64) {
         conn.execute(
-            "INSERT INTO facts (entity_type, entity_id, key, value_time, observed_at, observed_basis_rev)
-             VALUES ('source', ?1, ?2, ?3, 0, 0)",
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision,
+                                observed_at, observed_basis_rev)
+             VALUES ('source', ?1, ?2, ?3, 'clock', 'second', 0, 0)",
             rusqlite::params![source_id, key, timestamp],
         )
         .unwrap();
@@ -649,7 +659,8 @@ mod tests {
         crate::core::testing::insert_fact(&conn, s3, "content.Make", "Nikon");
 
         let key = ParsedFactKey::parse("content.Make").unwrap();
-        let result = compute_distribution(&mut conn, &[s1, s2, s3], &key, 0).unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2, s3], &key, 0, &UserZone::utc()).unwrap();
 
         assert_eq!(result.entries.len(), 2);
         // Sorted by count desc — Canon (2) first
@@ -680,7 +691,8 @@ mod tests {
         crate::core::testing::insert_fact(&conn, s4, "content.Make", "Canon");
 
         let key = ParsedFactKey::parse("content.Make").unwrap();
-        let result = compute_distribution(&mut conn, &[s1, s2, s3, s4], &key, 2).unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2, s3, s4], &key, 2, &UserZone::utc()).unwrap();
 
         // Limited to top 2
         assert_eq!(result.entries.len(), 2);
@@ -704,7 +716,8 @@ mod tests {
         let s3 = insert_source_with_size(&conn, root_id, "large.raw", Some(obj3), 5_242_880);
 
         let key = ParsedFactKey::parse("source.size").unwrap();
-        let result = compute_distribution(&mut conn, &[s1, s2, s3], &key, 0).unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2, s3], &key, 0, &UserZone::utc()).unwrap();
 
         assert_eq!(result.entries.len(), 3);
         let buckets: Vec<&str> = result.entries.iter().map(|e| e.value.as_str()).collect();
@@ -729,7 +742,8 @@ mod tests {
         let s3 = insert_source_with_metadata(&conn, root_id, "c.jpg", Some(obj3), 1000, 1719792000);
 
         let key = ParsedFactKey::parse("source.mtime").unwrap();
-        let result = compute_distribution(&mut conn, &[s1, s2, s3], &key, 0).unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2, s3], &key, 0, &UserZone::utc()).unwrap();
 
         // 2024 should have 2 entries, 2023 should have 1
         let y2024 = result.entries.iter().find(|e| e.value == "2024").unwrap();
@@ -755,12 +769,102 @@ mod tests {
         insert_time_fact(&conn, s3, "content.DateTimeOriginal", 1719792000);
 
         let key = ParsedFactKey::parse("content.DateTimeOriginal|year").unwrap();
-        let result = compute_distribution(&mut conn, &[s1, s2, s3], &key, 0).unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2, s3], &key, 0, &UserZone::utc()).unwrap();
 
         let y2024 = result.entries.iter().find(|e| e.value == "2024").unwrap();
         assert_eq!(y2024.count, 2);
         let y2023 = result.entries.iter().find(|e| e.value == "2023").unwrap();
         assert_eq!(y2023.count, 1);
+    }
+
+    /// `facts --key source.mtime` groups a save time by its year on the user's clock:
+    /// 23:30 UTC on New Year's Eve is half past midnight on 1 January in Amsterdam.
+    #[test]
+    fn the_save_time_groups_by_its_year_on_the_users_clock() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        // 2023-12-31T23:30:00Z
+        let s1 = crate::core::testing::insert_source_with_metadata(
+            &conn,
+            root_id,
+            "a.jpg",
+            Some(obj),
+            1000,
+            1704065400,
+        );
+
+        let key = ParsedFactKey::parse("source.mtime").unwrap();
+        let amsterdam = UserZone::for_test("Europe/Amsterdam");
+        let result = compute_distribution(&mut conn, &[s1], &key, 0, &amsterdam).unwrap();
+        assert_eq!(result.entries[0].value, "2024");
+
+        let utc = compute_distribution(&mut conn, &[s1], &key, 0, &UserZone::utc()).unwrap();
+        assert_eq!(utc.entries[0].value, "2023");
+    }
+
+    /// A save time Canon cannot read has no value: the report does not count it, and the
+    /// key listing counts `source.mtime` at one fewer than the sources — the same answer
+    /// as the key's own `(no value)` line. The sentinel is 9999-12-31 23:59:59 UTC.
+    #[test]
+    fn a_save_time_canon_cannot_read_is_not_counted() {
+        use crate::core::testing::insert_source_with_metadata;
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "h1", false);
+        let obj2 = insert_object(&conn, "h2", false);
+        let s1 = insert_source_with_metadata(&conn, root_id, "a.jpg", Some(obj1), 1000, 1704065400);
+        let s2 =
+            insert_source_with_metadata(&conn, root_id, "b.jpg", Some(obj2), 1000, 253402300799);
+
+        let key = ParsedFactKey::parse("source.mtime").unwrap();
+        let result = compute_distribution(&mut conn, &[s1, s2], &key, 0, &UserZone::utc()).unwrap();
+        assert_eq!(result.sources_with_value, 1);
+        assert_eq!(result.total_sources, 2);
+
+        let year = ParsedFactKey::parse("source.mtime|year").unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2], &year, 0, &UserZone::utc()).unwrap();
+        assert_eq!(result.sources_with_value, 1);
+
+        let keys = compute_all_keys(&mut conn, &[s1, s2], false).unwrap();
+        let count_of = |name: &str| keys.keys.iter().find(|k| k.key == name).unwrap().count;
+        assert_eq!(count_of("source.mtime"), 1);
+        assert_eq!(count_of("source.ext"), 2);
+    }
+
+    /// A modifier finer than the value was written gives no value, and the report does
+    /// not count that source as having one.
+    #[test]
+    fn a_value_too_coarse_for_its_modifier_is_not_counted() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "h1", false);
+        let obj2 = insert_object(&conn, "h2", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj1));
+        let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj2));
+        insert_time_fact(&conn, s1, "content.DateTimeOriginal", 1719792000);
+        // The clock reading "2024", known only to the year.
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision,
+                                observed_at, observed_basis_rev)
+             VALUES ('source', ?1, 'content.DateTimeOriginal', 1704067200, 'clock', 'year', 0, 0)",
+            rusqlite::params![s2],
+        )
+        .unwrap();
+
+        let month = ParsedFactKey::parse("content.DateTimeOriginal|month").unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2], &month, 0, &UserZone::utc()).unwrap();
+        assert_eq!(result.sources_with_value, 1);
+        assert_eq!(result.skipped_type_mismatch, 0);
+        assert_eq!(result.entries.len(), 1);
+
+        let year = ParsedFactKey::parse("content.DateTimeOriginal|year").unwrap();
+        let result =
+            compute_distribution(&mut conn, &[s1, s2], &year, 0, &UserZone::utc()).unwrap();
+        assert_eq!(result.sources_with_value, 2);
     }
 
     /// A hashed source carrying its content hash, the way scanning stores it.
@@ -792,12 +896,19 @@ mod tests {
         for builtin in BuiltinKey::iter() {
             let name: &'static str = builtin.into();
             let key = ParsedFactKey::parse(name).unwrap();
-            let alone = compute_distribution(&mut conn, &[s1], &key, 0).unwrap();
+            let alone = compute_distribution(&mut conn, &[s1], &key, 0, &UserZone::utc()).unwrap();
             assert_eq!(alone.sources_with_value, 1, "facts --key {name}");
 
             let by_root = ParsedFactKey::parse("source.root").unwrap();
-            let grouped =
-                compute_grouped_distribution(&mut conn, &[s1], &key, &[by_root], 0).unwrap();
+            let grouped = compute_grouped_distribution(
+                &mut conn,
+                &[s1],
+                &key,
+                &[by_root],
+                0,
+                &UserZone::utc(),
+            )
+            .unwrap();
             assert_eq!(
                 grouped.sources_with_value, 1,
                 "facts --key {name} --by-root"
@@ -813,7 +924,7 @@ mod tests {
             ("stem", "a"),
         ] {
             let key = ParsedFactKey::parse(name).unwrap();
-            let result = compute_distribution(&mut conn, &[s1], &key, 0).unwrap();
+            let result = compute_distribution(&mut conn, &[s1], &key, 0, &UserZone::utc()).unwrap();
             assert_eq!(result.entries[0].value, want, "facts --key {name}");
         }
     }
@@ -836,9 +947,15 @@ mod tests {
 
         let main_key = ParsedFactKey::parse("source.ext").unwrap();
         let group_key = ParsedFactKey::parse("source.root").unwrap();
-        let result =
-            compute_grouped_distribution(&mut conn, &[s1, s2, s3], &main_key, &[group_key], 0)
-                .unwrap();
+        let result = compute_grouped_distribution(
+            &mut conn,
+            &[s1, s2, s3],
+            &main_key,
+            &[group_key],
+            0,
+            &UserZone::utc(),
+        )
+        .unwrap();
 
         // "jpg" should have total_count=2 (from both roots), "png" should have 1
         assert_eq!(result.groups.len(), 2);
@@ -874,8 +991,15 @@ mod tests {
 
         let main_key = ParsedFactKey::parse("content.Make").unwrap();
         let group_key = ParsedFactKey::parse("source.root").unwrap();
-        let result =
-            compute_grouped_distribution(&mut conn, &[s1, s2], &main_key, &[group_key], 0).unwrap();
+        let result = compute_grouped_distribution(
+            &mut conn,
+            &[s1, s2],
+            &main_key,
+            &[group_key],
+            0,
+            &UserZone::utc(),
+        )
+        .unwrap();
 
         // Only 1 source has the main value, s2 is excluded
         assert_eq!(result.sources_with_value, 1);

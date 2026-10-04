@@ -1,8 +1,8 @@
 use anyhow::Result;
-use chrono::{Local, TimeZone};
 
-use crate::core::domain::format::{first_chars, format_size};
+use crate::core::domain::format::{clock_of, first_chars, format_size};
 use crate::core::domain::source::Source;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
@@ -51,6 +51,7 @@ pub fn run(
         include: include.clone(),
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: crate::user_zone().clone(),
     };
     let sel = select_sources(conn, &params)?;
 
@@ -100,10 +101,11 @@ pub fn run(
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let line_end = if null_delim { "\0" } else { "\n" };
+    let zone = crate::user_zone();
     for (source_path, size, mtime, status) in &output_lines {
         let line = if long_format {
             let size_str = format_size(*size);
-            let date_str = format_date(*mtime);
+            let date_str = format_date(*mtime, zone);
             if show_status {
                 format!("{status}{size_str:>8}  {date_str}  {source_path}{line_end}")
             } else {
@@ -138,11 +140,11 @@ fn format_path(full_path: &str, cwd: Option<&str>) -> String {
     crate::core::domain::path::format_path(full_path, cwd)
 }
 
-fn format_date(unix_timestamp: i64) -> String {
-    Local
-        .timestamp_opt(unix_timestamp, 0)
-        .single()
-        .map(|dt| dt.format("%b %e %Y").to_string())
+/// A save time's date on the user's clock, in `ls`'s own column layout (`Jun 15 2024`);
+/// `???` for a save time Canon cannot read.
+fn format_date(mtime: i64, zone: &UserZone) -> String {
+    clock_of(mtime, zone)
+        .map(|at| at.strftime("%b %e %Y").to_string())
         .unwrap_or_else(|| "???".to_string())
 }
 
@@ -193,6 +195,7 @@ pub fn show_duplicates(
         include: include.clone(),
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: crate::user_zone().clone(),
     };
     let sel = select_sources(conn, &params)?;
 
@@ -270,4 +273,30 @@ pub fn show_duplicates(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ls -l` dates a save time on the user's clock, in its own column layout: 23:30 UTC
+    /// on New Year's Eve 2023 is 1 January 2024 in Amsterdam and still 31 December in New
+    /// York. A save time Canon cannot read prints `???`, the sentinel 9999-12-31 23:59:59
+    /// UTC among them.
+    #[test]
+    fn the_date_column_reads_the_users_clock() {
+        let new_years_eve = 1704065400;
+        assert_eq!(
+            format_date(new_years_eve, &UserZone::for_test("Europe/Amsterdam")),
+            "Jan  1 2024"
+        );
+        assert_eq!(
+            format_date(new_years_eve, &UserZone::for_test("America/New_York")),
+            "Dec 31 2023"
+        );
+        assert_eq!(format_date(new_years_eve, &UserZone::utc()), "Dec 31 2023");
+        for unreadable in [253402300799, 300_000_000_000, i64::MIN] {
+            assert_eq!(format_date(unreadable, &UserZone::utc()), "???");
+        }
+    }
 }

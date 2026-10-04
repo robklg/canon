@@ -282,3 +282,73 @@ fn empty_and_all_excluded_roots_bind_complete_books() {
     assert_eq!(lines[0]["fate"], "excluded");
     assert_eq!(lines[0]["reason"], "not worth keeping");
 }
+
+/// The inventory's `mtime` is a machine field: UTC with the `Z` that says so for any
+/// instant a time can hold — a year before 0000 in ISO 8601's expanded form — and past
+/// that, the stored seconds as they are. A save time can be anything a filesystem wrote.
+#[test]
+fn the_inventory_writes_any_save_time_it_can_hold_as_utc_and_the_rest_as_seconds() {
+    let conn = open_in_memory_for_test();
+    let src_dir = tempfile::tempdir().unwrap();
+    let book_dir = tempfile::tempdir().unwrap();
+    let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+    insert_test_root(&conn, "/archive", "archive", false);
+    for (rel, mtime) in [
+        ("a.jpg", 1_704_065_400_i64),
+        ("b.jpg", -62_200_000_000),
+        ("c.jpg", 300_000_000_000),
+    ] {
+        let id = insert_source(&conn, root_id, rel, None, true, false, None);
+        conn.execute(
+            "UPDATE sources SET mtime = ?1 WHERE id = ?2",
+            rusqlite::params![mtime, id],
+        )
+        .unwrap();
+    }
+
+    let dest = book_dir.path().join("book");
+    compile_to(&conn, root_id, &dest);
+    let lines = inventory_lines(&dest);
+    assert_eq!(lines[0]["mtime"], "2023-12-31T23:30:00Z");
+    let before_zero = lines[1]["mtime"].as_str().unwrap();
+    assert!(
+        before_zero.starts_with("-00000") && before_zero.ends_with('Z'),
+        "{before_zero}"
+    );
+    assert_eq!(lines[2]["mtime"], "300000000000");
+}
+
+/// The book's notes and timeline are dated on the binder's clock, in their own layout: a
+/// note and a scan at 23:30 UTC on New Year's Eve 2023 read 31 December in New York.
+#[test]
+fn the_books_notes_and_timeline_are_dated_on_the_binders_clock() {
+    use crate::core::domain::time::{with_test_now, zone::UserZone};
+    let conn = open_in_memory_for_test();
+    let src_dir = tempfile::tempdir().unwrap();
+    let book_dir = tempfile::tempdir().unwrap();
+    let root_id = insert_test_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+    insert_test_root(&conn, "/archive", "archive", false);
+    let scan = insert_decision(&conn, "scan", 1704065400);
+    scope(&conn, scan, root_id);
+    set_decision_extras(&conn, scan, Some("Indexed 1 source"), None);
+    insert_source(&conn, root_id, "a.jpg", None, true, false, None);
+    with_test_now(1704065400, || {
+        insert(&conn, root_id, "", "the new year's last look").unwrap();
+    });
+
+    let dest = book_dir.path().join("book");
+    super::fixtures::compile_on(
+        &conn,
+        root_id,
+        &dest,
+        UserZone::for_test("America/New_York"),
+    );
+    let notes = std::fs::read_to_string(dest.join("notes.md")).unwrap();
+    assert!(
+        notes.contains("- 2023-12-31  (root): the new year's last look"),
+        "{notes}"
+    );
+    let timeline = std::fs::read_to_string(dest.join("timeline.md")).unwrap();
+    assert!(timeline.contains("2023-12-31"), "{timeline}");
+    assert!(!timeline.contains("2024-01-01"), "{timeline}");
+}

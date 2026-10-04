@@ -77,6 +77,7 @@ pub fn run(
         include: include.clone(),
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: crate::user_zone().clone(),
     };
     let sel = select_sources(conn, &params)?;
     let source_ids = sel.source_ids();
@@ -134,11 +135,18 @@ pub fn run(
         let main_key = ParsedFactKey::parse(fact_key)?;
 
         if !grouping_keys.is_empty() {
-            let result =
-                compute_grouped_distribution(conn, &source_ids, &main_key, &grouping_keys, limit)?;
+            let result = compute_grouped_distribution(
+                conn,
+                &source_ids,
+                &main_key,
+                &grouping_keys,
+                limit,
+                crate::user_zone(),
+            )?;
             display_grouped_distribution(&result, &main_key, &grouping_keys, total_sources);
         } else {
-            let result = compute_distribution(conn, &source_ids, &main_key, limit)?;
+            let result =
+                compute_distribution(conn, &source_ids, &main_key, limit, crate::user_zone())?;
             display_distribution(&result, fact_key, &main_key);
         }
     } else if by_root {
@@ -515,6 +523,7 @@ pub fn delete_facts(
         include: options.include.clone(),
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: crate::user_zone().clone(),
     };
     let source_ids = select_sources(conn, &params)?.source_ids();
 
@@ -847,52 +856,61 @@ mod tests {
     /// lists — keep their facts.
     #[test]
     fn delete_acts_on_the_population_a_preview_would_have_listed() {
-        use crate::core::repo::{open_in_memory_for_test, Db};
-        use crate::core::testing::{insert_object, insert_root, insert_source};
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                use crate::core::repo::{open_in_memory_for_test, Db};
+                use crate::core::testing::{insert_object, insert_root, insert_source};
 
-        let conn = open_in_memory_for_test();
-        let source_root = insert_root(&conn, "/photos", "source", false);
-        let archive_root = insert_root(&conn, "/archive", "archive", false);
-        let obj = insert_object(&conn, "h1", false);
+                let conn = open_in_memory_for_test();
+                let source_root = insert_root(&conn, "/photos", "source", false);
+                let archive_root = insert_root(&conn, "/archive", "archive", false);
+                let obj = insert_object(&conn, "h1", false);
 
-        let visible = insert_source(&conn, source_root, "visible.jpg", Some(obj));
-        let dismissed =
-            crate::core::testing::insert_source_excluded(&conn, source_root, "dismissed.jpg", None);
-        let archived = insert_source(&conn, archive_root, "kept.jpg", Some(obj));
-        for id in [visible, dismissed, archived] {
-            crate::core::testing::insert_fact(&conn, id, "content.Make", "Canon");
-        }
+                let visible = insert_source(&conn, source_root, "visible.jpg", Some(obj));
+                let dismissed = crate::core::testing::insert_source_excluded(
+                    &conn,
+                    source_root,
+                    "dismissed.jpg",
+                    None,
+                );
+                let archived = insert_source(&conn, archive_root, "kept.jpg", Some(obj));
+                for id in [visible, dismissed, archived] {
+                    crate::core::testing::insert_fact(&conn, id, "content.Make", "Canon");
+                }
 
-        let mut db = Db::from_connection(conn);
-        let options = DeleteOptions {
-            entity_type: "source".to_string(),
-            value_type: None,
-            dry_run: false,
-            include: IncludeSet::default(),
-        };
-        delete_facts(
-            &mut db,
-            "content.Make",
-            &[],
-            &[],
-            &options,
-            "canon facts delete content.Make --on source --yes",
-            &LedgerConfig::default(),
-            true,
-        )
-        .unwrap();
+                let mut db = Db::from_connection(conn);
+                let options = DeleteOptions {
+                    entity_type: "source".to_string(),
+                    value_type: None,
+                    dry_run: false,
+                    include: IncludeSet::default(),
+                };
+                delete_facts(
+                    &mut db,
+                    "content.Make",
+                    &[],
+                    &[],
+                    &options,
+                    "canon facts delete content.Make --on source --yes",
+                    &LedgerConfig::default(),
+                    true,
+                )
+                .unwrap();
 
-        let surviving = |id: i64| -> i64 {
-            db.conn()
+                let surviving = |id: i64| -> i64 {
+                    db.conn()
                 .query_row(
                     "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = ?",
                     rusqlite::params![id],
                     |row| row.get(0),
                 )
                 .unwrap()
-        };
-        assert_eq!(surviving(visible), 0, "the previewable fact is deleted");
-        assert_eq!(surviving(dismissed), 1, "a dismissed source is not listed");
-        assert_eq!(surviving(archived), 1, "nor is an archive copy");
+                };
+                assert_eq!(surviving(visible), 0, "the previewable fact is deleted");
+                assert_eq!(surviving(dismissed), 1, "a dismissed source is not listed");
+                assert_eq!(surviving(archived), 1, "nor is an archive copy");
+            },
+        )
     }
 }

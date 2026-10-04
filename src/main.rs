@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::domain::config::{parse_ledger_config, LedgerConfig};
 use crate::core::domain::root::{find_containing_root, DoorVerb};
+use crate::core::domain::time::zone::{UserZone, ZoneLabel};
 use crate::core::domain::IncludeSet;
 
 #[derive(Clone, PartialEq, clap::ValueEnum)]
@@ -49,6 +50,51 @@ fn include_set_from(values: &[IncludeValue]) -> IncludeSet {
         }
     }
     set
+}
+
+/// The user's clock, read once per process through the zone's one owner. The first use
+/// states on stderr, once, a zone Canon could not read — every time is then read in UTC.
+///
+/// Every command that selects, evaluates a pattern or prints a time reaches its clock here.
+#[cfg(not(test))]
+fn user_zone() -> &'static UserZone {
+    static ZONE: std::sync::OnceLock<UserZone> = std::sync::OnceLock::new();
+    ZONE.get_or_init(|| {
+        let zone = UserZone::machine();
+        if let Some(notice) = notice_for(&zone) {
+            eprintln!("{notice}");
+        }
+        zone
+    })
+}
+
+/// Under test the zone is whatever the test pinned (`with_test_zone`), read afresh each call:
+/// a process-wide cache would hand one test's pin to every test after it.
+#[cfg(test)]
+fn user_zone() -> &'static UserZone {
+    Box::leak(Box::new(UserZone::machine()))
+}
+
+/// What a user is told about their clock: nothing for a zone Canon can read, and for one it
+/// cannot, that times are read in UTC and why.
+fn notice_for(zone: &UserZone) -> Option<String> {
+    match zone.label() {
+        ZoneLabel::Unknown {
+            unreadable_tz: None,
+        } => Some(
+            "this machine's time zone is unknown; times are read in UTC — set TZ to change it"
+                .to_string(),
+        ),
+        ZoneLabel::Unknown {
+            unreadable_tz: Some(tz),
+        } => Some(format!(
+            "TZ={tz} is not a time zone Canon can read; times are read in UTC"
+        )),
+        ZoneLabel::Named(_)
+        | ZoneLabel::FixedOffset(_)
+        | ZoneLabel::RuleString(_)
+        | ZoneLabel::UnnamedRules => None,
+    }
 }
 
 // The shared spine, which every subsystem is built on, and the expression
@@ -1831,6 +1877,32 @@ fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zone_canon_reads_gets_no_notice() {
+        assert_eq!(notice_for(&UserZone::for_test("Europe/Amsterdam")), None);
+        assert_eq!(notice_for(&UserZone::utc()), None);
+    }
+
+    #[test]
+    fn an_unknown_zone_is_stated_with_utc_as_the_reading() {
+        let zone = UserZone::for_test_unknown(None);
+        assert_eq!(
+            notice_for(&zone).as_deref(),
+            Some(
+                "this machine's time zone is unknown; times are read in UTC — set TZ to change it"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unreadable_tz_is_named_in_the_notice() {
+        let zone = UserZone::for_test_unknown(Some("Europe/Amsterdm"));
+        assert_eq!(
+            notice_for(&zone).as_deref(),
+            Some("TZ=Europe/Amsterdm is not a time zone Canon can read; times are read in UTC")
+        );
+    }
 
     /// A flag the named subcommand cannot honor must be refused, never dropped.
     #[test]

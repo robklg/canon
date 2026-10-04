@@ -788,6 +788,28 @@ const LAWS: &[Law] = &[
         authority: Authority::Recognised,
         record: "2026-09-19",
     },
+    Law {
+        // Every time is read on the user's clock, one way: an instant through the zone, a
+        // clock reading as written, never a clock reading turned into an instant. The
+        // verifier pins the span through both clock-change hours; the comparison-level
+        // claim joins it when typed dates bind to spans.
+        name: "frame rule",
+        owner: "core/domain/time/value.rs",
+        verifier: "the_frame_rule_reads_both_clock_change_hours_on_the_users_clock",
+        reach: Reach::Canon,
+        authority: Authority::Distilled,
+        record: "2026-09-26",
+    },
+    Law {
+        // The machine's time zone is read once, by `UserZone::machine`, and handed to the
+        // frame rule as a parameter; every other read is build-refused.
+        name: "user's-zone owner",
+        owner: "core/domain/time/zone.rs",
+        verifier: "the_machine_zone_is_read_only_by_its_owner",
+        reach: Reach::Canon,
+        authority: Authority::Distilled,
+        record: "2026-09-26",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

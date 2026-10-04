@@ -242,6 +242,7 @@ fn a_book_without_a_story_claim_still_verifies() {
         &CompileParams {
             reason: None,
             now: 1_753_000_000,
+            zone: crate::core::domain::time::zone::UserZone::utc(),
             dest_dir: dest.clone(),
             ceremony_decision_id: None,
             telling: None,
@@ -368,6 +369,7 @@ fn existing_compile_target_is_an_explicit_collision() {
         &CompileParams {
             reason: None,
             now: 0,
+            zone: crate::core::domain::time::zone::UserZone::utc(),
             dest_dir: dest,
             ceremony_decision_id: None,
             telling: None,

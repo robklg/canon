@@ -1,32 +1,8 @@
-//! Import-vocabulary half of the fact domain model: the storage type used
-//! for type-consistency checking during import, the source-fact record
-//! promotion reads, and key normalization/classification.
+//! Import-vocabulary half of the fact domain model: the source-fact record
+//! promotion reads, and key normalization/classification. A value's kind is
+//! the fact noun's own (`core::domain::fact::FactType`).
 
-/// Fact storage type for type consistency checking during import.
-///
-/// When importing facts, we need to ensure type consistency: if a key was
-/// previously stored as Time, new values for that key must also be Time.
-/// This enum represents the storage type, which is separate from `FactValue`
-/// (the runtime representation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactValueType {
-    /// Stored in value_text column
-    Text,
-    /// Stored in value_num column
-    Num,
-    /// Stored in value_time column
-    Time,
-}
-
-impl std::fmt::Display for FactValueType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FactValueType::Text => write!(f, "text"),
-            FactValueType::Num => write!(f, "num"),
-            FactValueType::Time => write!(f, "time"),
-        }
-    }
-}
+use crate::core::domain::fact::FactValue;
 
 /// A source fact record for promotion processing.
 ///
@@ -39,12 +15,8 @@ pub struct SourceFact {
     pub id: i64,
     /// The fact key (e.g., "content.Make")
     pub key: String,
-    /// Text value if stored as text
-    pub value_text: Option<String>,
-    /// Numeric value if stored as number
-    pub value_num: Option<f64>,
-    /// Timestamp value if stored as time
-    pub value_time: Option<i64>,
+    /// The stored value
+    pub value: FactValue,
     /// When this fact was observed
     pub observed_at: i64,
 }
@@ -115,24 +87,6 @@ mod tests {
     }
 
     // =========================================================================
-    // FactValueType tests
-    // =========================================================================
-
-    #[test]
-    fn fact_value_type_display() {
-        assert_eq!(format!("{}", FactValueType::Text), "text");
-        assert_eq!(format!("{}", FactValueType::Num), "num");
-        assert_eq!(format!("{}", FactValueType::Time), "time");
-    }
-
-    #[test]
-    fn fact_value_type_equality() {
-        assert_eq!(FactValueType::Text, FactValueType::Text);
-        assert_ne!(FactValueType::Text, FactValueType::Num);
-        assert_ne!(FactValueType::Num, FactValueType::Time);
-    }
-
-    // =========================================================================
     // normalize_fact_key tests
     // =========================================================================
 
@@ -198,17 +152,13 @@ mod tests {
         let fact = SourceFact {
             id: 1,
             key: "content.Make".to_string(),
-            value_text: Some("Canon".to_string()),
-            value_num: None,
-            value_time: None,
+            value: FactValue::Text("Canon".to_string()),
             observed_at: 1704067200,
         };
 
         assert_eq!(fact.id, 1);
         assert_eq!(fact.key, "content.Make");
-        assert_eq!(fact.value_text, Some("Canon".to_string()));
-        assert!(fact.value_num.is_none());
-        assert!(fact.value_time.is_none());
+        assert!(matches!(fact.value, FactValue::Text(ref t) if t == "Canon"));
         assert_eq!(fact.observed_at, 1704067200);
     }
 
@@ -217,26 +167,23 @@ mod tests {
         let fact = SourceFact {
             id: 2,
             key: "content.Duration".to_string(),
-            value_text: None,
-            value_num: Some(120.5),
-            value_time: None,
+            value: FactValue::Num(120.5),
             observed_at: 1704067200,
         };
 
-        assert_eq!(fact.value_num, Some(120.5));
+        assert!(matches!(fact.value, FactValue::Num(n) if n == 120.5));
     }
 
     #[test]
     fn source_fact_with_time_value() {
+        let time = crate::core::domain::time::reading::read_time("2024-01-01T00:00:00").unwrap();
         let fact = SourceFact {
             id: 3,
             key: "content.DateTimeOriginal".to_string(),
-            value_text: None,
-            value_num: None,
-            value_time: Some(1704067200),
+            value: FactValue::Time(time),
             observed_at: 1704067200,
         };
 
-        assert_eq!(fact.value_time, Some(1704067200));
+        assert!(matches!(fact.value, FactValue::Time(t) if t == time));
     }
 }

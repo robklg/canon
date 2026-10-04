@@ -11,6 +11,7 @@ use crate::core::domain;
 use crate::core::domain::resolution::standing_first;
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::expr::{apply_filters, Filter, UsedStatus};
@@ -148,6 +149,7 @@ pub struct LocationResult {
 ///
 /// Takes pre-resolved scope paths (no cwd defaulting) and pre-resolved
 /// other paths. Returns a typed outcome for the interface to format.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_survey(
     conn: &mut Connection,
     scope_prefixes: &[String],
@@ -156,6 +158,7 @@ pub fn compute_survey(
     all_sources: &[Source],
     other_paths: &[String],
     archive_root_id: Option<i64>,
+    zone: &UserZone,
 ) -> Result<SurveyOutcome> {
     let scopes = classify_all(scope_prefixes);
 
@@ -186,7 +189,7 @@ pub fn compute_survey(
         (selection, UsedStatus::default())
     } else {
         let ids: Vec<i64> = selection.iter().map(|s| s.id).collect();
-        let filter_result = apply_filters(conn, &ids, filters)?;
+        let filter_result = apply_filters(conn, &ids, filters, zone)?;
         let passed: HashSet<i64> = filter_result.source_ids.into_iter().collect();
         let filtered = selection
             .into_iter()
@@ -381,7 +384,7 @@ pub fn compute_survey(
 
             // Step 2: Apply --where filters to location sources
             let loc_ids: Vec<i64> = loc_sources.iter().map(|s| s.id).collect();
-            let passed: HashSet<i64> = apply_filters(conn, &loc_ids, filters)?
+            let passed: HashSet<i64> = apply_filters(conn, &loc_ids, filters, zone)?
                 .source_ids
                 .into_iter()
                 .collect();

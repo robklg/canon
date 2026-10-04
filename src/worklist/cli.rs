@@ -30,6 +30,7 @@ pub fn run(
         include: include.clone(),
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
+        clock: crate::user_zone().clone(),
     };
     let sel = select_sources(conn, &params)?;
 
