@@ -66,6 +66,10 @@ padded — and `FactValue::Time` carries it. Three owners sit there:
 **Where they do not apply**: machine fields (receipts, the book's structured fields, a
 manifest's stamp) are UTC with `Z`; a manifest's run reads UTC, not the machine's zone.
 
+**A stored time is `value_time` plus four `time_*` columns** (form, offset, fraction,
+precision), read and written only through `repo::fact`'s conversion pair (`fact_value_params`,
+`fact_value_at`): `value_time` alone is no epoch second for a clock reading.
+
 **Text is cut by characters, never by byte index**, because a cut inside a multi-byte
 character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies
 `clippy::string_slice`; a slice whose index is a known boundary carries an `#[expect]` on its
