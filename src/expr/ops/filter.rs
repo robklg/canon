@@ -19,7 +19,9 @@ use crate::expr::domain::filter::{
     Expr, Filter, FilterResult, StatusPredicate,
 };
 use crate::expr::domain::key::{parse_key_with_modifiers, BuiltinKey};
-use crate::expr::domain::transform::{apply_chain, Modified, ModifierCall, PathAccessor};
+use crate::expr::domain::transform::{
+    apply_chain, Half, InstantRecord, Modified, ModifierCall, PathAccessor,
+};
 use crate::expr::domain::value::get_builtin_value;
 use crate::expr::repo::{
     fetch_source_row, get_fact_value, is_known_key, prefetch_facts, prefetch_status_data, SourceRow,
@@ -43,6 +45,7 @@ pub fn apply_filters(
         return Ok(FilterResult {
             source_ids: source_ids.to_vec(),
             used_status,
+            read_an_instant: false,
         });
     }
 
@@ -75,6 +78,7 @@ pub fn apply_filters(
     Ok(FilterResult {
         source_ids: result,
         used_status,
+        read_an_instant: cache.instant_read.read(),
     })
 }
 
@@ -112,13 +116,14 @@ fn check_fact_compare(
     op: CompareOp,
     value: &str,
     zone: &UserZone,
+    record: &InstantRecord,
 ) -> Result<bool> {
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
     let Some(row) = fetch_source_row(conn, source_id)? else {
         return Ok(false);
     };
     let matches = |fact_value: FactValue| {
-        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key, zone)
+        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key, zone, record)
             .is_some_and(|modified| compare_fact_value(&modified, op, value))
     };
 
@@ -228,12 +233,15 @@ fn check_fact_exists_cached(
     zone: &UserZone,
 ) -> Result<bool> {
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
-    let exists_through =
-        |value: FactValue| match apply_chain(value, accessor.as_ref(), &modifiers, key, true, zone)
-        {
+    let exists_through = |value: FactValue| {
+        cache
+            .instant_read
+            .note(&value, accessor.as_ref(), &modifiers, Half::Filter);
+        match apply_chain(value, accessor.as_ref(), &modifiers, key, true, zone) {
             Ok(Modified::Value(_)) | Err(_) => true,
             Ok(Modified::NoValue(_)) => false,
-        };
+        }
+    };
 
     // Check cache for stored facts
     if cache.has_key(&base_key) {
@@ -279,14 +287,19 @@ fn check_fact_compare_cached(
     // Handle built-in keys (still need DB for source columns)
     if BuiltinKey::from_str(&base_key).is_some() {
         // For built-ins, fall back to uncached version (they query source table, not facts)
-        return check_fact_compare(conn, source_id, key, op, value, zone);
+        return check_fact_compare(conn, source_id, key, op, value, zone, &cache.instant_read);
     }
 
     // Use cache for stored facts
     if let Some(fact_value) = cache.get_source_fact(source_id, &base_key) {
-        if let Some(modified) =
-            apply_accessor_and_modifiers(fact_value.clone(), &accessor, &modifiers, key, zone)
-        {
+        if let Some(modified) = apply_accessor_and_modifiers(
+            fact_value.clone(),
+            &accessor,
+            &modifiers,
+            key,
+            zone,
+            &cache.instant_read,
+        ) {
             if compare_fact_value(&modified, op, value) {
                 return Ok(true);
             }
@@ -294,9 +307,14 @@ fn check_fact_compare_cached(
     }
 
     if let Some(fact_value) = cache.get_object_fact(source_id, &base_key) {
-        if let Some(modified) =
-            apply_accessor_and_modifiers(fact_value.clone(), &accessor, &modifiers, key, zone)
-        {
+        if let Some(modified) = apply_accessor_and_modifiers(
+            fact_value.clone(),
+            &accessor,
+            &modifiers,
+            key,
+            zone,
+            &cache.instant_read,
+        ) {
             if compare_fact_value(&modified, op, value) {
                 return Ok(true);
             }
@@ -336,7 +354,9 @@ fn apply_accessor_and_modifiers(
     modifiers: &[ModifierCall],
     key: &str,
     zone: &UserZone,
+    record: &InstantRecord,
 ) -> Option<FactValue> {
+    record.note(&value, accessor.as_ref(), modifiers, Half::Filter);
     // for_display: true since filters are typically for display/comparison
     match apply_chain(value, accessor.as_ref(), modifiers, key, true, zone) {
         Ok(Modified::Value(v)) => Some(v),
@@ -352,6 +372,7 @@ fn apply_accessor_and_modifiers(
 mod tests {
     use super::*;
     use crate::core::repo::open_in_memory_for_test;
+    use crate::core::testing::insert_time_fact;
     use crate::expr::domain::filter::STATUS_KEYWORDS;
     use crate::expr::domain::value::SourceAttributes;
     use rusqlite::Connection as RawConnection;
@@ -1063,22 +1084,6 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    /// Store a time fact on a source through the one conversion pair.
-    fn insert_time_fact(conn: &RawConnection, source_id: i64, key: &str, written: &str) {
-        let value =
-            FactValue::Time(crate::core::domain::time::reading::read_time(written).unwrap());
-        let p = crate::core::repo::fact::fact_value_params(&value).unwrap();
-        conn.execute(
-            &format!(
-                "INSERT INTO facts (entity_type, entity_id, key, {}, observed_at, observed_basis_rev)
-                 VALUES ('source', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0)",
-                crate::core::repo::fact::FACT_VALUE_COLUMNS
-            ),
-            rusqlite::params![source_id, key, p[0], p[1], p[2], p[3], p[4], p[5], p[6]],
-        )
-        .unwrap();
-    }
-
     fn selected(conn: &mut RawConnection, ids: &[i64], filter: &str, zone: &UserZone) -> Vec<i64> {
         apply_filters(conn, ids, &[Filter::parse(filter).unwrap()], zone)
             .unwrap()
@@ -1129,6 +1134,38 @@ mod tests {
                 vec![midnight]
             );
         }
+    }
+
+    /// A filter reads a save time on the clock only through a modifier: a bare comparison
+    /// compares the stored number, and so does an existence check with no modifier — the
+    /// window before typed dates bind, which the record must not claim a clock for.
+    #[test]
+    fn a_filter_reads_an_instant_only_through_a_modifier() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let s = insert_source_saved_at(&conn, root, "a.jpg", NEW_YEARS_EVE_2330_UTC);
+        let read = |conn: &mut RawConnection, filter: &str| {
+            apply_filters(
+                conn,
+                &[s],
+                &[Filter::parse(filter).unwrap()],
+                &UserZone::utc(),
+            )
+            .unwrap()
+            .read_an_instant
+        };
+
+        assert!(read(&mut conn, "source.mtime|year=2023"));
+        assert!(read(&mut conn, "source.mtime|month?"));
+        assert!(read(&mut conn, "NOT source.mtime|year IN (2020, 2021)"));
+        assert!(!read(&mut conn, "source.mtime>=2024-01-01"));
+        assert!(!read(&mut conn, "source.mtime?"));
+        assert!(!read(&mut conn, "source.ext=jpg"));
+        assert!(
+            !apply_filters(&mut conn, &[s], &[], &UserZone::utc())
+                .unwrap()
+                .read_an_instant
+        );
     }
 
     /// A save time Canon cannot read has no value at the existence door: `NOT source.mtime?`

@@ -75,6 +75,15 @@ fn user_zone() -> &'static UserZone {
     Box::leak(Box::new(UserZone::machine()))
 }
 
+/// This machine's zone for the manifest commands, read through the same owner **without** the
+/// unknown-zone notice. A manifest's run reads the zone the manifest or its lock records, so
+/// the notice's "times are read in UTC" would be false there; `cluster generate` and
+/// `cluster refresh` name the machine's zone in their own refusals and statements instead,
+/// and `cluster status` reads it only for what a refresh here would record.
+fn manifest_machine_zone() -> UserZone {
+    UserZone::machine()
+}
+
 /// What a user is told about their clock: nothing for a zone Canon can read, and for one it
 /// cannot, that times are read in UTC and why.
 fn notice_for(zone: &UserZone) -> Option<String> {
@@ -1461,6 +1470,7 @@ fn run(cli: Cli) -> Result<()> {
                     &command_line,
                     &config,
                     cli.no_receipt,
+                    &manifest_machine_zone(),
                 )?;
             }
             ClusterAction::Refresh {
@@ -1476,10 +1486,11 @@ fn run(cli: Cli) -> Result<()> {
                     &command_line,
                     &config,
                     cli.no_receipt,
+                    &manifest_machine_zone(),
                 )?;
             }
             ClusterAction::Status { manifest, verbose } => {
-                archive::status(db.conn_mut(), &manifest, verbose)?;
+                archive::status(db.conn_mut(), &manifest, verbose, &manifest_machine_zone())?;
             }
         },
         Commands::Apply {

@@ -13,6 +13,7 @@ use std::collections::HashSet;
 
 use crate::archive::{plan_generate, ClusterGenerateParams};
 use crate::core::domain::resolution::{classify_present, StandingBucket};
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo;
 use crate::core::testing::*;
 use crate::survey::ObjectIndex;
@@ -164,6 +165,7 @@ fn cluster_generate_carries_empty_files_instead_of_skipping_them() {
             filters: vec![],
             allow_archived: false,
             allow_duplicates: false,
+            clock: UserZone::utc(),
         },
     )
     .unwrap();

@@ -77,6 +77,9 @@ pub enum Expr {
 pub struct FilterResult {
     pub source_ids: Vec<i64>,
     pub used_status: UsedStatus,
+    /// Whether any comparison read an instant on the clock
+    /// (`domain::transform::reads_an_instant`).
+    pub read_an_instant: bool,
 }
 
 /// Flags indicating which status predicates appeared in the filter expression.

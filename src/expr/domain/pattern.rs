@@ -9,11 +9,12 @@ use std::collections::HashMap;
 
 use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
 use super::transform::{
-    apply_chain, fact_value_to_string, parse_modifier, Modified, ModifierCall, NoValueCause,
-    PathAccessor,
+    apply_chain, fact_value_to_string, parse_modifier, Half, InstantRecord, Modified, ModifierCall,
+    NoValueCause, PathAccessor,
 };
 use super::value::{get_builtin_value, SourceAttributes};
 use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::UserZone;
 
 // ============================================================================
@@ -149,6 +150,18 @@ impl PatternNoValue {
             }
         }
     }
+
+    /// The grain the time was known to, where a modifier read finer; `None` for a cause no
+    /// modifier met.
+    pub fn too_coarse_grain(&self) -> Option<Precision> {
+        match self {
+            PatternNoValue::UnreadableSaveTime => None,
+            PatternNoValue::TooCoarse {
+                cause: NoValueCause::TooCoarse { precision, .. },
+                ..
+            } => Some(*precision),
+        }
+    }
 }
 
 impl std::fmt::Display for PatternNoValue {
@@ -192,6 +205,8 @@ pub struct EvalContext<'a> {
     unmeasured: Unmeasured,
     /// The clock every time is read on, through the frame rule.
     clock: &'a UserZone,
+    /// Whether an evaluation read an instant on that clock.
+    instant_read: InstantRecord,
 }
 
 impl<'a> EvalContext<'a> {
@@ -204,6 +219,7 @@ impl<'a> EvalContext<'a> {
             // it, which is exactly this reading.
             unmeasured: Unmeasured::NoScopeRecorded,
             clock,
+            instant_read: InstantRecord::default(),
         }
     }
 
@@ -228,6 +244,13 @@ impl<'a> EvalContext<'a> {
     pub fn set_scope_rel(&mut self, scope_rel: Option<&'a str>, unmeasured: Unmeasured) {
         self.scope_rel = scope_rel;
         self.unmeasured = unmeasured;
+    }
+
+    /// Whether an evaluation through this context read an instant on its clock
+    /// (`domain::transform::reads_an_instant`): a pattern that placed a save time or an
+    /// instant fact, printed or modified. A clock reading places the same on any clock.
+    pub fn read_an_instant(&self) -> bool {
+        self.instant_read.read()
     }
 }
 
@@ -469,6 +492,12 @@ fn normalize_pattern_result(path: &str) -> String {
 /// Evaluate a single expression
 fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
     let value = get_value(&expr.key, ctx)?;
+    ctx.instant_read.note(
+        &value,
+        expr.accessor.as_ref(),
+        &expr.modifiers,
+        Half::Pattern,
+    );
 
     // for_display: false since patterns are used for paths
     match apply_chain(
@@ -1278,6 +1307,54 @@ mod tests {
 
         let year = parse_pattern("{content.DateTimeOriginal|year}/{filename}").unwrap();
         assert_eq!(evaluate(&year, &ctx).unwrap(), "2024/a.jpg");
+    }
+
+    /// A save time is an instant: placing it — modified or printed bare — reads the clock.
+    #[test]
+    fn a_pattern_placing_a_save_time_reads_an_instant() {
+        let zone = UserZone::utc();
+        for pattern in [
+            "{source.mtime|year}/{filename}",
+            "{source.mtime}/{filename}",
+        ] {
+            let mut ctx = EvalContext::new(&zone);
+            ctx.set_source(at("photos/a.jpg"));
+            evaluate(&parse_pattern(pattern).unwrap(), &ctx).unwrap();
+            assert!(ctx.read_an_instant(), "{pattern}");
+        }
+        let mut ctx = EvalContext::new(&zone);
+        ctx.set_source(at("photos/a.jpg"));
+        ctx.set_fact(
+            "content.CreateDate",
+            FactValue::Time(
+                crate::core::domain::time::reading::read_time("2024-06-15T14:30:05+02:00").unwrap(),
+            ),
+        );
+        evaluate(&parse_pattern("{content.CreateDate|date}").unwrap(), &ctx).unwrap();
+        assert!(ctx.read_an_instant(), "an instant with its offset");
+    }
+
+    /// A clock reading reads as written on any clock, and a pattern naming no time reads
+    /// none: neither is a clock that mattered.
+    #[test]
+    fn a_pattern_placing_a_clock_reading_reads_none() {
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
+        ctx.set_source(at("photos/a.jpg"));
+        ctx.set_fact(
+            "content.DateTimeOriginal",
+            FactValue::Time(
+                crate::core::domain::time::reading::read_time("2024-06-15 14:30:05").unwrap(),
+            ),
+        );
+        for pattern in [
+            "{content.DateTimeOriginal|year}/{filename}",
+            "{content.DateTimeOriginal}/{filename}",
+            "{source.ext}/{source.size}/{filename}",
+        ] {
+            evaluate(&parse_pattern(pattern).unwrap(), &ctx).unwrap();
+        }
+        assert!(!ctx.read_an_instant());
     }
 
     #[test]

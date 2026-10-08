@@ -810,6 +810,17 @@ const LAWS: &[Law] = &[
         authority: Authority::Distilled,
         record: "2026-09-26",
     },
+    Law {
+        // A zone a person names — a manifest's `zone` line — is read by
+        // `parse_zone_name` alone, beside the user's-zone owner; a lookup of zone
+        // rules anywhere else is build-refused. Wider reach is a board grant.
+        name: "zone-name parse",
+        owner: "core/domain/time/zone.rs",
+        verifier: "zone_rules_are_looked_up_only_by_their_owner",
+        reach: Reach::Unit("core"),
+        authority: Authority::Recognised,
+        record: "2026-10-05",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

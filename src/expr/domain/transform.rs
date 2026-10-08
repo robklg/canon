@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use jiff::civil::Weekday;
 
 use crate::core::domain::fact::FactValue;
-use crate::core::domain::time::value::{Precision, TimeValue};
+use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 use crate::core::domain::time::zone::UserZone;
 
 /// A modifier with optional arguments
@@ -258,24 +258,9 @@ impl std::fmt::Display for NoValueCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NoValueCause::TooCoarse { precision, .. } => {
-                write!(
-                    f,
-                    "the time is known only to the {}",
-                    precision_word(*precision)
-                )
+                write!(f, "the time is known only to the {}", precision.word())
             }
         }
-    }
-}
-
-fn precision_word(precision: Precision) -> &'static str {
-    match precision {
-        Precision::Year => "year",
-        Precision::Month => "month",
-        Precision::Day => "day",
-        Precision::Minute => "minute",
-        Precision::Second => "second",
-        Precision::Fraction => "fraction of a second",
     }
 }
 
@@ -394,6 +379,76 @@ pub fn apply_chain(
         }
     }
     Ok(Modified::Value(value))
+}
+
+/// Which half of the language reads a value: the asking half (filters) or the shaping half
+/// (patterns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Half {
+    Filter,
+    Pattern,
+}
+
+/// **Whether evaluating `value` through an accessor and `modifiers` reads an instant on the
+/// clock** — the one answer to "did this run's clock matter?", read by the archive's
+/// statements about the zone a manifest's run used.
+///
+/// An instant is a time whose form is not a clock reading, every save time among them; a
+/// clock reading reads as written on any clock, so it never counts. The first transform is
+/// the only one that sees the time — whatever follows reads the text it gave. An accessor
+/// refuses a time, and `|bucket` refuses one; neither reads a clock. A number under a time
+/// modifier is read as seconds since 1970 (the `// AUDIT:` in [`apply_modifier`]), an
+/// instant.
+///
+/// The halves differ in one case: a pattern prints a bare time on the clock, while a filter
+/// compares a bare time by the stored number and never uses the clock — the window before
+/// typed dates bind to spans, under the existing `// AUDIT:` in `domain/filter.rs`. So a
+/// filter reads an instant only through a modifier.
+pub(crate) fn reads_an_instant(
+    value: &FactValue,
+    accessor: Option<&PathAccessor>,
+    modifiers: &[ModifierCall],
+    half: Half,
+) -> bool {
+    if accessor.is_some() {
+        return false;
+    }
+    let first = modifiers.first().map(|call| call.modifier);
+    match value {
+        FactValue::Time(tv) if tv.form() != TimeForm::Clock => match first {
+            Some(Modifier::Bucket) => false,
+            Some(_) => true,
+            None => half == Half::Pattern,
+        },
+        FactValue::Num(_) => first.is_some_and(|m| m.category() == ModifierCategory::Time),
+        FactValue::Time(_) | FactValue::Text(_) | FactValue::Path(_) => false,
+    }
+}
+
+/// The record a run keeps of [`reads_an_instant`]: set by every evaluation site through the
+/// rule, read once the run is done. Held by the run's own context (`FactCache` for filters,
+/// `EvalContext` for patterns), so no evaluation signature carries it.
+#[derive(Debug, Default)]
+pub(crate) struct InstantRecord(std::cell::Cell<bool>);
+
+impl InstantRecord {
+    /// Note one evaluation, through the rule.
+    pub(crate) fn note(
+        &self,
+        value: &FactValue,
+        accessor: Option<&PathAccessor>,
+        modifiers: &[ModifierCall],
+        half: Half,
+    ) {
+        if reads_an_instant(value, accessor, modifiers, half) {
+            self.0.set(true);
+        }
+    }
+
+    /// Whether any evaluation noted so far read an instant on the clock.
+    pub(crate) fn read(&self) -> bool {
+        self.0.get()
+    }
 }
 
 /// The precision a time modifier reads: a value written coarser has no value for it.
@@ -843,5 +898,54 @@ mod tests {
         assert_eq!(format_bucket_num(1000000000.0), "1G");
         assert_eq!(format_bucket_num(0.5), "0.5");
         assert_eq!(format_bucket_num(0.123), "0.123");
+    }
+
+    /// The rule's edges: only the first transform sees the time; an accessor and `|bucket`
+    /// refuse one; a number under a time modifier is an instant; a clock reading never is.
+    #[test]
+    fn the_instant_rule_reads_only_what_reads_a_clock() {
+        let call = |m: Modifier| ModifierCall {
+            modifier: m,
+            args: vec![],
+        };
+        let instant = FactValue::Time(TimeValue::from_epoch_secs(1_718_452_800).unwrap());
+        let clock = FactValue::Time(read_time("2024-06-15 14:30:05").unwrap());
+        let year = [call(Modifier::Year)];
+        let lower = [call(Modifier::Lowercase)];
+        let bucket = [call(Modifier::Bucket)];
+        let index = PathAccessor::Index(0);
+
+        for half in [Half::Filter, Half::Pattern] {
+            assert!(reads_an_instant(&instant, None, &year, half));
+            assert!(
+                reads_an_instant(&instant, None, &lower, half),
+                "printed, then cased"
+            );
+            assert!(!reads_an_instant(&instant, None, &bucket, half));
+            assert!(!reads_an_instant(&instant, Some(&index), &year, half));
+            assert!(!reads_an_instant(&clock, None, &year, half));
+            assert!(!reads_an_instant(&clock, None, &[], half));
+            assert!(reads_an_instant(&FactValue::Num(1.0e9), None, &year, half));
+            assert!(!reads_an_instant(
+                &FactValue::Num(1.0e9),
+                None,
+                &lower,
+                half
+            ));
+            assert!(!reads_an_instant(
+                &FactValue::Text("2024".into()),
+                None,
+                &year,
+                half
+            ));
+        }
+        assert!(
+            reads_an_instant(&instant, None, &[], Half::Pattern),
+            "printed bare"
+        );
+        assert!(
+            !reads_an_instant(&instant, None, &[], Half::Filter),
+            "the stored number"
+        );
     }
 }

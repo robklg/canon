@@ -41,6 +41,20 @@ pub enum Precision {
     Fraction,
 }
 
+impl Precision {
+    /// The grain in plain words, as a sentence says a time is known "only to the …".
+    pub fn word(self) -> &'static str {
+        match self {
+            Precision::Year => "year",
+            Precision::Month => "month",
+            Precision::Day => "day",
+            Precision::Minute => "minute",
+            Precision::Second => "second",
+            Precision::Fraction => "fraction of a second",
+        }
+    }
+}
+
 /// The three stored forms, named by their offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeForm {

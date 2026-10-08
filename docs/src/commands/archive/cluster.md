@@ -49,6 +49,7 @@ Generated manifest: manifest.toml (1,234 sources in manifest.lock)
     /Volumes/Drive1  (800)
     /Volumes/Drive2  (434)
   1,234 have no archived copy
+Times are read on Europe/Amsterdam; the manifest's zone line records it.
 ```
 
 **Empty files are never skipped as "already archived".** A zero-byte file is
@@ -60,6 +61,12 @@ archive detection ignores it and the manifest carries it with its folder.
 The generated manifest includes a cluster summary, a notes section for your own annotations, and comments listing available pattern variables:
 
 ```toml
+# Canon manifest — edit pattern and Notes freely.
+# To change the query, edit it here then run: canon cluster refresh <manifest>
+# zone: the time zone dates are read in, for the query and for folder names.
+# Edit it, or delete it to take this machine's, then run: canon cluster refresh <manifest>
+# Other fields are managed by Canon — do not edit.
+#
 # === Cluster Summary ===
 # 1,234 sources from 2 roots:
 #   /Volumes/Drive1  (800)
@@ -73,6 +80,7 @@ The generated manifest includes a cluster summary, a notes section for your own 
 version = 2
 query = ["source.ext|lowercase IN ('jpg', 'png', 'heic')"]
 scope = ["/path/to/photos"]
+zone = "Europe/Amsterdam"
 generated_at = "2026-02-28T12:00:00Z"
 lock_hash = "abc123..."
 
@@ -95,6 +103,8 @@ archive_root_id = 2
   Scoping to files rather than a folder — `canon cluster generate notes-2026-02*`, letting the shell expand the wildcard — places those files by name: directly under the destination when they all sit in one folder, and otherwise below the folder they share, which keeps files of the same name apart. How many files the wildcard happened to match makes no difference.
 
   Writing the manifest inside the destination is fine, but a manifest whose own path is a directory the pattern needs blocks every file below it. Generate and refresh warn when that is the case, naming both paths; [`apply`](apply.md) refuses the run. This is easy to hit by naming a manifest after a folder whose name contains a dot: `-o`/`-O` append `.toml` only when the name has no extension, so `-O photos.2024` writes exactly that name.
+- **`zone`** is the time zone dates are read in, for the query and for folder names. See [The manifest's time zone](#the-manifests-time-zone).
+- **The facts comment** lists the facts every source carries. A time fact not written to the second for every source names its coarsest grain and how many values have it, for example `content.Taken time — 12 known only to the year`: a pattern's `|month` finds no value in those.
 - **`version`** field tracks the manifest format version.
 - **`[options]`** records which `--allow` flags were used during generation. [`cluster refresh`](cluster.md) reads them, because it re-selects sources from the same query. [`apply`](apply.md) reads only `duplicates`, which speaks to the content it is about to transfer; `archived` acknowledged a selection that has already happened, and apply selects nothing. What apply needs acknowledged, it asks for on its own flags.
 
@@ -125,6 +135,52 @@ pattern = "{source.ext|lowercase}/{filename}"
 
 See [Pattern Expressions](../../reference/expr.md) for the full syntax reference, including modifiers, path accessors, and aliases.
 
+**Year folders for files known only to the year.** A pattern reading `|month` has no value for a time known only to the year. A second manifest takes those files on their own, into year folders:
+
+```toml
+query = ["content.DateTimeOriginal|year? AND NOT content.DateTimeOriginal|month?"]
+pattern = "{content.DateTimeOriginal|year}/{filename}"
+```
+
+## The manifest's time zone
+
+A date becomes a folder name on a clock. The manifest records that clock in its `zone` line, and the lock file carries it, so a manifest places the same way on whatever machine refreshes or applies it.
+
+- **`cluster generate`** records this machine's zone: a zone name such as `Europe/Amsterdam`, `UTC`, or a fixed offset such as `+03:00`. A machine zone with no name whose offset never changes is recorded as that offset: `TZ=EST5` records `-05:00`, and `TZ=UTC-3` records `+03:00`, because a `TZ` rule counts hours west of UTC, as `date` reads it. One whose offset changes, such as a `TZ` rule with summer time, has no name to record, and is refused.
+- **`cluster refresh`** reads the zone line, selects on it, and writes it into the lock. With no zone line it records this machine's zone and says so. A name that differs only in upper and lower case is written back in its usual spelling.
+- **[`apply`](apply.md)** and `cluster status` read the lock's zone, never this machine's.
+
+Edit the zone line, or delete it to take this machine's, then refresh. A refresh that reads a time on a clock other than this machine's says which:
+
+```
+times read on Europe/Amsterdam, as the manifest records (this machine: America/New_York)
+```
+
+A refresh recording a zone other than the one the old lock was built in says what changes:
+
+```
+Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now read on America/New_York, which can change which sources a time query selects and which folder a file goes to
+```
+
+Where the query and the pattern read no time on a clock (a camera's clock reading reads the same on any clock), the change is one line in parentheses, and no clock line prints. Two names for the same zone, such as `US/Eastern` and `America/New_York`, are not a change.
+
+A zone line Canon cannot read stops the refresh, which writes nothing:
+
+```
+Error: this machine's time zone data does not know "Europe/Amsterdm", the zone line in the manifest — correct the zone line, or update this machine's time zone data
+Refresh aborted — manifest.toml and its lock file are unchanged.
+```
+
+A zone line holding a rule such as `EST5EDT,M3.2.0,M11.1.0` instead of a name is refused the same way. `cluster generate` refuses a machine zone it cannot record, before it selects anything:
+
+```
+Error: TZ=Europe/Amsterdm is not a time zone Canon can read; run it with TZ set to a zone name, for example TZ=Europe/Amsterdam canon cluster generate …
+```
+
+A refresh reports these causes together, in one run: the scope's first, then the zone line, then each query line that does not parse. A query line that parses but names an unknown key or modifier is refused later, on its own.
+
+**What "the same on any machine" rests on.** Zone rules come from each machine's own time zone data. Two machines place a file the same way when their data agree for the manifest's zone. `apply --dry-run` on the machine that applies shows the destinations that run will use.
+
 ## Refreshing the Lock File
 
 Use `canon cluster refresh` to update the lock file if sources have changed since the manifest was generated:
@@ -134,7 +190,7 @@ Use `canon cluster refresh` to update the lock file if sources have changed sinc
 canon cluster refresh manifest.toml
 
 # Edit the manifest first, then re-query from what was saved
-canon cluster refresh manifest.toml --edit
+canon cluster refresh --edit manifest.toml
 ```
 
 This re-runs the manifest's query and updates `manifest.lock` with the current matching sources. The manifest settings (`[options]`, `[output]`) remain unchanged.
@@ -192,6 +248,7 @@ across*: at [`apply`](apply.md).
 ```
 Lock: 1 entries
 /path/to/photos suspended — apply would refuse: origin of 1 source · canon roots unsuspend path:/path/to/photos
+Time zone: Europe/Amsterdam (the lock's)
 ```
 
 A suspended destination is stated the same way. A root the manifest reaches through its scope
@@ -271,11 +328,17 @@ failed as the query entry that leaves such files out:
 
 ```
 A time known only to a coarser grain than the pattern reads gives the pattern no value.
-Add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, and refresh.
+Use a coarser modifier in the pattern, which takes effect at the next apply; or add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, then refresh.
 ```
 
-The query and a file's save time are both read when the lock is built, so these ways out take
+The query and a file's save time are both read when the lock is built, so those ways out take
 effect at the refresh, and `cluster status` names the apply once the rebuilt lock places every file.
+The pattern is read when files are placed, so a coarser modifier needs no refresh. `cluster refresh`
+states the same cause with its counts, over the lock it has just written:
+
+```
+12 sources hold content.DateTimeOriginal only to the year, so {content.DateTimeOriginal|month} has no value for them
+```
 
 If the recorded scope resolves to nothing — every path in it set aside, so the report has just
 printed `no sources known at …` — a refresh is refused outright, and pointing at one would only
@@ -305,3 +368,32 @@ Lock: none — the last refresh matched nothing.
 ```
 
 A manifest that still records a `lock_hash` but whose lock file is gone reads `Lock: none — the manifest names a lock file that is not there.` [`apply`](apply.md) refuses in both cases: there is nothing to carry across.
+
+### The zone in `cluster status`
+
+`cluster status` places files on the lock's zone and names it under the `Lock:` line. Where the manifest's zone line says something a refresh would change, a second line says so:
+
+```
+Time zone: Europe/Amsterdam (the lock's)
+  the manifest's zone line reads America/New_York; canon cluster refresh manifest.toml brings the lock up to date
+```
+
+```
+Time zone: America/New_York (the lock's)
+  the manifest has no zone line; a refresh on this machine would record Europe/Paris: canon cluster refresh manifest.toml
+```
+
+A zone line Canon cannot read, and a query line that does not parse, are each named as what stops the refresh (`cluster refresh would refuse: …`, in the refresh's own words), and the report then names no rebuild. Neither stops an apply, which reads the lock's zone and re-selects nothing.
+
+A lock that records no zone Canon can read gets no destinations and no counts: the summary names its entries once, with their source files unchecked, and the rebuild is the step. A lock built before lock files recorded the zone says so on its `Lock:` line; a lock naming a zone this machine's time zone data does not know names the ways out:
+
+```
+Lock: 1 entries
+Time zone: Europe/Kyiv (the lock's)
+  This machine's time zone data does not know Europe/Kyiv, the zone the lock was built in.
+    update this machine's time zone data, or
+    apply on the machine that built the lock, or
+    change the manifest's zone line to a name this machine knows for the same zone (for example, an older spelling), then canon cluster refresh manifest.toml
+
+Summary: 1 entry with no destination computed, and its source file not checked: the lock records no time zone this machine can read.
+```

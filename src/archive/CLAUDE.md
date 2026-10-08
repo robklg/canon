@@ -20,7 +20,7 @@ archive/
     cluster.rs    # canon cluster generate/refresh/status
   ops.rs          # declaration-only
   ops/
-    pattern.rs    # build_eval_context + evaluate_pattern — used by plan, status, cli/apply
+    pattern.rs    # build_eval_context + evaluate_pattern — used by plan, status, generate, cli/apply
     plan.rs       # what an apply would do, and what stands in the way
     execute.rs    # the transfer loop, receipts, extraction rows
     receipt.rs    # apply's two receipt document shapes
@@ -31,8 +31,9 @@ archive/
 ```
 
 **The internal dependency direction is a DAG, and the split is what keeps it one**:
-`execute → plan → pattern`; `execute → receipt`; `generate → manifest`; `status → manifest`,
-`status → pattern` (a function-local `use` inside `compute_manifest_status`). `pattern`, `manifest`
+`execute → plan → pattern`; `execute → receipt`; `generate → manifest`, `generate → pattern`
+(the refresh's pass over the lock it just wrote, `pattern_gaps_for_written_lock`); `status →
+manifest`, `status → pattern` (a function-local `use` inside `compute_manifest_status`). `pattern`, `manifest`
 and `receipt` are the sinks, pointing at nothing above `domain`. An edge from `plan` to `execute`
 would undo the separation the split exists to hold.
 
@@ -155,7 +156,7 @@ carries no measurement.
 So an absent measurement has **two** causes, taking different answers — a refresh rebuilds an old
 lock, and gives an unscoped manifest nothing. The entry cannot tell them apart (both are an absent
 field), so the question is asked of the **file**: `ops/manifest.rs::LockFile::unmeasured_reason`
-answers it from the header's presence, and the three readers hand that `expr::Unmeasured` to
+answers it from the header's presence, and every reader hands that `expr::Unmeasured` to
 `evaluate_pattern` the way they hand it the root cache. The two refusals then say their own thing,
 and `cluster status` asks the same question before naming a next step — offering the rebuild for an
 old lock and **nothing at all** for a pattern that will not expand, because a refresh does not give
@@ -199,10 +200,10 @@ The dispositions differ by what each command is about to do, and none of them is
 - **`cluster status` carries every category out** on `ManifestStatus` and lets the interface print
   them: `unrooted_scope` and `set_aside_scope`, and — because a report must name no act that would
   be turned away — `scope_kept_nothing` and `scope_confirms_nothing`, the two halves of the
-  recorded scope the decision table reads. `all_accounted_for()` is untouched, since its claim is
-  about source files and is still true. Whether there is a **next step** is never the scope's
-  business: a manifest with nothing pending has no step to offer, and that gate is the interface's
-  own. *Which* step it is belongs to the table below.
+  recorded scope the decision table reads. `all_accounted_for()` answers about source files the
+  report checked — never over a lock placed nowhere. Whether there is a **next step** is never the
+  scope's business: none with nothing pending or unplaced, nor where a checked entry found
+  something lost or wrong (`found_nothing_lost_or_wrong`); *which* is the table's.
 
 The recorded-scope resolution itself, and its pins, live in `src/core/CLAUDE.md`.
 
@@ -301,23 +302,31 @@ help — for generation and for *both* refresh arms, and the round-trip test cov
 inside `cluster status`'s next-step hint, listing four causes where `apply` refuses on more — so
 the report invited the one command that refuses, in four separate ways.
 
-- **Each row stops exactly one act**, and which one is the enum's own doc table: the lock's three
-  states, the pattern's, and the two ends' doors stop `apply`; the recorded scope's door and the
-  source-existence policy's terminal rule stop `cluster refresh`.
+- **Each row stops exactly one act**, and which one is the enum's own doc table: the lock's
+  states (absent, hash, header and its zone), the pattern's, and the two ends' doors stop `apply`;
+  the recorded scope's door, the source-existence policy's terminal rule and the manifest's zone
+  (a line this machine cannot read, or no line on a machine whose zone cannot be written down)
+  and a query line that does not parse stop `cluster refresh` — read through the refresh's own
+  `settle_manifest_zone` and `ops/manifest.rs::parse_recorded_query`, so the report names no rebuild
+  those turn away. **Not reached**: a query line that parses but names an unknown key or modifier,
+  refused only inside the selection, which neither command collects. A lock's header is one `LockHeaderStanding`, so a lock with no header
+  raises its older row and never a zone row; both zone-of-the-lock rows are cleared by a refresh
+  that runs, which writes a zone it read on this machine, and both zone-of-the-manifest rows owe
+  no way back of their own — the report states them in the refresh's words.
   `ManifestStatus::next_step` and `refresh_refused_by` are **projections** into it, never
   derivations beside it (`the_table_holds_every_row_once`, `each_row_stops_the_act_the_table_names`).
   A projection is carried only where production asks for it: a bare "could the refresh run" was
   minted, lost its last caller to the richer question below, and came out rather than standing as a
   second spelling of it.
-- **The refusal answers with its cause, because the two causes leave the reader differently
-  placed.** `refresh_refused_by` names the door or the terminal rule, in the order `cluster
-  refresh` itself refuses in, and its `None` is exactly `can_run(Act::Refresh)`
-  (`the_refresh_refusal_agrees_with_the_predicate`). A door announces itself with the act that
-  opens it; a scope that kept nothing announces itself as `no sources known at <p> — skipped`,
-  which names no act at all — so a remedy falling silent at the first leaves the reader holding
-  something and at the second leaves them holding nothing.
+- **The refusal answers with its cause, because the causes leave the reader differently
+  placed.** `refresh_refused_by` names the door, the terminal rule, the manifest's zone or the query, in
+  the order `cluster refresh` states them in, and its `None` is exactly `can_run(Act::Refresh)`
+  (`the_refresh_refusal_agrees_with_the_predicate`). A door, zone or query line announces itself
+  with its way back; a scope that kept nothing as `no sources known at <p> — skipped`, naming no
+  act — so a remedy falling silent at the first leaves the reader holding something and at the
+  second nothing.
 - **Two cells are unrepresentable; the third only looks like them.** `LockStanding` is an enum
-  because two of a lock's three claims are about a file somebody *read*: with no lock there is no
+  because two of a lock's claims are about a file somebody *read*: with no lock there is no
   hash to mismatch and no header to be missing, so those pairs cannot be posed at all. "No lock
   *and* an unexpandable pattern" reads like a third and is not — `pattern_expands` sits beside the
   enum, so the pair is constructible and only `compute_manifest_status`'s derivation keeps it from
@@ -326,7 +335,8 @@ the report invited the one command that refuses, in four separate ways.
   rather than assuming it away) and the derivation's
   (`an_absent_lock_is_a_state_the_read_states`, over a real manifest whose pattern cannot expand
   and whose lock was removed).
-- **A rebuild is named where it would run and would clear every obstacle in the apply's way.** One
+- **A rebuild is named where it would run and would clear every obstacle in the apply's way**
+  (short of the unknown key or modifier above). One
   row answers conditionally: a pattern that will not expand is cleared only where the lock predates
   the measurement *and* the recorded scope confirms something to measure from — otherwise the
   rebuild changes the stated reason and nothing else
@@ -362,8 +372,9 @@ the report invited the one command that refuses, in four separate ways.
   well — every spelling of one of these commands with something pasted into it lives in `cli.rs`,
   and there are exactly three
   (`a_command_is_spelled_with_a_path_only_where_it_is_quoted`, matched both directions). `source_lost_remedy` takes a
-  `RefreshStanding` and asks *would a refresh run, and if not, why* — the two refusals are kept
-  apart because **only a door states its own way back**, in the line that announces it; a scope
+  `RefreshStanding` and asks *would a refresh run, and if not, why* — the refusals are kept
+  apart because only some state their own way back in the line that announces them (a door; a zone
+  or query line, in the refresh's words); a scope
   that kept nothing is announced with no act at all, so that arm names the same pair `cluster
   refresh` itself prints when it refuses for the same reason
   (`the_source_lost_remedy_gives_each_refusal_its_own_way_back`). `Unasked` is `apply`'s: apply carries out a
@@ -404,24 +415,22 @@ the report invited the one command that refuses, in four separate ways.
   matches its three answers with no rest arm
   (`a_withheld_step_is_never_left_without_an_answer`, walked over every shape the table can take,
   every input varied, the one pair construction rules out skipped by name). **The claim reaches the table's answers and no further**: the
-  interface's outermost gate — nothing pending, or a source lost, or a destination of the wrong
+  interface's outermost gate — nothing pending or unplaced, or a source lost, or a destination of the wrong
   size — returns before the table is asked, and a report stopped there names no act. For a lost
   source the line above has already said to check the volume; for a wrong-sized destination
   nothing has, and `apply --resume` on the same manifest holds the look-before-deleting guidance
   the report withholds. That gap is the gate's, older than the table, and stands.
   The pattern arm and `apply`'s pattern refusal are one composition, `adjust_pattern_remedy`, so
-  wherever both reach it they say the same words. They do not always both reach it: `apply`
-  refuses a lock without a header before it evaluates the pattern, so on a lock that predates
-  the measurement `apply` says to rebuild, while the report asks the table. The table's rule for
-  the **pattern row** is a conjunction: a rebuild clears an unexpandable pattern only where the
-  pattern needs a scope the lock lacks *and* the recorded scope confirms something to measure
-  from; the lock's own rows (no header, hash mismatch, a lost lock) and parked origins are
-  cleared by a rebuild as before, so a header-less lock under a pattern that expands is still
-  sent to the rebuild. A pattern failing for a fact is cleared by no rebuild whatever the lock's
-  age, and there the age is stated on the `Lock:` line instead, in the words `apply`'s refusal
-  will use (`a_locks_age_is_stated_on_its_own_line`) — a raised obstacle the step does not
-  answer is never left unspoken. Each is right at its own grain, and the rebuild `apply` names
-  arrives at the report's answer one step later.
+  wherever both reach it they say the same words. Both reach it only over a lock carrying a zone
+  this machine reads: `apply` refuses any other before it evaluates the pattern, and the report
+  places none of its entries (below), so for such a lock both name the rebuild and the pattern
+  is met after it. The table's rule for the **pattern row** is a conjunction: a rebuild clears an
+  unexpandable pattern only where the pattern needs a scope the lock lacks *and* the recorded
+  scope confirms something to measure from; the lock's own rows (no header, no zone, a zone not
+  known here, hash mismatch, a lost lock) and parked origins are cleared by a rebuild as before.
+  A pattern failing for a fact is cleared by no rebuild, and a lock's age is stated on the
+  `Lock:` line in the words `apply`'s refusal will use (`a_locks_age_is_stated_on_its_own_line`)
+  — a raised obstacle the step does not answer is never left unspoken.
   **Each pattern failure is answered by its cause.** `ops/pattern.rs`'s `PatternGaps` records
   which causes a run met, read off the facility's typed `expr::PatternNoValue`, never off a
   refusal's wording: a scope the lock lacks, a fact a source does not carry, a save time Canon
@@ -433,13 +442,14 @@ the report invited the one command that refuses, in four separate ways.
   fact, so no import supplies it; a pattern naming a fact no source carries is repaired only by
   the fact. The save-time and too-coarse pairs leave such files out through a query entry, the
   too-coarse one naming each key and modifier that failed, or correct the save time; a query and
-  a save time are both read when the lock is built, so those lines name the refresh. The
+  a save time are both read when the lock is built, so those ways name the refresh; the
+  too-coarse pair offers a coarser modifier first, which needs none (`coarse_way_out`). The
   condition is the lock's, never the manifest's: a manifest may declare a scope its lock has not
   seen, and there the rebuild is the step — the table reads the same lock answer to decide it
   (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`; the table once read the header's
   presence instead and told such a manifest it declared none). Which failure it is is the
   lock's answer, `ops/manifest.rs`'s `LockFile::pattern_needs_a_scope_it_lacks`, asked once of
-  the whole file at both commands and never of the run's `--root` subset, which could answer
+  the whole file at every reader and never of the run's `--root` subset, which could answer
   differently from the file it was cut from
   (`a_pattern_needing_a_scope_is_asked_of_the_whole_lock`), and carried into the table as its
   own input; its pattern half comes off
@@ -451,13 +461,21 @@ the report invited the one command that refuses, in four separate ways.
 
 ## Conventions
 
-- **Selection and placement read UTC until a manifest records the zone it was made in** — four
-  `// AUDIT:` sites hand `UserZone::utc()` to the facility, never the machine's zone, because what
-  a manifest takes and where it places must not depend on where a command runs: `ops/generate.rs`'s
-  selection, `ops/plan.rs`'s and `ops/status.rs`'s placement, and `cli/apply.rs`'s confirmation
-  samples. Each is pinned with the machine set to Amsterdam and UTC expected
-  (`the_selection_reads_utc_whatever_the_machines_zone` and its three siblings); marker and pin go
-  together when the lock carries the zone.
+- **The zone is manifest intent, and the lock carries it.** `cluster generate` records this
+  machine's zone in the manifest's editable `zone` line and the lock's header, refusing a zone
+  with no name to record; `cluster refresh` settles the line (`domain.rs::settle_manifest_zone`,
+  which `cluster status` reads too), selects on it and writes it into both files; `apply` and
+  `cluster status` place on the lock's zone (`ops/manifest.rs::LockFile::zone`), never the
+  machine's. An unreadable line is one refusal among a refresh's collected causes, never a parse
+  error. A lock with no zone this machine reads is refused by `apply` before the plan and the
+  decision row, and `cluster status` computes no destination and states no counts for it — a lock
+  recording no clock is placed on none, and a zero nobody measured is not said. Zones compare parsed, never as text (`RecordedZone::same_zone`). Pinned by
+  `apply_places_on_the_locks_zone_whatever_the_machines` and its siblings at each reader. **Not
+  reached**: a typed date in a manifest's query, which still compares the stored number.
+- **Lock-file test machinery shared across strata lives beside the format it writes**:
+  `ops/manifest.rs::fixtures`, a `#[cfg(test)]` module, serves the tests of `ops/status.rs` and
+  `cli/apply.rs`, which stay in-file with the code they exercise. The root's externalized `tests/`
+  directory is per stratum, and two strata share this helper.
 - **The manifest's base_dir is gated at plan time** (`plan_apply` precondition, via
   `core::domain::path::rel_dir_escapes`): absolute or parent-traversing values are refused before
   any plan is computed — an absolute value replaces the archive root in the filesystem join, a `..`

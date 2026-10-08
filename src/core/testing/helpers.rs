@@ -175,3 +175,20 @@ pub fn migrated_time(secs: i64) -> crate::core::domain::time::value::TimeValue {
     )
     .expect("a whole-second clock reading")
 }
+
+/// Store a time fact on a source, written as `written` (`2024`, `2024-06-15T14:30:05`, …),
+/// through the one conversion pair the import uses.
+pub fn insert_time_fact(conn: &Connection, source_id: i64, key: &str, written: &str) {
+    use crate::core::domain::fact::FactValue;
+    let value = FactValue::Time(crate::core::domain::time::reading::read_time(written).unwrap());
+    let p = crate::core::repo::fact::fact_value_params(&value).unwrap();
+    conn.execute(
+        &format!(
+            "INSERT INTO facts (entity_type, entity_id, key, {}, observed_at, observed_basis_rev)
+             VALUES ('source', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0)",
+            crate::core::repo::fact::FACT_VALUE_COLUMNS
+        ),
+        rusqlite::params![source_id, key, p[0], p[1], p[2], p[3], p[4], p[5], p[6]],
+    )
+    .unwrap();
+}

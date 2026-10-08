@@ -291,3 +291,248 @@ fn a_zone_canon_cannot_read_is_named_and_utc_is_read() {
         run.stdout
     );
 }
+
+/// The outcome of a run that may refuse.
+struct Outcome {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+impl Home {
+    /// [`Home::run`], for a run that may refuse: its exit and both streams, asserted on by
+    /// the caller.
+    fn attempt(&self, tz: &str, args: &[&str]) -> Outcome {
+        let out = Command::new(env!("CARGO_BIN_EXE_canon"))
+            .args(args)
+            .current_dir(self.dir.path())
+            .env("CANON_HOME", self.path("home"))
+            .env("TZ", tz)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("canon must run");
+        Outcome {
+            success: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
+    /// An archive root beside the photos, and a manifest made under `tz` over the save-time
+    /// file alone, placing by `{source.mtime|year}`.
+    fn manifest_made_in(&self, tz: &str) -> String {
+        let manifest = self.manifest_over(tz, &["photos/saved.jpg"]);
+        self.edit_manifest(
+            &manifest,
+            "pattern = ",
+            "pattern = \"{source.mtime|year}/{filename}\"",
+        );
+        manifest
+    }
+
+    /// An archive root beside the photos, and a manifest made under `tz` over `files`.
+    fn manifest_over(&self, tz: &str, files: &[&str]) -> String {
+        std::fs::create_dir_all(self.path("archive")).unwrap();
+        let archive = self.path_str("archive");
+        self.run(tz, &["scan", "--add", "--role", "archive", &archive], None);
+        let manifest = format!("{}/cluster.toml", self.path_str(""));
+        let scope: Vec<String> = files.iter().map(|f| self.path_str(f)).collect();
+        let mut args = vec!["cluster", "generate"];
+        args.extend(scope.iter().map(String::as_str));
+        args.extend([
+            "--dest",
+            archive.as_str(),
+            "-o",
+            manifest.as_str(),
+            "--no-edit",
+        ]);
+        let made = self.run(tz, &args, None);
+        assert!(
+            made.stdout.contains(&format!("Times are read on {tz}")),
+            "{}{}",
+            made.stdout,
+            made.stderr
+        );
+        manifest
+    }
+
+    /// Replace the manifest line starting with `starts` by `line`, as a user editing it does.
+    fn edit_manifest(&self, manifest: &str, starts: &str, line: &str) {
+        let text = std::fs::read_to_string(manifest).unwrap();
+        let edited: String = text
+            .lines()
+            .map(|l| {
+                if l.starts_with(starts) {
+                    format!("{line}\n")
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect();
+        std::fs::write(manifest, edited).unwrap();
+    }
+}
+
+/// **The New Year places on the manifest's zone on any machine.** A manifest recorded in
+/// Amsterdam, refreshed and applied in New York, places the file saved at 23:30 UTC on New
+/// Year's Eve 2023 under 2024 — Amsterdam's year — and says which clock it read. With the
+/// zone line edited to New York and refreshed, the same file places under 2023.
+#[test]
+fn the_new_year_places_on_the_manifests_zone_on_any_machine() {
+    for (zone_line, year) in [(None, "2024"), (Some("America/New_York"), "2023")] {
+        let home = Home::new();
+        let manifest = home.manifest_made_in("Europe/Amsterdam");
+        if let Some(zone) = zone_line {
+            home.edit_manifest(&manifest, "zone = ", &format!("zone = \"{zone}\""));
+        }
+
+        let refreshed = home.run("America/New_York", &["cluster", "refresh", &manifest], None);
+        match zone_line {
+            None => assert!(
+                refreshed.stdout.contains(
+                    "times read on Europe/Amsterdam, as the manifest records (this machine: America/New_York)"
+                ),
+                "{}",
+                refreshed.stdout
+            ),
+            Some(_) => assert!(
+                refreshed
+                    .stdout
+                    .contains("Time zone changed from Europe/Amsterdam to America/New_York"),
+                "{}",
+                refreshed.stdout
+            ),
+        }
+
+        let dry = home.run("America/New_York", &["apply", &manifest, "--dry-run"], None);
+        let lock_zone = zone_line.unwrap_or("Europe/Amsterdam");
+        assert!(
+            dry.stderr
+                .contains(&format!("Time zone: {lock_zone} (from the lock)")),
+            "{}",
+            dry.stderr
+        );
+
+        home.run("America/New_York", &["apply", &manifest, "--yes"], None);
+        assert!(
+            home.path(&format!("archive/{year}/saved.jpg")).exists(),
+            "placed under {year}"
+        );
+    }
+}
+
+/// **An old lock is refused in friendly words**: a lock written before lock files recorded
+/// the zone is refused by `apply` naming the rebuild, never as a parse error — and a
+/// manifest command prints no unknown-zone notice, since it reads the recorded zone.
+#[test]
+fn an_old_lock_is_refused_in_friendly_words() {
+    use sha2::{Digest, Sha256};
+    let home = Home::new();
+    let manifest = home.manifest_made_in("Europe/Amsterdam");
+
+    // Take the zone out of the lock's header and re-point the manifest at the new bytes, so
+    // the refusal is the zone's and not the hash's.
+    let lock = manifest.replace(".toml", ".lock");
+    let text = std::fs::read_to_string(&lock).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    header.as_object_mut().unwrap().remove("zone");
+    lines[0] = header.to_string();
+    let old = lines.join("\n") + "\n";
+    std::fs::write(&lock, &old).unwrap();
+    let hash = format!("{:x}", Sha256::digest(old.as_bytes()));
+    home.edit_manifest(
+        &manifest,
+        "lock_hash = ",
+        &format!("lock_hash = \"{hash}\""),
+    );
+
+    let refused = home.attempt("America/New_York", &["apply", &manifest, "--yes"]);
+    assert!(!refused.success);
+    let said = format!("{}{}", refused.stdout, refused.stderr);
+    assert!(
+        said.contains("This lock file was built before lock files recorded the time zone."),
+        "{said}"
+    );
+    assert!(said.contains("canon cluster refresh"), "{said}");
+    assert!(!said.contains("Failed to parse"), "{said}");
+}
+
+/// **A manifest command prints no unknown-zone notice**: it reads the manifest's recorded
+/// zone, so "times are read in UTC" would be false there — on a machine whose `TZ` Canon
+/// cannot read, `cluster refresh` and `cluster status` say nothing of it.
+#[test]
+fn manifest_commands_print_no_unknown_zone_notice() {
+    let home = Home::new();
+    let manifest = home.manifest_made_in("Europe/Amsterdam");
+    for args in [
+        ["cluster", "refresh", manifest.as_str()],
+        ["cluster", "status", manifest.as_str()],
+    ] {
+        let run = home.run("Europe/Amsterdm", &args, None);
+        assert!(
+            !run.stderr.contains("times are read in UTC"),
+            "{args:?}: {}",
+            run.stderr
+        );
+    }
+}
+
+/// **Camera dates place on the manifest's zone too**, the other half of the New Year check: an
+/// instant written with `-05:00` and one written in UTC are 1 January 2024 in Amsterdam, and a
+/// clock reading with no zone places as written — on a New York machine, from a manifest
+/// recording Amsterdam.
+#[test]
+fn a_camera_date_places_on_the_manifests_zone_and_a_clock_reading_as_written() {
+    let home = Home::new();
+    let manifest = home.manifest_over(
+        "Europe/Amsterdam",
+        &["photos/f0.jpg", "photos/f1.jpg", "photos/f4.jpg"],
+    );
+    home.edit_manifest(
+        &manifest,
+        "pattern = ",
+        "pattern = \"{content.Taken|date}/{filename}\"",
+    );
+    home.run("America/New_York", &["cluster", "refresh", &manifest], None);
+    home.run("America/New_York", &["apply", &manifest, "--yes"], None);
+    for placed in [
+        "2024-01-01/f0.jpg",
+        "2024-01-01/f1.jpg",
+        "2023-12-31/f4.jpg",
+    ] {
+        assert!(home.path(&format!("archive/{placed}")).exists(), "{placed}");
+    }
+}
+
+/// **A refresh states the scope's refusal first**: a scope line on a suspended root, beside a
+/// zone line Canon cannot read, prints the door, then the zone's cause, then the abort once —
+/// exit 1 with no `Error:`, nothing written.
+#[test]
+fn a_refresh_states_the_door_before_the_zone_cause() {
+    let home = Home::new();
+    let manifest = home.manifest_made_in("Europe/Amsterdam");
+    home.edit_manifest(&manifest, "zone = ", "zone = \"Europe/Amsterdm\"");
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    let photos = home.path_str("photos");
+    home.run(
+        "UTC",
+        &["roots", "suspend", &format!("path:{photos}")],
+        None,
+    );
+
+    let refused = home.attempt("UTC", &["cluster", "refresh", &manifest]);
+    assert!(!refused.success);
+    let out = refused.stdout;
+    let door = out.find("suspended").unwrap_or_else(|| panic!("{out}"));
+    let zone = out
+        .find("Europe/Amsterdm")
+        .unwrap_or_else(|| panic!("{out}"));
+    let aborted = out
+        .find("Refresh aborted")
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(door < zone && zone < aborted, "{out}");
+    assert_eq!(out.matches("Refresh aborted").count(), 1, "{out}");
+    assert!(!refused.stderr.contains("Error:"), "{}", refused.stderr);
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), before);
+}

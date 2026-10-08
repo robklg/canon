@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::domain::fact;
+use crate::expr::domain::transform::InstantRecord;
 
 // ============================================================================
 // Fact Cache for Bulk Prefetching
@@ -32,6 +33,8 @@ pub struct FactCache {
     pub excluded_sources: Option<HashSet<i64>>,
     /// Source IDs with facts beyond content.hash.sha256 (for `enriched?`).
     pub enriched_sources: Option<HashSet<i64>>,
+    /// Whether any comparison in this run read an instant on the clock.
+    pub(crate) instant_read: InstantRecord,
 }
 
 impl FactCache {
@@ -44,6 +47,7 @@ impl FactCache {
             archived_objects: None,
             excluded_sources: None,
             enriched_sources: None,
+            instant_read: InstantRecord::default(),
         }
     }
 

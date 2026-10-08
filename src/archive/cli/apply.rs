@@ -15,7 +15,7 @@ use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorRefused, DoorVerb, ParkedRoot};
 use crate::core::domain::scope::DecisionScope;
-use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::time::zone::RecordedZone;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
@@ -122,6 +122,9 @@ pub fn run(
     // Why an entry might carry no measurement — asked of the file, which can
     // tell the two causes apart, rather than left to a refusal to guess.
     let unmeasured = lock.unmeasured_reason();
+    // The zone the lock was built in — asked of the file before its parts are taken apart,
+    // and answered below, after the older refusal a headerless lock takes.
+    let lock_zone_state = lock.zone();
 
     // Validate lock file hash matches config
     let actual_hash = crate::core::ops::fs::compute_full_hash(&lock_path)?;
@@ -172,11 +175,25 @@ pub fn run(
     // above already uses: both say this manifest cannot be applied as it
     // stands and name the way back.
     let Some(header) = lock.header else {
-        bail!(
+        return Err(lock_predates_measurement(&config_path));
+    };
+    // The lock's zone is the only clock this run reads times on — placement, the samples and
+    // the pre-flight line — so a lock that cannot name one is refused here, beside the older
+    // refusal and for the same reason: before the plan and before any decision row.
+    let lock_zone = match lock_zone_state {
+        Some(manifest::LockZone::Recorded(zone)) => zone,
+        Some(manifest::LockZone::PredatesZone) => bail!(
             "This lock file was {}.\nNothing was moved. {}",
-            super::LOCK_PREDATES_MEASUREMENT,
+            super::LOCK_PREDATES_ZONE,
             super::rebuild_remedy(config_path.as_ref()),
-        );
+        ),
+        Some(manifest::LockZone::NotKnownHere(name)) => bail!(
+            "{}",
+            super::lock_zone_not_known_here(&name, config_path.as_ref(), "Nothing was moved.")
+                .join("\n")
+        ),
+        // A lock with no header returned above.
+        None => return Err(lock_predates_measurement(&config_path)),
     };
     // Nothing checks that the header's scopes actually contain the entries,
     // and nothing needs to *while* the writers keep selecting from the same
@@ -260,7 +277,7 @@ pub fn run(
     }
 
     // Show summary and confirm (unless --yes)
-    let sample_dests = if !options.yes {
+    let samples = if !options.yes {
         compute_sample_destinations(
             conn,
             &filtered_sources,
@@ -269,9 +286,10 @@ pub fn run(
             unmeasured,
             &root_paths,
             &base_dir,
+            &lock_zone,
         )
     } else {
-        vec![]
+        Samples::default()
     };
 
     let destination = Destination::compute(&base_dir, &pattern);
@@ -282,7 +300,8 @@ pub fn run(
         &filtered_sources,
         options,
         &root_paths,
-        &sample_dests,
+        &samples,
+        &lock_zone,
     );
 
     if !options.dry_run && !ceremony::confirm(options.yes)? {
@@ -302,6 +321,7 @@ pub fn run(
             unmeasured,
             pattern_needs_a_scope_it_lacks,
             root_paths: &root_paths,
+            lock_zone: &lock_zone,
             archive_root_id: config.output.archive_root_id,
             base_dir_rel: &config.output.base_dir,
             resume: options.resume,
@@ -470,7 +490,7 @@ pub fn run(
         eprintln!("Source files have changed since the manifest was generated.");
         eprintln!(
             "Refresh the manifest: {}",
-            super::refresh_command(config_path.as_ref())
+            super::refresh_command(config_path.as_ref(), false)
         );
         bail!("Aborting due to missing source files");
     }
@@ -606,7 +626,13 @@ pub fn run(
     // --- Dry-run: display plan and return ---
 
     if options.dry_run {
-        display_dry_run_plan(&plan, &base_dir, options.transfer_mode, options.resume);
+        display_dry_run_plan(
+            &plan,
+            &base_dir,
+            options.transfer_mode,
+            options.resume,
+            &lock_zone,
+        );
 
         if options.resume {
             println!(
@@ -676,6 +702,7 @@ pub fn run(
             skipped_by_filter,
             manifest_display: format!("{}", config_path.display()),
             receipt_ctx,
+            lock_zone: lock_zone.clone(),
         },
         &progress_impl,
         Some(&decision),
@@ -753,11 +780,32 @@ struct SampleDestination {
     error: Option<String>,
 }
 
+/// What the confirmation shows of where files will go: the first few destinations, and
+/// whether any entry's placement reads an instant on the lock's clock — which decides
+/// whether the summary names that clock.
+#[derive(Default)]
+struct Samples {
+    destinations: Vec<SampleDestination>,
+    placed_an_instant: bool,
+}
+
 const SAMPLE_COUNT: usize = 5;
 
-/// Compute sample destination paths for the apply confirmation summary.
-/// Resolves the output pattern for up to SAMPLE_COUNT sources, fetching
-/// only the facts needed for those sources.
+/// The confirmation's zone line: said where the pattern places an instant, the only case in
+/// which the lock's zone decides where a file goes — a clock reading places the same on any
+/// clock. The dry run says it always.
+fn summary_zone_line(samples: &Samples, lock_zone: &RecordedZone) -> Option<String> {
+    samples
+        .placed_an_instant
+        .then(|| super::lock_zone_line(lock_zone))
+}
+
+/// Evaluate the pattern for every entry the run would carry, on the lock's clock, keeping
+/// the first SAMPLE_COUNT destinations for the confirmation summary.
+///
+/// Every entry, not the first few: whether the summary names the zone turns on whether
+/// *any* placement reads an instant, and the full plan runs only after the confirmation.
+#[allow(clippy::too_many_arguments)]
 fn compute_sample_destinations(
     conn: &mut repo::Connection,
     sources: &[&LockEntry],
@@ -766,48 +814,62 @@ fn compute_sample_destinations(
     unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     base_dir: &Path,
-) -> Vec<SampleDestination> {
-    let sample_sources: Vec<&&LockEntry> = sources.iter().take(SAMPLE_COUNT).collect();
-    if sample_sources.is_empty() {
-        return vec![];
+    lock_zone: &RecordedZone,
+) -> Samples {
+    if sources.is_empty() {
+        return Samples::default();
     }
 
-    // Fetch facts for sample sources only. The samples are decoration on a
-    // confirmation prompt, not the act, so a database error drops them rather
-    // than failing the command — the same graceful degradation as before,
-    // moved out to the one call that can now fail.
-    let sample_ids: Vec<i64> = sample_sources.iter().map(|s| s.id).collect();
-    let Ok(facts) = prefetch_pattern_facts(conn, &sample_ids, needed_keys) else {
-        return vec![];
+    // The samples are decoration on a confirmation prompt, not the act, so a
+    // database error drops them rather than failing the command.
+    let ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+    let Ok(facts) = prefetch_pattern_facts(conn, &ids, needed_keys) else {
+        return Samples::default();
     };
 
-    // AUDIT: placement reads UTC until a manifest records the zone it was made in; it must never
-    // read the machine's zone.
-    let zone = UserZone::utc();
-    sample_sources
-        .iter()
-        .map(|source| {
-            match pattern::evaluate_pattern(pattern, source, unmeasured, root_paths, &facts, &zone)
-            {
-                Ok(dest_rel) => {
-                    let full_path = base_dir.join(&dest_rel);
-                    SampleDestination {
-                        dest_path: full_path.display().to_string(),
-                        error: None,
-                    }
-                }
+    let mut samples = Samples::default();
+    for (i, source) in sources.iter().enumerate() {
+        let result = pattern::evaluate_pattern(
+            pattern,
+            source,
+            unmeasured,
+            root_paths,
+            &facts,
+            lock_zone.clock(),
+        );
+        if let Ok(expansion) = &result {
+            samples.placed_an_instant |= expansion.placed_an_instant;
+        }
+        if i < SAMPLE_COUNT {
+            samples.destinations.push(match result {
+                Ok(expansion) => SampleDestination {
+                    dest_path: base_dir.join(&expansion.rel_path).display().to_string(),
+                    error: None,
+                },
                 Err(e) => SampleDestination {
                     dest_path: String::new(),
                     error: Some(format!("pattern error: {e}")),
                 },
-            }
-        })
-        .collect()
+            });
+        }
+    }
+    samples
+}
+
+/// The refusal for a lock written before the header existed. One spelling for the two
+/// places that can meet it.
+fn lock_predates_measurement(config_path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "This lock file was {}.\nNothing was moved. {}",
+        super::LOCK_PREDATES_MEASUREMENT,
+        super::rebuild_remedy(config_path),
+    )
 }
 
 // Summary and confirmation helpers
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn print_apply_summary(
     config_path: &Path,
     destination: &Destination,
@@ -815,13 +877,18 @@ fn print_apply_summary(
     sources: &[&LockEntry],
     options: &ApplyOptions,
     root_paths: &HashMap<i64, String>,
-    sample_dests: &[SampleDestination],
+    samples: &Samples,
+    lock_zone: &RecordedZone,
 ) {
+    let sample_dests = &samples.destinations;
     eprintln!();
     eprintln!("=== Apply Summary ===");
     eprintln!("Manifest: {}", config_path.display());
     eprintln!("Destination: {}", destination.base_dir.display());
     eprintln!("Pattern: {pattern}");
+    if let Some(line) = summary_zone_line(samples, lock_zone) {
+        eprintln!("{line}");
+    }
 
     let mode_name = match options.transfer_mode {
         TransferMode::Copy => "copy",
@@ -955,12 +1022,19 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
 }
 
 /// Display dry-run transfer plan.
-fn display_dry_run_plan(plan: &plan::ApplyPlan, base_dir: &Path, mode: TransferMode, resume: bool) {
+fn display_dry_run_plan(
+    plan: &plan::ApplyPlan,
+    base_dir: &Path,
+    mode: TransferMode,
+    resume: bool,
+    lock_zone: &RecordedZone,
+) {
     if resume {
         eprintln!("=== DRY RUN (resume) ===");
     } else {
         eprintln!("=== DRY RUN ===");
     }
+    eprintln!("{}", super::lock_zone_line(lock_zone));
     let label = match mode {
         TransferMode::Copy => "COPY",
         TransferMode::Rename => "RENAME",
@@ -1118,14 +1192,14 @@ impl plan::PlanProgress for CliTransferProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{parse_zone_name, UserZone};
 
-    /// The confirmation's sample destinations read UTC whatever the machine's zone, as the
-    /// placement they preview does: a file saved at 2023-12-31 23:30 UTC — already 2024 in
-    /// Amsterdam — is shown under `2023` with Amsterdam on the machine. A sample on another
-    /// clock would confirm a destination the run does not use. The pin goes with the
-    /// `// AUDIT:` marker it holds, when the lock carries the zone.
+    /// The confirmation's sample destinations read the lock's zone whatever the machine's, as
+    /// the placement they preview does: a file saved at 2023-12-31 23:30 UTC is already 2024
+    /// in Amsterdam (the lock's zone) and still 2023 in New York (the machine's) and in UTC.
+    /// A sample on another clock would confirm a destination the run does not use.
     #[test]
-    fn the_sample_destinations_read_utc_whatever_the_machines_zone() {
+    fn the_sample_destinations_read_the_locks_zone() {
         use crate::core::domain::time::zone::with_test_zone;
         use crate::core::testing::{insert_root, setup_test_db};
         let mut conn = setup_test_db();
@@ -1147,7 +1221,9 @@ mod tests {
         let pattern = parse_pattern("{source.mtime|year}/{filename}").unwrap();
         let root_paths = HashMap::from([(root_id, "/photos".to_string())]);
 
-        let samples = with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
+        let lock_zone = parse_zone_name("Europe/Amsterdam").unwrap();
+
+        let samples = with_test_zone(UserZone::for_test("America/New_York"), || {
             compute_sample_destinations(
                 &mut conn,
                 &[&entry],
@@ -1156,10 +1232,28 @@ mod tests {
                 Unmeasured::NoScopeRecorded,
                 &root_paths,
                 Path::new("/archive"),
+                &lock_zone,
             )
         });
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].dest_path, "/archive/2023/a.jpg");
+        assert_eq!(samples.destinations.len(), 1);
+        assert_eq!(samples.destinations[0].dest_path, "/archive/2024/a.jpg");
+        assert!(samples.placed_an_instant, "a save time is an instant");
+    }
+
+    /// **The confirmation names the zone only where the pattern places an instant**; the dry
+    /// run names it always, in the same words.
+    #[test]
+    fn the_confirmation_names_the_zone_only_when_an_instant_is_placed() {
+        let zone = parse_zone_name("Europe/Amsterdam").unwrap();
+        let placing = Samples {
+            destinations: vec![],
+            placed_an_instant: true,
+        };
+        assert_eq!(
+            summary_zone_line(&placing, &zone).as_deref(),
+            Some("Time zone: Europe/Amsterdam (from the lock)")
+        );
+        assert_eq!(summary_zone_line(&Samples::default(), &zone), None);
     }
 
     /// A pattern that opens with literal directories places every file below
@@ -1300,7 +1394,20 @@ mod tests {
                 })
                 .collect();
             fs::write(&lock_path, without).unwrap();
+            self.repoint_manifest_hash();
+        }
 
+        /// Write the lock header's `zone` — or take it away, as a lock written before lock
+        /// files recorded the zone has none — and re-point the manifest at the new hash.
+        fn set_lock_zone(&self, zone: Option<&str>) {
+            manifest::fixtures::set_lock_header_zone(&self.manifest.with_extension("lock"), zone);
+            self.repoint_manifest_hash();
+        }
+
+        /// Point the manifest at its lock's current hash — otherwise a run would stop on
+        /// the hash mismatch instead of on what the lock was edited to show.
+        fn repoint_manifest_hash(&self) {
+            let lock_path = self.manifest.with_extension("lock");
             let hash = crate::core::ops::fs::compute_full_hash(&lock_path).unwrap();
             let text = fs::read_to_string(&self.manifest).unwrap();
             let rewritten: String = text
@@ -1353,6 +1460,7 @@ mod tests {
                     base_dir_rel: &config.output.base_dir,
                     resume: false,
                     progress: None,
+                    lock_zone: &parse_zone_name("UTC").unwrap(),
                 },
             )
             .unwrap();
@@ -1496,6 +1604,7 @@ mod tests {
                 filters: vec![],
                 allow_archived: false,
                 allow_duplicates: false,
+                clock: UserZone::utc(),
             },
         )
         .unwrap();
@@ -1525,6 +1634,7 @@ mod tests {
                 archive_root_id: archive_id,
                 base_dir: String::new(),
                 allow: vec![],
+                zone: parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -1739,6 +1849,59 @@ mod tests {
                 "a run refused before planning leaves no decision row"
             );
         }
+    }
+
+    /// **A lock built before lock files recorded the zone is refused in friendly words**,
+    /// naming the rebuild — never a parse error — before the plan and before any decision
+    /// row, so nothing moves and nothing is recorded.
+    #[test]
+    fn a_lock_built_before_the_zone_is_refused_with_the_rebuild() {
+        let mut f = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+        f.set_lock_zone(None);
+
+        let message = format!("{:#}", apply(&mut f).unwrap_err());
+        assert!(
+            message.contains("This lock file was built before lock files recorded the time zone."),
+            "{message}"
+        );
+        assert!(message.contains("Nothing was moved."), "{message}");
+        assert!(message.contains("cluster refresh"), "{message}");
+        assert!(!message.contains("Failed to parse"), "{message}");
+        assert!(f.placed().is_empty(), "{:?}", f.placed());
+        assert_eq!(f.decision_count(), 0);
+    }
+
+    /// **A lock zone this machine does not know names its cause and three ways out**:
+    /// update the zone data, apply where the lock was built, or name the same zone in a
+    /// spelling this machine knows and refresh. Nothing moves and nothing is recorded.
+    #[test]
+    fn a_lock_zone_not_known_here_names_its_cause_and_three_ways_out() {
+        let mut f = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+        f.set_lock_zone(Some("Mars/Olympus_Mons"));
+
+        let message = format!("{:#}", apply(&mut f).unwrap_err());
+        assert!(
+            message.contains(
+                "This machine's time zone data does not know Mars/Olympus_Mons, the zone the lock \
+                 was built in. Nothing was moved."
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("update this machine's time zone data"),
+            "{message}"
+        );
+        assert!(
+            message.contains("apply on the machine that built the lock"),
+            "{message}"
+        );
+        assert!(
+            message.contains("a name this machine knows for the same zone"),
+            "{message}"
+        );
+        assert!(message.contains("cluster refresh"), "{message}");
+        assert!(f.placed().is_empty(), "{:?}", f.placed());
+        assert_eq!(f.decision_count(), 0);
     }
 
     /// C4b — an absent measurement has **two** causes and they take different

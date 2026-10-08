@@ -15,11 +15,13 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
 
+use crate::archive::domain::mtime_change;
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::source::NewSource;
 use crate::core::domain::time::now_epoch_secs;
+use crate::core::domain::time::zone::RecordedZone;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::fs::{compute_partial_hash, copy_file, move_file, rename_file, MoveOutcome};
 use crate::core::ops::receipt::{ReceiptKind, ReceiptPlacement};
@@ -134,6 +136,8 @@ pub struct ApplyExecuteParams {
     pub manifest_display: String,
     /// Receipt placement for targeted (apply) receipts. None if receipts are disabled.
     pub receipt_ctx: Option<ReceiptPlacement>,
+    /// The zone the lock was built in, which the disk check's save times print on.
+    pub lock_zone: RecordedZone,
 }
 
 /// Result of executing an apply operation.
@@ -275,7 +279,7 @@ pub fn execute_apply(
 
     // --- Batch staleness validation ---
     if !transfers_to_execute.is_empty() {
-        let stale = validate_transfers_disk(&transfers_to_execute, progress);
+        let stale = validate_transfers_disk(&transfers_to_execute, progress, &params.lock_zone);
         if !stale.is_empty() {
             // The other pre-transfer refusal, settled the same way — the two
             // must never diverge, which is what pins them separately.
@@ -314,6 +318,7 @@ pub fn execute_apply(
             conn,
             params.archive_root_id,
             decision_id,
+            &params.lock_zone,
         ) {
             Ok(pair) => pair,
             Err(e) => (TransferOutcome::Error(format!("{:#}", e)), None),
@@ -618,6 +623,7 @@ fn execute_single_transfer(
     conn: &Connection,
     archive_root_id: i64,
     decision_id: Option<i64>,
+    clock: &RecordedZone,
 ) -> Result<(TransferOutcome, Option<i64>)> {
     let src_path = Path::new(&transfer.source_path);
     let dest_path = base_dir.join(&transfer.dest_rel_path);
@@ -628,7 +634,7 @@ fn execute_single_transfer(
     }
 
     // Per-transfer staleness validation (catches race conditions)
-    if let Err(reason) = validate_source_state(transfer) {
+    if let Err(reason) = validate_source_state(transfer, clock) {
         return Ok((TransferOutcome::SkippedStale(reason), None));
     }
 
@@ -700,7 +706,10 @@ fn execute_single_transfer(
 }
 
 /// Validate that a source file on disk matches the state recorded in the transfer.
-fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), String> {
+fn validate_source_state(
+    transfer: &ApplyTransfer,
+    clock: &RecordedZone,
+) -> std::result::Result<(), String> {
     let meta = match fs::metadata(&transfer.source_path) {
         Ok(m) => m,
         Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -723,7 +732,7 @@ fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), St
             mismatches.push(format!("size: {} → {}", transfer.size, current_size));
         }
         if current_mtime != transfer.mtime {
-            mismatches.push(format!("mtime: {} → {}", transfer.mtime, current_mtime));
+            mismatches.push(mtime_change(transfer.mtime, current_mtime, clock));
         }
     }
 
@@ -741,7 +750,7 @@ fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), St
             mismatches.push(format!("size: {} → {}", transfer.size, current_size));
         }
         if current_mtime != transfer.mtime {
-            mismatches.push(format!("mtime: {} → {}", transfer.mtime, current_mtime));
+            mismatches.push(mtime_change(transfer.mtime, current_mtime, clock));
         }
     }
 
@@ -767,11 +776,12 @@ fn validate_source_state(transfer: &ApplyTransfer) -> std::result::Result<(), St
 fn validate_transfers_disk(
     transfers: &[&ApplyTransfer],
     progress: &dyn TransferProgress,
+    clock: &RecordedZone,
 ) -> Vec<StaleSource> {
     let mut stale = Vec::new();
     progress.on_validation_start(ValidationSweep::LockAgreement, transfers.len());
     for (i, transfer) in transfers.iter().enumerate() {
-        if let Err(reason) = validate_source_state(transfer) {
+        if let Err(reason) = validate_source_state(transfer, clock) {
             stale.push(StaleSource {
                 path: transfer.source_path.clone(),
                 reason,
@@ -884,6 +894,11 @@ fn build_new_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The zone a test lock records: the reference zone, never the machine's.
+    fn lock_zone() -> crate::core::domain::time::zone::RecordedZone {
+        crate::core::domain::time::zone::parse_zone_name("Europe/Amsterdam").unwrap()
+    }
     use crate::core::testing::{insert_object, insert_root, setup_test_db};
 
     use super::super::plan::ApplyViolations;
@@ -957,7 +972,7 @@ mod tests {
 
         let hash = compute_partial_hash(f.path(), size as u64).unwrap();
         let transfer = make_transfer_for_file(f.path(), size, mtime, &hash);
-        assert!(validate_source_state(&transfer).is_ok());
+        assert!(validate_source_state(&transfer, &lock_zone()).is_ok());
     }
 
     #[test]
@@ -968,7 +983,7 @@ mod tests {
             1704067200,
             "testhash",
         );
-        let err = validate_source_state(&transfer).unwrap_err();
+        let err = validate_source_state(&transfer, &lock_zone()).unwrap_err();
         assert!(
             err.contains("not found"),
             "expected 'not found', got: {err}"
@@ -996,7 +1011,7 @@ mod tests {
         std::fs::write(&path, b"much longer content here").unwrap();
 
         let transfer = make_transfer_for_file(&path, orig_size, mtime, &hash);
-        let err = validate_source_state(&transfer).unwrap_err();
+        let err = validate_source_state(&transfer, &lock_zone()).unwrap_err();
         assert!(err.contains("size"), "expected 'size' in error, got: {err}");
     }
 
@@ -1018,7 +1033,7 @@ mod tests {
 
         // Correct size/mtime but wrong hash
         let transfer = make_transfer_for_file(f.path(), size, mtime, "wrong_hash_value_here");
-        let err = validate_source_state(&transfer).unwrap_err();
+        let err = validate_source_state(&transfer, &lock_zone()).unwrap_err();
         assert!(
             err.contains("partial hash"),
             "expected 'partial hash' in error, got: {err}"
@@ -1045,7 +1060,7 @@ mod tests {
         // recorded hash is hex. Truncating this one for the message must count
         // characters: its sixteenth byte falls inside a character.
         let transfer = make_transfer_for_file(f.path(), size, mtime, "日本語日本語日本語");
-        let err = validate_source_state(&transfer).unwrap_err();
+        let err = validate_source_state(&transfer, &lock_zone()).unwrap_err();
         assert!(
             err.contains("partial hash"),
             "expected 'partial hash' in error, got: {err}"
@@ -1102,6 +1117,7 @@ mod tests {
             &conn,
             archive_root,
             None,
+            &lock_zone(),
         )
         .unwrap();
 
@@ -1157,6 +1173,7 @@ mod tests {
             &conn,
             archive_root,
             None,
+            &lock_zone(),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
@@ -1208,8 +1225,15 @@ mod tests {
             hash: None,
         };
 
-        let result =
-            execute_single_transfer(&transfer, dest_dir.path(), mode, &conn, archive_root, None);
+        let result = execute_single_transfer(
+            &transfer,
+            dest_dir.path(),
+            mode,
+            &conn,
+            archive_root,
+            None,
+            &lock_zone(),
+        );
         assert!(
             result.is_err(),
             "{mode:?} overwrote an occupied destination"
@@ -1259,6 +1283,7 @@ mod tests {
             &conn,
             archive_root,
             None,
+            &lock_zone(),
         )
         .unwrap();
 
@@ -1315,6 +1340,7 @@ mod tests {
             &conn,
             archive_root,
             decision_id,
+            &lock_zone(),
         )
         .unwrap();
 
@@ -1375,6 +1401,7 @@ mod tests {
             &conn,
             archive_root,
             Some(10),
+            &lock_zone(),
         )
         .unwrap();
 
@@ -1417,6 +1444,7 @@ mod tests {
             &conn,
             archive_root,
             Some(20),
+            &lock_zone(),
         )
         .unwrap();
         assert!(matches!(outcome, TransferOutcome::Copied));
@@ -1479,6 +1507,7 @@ mod tests {
             &conn,
             archive_root,
             Some(5),
+            &lock_zone(),
         )
         .unwrap();
         assert_eq!(prev_decision_id, None);
@@ -1594,6 +1623,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(true));
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: dest_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -1635,6 +1665,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(true));
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: dest_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -1735,6 +1766,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -1890,6 +1922,7 @@ mod tests {
         plan.transfers.extend(second.transfers);
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -1939,6 +1972,7 @@ mod tests {
         );
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -1991,6 +2025,7 @@ mod tests {
         plan.already_archived_count = 1;
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2031,6 +2066,7 @@ mod tests {
             single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"hello");
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Move,
@@ -2083,6 +2119,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2134,6 +2171,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2170,6 +2208,7 @@ mod tests {
         let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"records");
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2211,6 +2250,7 @@ mod tests {
         let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"dryrun");
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2298,6 +2338,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2377,6 +2418,7 @@ mod tests {
 
         // receipt_ctx is None — no receipt written
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2453,6 +2495,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2565,6 +2608,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: base_dir.clone(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2650,6 +2694,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2746,6 +2791,7 @@ mod tests {
         };
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2816,6 +2862,7 @@ mod tests {
         std::fs::File::create(archive_dir.path().join("photo.jpg")).unwrap();
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2869,6 +2916,7 @@ mod tests {
             .unwrap();
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2938,6 +2986,7 @@ mod tests {
         std::os::unix::fs::symlink(&path, &path).unwrap();
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -2996,6 +3045,7 @@ mod tests {
             .unwrap();
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -3075,6 +3125,7 @@ mod tests {
         std::os::unix::fs::symlink(&path, &path).unwrap();
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -3159,6 +3210,7 @@ mod tests {
         let (plan, _, _) = single_transfer_plan(src_dir.path(), "photo.jpg", "photo.jpg", b"data");
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -3281,6 +3333,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(true));
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -3346,6 +3399,7 @@ mod tests {
         let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"data");
 
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
@@ -3440,6 +3494,7 @@ mod tests {
             &conn,
             archive_root,
             Some(42),
+            &lock_zone(),
         )
         .unwrap();
 

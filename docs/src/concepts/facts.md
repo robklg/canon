@@ -38,7 +38,7 @@ Type hints can be provided during import to ensure correct parsing. See [Enrichi
 
 ### How Canon shows a time
 
-Canon reads the times it shows you on your clock: the zone `TZ` names, or else the zone the machine is set to, the same clock `date` reads. Two places read differently. A manifest selects and places files by UTC, whatever your clock, so the same manifest does the same thing wherever it runs. And `apply`'s check for files changed since the lock was written prints a save time as seconds since 1970. A printed time carries no offset, and prints at its precision:
+Canon reads the times it shows you on your clock: the zone `TZ` names, or else the zone the machine is set to, the same clock `date` reads. A manifest reads differently: it selects and places files on the [time zone it records](../commands/archive/cluster.md#the-manifests-time-zone), whatever your clock, so the same manifest does the same thing wherever it runs. `apply`'s check for files changed since the lock was written prints save times on that zone too, and names it. A printed time carries no offset, and prints at its precision:
 
 | Precision | Prints |
 |---|---|

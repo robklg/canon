@@ -5,13 +5,14 @@
 //! against it. Planning and the apply command both expand patterns, so the pair
 //! is shared rather than owned by either.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 
 use crate::archive::domain::LockEntry;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::path::path_strip_prefix;
+use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::UserZone;
 use crate::expr::{
     evaluate, EvalContext, Pattern, PatternFacts, PatternNoValue, SourceAttributes, Unmeasured,
@@ -31,11 +32,16 @@ pub struct PatternGaps {
     pub needs_a_scope_it_lacks: bool,
     /// A file's save time Canon cannot read gave the pattern no value.
     pub unreadable_save_time: bool,
-    /// A time written coarser than its modifier reads gave the pattern no value: each
-    /// `key|modifier` that failed so, in order, for the way out to name.
-    pub too_coarse: BTreeSet<String>,
+    /// A time written coarser than its modifier reads gave the pattern no value: how many
+    /// entries failed so, per `key|modifier` and the grain the time was known to, in order —
+    /// read off the facility's typed cause, so the counts and the way out cannot drift from
+    /// what failed.
+    pub too_coarse: BTreeMap<(String, Precision), usize>,
     /// A fact the source does not carry.
     pub fact_not_carried: bool,
+    /// Whether an entry that expanded placed an instant on the clock — what decides whether
+    /// the zone the run read on is worth a sentence.
+    pub placed_an_instant: bool,
 }
 
 impl PatternGaps {
@@ -52,11 +58,36 @@ impl PatternGaps {
         match failure.downcast_ref::<PatternNoValue>() {
             Some(PatternNoValue::UnreadableSaveTime) => self.unreadable_save_time = true,
             Some(coarse @ PatternNoValue::TooCoarse { .. }) => {
-                self.too_coarse.extend(coarse.too_coarse_chain());
+                if let (Some(chain), Some(grain)) =
+                    (coarse.too_coarse_chain(), coarse.too_coarse_grain())
+                {
+                    *self.too_coarse.entry((chain, grain)).or_default() += 1;
+                }
             }
             None => self.fact_not_carried = true,
         }
     }
+
+    /// Record one entry that expanded.
+    pub fn placed(&mut self, expansion: &Expansion) {
+        self.placed_an_instant |= expansion.placed_an_instant;
+    }
+
+    /// Each `key|modifier` that met a time too coarse for it, once, in order.
+    pub fn too_coarse_chains(&self) -> BTreeSet<&str> {
+        self.too_coarse
+            .keys()
+            .map(|(chain, _)| chain.as_str())
+            .collect()
+    }
+}
+
+/// One entry's expansion: where it goes, and whether placing it read an instant on the
+/// clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expansion {
+    pub rel_path: String,
+    pub placed_an_instant: bool,
 }
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
@@ -135,7 +166,7 @@ fn build_eval_context<'a>(
 /// an entry cannot answer it and a refusal that guesses prescribes a remedy
 /// that may not work.
 ///
-/// `zone` is the clock the pattern's times are read on.
+/// `zone` is the clock the pattern's times are read on — the lock's, in every reader.
 pub fn evaluate_pattern(
     pattern: &Pattern,
     source: &LockEntry,
@@ -143,9 +174,13 @@ pub fn evaluate_pattern(
     root_paths: &HashMap<i64, String>,
     facts: &PatternFacts,
     zone: &UserZone,
-) -> Result<String> {
+) -> Result<Expansion> {
     let ctx = build_eval_context(source, unmeasured, root_paths, facts, zone)?;
-    evaluate(pattern, &ctx)
+    let rel_path = evaluate(pattern, &ctx)?;
+    Ok(Expansion {
+        rel_path,
+        placed_an_instant: ctx.read_an_instant(),
+    })
 }
 
 #[cfg(test)]
@@ -190,6 +225,7 @@ mod tests {
             &PatternFacts::from_entries(HashMap::new()),
             &UserZone::utc(),
         )
+        .map(|e| e.rel_path)
     }
 
     #[test]
@@ -273,7 +309,8 @@ mod tests {
             &facts,
             &UserZone::utc(),
         )
-        .unwrap();
+        .unwrap()
+        .rel_path;
         assert_eq!(dest, "2024/IMG_001.jpg");
         assert_ne!(dest, "2019/IMG_001.jpg", "the stored fact decided the year");
     }

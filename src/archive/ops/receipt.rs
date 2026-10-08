@@ -32,6 +32,11 @@ pub(super) struct ApplyReceiptItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The zone a test lock records: the reference zone, never the machine's.
+    fn lock_zone() -> crate::core::domain::time::zone::RecordedZone {
+        crate::core::domain::time::zone::parse_zone_name("Europe/Amsterdam").unwrap()
+    }
     use crate::archive::ops::execute::{
         execute_apply, ApplyExecuteParams, TransferMode, TransferOutcome, TransferProgress,
     };
@@ -287,6 +292,7 @@ mod tests {
             base_dir_rel: String::new(),
         };
         let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode,

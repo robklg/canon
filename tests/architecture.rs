@@ -1601,6 +1601,83 @@ fn the_machine_zone_is_read_only_by_its_owner() {
     );
 }
 
+/// The ways zone rules are looked up by a name or a rule: jiff's zone database and its rule
+/// parser. The machine's own zone is the guard above's; these are any zone a person names.
+const ZONE_RULE_SPELLINGS: &[&str] = &["TimeZone::get(", "TimeZone::posix("];
+
+/// How many lookups the owner itself spells, outside comments and its test module: the rule
+/// parser once in the machine classifier, the database and the rule parser once each in the
+/// zone-name parse, and the database once in the test-only `UserZone::for_test`, which sits
+/// outside the test module.
+const ZONE_RULE_OWNER_LOOKUPS: usize = 4;
+
+/// How many zone-rule lookups a text contains.
+fn zone_rule_lookups(text: &str) -> usize {
+    ZONE_RULE_SPELLINGS
+        .iter()
+        .map(|s| text.matches(s).count())
+        .sum()
+}
+
+/// **The zone-name parse**: a zone a person names — a manifest's `zone` line — is read in
+/// one place, `core::domain::time::zone::parse_zone_name`, beside the user's-zone owner, and
+/// a lookup of zone rules anywhere else fails the build.
+///
+/// A second reading of a zone name is a second answer to "which rules does this name
+/// mean?": a parser in `archive` that accepted a rule string, or flattened one to today's
+/// offset, would place files on a clock the manifest never recorded. So the lookup has one
+/// owner. Matched both directions, like the guard above: a lookup outside the owner fails
+/// (there are no exemptions), and the owner must still spell exactly its own lookups.
+///
+/// **What this does not catch**: the same blind spots as the guard above — an aliased
+/// import, and jiff's other doors to a named zone (its zone-database handle, `"…[Europe/Amsterdam]"`
+/// parsed as a `Zoned`), which nothing in the tree uses.
+#[test]
+fn zone_rules_are_looked_up_only_by_their_owner() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let base = Path::new(&manifest_dir);
+
+    let found = spelled_only_here(base, ZONE_HOMES, zone_rule_lookups);
+    assert!(
+        found.is_empty(),
+        "\n  Zone rules are looked up by name outside the zone-name parse.\n  \
+         Found: {found:?}\n  \
+         Read a zone a person names through `parse_zone_name`, and the machine's through \
+         `UserZone::machine`; hand the zone on as a `RecordedZone` or a `UserZone`."
+    );
+
+    let owner = ZONE_HOMES[0];
+    let raw = fs::read_to_string(base.join(owner)).expect("the owner's file");
+    let code: String = production_text(owner, &raw)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        zone_rule_lookups(&code),
+        ZONE_RULE_OWNER_LOOKUPS,
+        "\n  The owner `{owner}` no longer spells exactly its own zone-rule lookups.\n  \
+         If the owner moved, move `ZONE_HOMES` with it; if it looks rules up a new way, \
+         say so in `ZONE_RULE_OWNER_LOOKUPS`."
+    );
+}
+
+/// The zone-rule matcher counts each spelling it declares, red-smoked on its own fixtures.
+#[test]
+fn the_zone_rule_matcher_counts_each_spelling() {
+    for spelling in ZONE_RULE_SPELLINGS {
+        assert_eq!(zone_rule_lookups(spelling), 1, "{spelling}");
+    }
+    assert_eq!(
+        zone_rule_lookups("TimeZone::get(\"UTC\"); TimeZone::posix(rule); TimeZone::get(n)"),
+        3
+    );
+    assert_eq!(
+        zone_rule_lookups("TimeZone::UTC; TimeZone::fixed(o); TimeZone::try_system()"),
+        0
+    );
+}
+
 /// The zone matcher counts each spelling it declares — the matcher red-smoked on its own
 /// fixtures, so a spelling dropped from the list fails here rather than going quiet.
 #[test]

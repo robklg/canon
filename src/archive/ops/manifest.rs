@@ -17,7 +17,8 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
-use crate::expr::{Pattern, Unmeasured};
+use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, ZoneNameError};
+use crate::expr::{Filter, Pattern, Unmeasured};
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
 /// This prevents race conditions when opening the file in an editor
@@ -60,6 +61,26 @@ pub(super) fn write_lock_file(
         .sync_all()
         .with_context(|| format!("Failed to sync lock file: {}", lock_path.display()))?;
     Ok(())
+}
+
+/// The manifest's recorded query, parsed once for a run: the lines that parse, and every line
+/// that does not with its parse error, in the order the lines stand. `cluster refresh` refuses
+/// on them, all in one run; `cluster status` names them as what would stop that refresh.
+///
+/// **Parse failures only.** A line that parses can still be refused later, inside the
+/// selection — an unknown fact key, an unknown modifier — and neither is collected here, so a
+/// report can still offer a refresh one of those turns away. Collecting them needs each clause
+/// read against its key before anything runs, which nothing does yet.
+pub fn parse_recorded_query(lines: &[String]) -> (Vec<Filter>, Vec<(String, String)>) {
+    let mut filters = Vec::new();
+    let mut unparsed = Vec::new();
+    for line in lines {
+        match Filter::parse(line) {
+            Ok(filter) => filters.push(filter),
+            Err(e) => unparsed.push((line.clone(), format!("{e:#}"))),
+        }
+    }
+    (filters, unparsed)
 }
 
 /// Read and parse a manifest TOML config file.
@@ -131,6 +152,51 @@ impl LockFile {
     pub fn pattern_needs_a_scope_it_lacks(&self, pattern: &Pattern) -> bool {
         pattern.names_scope_rel_path() && self.entries.iter().any(|e| e.scope_rel_path.is_none())
     }
+
+    /// The zone this lock was built in — the clock `apply` and `cluster status` read every
+    /// time on, and the only one. `None` where the lock has no header at all: that lock
+    /// predates the zone too, and its readers refuse it earlier, for the older reason.
+    ///
+    /// A name this machine's zone data does not read is carried as written. Canon writes
+    /// only names it parsed, so on the machine that built the lock every recorded name
+    /// reads; elsewhere the zone data may be older. (A hand-edited header cannot reach here
+    /// unnoticed: the manifest's lock hash covers the whole file.)
+    pub fn zone(&self) -> Option<LockZone> {
+        let header = self.header.as_ref()?;
+        Some(match &header.zone {
+            None => LockZone::PredatesZone,
+            Some(text) => match parse_zone_name(text) {
+                Ok(zone) => LockZone::Recorded(zone),
+                Err(ZoneNameError::NotKnownHere(_) | ZoneNameError::RuleString(_))
+                | Err(ZoneNameError::Empty) => LockZone::NotKnownHere(text.clone()),
+            },
+        })
+    }
+}
+
+/// A lock's zone, as its readers find it.
+#[derive(Debug, Clone)]
+pub enum LockZone {
+    /// The zone the lock was built in, read on this machine.
+    Recorded(RecordedZone),
+    /// The lock was built before lock files recorded the zone.
+    PredatesZone,
+    /// The lock names a zone this machine's zone data does not know.
+    NotKnownHere(String),
+}
+
+/// The old lock's zone, for `cluster refresh`'s comparison and nothing else: the first line
+/// read as a header, **tolerantly** — no lock, no header, no zone, a first line that will
+/// not parse, or a lock replaced while it was read all give `None`, never a refusal, because
+/// the comparison only adds a sentence to a refresh that is about to rewrite the lock anyway.
+pub fn read_lock_zone_tolerantly(lock_path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(lock_path).ok()?;
+    let mut first = String::new();
+    BufReader::new(file).read_line(&mut first).ok()?;
+    serde_json::from_str::<LockHeader>(first.trim_end())
+        .ok()?
+        .zone
 }
 
 /// Read and parse a lock file (JSONL: a header line, then one entry per line),
@@ -192,6 +258,38 @@ pub fn read_lock_file(lock_path: &Path) -> Result<Option<LockFile>> {
     Ok(Some(LockFile { header, entries }))
 }
 
+/// Lock-file fixtures shared by the subsystem's tests.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use std::path::Path;
+
+    /// Write a lock header's `zone` by hand — or take it away, as a lock written before lock files
+    /// recorded the zone has none — for the tests that pose such a lock. The manifest's hash is the
+    /// caller's to re-point or leave stale.
+    pub(crate) fn set_lock_header_zone(lock_path: &Path, zone: Option<&str>) {
+        let text = std::fs::read_to_string(lock_path).unwrap();
+        let edited: Vec<String> = text
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value.get("lock_version").is_some() {
+                    let header = value.as_object_mut().unwrap();
+                    match zone {
+                        Some(z) => {
+                            header.insert("zone".into(), serde_json::Value::from(z));
+                        }
+                        None => {
+                            header.remove("zone");
+                        }
+                    }
+                }
+                value.to_string()
+            })
+            .collect();
+        std::fs::write(lock_path, edited.join("\n") + "\n").unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +341,7 @@ mod tests {
                 root_path: "/photos".to_string(),
                 rel_prefix: "trip".to_string(),
             }],
+            zone: None,
         };
         write_lock_file(&lock_path, &header, &entries).unwrap();
 
@@ -356,6 +455,85 @@ mod tests {
             lock(vec![measured(Some("a.jpg")), measured(None)])
                 .pattern_needs_a_scope_it_lacks(&scoped),
             "one unmeasured entry anywhere in the file is the file's answer"
+        );
+    }
+
+    // =========================================================================
+    // The lock's zone
+    // =========================================================================
+
+    const ENTRY: &str = r#"{"id":1,"root_id":1,"path":"/photos/a.jpg","device":0,"inode":0,"size":4,"mtime":0,"partial_hash":"h","object_id":null,"hash_type":null,"hash_value":null}"#;
+
+    /// Write a lock whose first line is `first`, followed by one entry.
+    fn lock_with_first_line(dir: &Path, first: Option<&str>) -> std::path::PathBuf {
+        let path = dir.join("cluster.lock");
+        let text = match first {
+            Some(line) => format!("{line}\n{ENTRY}\n"),
+            None => format!("{ENTRY}\n"),
+        };
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// **A lock written before lock files recorded the zone still parses** — its header
+    /// simply carries none — so `apply` and `cluster status` can say so in their own words
+    /// rather than meeting a parse error that reads as corruption.
+    #[test]
+    fn a_lock_without_a_zone_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_with_first_line(dir.path(), Some(r#"{"lock_version":2,"scope":[]}"#));
+        let lock = read_lock_file(&path).unwrap().unwrap();
+        assert!(lock.header.is_some(), "the header is read");
+        assert_eq!(lock.entries.len(), 1);
+        assert!(matches!(lock.zone(), Some(LockZone::PredatesZone)));
+    }
+
+    /// **The lock's zone, as its readers find it**: a zone this machine knows, none, a zone
+    /// it does not know — and no answer at all for a lock with no header, which is refused by
+    /// its older cause.
+    #[test]
+    fn a_locks_zone_is_recorded_predates_or_not_known_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = |zone: &str| format!(r#"{{"lock_version":2,"scope":[],"zone":"{zone}"}}"#);
+
+        let path = lock_with_first_line(dir.path(), Some(&header("Europe/Amsterdam")));
+        let zone = read_lock_file(&path).unwrap().unwrap().zone();
+        assert!(matches!(zone, Some(LockZone::Recorded(z)) if z.name() == "Europe/Amsterdam"));
+
+        let path = lock_with_first_line(dir.path(), Some(&header("Mars/Olympus_Mons")));
+        let zone = read_lock_file(&path).unwrap().unwrap().zone();
+        assert!(matches!(zone, Some(LockZone::NotKnownHere(n)) if n == "Mars/Olympus_Mons"));
+
+        let path = lock_with_first_line(dir.path(), None);
+        assert!(read_lock_file(&path).unwrap().unwrap().zone().is_none());
+    }
+
+    /// **The old lock's zone is read tolerantly**: no lock, no header, no zone and a first
+    /// line cut short all give no zone — never a refusal — and a recorded one is its text.
+    #[test]
+    fn the_old_locks_zone_is_read_tolerantly() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_lock_zone_tolerantly(&dir.path().join("absent.lock")),
+            None
+        );
+
+        let headerless = lock_with_first_line(dir.path(), None);
+        assert_eq!(read_lock_zone_tolerantly(&headerless), None);
+
+        let zoneless = lock_with_first_line(dir.path(), Some(r#"{"lock_version":2,"scope":[]}"#));
+        assert_eq!(read_lock_zone_tolerantly(&zoneless), None);
+
+        let truncated = lock_with_first_line(dir.path(), Some(r#"{"lock_version":2,"sco"#));
+        assert_eq!(read_lock_zone_tolerantly(&truncated), None);
+
+        let zoned = lock_with_first_line(
+            dir.path(),
+            Some(r#"{"lock_version":2,"scope":[],"zone":"Europe/Amsterdam"}"#),
+        );
+        assert_eq!(
+            read_lock_zone_tolerantly(&zoned).as_deref(),
+            Some("Europe/Amsterdam")
         );
     }
 }

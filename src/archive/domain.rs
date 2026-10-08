@@ -24,7 +24,12 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
+use crate::core::domain::format_count;
 use crate::core::domain::source::Source;
+use crate::core::domain::time::value::TimeValue;
+use crate::core::domain::time::zone::{
+    parse_zone_name, RecordedZone, Unrecordable, UserZone, ZoneNameError,
+};
 
 // ============================================================================
 // Manifest data contract (shared between cluster generate and apply)
@@ -59,6 +64,12 @@ pub struct ManifestMeta {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub scope: Vec<String>,
+    /// The time zone the query and the folder names read times in, as the user's own
+    /// editable line. Raw text here, read only through [`settle_manifest_zone`], so a name
+    /// Canon cannot read is one refusal among a refresh's causes rather than a parse error
+    /// that stops them. Absent: the next refresh records this machine's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     /// RFC3339 timestamp when manifest was generated/refreshed
     pub generated_at: String,
     /// SHA256 hash of the lock file (for integrity validation)
@@ -224,6 +235,13 @@ pub struct LockHeader {
     /// only — a line the index could not confirm never reaches here, so the
     /// record cannot claim a place Canon has no sources for.
     pub scope: Vec<LockScope>,
+    /// The zone the run settled on — the clock `apply` and `cluster status` read every
+    /// time on. **Optional in the file, required at use**: a lock written before the zone
+    /// was recorded still parses as a header (a required field would make it a parse error
+    /// that reads as corruption), and its readers refuse it by name through
+    /// `archive::ops::manifest::LockFile::zone`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
 }
 
 /// One resolved scope, as the lock records it.
@@ -306,6 +324,104 @@ impl LockEntry {
             scope_rel_path: None,
         }
     }
+}
+
+// ============================================================================
+// The manifest's zone
+// ============================================================================
+
+/// The zone a manifest's run reads times on, as settled from its `zone` line.
+#[derive(Debug, Clone)]
+pub enum ManifestZone {
+    /// The manifest's own line, read.
+    Recorded(RecordedZone),
+    /// No line: this machine's zone, which the run records.
+    FromMachine(RecordedZone),
+}
+
+impl ManifestZone {
+    /// The zone the run reads on and writes into both files.
+    pub fn zone(&self) -> &RecordedZone {
+        match self {
+            ManifestZone::Recorded(zone) | ManifestZone::FromMachine(zone) => zone,
+        }
+    }
+}
+
+/// Why a manifest's zone cannot be settled: its line names no zone Canon can read, or it has
+/// no line and this machine's zone cannot be written down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZoneRefusal {
+    Line(ZoneNameError),
+    Machine(Unrecordable),
+}
+
+impl ZoneRefusal {
+    /// Which of the two causes this is, as the decision table reads it.
+    pub fn kind(&self) -> ZoneRefusalKind {
+        match self {
+            ZoneRefusal::Line(_) => ZoneRefusalKind::Line,
+            ZoneRefusal::Machine(_) => ZoneRefusalKind::Machine,
+        }
+    }
+}
+
+/// The two causes of a [`ZoneRefusal`], without what each names — the table's input, which
+/// asks only which act it stops and what owes the way back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneRefusalKind {
+    /// The zone line names no zone this machine can read.
+    Line,
+    /// There is no zone line, and this machine's zone cannot be written down.
+    Machine,
+}
+
+/// **The manifest's zone for a run**, read by `cluster refresh` and `cluster status` alike,
+/// so the report names exactly the refusal the refresh raises and the zone a refresh here
+/// would record.
+///
+/// A line is read through the zone-name parse and never guessed past; no line takes this
+/// machine's zone where it can be written down.
+pub fn settle_manifest_zone(
+    line: Option<&str>,
+    machine: &UserZone,
+) -> Result<ManifestZone, ZoneRefusal> {
+    match line {
+        Some(text) => parse_zone_name(text)
+            .map(ManifestZone::Recorded)
+            .map_err(ZoneRefusal::Line),
+        None => machine
+            .recordable()
+            .map(ManifestZone::FromMachine)
+            .map_err(ZoneRefusal::Machine),
+    }
+}
+
+/// `apply`'s pre-flight line for a file whose save time moved since the lock was built: both
+/// save times on the lock's clock, the zone named on the line —
+/// `mtime (Europe/Amsterdam): 2024-06-15 14:30:05 → 2024-06-15 14:31:12`.
+///
+/// Where the two print the same — the repeated hour of a clock change, the only way two
+/// whole-second times print alike — the line adds the difference, so it never reads as no
+/// change at all; and a save
+/// time Canon cannot read prints `(unreadable)` and adds the difference the same way. One
+/// helper for both sites that compose the line — the database check in planning and the disk
+/// check before transfer.
+pub fn mtime_change(locked: i64, now: i64, clock: &RecordedZone) -> String {
+    let printed = |secs: i64| {
+        TimeValue::from_epoch_secs(secs)
+            .map(|t| t.printed(clock.clock()))
+            .ok()
+    };
+    let (was, is) = (printed(locked), printed(now));
+    let side = |p: &Option<String>| p.clone().unwrap_or_else(|| "(unreadable)".to_string());
+    let mut line = format!("mtime ({}): {} → {}", clock.name(), side(&was), side(&is));
+    if was.is_none() || is.is_none() || was == is {
+        let diff = i128::from(now) - i128::from(locked);
+        let sign = if diff < 0 { '-' } else { '+' };
+        line.push_str(&format!(" ({sign}{} s)", format_count(diff.unsigned_abs())));
+    }
+    line
 }
 
 // ============================================================================
@@ -411,12 +527,27 @@ pub enum LockStanding {
     Read {
         /// Whether its bytes still hash to what the manifest records.
         hash_matches: bool,
-        /// Whether it carries the header that records the scopes it was built
-        /// from.
-        /// `false` is a lock written before that header existed, which `apply`
-        /// refuses outright whatever the pattern says.
-        carries_measurement: bool,
+        /// What its header records, which `apply` refuses on before it plans.
+        header: LockHeaderStanding,
     },
+}
+
+/// The header of a lock that was read: whether it is there, and whether it carries a zone
+/// this machine can read.
+///
+/// One enum rather than two booleans, so a lock with no header *and* no zone — a claim about
+/// a line that is not in the file — cannot be posed: a lock written before the header existed
+/// predates both, and is refused by its older cause alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockHeaderStanding {
+    /// No header: written before lock files recorded the scopes they were built from.
+    Absent,
+    /// A header with no zone: written before lock files recorded the time zone.
+    PredatesZone,
+    /// A header whose zone this machine's time zone data does not know.
+    ZoneNotKnownHere,
+    /// A header carrying a zone this machine knows.
+    Sound,
 }
 
 impl LockStanding {
@@ -480,6 +611,12 @@ pub struct ManifestStanding {
     /// Whether no recorded prefix confirmed, so a rebuild would supply no
     /// measurement (`ScopeResolution::scopes` empty).
     pub scope_confirms_nothing: bool,
+    /// Why the manifest's zone cannot be settled for a refresh here, where it cannot
+    /// (`settle_manifest_zone`).
+    pub zone_refusal: Option<ZoneRefusalKind>,
+    /// Whether a line of the recorded query does not parse
+    /// (`ops::manifest::parse_recorded_query`).
+    pub query_unparseable: bool,
 }
 
 /// The two acts that read a manifest.
@@ -494,9 +631,9 @@ pub enum Act {
 
 /// Why a `cluster refresh` would be turned away.
 ///
-/// The two rows of the table below that stop a refresh, as the one question a
+/// The rows of the table below that stop a refresh, as the one question a
 /// caller telling the user about a refresh needs answered. Separate from
-/// [`Obstacle`] because a caller asking it must not have to say what the six
+/// [`Obstacle`] because a caller asking it must not have to say what the
 /// apply-only rows would mean here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshRefusal {
@@ -505,6 +642,12 @@ pub enum RefreshRefusal {
     /// The recorded scope kept nothing — the source-existence policy's
     /// terminal rule.
     ScopeKeptNothing,
+    /// The manifest's zone line names no zone this machine can read.
+    ZoneLine,
+    /// The manifest has no zone line, and this machine's zone cannot be written down.
+    NoMachineZone,
+    /// A line of the manifest's query does not parse.
+    Query,
 }
 
 /// What a withheld step still owes the reader.
@@ -545,17 +688,24 @@ pub enum OwedWayBack {
 /// | [`NoLock`](Self::NoLock) | yes — there is nothing to carry across | no — a refresh *writes* the lock; it never reads one |
 /// | [`LockHashMismatch`](Self::LockHashMismatch) | yes | no — same reason |
 /// | [`LockPredatesMeasurement`](Self::LockPredatesMeasurement) | yes | no — same reason |
+/// | [`LockPredatesZone`](Self::LockPredatesZone) | yes | no — same reason |
+/// | [`LockZoneNotKnownHere`](Self::LockZoneNotKnownHere) | yes | no — same reason |
 /// | [`PatternUnexpandable`](Self::PatternUnexpandable) | yes | no — a refresh names no destination; only apply expands the pattern to move a file |
 /// | [`ParkedOrigins`](Self::ParkedOrigins) | yes | no — a record is not a naming: the rebuild re-selects from the open world and leaves them out |
 /// | [`ParkedDestination`](Self::ParkedDestination) | yes | no — a refresh writes only the manifest and its lock, never into the archive root |
 /// | [`ParkedScope`](Self::ParkedScope) | no — apply reads no recorded scope, taking its own from the lock header | yes |
 /// | [`ScopeKeptNothing`](Self::ScopeKeptNothing) | no — same reason | yes |
+/// | [`ZoneLineUnreadable`](Self::ZoneLineUnreadable) | no — apply reads the lock's zone, never the manifest's line | yes |
+/// | [`NoZoneToRecord`](Self::NoZoneToRecord) | no — same reason | yes |
+/// | [`QueryUnreadable`](Self::QueryUnreadable) | no — apply re-selects nothing | yes |
 ///
 /// **Two unreachable cells, and one that only looks like them.** With no lock
 /// there is no hash to mismatch and no header to be missing, so `NoLock` can
-/// never be raised beside `LockHashMismatch` or `LockPredatesMeasurement` —
+/// never be raised beside `LockHashMismatch` or any of the header's rows —
 /// **unrepresentable**, by the shape of [`LockStanding`] rather than by
-/// anyone's discipline, since both are claims about a file somebody read.
+/// anyone's discipline, since both are claims about a file somebody read. The
+/// header's own rows are one [`LockHeaderStanding`], so a lock with no header
+/// is never also said to have no zone.
 ///
 /// `PatternUnexpandable` beside `NoLock` is a third impossible state and is
 /// **not** of that kind, which is worth saying because the three read alike.
@@ -611,6 +761,16 @@ pub enum Obstacle {
     /// pattern says, because a scoped act recorded as a global one is the
     /// silence the lock header exists to close.
     LockPredatesMeasurement,
+    /// The lock was built before lock files recorded the time zone, so no
+    /// placement can be read on the zone it was built in.
+    /// Enforced by `apply`'s lock-zone refusal, right after the no-header one.
+    LockPredatesZone,
+    /// This machine's time zone data does not know the zone the lock records.
+    /// Enforced by `apply`'s lock-zone refusal. A refresh that runs has read
+    /// the manifest's zone on this machine and writes one it knows; where the
+    /// manifest's line names the same unknown zone, [`ZoneLineUnreadable`](Self::ZoneLineUnreadable)
+    /// stops that refresh, so no step is named.
+    LockZoneNotKnownHere,
     /// The destination pattern does not expand for the entries as they stand.
     /// Enforced by `apply`'s expansion-failure refusal, which collects every
     /// failure and aborts before it transfers anything.
@@ -630,6 +790,16 @@ pub enum Obstacle {
     /// terminal rule. Enforced by `cluster refresh`, which names every
     /// set-aside line as it refuses.
     ScopeKeptNothing,
+    /// The manifest's zone line names no zone this machine can read.
+    /// Enforced by `cluster refresh`, which states it among every cause it
+    /// meets and writes nothing.
+    ZoneLineUnreadable,
+    /// The manifest has no zone line and this machine's zone cannot be
+    /// written down. Enforced by `cluster refresh`, the same way.
+    NoZoneToRecord,
+    /// A line of the manifest's query does not parse. Enforced by `cluster
+    /// refresh`, which states every such line beside the zone's cause.
+    QueryUnreadable,
 }
 
 /// What a `cluster refresh` does about one obstacle.
@@ -669,10 +839,16 @@ impl Obstacle {
             Obstacle::NoLock
             | Obstacle::LockHashMismatch
             | Obstacle::LockPredatesMeasurement
+            | Obstacle::LockPredatesZone
+            | Obstacle::LockZoneNotKnownHere
             | Obstacle::PatternUnexpandable
             | Obstacle::ParkedOrigins
             | Obstacle::ParkedDestination => Act::Apply,
-            Obstacle::ParkedScope | Obstacle::ScopeKeptNothing => Act::Refresh,
+            Obstacle::ParkedScope
+            | Obstacle::ScopeKeptNothing
+            | Obstacle::ZoneLineUnreadable
+            | Obstacle::NoZoneToRecord
+            | Obstacle::QueryUnreadable => Act::Refresh,
         }
     }
 
@@ -701,8 +877,12 @@ impl Obstacle {
     /// expression facility, which no reader asks for today.
     pub fn rebuild(self, standing: &ManifestStanding) -> Rebuild {
         match self {
+            // A refresh that runs writes a header carrying a zone it has read
+            // on this machine.
             Obstacle::LockHashMismatch
             | Obstacle::LockPredatesMeasurement
+            | Obstacle::LockPredatesZone
+            | Obstacle::LockZoneNotKnownHere
             | Obstacle::ParkedOrigins => Rebuild::Clears,
             // A lock that went missing is rebuilt; a lock that was never
             // written because the query matched nothing is not, because the
@@ -723,7 +903,11 @@ impl Obstacle {
             }
             // No rebuild moves a destination.
             Obstacle::ParkedDestination => Rebuild::Leaves,
-            Obstacle::ParkedScope | Obstacle::ScopeKeptNothing => Rebuild::Refused,
+            Obstacle::ParkedScope
+            | Obstacle::ScopeKeptNothing
+            | Obstacle::ZoneLineUnreadable
+            | Obstacle::NoZoneToRecord
+            | Obstacle::QueryUnreadable => Rebuild::Refused,
         }
     }
 }
@@ -736,13 +920,18 @@ impl ManifestStanding {
             LockStanding::Absent { .. } => raised.push(Obstacle::NoLock),
             LockStanding::Read {
                 hash_matches,
-                carries_measurement,
+                header,
             } => {
                 if !hash_matches {
                     raised.push(Obstacle::LockHashMismatch);
                 }
-                if !carries_measurement {
-                    raised.push(Obstacle::LockPredatesMeasurement);
+                match header {
+                    LockHeaderStanding::Absent => raised.push(Obstacle::LockPredatesMeasurement),
+                    LockHeaderStanding::PredatesZone => raised.push(Obstacle::LockPredatesZone),
+                    LockHeaderStanding::ZoneNotKnownHere => {
+                        raised.push(Obstacle::LockZoneNotKnownHere)
+                    }
+                    LockHeaderStanding::Sound => {}
                 }
             }
         }
@@ -761,6 +950,14 @@ impl ManifestStanding {
         if self.scope_kept_nothing {
             raised.push(Obstacle::ScopeKeptNothing);
         }
+        match self.zone_refusal {
+            Some(ZoneRefusalKind::Line) => raised.push(Obstacle::ZoneLineUnreadable),
+            Some(ZoneRefusalKind::Machine) => raised.push(Obstacle::NoZoneToRecord),
+            None => {}
+        }
+        if self.query_unparseable {
+            raised.push(Obstacle::QueryUnreadable);
+        }
         raised
     }
 
@@ -769,20 +966,21 @@ impl ManifestStanding {
         !self.obstacles().iter().any(|o| o.stops() == act)
     }
 
-    /// Which of the two refusals turns a `cluster refresh` away, where one
+    /// Which of the refresh's refusals turns a `cluster refresh` away, where one
     /// does.
     ///
     /// Asked because the answer changes what a reader is owed, not merely
     /// whether an act is named: a closed door announces itself with the act
-    /// that opens it, and a scope that kept nothing announces itself with a
-    /// skipped line carrying no act at all. An interface deciding that from
+    /// that opens it, the manifest's zone and a query line in the refresh's own
+    /// words with theirs, and a scope that kept nothing with a skipped line
+    /// carrying no act at all. An interface deciding that from
     /// `parked_scope` and `scope_kept_nothing` would be re-testing causes the
     /// table already holds, and would re-spell the precedence between them.
     ///
-    /// **The door outranks the terminal rule**, matching the order `cluster
-    /// refresh` itself asks in — it refuses on a door before it looks at what
-    /// the scope kept — so a manifest with both is told about the door, whose
-    /// way back is the one already on screen.
+    /// **The door outranks the terminal rule, both outrank the zone, and all
+    /// three outrank the query**, matching the order `cluster refresh` itself
+    /// states its causes in — the scope's first — so a manifest with several
+    /// is told about the door, whose way back is the one already on screen.
     ///
     /// Its `None` is exactly [`can_run(Act::Refresh)`](Self::can_run) — the
     /// same question, answered with its cause — and the two are held to that
@@ -792,12 +990,17 @@ impl ManifestStanding {
         self.obstacles().into_iter().find_map(|o| match o {
             Obstacle::ParkedScope => Some(RefreshRefusal::Door),
             Obstacle::ScopeKeptNothing => Some(RefreshRefusal::ScopeKeptNothing),
+            Obstacle::ZoneLineUnreadable => Some(RefreshRefusal::ZoneLine),
+            Obstacle::NoZoneToRecord => Some(RefreshRefusal::NoMachineZone),
+            Obstacle::QueryUnreadable => Some(RefreshRefusal::Query),
             // Every row that stops `apply` and never a refresh. Spelled out
             // rather than swept into a rest, so a new refresh-stopping row
             // cannot arrive without this answering for it.
             Obstacle::NoLock
             | Obstacle::LockHashMismatch
             | Obstacle::LockPredatesMeasurement
+            | Obstacle::LockPredatesZone
+            | Obstacle::LockZoneNotKnownHere
             | Obstacle::PatternUnexpandable
             | Obstacle::ParkedOrigins
             | Obstacle::ParkedDestination => None,
@@ -807,10 +1010,12 @@ impl ManifestStanding {
     /// What the reader is owed where [`next_step`](Self::next_step) names no
     /// act.
     ///
-    /// **Three causes reach that answer and only one of them speaks for
-    /// itself.** A door is announced with `canon roots unsuspend`, so it needs
-    /// nothing here. A recorded scope that kept nothing is announced as `no
-    /// sources known at <p> — skipped`, which names no act. A pattern that
+    /// **Four kinds of cause reach that answer and two of them speak for
+    /// themselves.** A door is announced with `canon roots unsuspend`, and a
+    /// zone or a query line the refresh cannot read is announced in the
+    /// refresh's own words, so neither needs anything here. A recorded scope
+    /// that kept nothing is announced as `no sources known at <p> — skipped`,
+    /// which names no act. A pattern that
     /// cannot expand states why it cannot, and where no rebuild clears it on
     /// its own — nothing to measure from, a fact no refresh supplies, a save
     /// time or a grain no refresh changes — what moves it is an edit: to the
@@ -844,11 +1049,16 @@ impl ManifestStanding {
                 // Each of these is either named on a line carrying its own
                 // act, or is not what withheld the step.
                 Obstacle::ParkedScope
+                | Obstacle::ZoneLineUnreadable
+                | Obstacle::NoZoneToRecord
+                | Obstacle::QueryUnreadable
                 | Obstacle::ParkedDestination
                 | Obstacle::ParkedOrigins
                 | Obstacle::NoLock
                 | Obstacle::LockHashMismatch
-                | Obstacle::LockPredatesMeasurement => owed,
+                | Obstacle::LockPredatesMeasurement
+                | Obstacle::LockPredatesZone
+                | Obstacle::LockZoneNotKnownHere => owed,
             };
         }
         owed
@@ -1009,6 +1219,7 @@ base_dir = ""
                 scope: scope.clone(),
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
+                zone: None,
             },
             options: ManifestOptions::default(),
             output: ManifestOutput {
@@ -1035,6 +1246,7 @@ base_dir = ""
                 scope: vec![],
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
+                zone: None,
             },
             options: ManifestOptions::default(),
             output: ManifestOutput {
@@ -1147,6 +1359,7 @@ base_dir = ""
                 scope: vec!["/photos".to_string()],
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
+                zone: None,
             },
             options: ManifestOptions {
                 allow: vec!["archived".to_string(), "duplicates".to_string()],
@@ -1211,6 +1424,7 @@ base_dir = "photos"
                 scope: vec!["/photos".to_string()],
                 generated_at: "2026-02-15T12:00:00Z".to_string(),
                 lock_hash: "abc123".to_string(),
+                zone: None,
             },
             options: ManifestOptions { allow: vec![] },
             output: ManifestOutput {
@@ -1342,7 +1556,7 @@ base_dir = "photos"
         ManifestStanding {
             lock: LockStanding::Read {
                 hash_matches: true,
-                carries_measurement: true,
+                header: LockHeaderStanding::Sound,
             },
             pattern_expands: true,
             pattern_needs_a_scope_it_lacks: false,
@@ -1351,6 +1565,8 @@ base_dir = "photos"
             parked_scope: false,
             scope_kept_nothing: false,
             scope_confirms_nothing: false,
+            zone_refusal: None,
+            query_unparseable: false,
         }
     }
 
@@ -1360,13 +1576,33 @@ base_dir = "photos"
             Obstacle::NoLock,
             Obstacle::LockHashMismatch,
             Obstacle::LockPredatesMeasurement,
+            Obstacle::LockPredatesZone,
+            Obstacle::LockZoneNotKnownHere,
             Obstacle::PatternUnexpandable,
             Obstacle::ParkedOrigins,
             Obstacle::ParkedDestination,
             Obstacle::ParkedScope,
             Obstacle::ScopeKeptNothing,
+            Obstacle::ZoneLineUnreadable,
+            Obstacle::NoZoneToRecord,
+            Obstacle::QueryUnreadable,
         ]
     }
+
+    /// Every header a lock that was read can carry.
+    const HEADERS: [LockHeaderStanding; 4] = [
+        LockHeaderStanding::Absent,
+        LockHeaderStanding::PredatesZone,
+        LockHeaderStanding::ZoneNotKnownHere,
+        LockHeaderStanding::Sound,
+    ];
+
+    /// Every answer the manifest's zone can give a refresh here.
+    const ZONE_REFUSALS: [Option<ZoneRefusalKind>; 3] = [
+        None,
+        Some(ZoneRefusalKind::Line),
+        Some(ZoneRefusalKind::Machine),
+    ];
 
     /// Where each row sits in the census above — an exhaustive match, so a new
     /// obstacle cannot be minted without being given a place here.
@@ -1375,21 +1611,29 @@ base_dir = "photos"
             Obstacle::NoLock => 0,
             Obstacle::LockHashMismatch => 1,
             Obstacle::LockPredatesMeasurement => 2,
-            Obstacle::PatternUnexpandable => 3,
-            Obstacle::ParkedOrigins => 4,
-            Obstacle::ParkedDestination => 5,
-            Obstacle::ParkedScope => 6,
-            Obstacle::ScopeKeptNothing => 7,
+            Obstacle::LockPredatesZone => 3,
+            Obstacle::LockZoneNotKnownHere => 4,
+            Obstacle::PatternUnexpandable => 5,
+            Obstacle::ParkedOrigins => 6,
+            Obstacle::ParkedDestination => 7,
+            Obstacle::ParkedScope => 8,
+            Obstacle::ScopeKeptNothing => 9,
+            Obstacle::ZoneLineUnreadable => 10,
+            Obstacle::NoZoneToRecord => 11,
+            Obstacle::QueryUnreadable => 12,
         }
     }
 
     /// **The census is complete, and matched both directions.** A row minted
     /// without a place fails [`position`]'s match at compile time; a row given
-    /// a place but left out of the list fails the run here. Eight, because the
+    /// a place but left out of the list fails the run here. Thirteen: the
     /// charter's seven conditions split the manifest door in two — the origin
     /// end and the destination end meet different acts — and the recorded
     /// scope's own two reasons are a door and the terminal rule, which are
-    /// likewise not one row.
+    /// likewise not one row; then the zone's four — two about the lock's
+    /// header, which stop `apply`, and two about the manifest's line, which
+    /// stop the refresh; and a query line that does not parse, which stops it
+    /// too.
     #[test]
     fn the_table_holds_every_row_once() {
         let all = all_obstacles();
@@ -1401,26 +1645,32 @@ base_dir = "photos"
             (0..all.len()).collect::<Vec<_>>(),
             "every row listed once, and none listed twice"
         );
-        assert_eq!(all.len(), 8, "the table's row count");
+        assert_eq!(all.len(), 13, "the table's row count");
     }
 
     /// Each row stops exactly one act, and which one is the table's own claim
     /// rather than a reading of the code: apply transfers from the lock into
     /// the destination and reads no recorded scope, so the lock's states, the
-    /// pattern's and the two ends' doors are its; a refresh re-queries from
-    /// the recorded scope and writes the lock, so the scope's door and the
-    /// sourceless terminal rule are its and nothing else is.
+    /// pattern's, the two ends' doors and the lock's zone are its; a refresh
+    /// re-queries from the recorded scope on the manifest's zone and writes the
+    /// lock, so the scope's door, the sourceless terminal rule, the manifest's
+    /// zone and its query are its and nothing else is.
     #[test]
     fn each_row_stops_the_act_the_table_names() {
         for (obstacle, act) in [
             (Obstacle::NoLock, Act::Apply),
             (Obstacle::LockHashMismatch, Act::Apply),
             (Obstacle::LockPredatesMeasurement, Act::Apply),
+            (Obstacle::LockPredatesZone, Act::Apply),
+            (Obstacle::LockZoneNotKnownHere, Act::Apply),
             (Obstacle::PatternUnexpandable, Act::Apply),
             (Obstacle::ParkedOrigins, Act::Apply),
             (Obstacle::ParkedDestination, Act::Apply),
             (Obstacle::ParkedScope, Act::Refresh),
             (Obstacle::ScopeKeptNothing, Act::Refresh),
+            (Obstacle::ZoneLineUnreadable, Act::Refresh),
+            (Obstacle::NoZoneToRecord, Act::Refresh),
+            (Obstacle::QueryUnreadable, Act::Refresh),
         ] {
             assert_eq!(obstacle.stops(), act, "{obstacle:?}");
         }
@@ -1522,8 +1772,9 @@ base_dir = "photos"
     /// **Every withheld step is either self-explaining or told what to do.**
     ///
     /// Walked over every shape the table can take — every input of
-    /// [`ManifestStanding`], the lock over both absences and all four
-    /// readings — rather than the shapes that arise today: the claim is that
+    /// [`ManifestStanding`], the lock over both absences and all eight
+    /// readings, the manifest's zone over its three answers — rather than the
+    /// shapes that arise today: the claim is that
     /// a reader left without a step is never left without an answer, and a
     /// new row that withholds a step must say here what it owes, or fail.
     /// One pair the construction rules out is skipped by name rather than
@@ -1541,77 +1792,79 @@ base_dir = "photos"
     /// there would be sending them to edit a line that was never the problem.
     #[test]
     fn a_withheld_step_is_never_left_without_an_answer() {
-        for lock in [
-            LockStanding::absent(""),
-            LockStanding::absent("abc123"),
-            LockStanding::Read {
-                hash_matches: true,
-                carries_measurement: true,
-            },
-            LockStanding::Read {
-                hash_matches: true,
-                carries_measurement: false,
-            },
-            LockStanding::Read {
-                hash_matches: false,
-                carries_measurement: true,
-            },
-            LockStanding::Read {
-                hash_matches: false,
-                carries_measurement: false,
-            },
-        ] {
-            for pattern_expands in [true, false] {
-                for pattern_needs_a_scope_it_lacks in [true, false] {
-                    for parked_origins in [true, false] {
-                        for parked_scope in [true, false] {
-                            for parked_destination in [true, false] {
-                                for scope_kept_nothing in [true, false] {
-                                    for scope_confirms_nothing in [true, false] {
-                                        if !pattern_expands
-                                            && matches!(lock, LockStanding::Absent { .. })
-                                        {
-                                            continue;
-                                        }
-                                        let standing = ManifestStanding {
-                                            lock,
-                                            pattern_expands,
-                                            pattern_needs_a_scope_it_lacks,
-                                            parked_origins,
-                                            parked_destination,
-                                            parked_scope,
-                                            scope_kept_nothing,
-                                            scope_confirms_nothing,
-                                        };
-                                        let owed = standing.owed_way_back();
-                                        if !matches!(standing.next_step(), NextStep::None) {
-                                            assert_eq!(
+        let mut locks = vec![LockStanding::absent(""), LockStanding::absent("abc123")];
+        for hash_matches in [true, false] {
+            for header in HEADERS {
+                locks.push(LockStanding::Read {
+                    hash_matches,
+                    header,
+                });
+            }
+        }
+        // The manifest's own two refresh causes, every pairing.
+        let refresh_causes = ZONE_REFUSALS
+            .into_iter()
+            .flat_map(|z| [(z, false), (z, true)]);
+        for (zone_refusal, query_unparseable) in refresh_causes {
+            for lock in locks.iter().copied() {
+                for pattern_expands in [true, false] {
+                    for pattern_needs_a_scope_it_lacks in [true, false] {
+                        for parked_origins in [true, false] {
+                            for parked_scope in [true, false] {
+                                for parked_destination in [true, false] {
+                                    for scope_kept_nothing in [true, false] {
+                                        for scope_confirms_nothing in [true, false] {
+                                            if !pattern_expands
+                                                && matches!(lock, LockStanding::Absent { .. })
+                                            {
+                                                continue;
+                                            }
+                                            let standing = ManifestStanding {
+                                                lock,
+                                                pattern_expands,
+                                                pattern_needs_a_scope_it_lacks,
+                                                parked_origins,
+                                                parked_destination,
+                                                parked_scope,
+                                                scope_kept_nothing,
+                                                scope_confirms_nothing,
+                                                zone_refusal,
+                                                query_unparseable,
+                                            };
+                                            let owed = standing.owed_way_back();
+                                            if !matches!(standing.next_step(), NextStep::None) {
+                                                assert_eq!(
                                                 owed,
                                                 OwedWayBack::Stated,
                                                 "a named step asks nothing of this: {standing:?}"
                                             );
-                                            continue;
-                                        }
-                                        if scope_kept_nothing {
-                                            assert_eq!(
-                                                owed,
-                                                OwedWayBack::ScanOrEditScope,
-                                                "the scope outranks the pattern: {standing:?}"
-                                            );
-                                        }
-                                        // Exhaustive on purpose: a fourth
-                                        // answer fails to compile here until
-                                        // it says which input earns it.
-                                        match owed {
+                                                continue;
+                                            }
+                                            if scope_kept_nothing {
+                                                assert_eq!(
+                                                    owed,
+                                                    OwedWayBack::ScanOrEditScope,
+                                                    "the scope outranks the pattern: {standing:?}"
+                                                );
+                                            }
+                                            // Exhaustive on purpose: a fourth
+                                            // answer fails to compile here until
+                                            // it says which input earns it.
+                                            match owed {
                                             // Parked origins are deliberately
                                             // not in this list: a rebuild
                                             // clears them and never withholds
                                             // the step, so they can never be
                                             // what left the reader without one.
+                                            // A zone the refresh cannot settle
+                                            // is stated in the refresh's own
+                                            // words, with its ways out.
                                             OwedWayBack::Stated => assert!(
                                                 parked_scope
                                                     || parked_destination
-                                                    || pattern_expands,
+                                                    || pattern_expands
+                                                    || zone_refusal.is_some()
+                                                    || query_unparseable,
                                                 "nothing here states its own way back: {standing:?}"
                                             ),
                                             OwedWayBack::ScanOrEditScope => assert!(
@@ -1622,6 +1875,7 @@ base_dir = "photos"
                                                 !pattern_expands && !scope_kept_nothing,
                                                 "a pattern remedy owed by something other than the pattern: {standing:?}"
                                             ),
+                                        }
                                         }
                                     }
                                 }
@@ -1637,55 +1891,61 @@ base_dir = "photos"
     /// disagree — and the refusal must name the door first, matching the
     /// order `cluster refresh` itself refuses in.
     ///
-    /// Walked over every combination of the two scope inputs against every
-    /// lock shape, rather than the shapes that happen to arise today: this
+    /// Walked over every combination of the scope's two inputs and the zone's
+    /// answer against every lock shape, rather than the shapes that happen to
+    /// arise today: this
     /// exists so that a row added to one answer and not the other fails here.
     #[test]
     fn the_refresh_refusal_agrees_with_the_predicate() {
-        let locks = [
-            LockStanding::Absent {
-                manifest_names_a_hash: true,
-            },
-            LockStanding::Absent {
-                manifest_names_a_hash: false,
-            },
-            LockStanding::Read {
-                hash_matches: true,
-                carries_measurement: true,
-            },
-            LockStanding::Read {
-                hash_matches: false,
-                carries_measurement: true,
-            },
-            LockStanding::Read {
-                hash_matches: true,
-                carries_measurement: false,
-            },
-        ];
+        let mut locks = vec![LockStanding::absent(""), LockStanding::absent("abc123")];
+        for hash_matches in [true, false] {
+            for header in HEADERS {
+                locks.push(LockStanding::Read {
+                    hash_matches,
+                    header,
+                });
+            }
+        }
         for lock in locks {
             for parked_scope in [false, true] {
                 for scope_kept_nothing in [false, true] {
-                    let standing = ManifestStanding {
-                        lock,
-                        parked_scope,
-                        scope_kept_nothing,
-                        ..sound()
-                    };
-                    let refused = standing.refresh_refused_by();
-                    assert_eq!(
-                        refused.is_none(),
-                        standing.can_run(Act::Refresh),
-                        "the cause and the yes/no must answer alike: {standing:?}"
-                    );
-                    let expected = match (parked_scope, scope_kept_nothing) {
-                        (true, _) => Some(RefreshRefusal::Door),
-                        (false, true) => Some(RefreshRefusal::ScopeKeptNothing),
-                        (false, false) => None,
-                    };
-                    assert_eq!(
-                        refused, expected,
-                        "the door outranks the terminal rule: {standing:?}"
-                    );
+                    let refresh_causes = ZONE_REFUSALS
+                        .into_iter()
+                        .flat_map(|z| [(z, false), (z, true)]);
+                    for (zone_refusal, query_unparseable) in refresh_causes {
+                        let standing = ManifestStanding {
+                            lock,
+                            parked_scope,
+                            scope_kept_nothing,
+                            zone_refusal,
+                            query_unparseable,
+                            ..sound()
+                        };
+                        let refused = standing.refresh_refused_by();
+                        assert_eq!(
+                            refused.is_none(),
+                            standing.can_run(Act::Refresh),
+                            "the cause and the yes/no must answer alike: {standing:?}"
+                        );
+                        let expected = match (parked_scope, scope_kept_nothing, zone_refusal) {
+                            (true, _, _) => Some(RefreshRefusal::Door),
+                            (false, true, _) => Some(RefreshRefusal::ScopeKeptNothing),
+                            (false, false, Some(ZoneRefusalKind::Line)) => {
+                                Some(RefreshRefusal::ZoneLine)
+                            }
+                            (false, false, Some(ZoneRefusalKind::Machine)) => {
+                                Some(RefreshRefusal::NoMachineZone)
+                            }
+                            (false, false, None) if query_unparseable => {
+                                Some(RefreshRefusal::Query)
+                            }
+                            (false, false, None) => None,
+                        };
+                        assert_eq!(
+                            refused, expected,
+                            "the scope's refusals outrank the zone's: {standing:?}"
+                        );
+                    }
                 }
             }
         }
@@ -1712,7 +1972,7 @@ base_dir = "photos"
         let standing = ManifestStanding {
             lock: LockStanding::Read {
                 hash_matches: false,
-                carries_measurement: true,
+                header: LockHeaderStanding::Sound,
             },
             ..sound()
         };
@@ -1733,7 +1993,7 @@ base_dir = "photos"
         let old_and_unexpandable = ManifestStanding {
             lock: LockStanding::Read {
                 hash_matches: true,
-                carries_measurement: false,
+                header: LockHeaderStanding::Absent,
             },
             pattern_expands: false,
             pattern_needs_a_scope_it_lacks: true,
@@ -1793,7 +2053,7 @@ base_dir = "photos"
         let declared_after_the_lock = ManifestStanding {
             lock: LockStanding::Read {
                 hash_matches: true,
-                carries_measurement: true,
+                header: LockHeaderStanding::Sound,
             },
             pattern_expands: false,
             pattern_needs_a_scope_it_lacks: true,
@@ -1822,7 +2082,7 @@ base_dir = "photos"
         let standing = ManifestStanding {
             lock: LockStanding::Read {
                 hash_matches: true,
-                carries_measurement: false,
+                header: LockHeaderStanding::Absent,
             },
             scope_kept_nothing: true,
             scope_confirms_nothing: true,
@@ -1880,5 +2140,268 @@ base_dir = "photos"
             NextStep::None,
             "a refresh would run, but it addresses nothing the reader is stuck on"
         );
+    }
+
+    /// **A lock built before lock files recorded the zone stops the apply, and
+    /// the rebuild is the step**: a refresh writes a header carrying a zone it
+    /// has read on this machine.
+    #[test]
+    fn a_lock_predating_the_zone_is_cleared_by_a_rebuild() {
+        let standing = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::PredatesZone,
+            },
+            ..sound()
+        };
+        assert_eq!(standing.obstacles(), vec![Obstacle::LockPredatesZone]);
+        assert!(!standing.can_run(Act::Apply));
+        assert!(standing.can_run(Act::Refresh));
+        assert_eq!(
+            Obstacle::LockPredatesZone.rebuild(&standing),
+            Rebuild::Clears
+        );
+        assert_eq!(standing.next_step(), NextStep::Rebuild);
+    }
+
+    /// **A lock zone this machine does not know is cleared by a refresh that
+    /// runs** — it has read the manifest's zone here, so it writes one this
+    /// machine knows. Where the manifest's line names the same unknown zone, its
+    /// own row stops that refresh, and no step is named: the zone lines state
+    /// the ways out.
+    #[test]
+    fn a_lock_zone_not_known_here_is_cleared_by_a_refresh_that_runs() {
+        let standing = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::ZoneNotKnownHere,
+            },
+            ..sound()
+        };
+        assert_eq!(standing.obstacles(), vec![Obstacle::LockZoneNotKnownHere]);
+        assert!(!standing.can_run(Act::Apply));
+        assert_eq!(standing.next_step(), NextStep::Rebuild);
+
+        let line_unknown_too = ManifestStanding {
+            zone_refusal: Some(ZoneRefusalKind::Line),
+            ..standing
+        };
+        assert_eq!(
+            line_unknown_too.obstacles(),
+            vec![Obstacle::LockZoneNotKnownHere, Obstacle::ZoneLineUnreadable]
+        );
+        assert_eq!(line_unknown_too.next_step(), NextStep::None);
+        assert_eq!(line_unknown_too.owed_way_back(), OwedWayBack::Stated);
+    }
+
+    /// **An unreadable zone line stops the refresh and no apply**: `apply`
+    /// reads the lock's zone, never the manifest's line.
+    #[test]
+    fn an_unreadable_zone_line_stops_the_refresh_and_no_apply() {
+        let standing = ManifestStanding {
+            zone_refusal: Some(ZoneRefusalKind::Line),
+            ..sound()
+        };
+        assert_eq!(standing.obstacles(), vec![Obstacle::ZoneLineUnreadable]);
+        assert!(standing.can_run(Act::Apply));
+        assert!(!standing.can_run(Act::Refresh));
+        assert_eq!(
+            standing.refresh_refused_by(),
+            Some(RefreshRefusal::ZoneLine)
+        );
+        assert_eq!(
+            Obstacle::ZoneLineUnreadable.rebuild(&standing),
+            Rebuild::Refused
+        );
+        assert_eq!(standing.next_step(), NextStep::Apply);
+    }
+
+    /// **No zone line on a machine whose zone cannot be written down stops the
+    /// refresh**, and only the refresh.
+    #[test]
+    fn no_zone_to_record_stops_the_refresh() {
+        let standing = ManifestStanding {
+            zone_refusal: Some(ZoneRefusalKind::Machine),
+            ..sound()
+        };
+        assert_eq!(standing.obstacles(), vec![Obstacle::NoZoneToRecord]);
+        assert!(standing.can_run(Act::Apply));
+        assert!(!standing.can_run(Act::Refresh));
+        assert_eq!(
+            standing.refresh_refused_by(),
+            Some(RefreshRefusal::NoMachineZone)
+        );
+        assert_eq!(
+            Obstacle::NoZoneToRecord.rebuild(&standing),
+            Rebuild::Refused
+        );
+
+        // A lock the refresh would have rebuilt is left without a step, and the
+        // zone line owes the way back in the refresh's own words.
+        let old_lock = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::PredatesZone,
+            },
+            ..standing
+        };
+        assert_eq!(old_lock.next_step(), NextStep::None);
+        assert_eq!(old_lock.owed_way_back(), OwedWayBack::Stated);
+    }
+
+    /// **A lock with no header raises its older row and no zone row**: it
+    /// predates both, and the header standing cannot say it lacks a zone.
+    #[test]
+    fn a_headerless_lock_raises_no_zone_row() {
+        let standing = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::Absent,
+            },
+            ..sound()
+        };
+        assert_eq!(
+            standing.obstacles(),
+            vec![Obstacle::LockPredatesMeasurement]
+        );
+    }
+
+    /// **The door outranks the zone refusal**: `cluster refresh` states the
+    /// scope's causes first, so a report naming the refusal names the door.
+    #[test]
+    fn the_door_outranks_the_zone_refusal() {
+        let standing = ManifestStanding {
+            parked_scope: true,
+            zone_refusal: Some(ZoneRefusalKind::Line),
+            ..sound()
+        };
+        assert_eq!(standing.refresh_refused_by(), Some(RefreshRefusal::Door));
+    }
+
+    /// **The pre-flight line reads both save times on the lock's clock, naming it**, and
+    /// adds the difference wherever the two print alike or one cannot be read — so a change
+    /// never reads as none.
+    #[test]
+    fn mtime_change_reads_on_the_locks_clock() {
+        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
+        // 2024-06-15 12:30:05 UTC and 12:31:12 UTC: summer time, two hours ahead.
+        assert_eq!(
+            mtime_change(1718454605, 1718454672, &amsterdam),
+            "mtime (Europe/Amsterdam): 2024-06-15 14:30:05 → 2024-06-15 14:31:12"
+        );
+        // The repeated autumn hour: 00:30 and 01:30 UTC on 2024-10-27 both print 02:30.
+        assert_eq!(
+            mtime_change(1729989000, 1729992600, &amsterdam),
+            "mtime (Europe/Amsterdam): 2024-10-27 02:30:00 → 2024-10-27 02:30:00 (+3,600 s)"
+        );
+        assert_eq!(
+            mtime_change(1729992600, 1729989000, &amsterdam),
+            "mtime (Europe/Amsterdam): 2024-10-27 02:30:00 → 2024-10-27 02:30:00 (-3,600 s)"
+        );
+        // A save time past the year 9999 cannot be read; its side says so.
+        assert_eq!(
+            mtime_change(1718454605, 253402300800, &amsterdam),
+            "mtime (Europe/Amsterdam): 2024-06-15 14:30:05 → (unreadable) (+251,683,846,195 s)"
+        );
+    }
+
+    // =========================================================================
+    // The manifest's zone
+    // =========================================================================
+
+    fn manifest_with_zone(zone: Option<&str>) -> ManifestConfig {
+        ManifestConfig {
+            meta: ManifestMeta {
+                version: CURRENT_MANIFEST_VERSION,
+                query: vec![],
+                scope: vec![],
+                zone: zone.map(str::to_string),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+                lock_hash: "abc".to_string(),
+            },
+            options: ManifestOptions { allow: vec![] },
+            output: ManifestOutput {
+                pattern: "{filename}".to_string(),
+                archive_root_id: 1,
+                base_dir: String::new(),
+            },
+        }
+    }
+
+    /// **The zone line round-trips as the user's own text**, beside the query and scope it
+    /// governs — read back exactly as written, never parsed into a zone here.
+    #[test]
+    fn a_manifest_zone_line_round_trips() {
+        let config = manifest_with_zone(Some("Europe/Amsterdam"));
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("zone = \"Europe/Amsterdam\""), "{text}");
+        let back = parse_manifest_config(&text, Path::new("m.toml")).unwrap();
+        assert_eq!(back.meta.zone.as_deref(), Some("Europe/Amsterdam"));
+
+        // A line Canon cannot read still parses: it is a refresh's refusal, not a file's.
+        let text = toml::to_string_pretty(&manifest_with_zone(Some("Europe/Amsterdm"))).unwrap();
+        let back = parse_manifest_config(&text, Path::new("m.toml")).unwrap();
+        assert_eq!(back.meta.zone.as_deref(), Some("Europe/Amsterdm"));
+    }
+
+    /// **A manifest with no zone line writes none and reads back none** — the next refresh
+    /// records this machine's.
+    #[test]
+    fn a_manifest_without_a_zone_line_omits_it() {
+        let text = toml::to_string_pretty(&manifest_with_zone(None)).unwrap();
+        assert!(!text.contains("zone"), "{text}");
+        let back = parse_manifest_config(&text, Path::new("m.toml")).unwrap();
+        assert_eq!(back.meta.zone, None);
+    }
+
+    /// **The manifest's zone for a run**: its own line where it reads, refused by that
+    /// line's cause where it does not — never this machine's in its place — and this
+    /// machine's only where there is no line, refused where that cannot be written down.
+    #[test]
+    fn settle_manifest_zone_reads_the_line_and_falls_to_the_machine_only_without_one() {
+        let new_york = UserZone::for_test("America/New_York");
+
+        let settled = settle_manifest_zone(Some("Europe/Amsterdam"), &new_york).unwrap();
+        assert!(matches!(&settled, ManifestZone::Recorded(z) if z.name() == "Europe/Amsterdam"));
+
+        assert_eq!(
+            settle_manifest_zone(Some("Europe/Amsterdm"), &new_york).unwrap_err(),
+            ZoneRefusal::Line(ZoneNameError::NotKnownHere("Europe/Amsterdm".to_string()))
+        );
+
+        let settled = settle_manifest_zone(None, &new_york).unwrap();
+        assert!(matches!(&settled, ManifestZone::FromMachine(z) if z.name() == "America/New_York"));
+
+        let unknown = UserZone::for_test_unknown(None);
+        assert!(matches!(
+            settle_manifest_zone(None, &unknown).unwrap_err(),
+            ZoneRefusal::Machine(Unrecordable::Unknown { .. })
+        ));
+        // A line still reads on a machine whose own zone cannot be written down.
+        assert!(settle_manifest_zone(Some("UTC"), &unknown).is_ok());
+    }
+
+    /// **A query line that does not parse stops the refresh and no apply**: `apply`
+    /// re-selects nothing. Beside a lock the rebuild would clear, no step is named, since the
+    /// refresh would refuse; the report states the line in the refresh's own words.
+    #[test]
+    fn an_unparseable_query_stops_the_refresh_and_no_apply() {
+        let standing = ManifestStanding {
+            query_unparseable: true,
+            ..sound()
+        };
+        assert_eq!(standing.obstacles(), vec![Obstacle::QueryUnreadable]);
+        assert!(standing.can_run(Act::Apply));
+        assert_eq!(standing.refresh_refused_by(), Some(RefreshRefusal::Query));
+
+        let old_lock = ManifestStanding {
+            lock: LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::PredatesZone,
+            },
+            ..standing
+        };
+        assert_eq!(old_lock.next_step(), NextStep::None);
+        assert_eq!(old_lock.owed_way_back(), OwedWayBack::Stated);
     }
 }

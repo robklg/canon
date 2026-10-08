@@ -10,9 +10,11 @@ pub(super) mod cluster;
 
 use std::path::Path;
 
-use crate::archive::domain::LockStanding;
+use crate::archive::domain::{LockStanding, ZoneRefusal};
 use crate::archive::ops::pattern::PatternGaps;
 use crate::core::domain::format::shell_quote;
+use crate::core::domain::format_count;
+use crate::core::domain::time::zone::{RecordedZone, Unrecordable, UserZone, ZoneNameError};
 
 /// Whether a `cluster refresh` would run, as far as the caller telling the
 /// user about one knows.
@@ -29,12 +31,13 @@ use crate::core::domain::format::shell_quote;
 ///
 /// The two refusals are kept apart because **only one of them states its own
 /// way back**. A closed door is announced in the report with the act that
-/// opens it (`canon roots unsuspend …`), so a remedy that falls silent there
-/// leaves the user holding an act already. A recorded scope that kept nothing
-/// is announced as `no sources known at <p> — skipped`, which names no act at
-/// all — so falling silent there leaves the reader with nothing, and the
-/// remedy owes the same pair `cluster refresh` itself prints when it refuses
-/// for that very reason.
+/// opens it (`canon roots unsuspend …`), and a zone or query line the refresh
+/// would refuse in the refresh's own words, way back included — so a remedy
+/// that falls silent there leaves the user holding an act already. A recorded
+/// scope that kept nothing is announced as `no sources known at <p> — skipped`,
+/// which names no act at all — so falling silent there leaves the reader with
+/// nothing, and the remedy owes the same pair `cluster refresh` itself prints
+/// when it refuses for that very reason.
 ///
 /// [`Unasked`](Self::Unasked) is `apply`'s. Apply carries out a lock already
 /// built and checks that it still holds; it resolves no recorded scope, and a
@@ -47,8 +50,10 @@ use crate::core::domain::format::shell_quote;
 enum RefreshStanding {
     /// It would run.
     Runs,
-    /// It would be turned away by a closed door the recorded scope names.
-    DoorClosed,
+    /// It would be turned away by a cause the report states with its way back:
+    /// a closed door the recorded scope names, the manifest's zone, or a query
+    /// line that does not parse.
+    WayBackStated,
     /// It would be turned away by the source-existence policy's terminal
     /// rule: the recorded scope kept nothing.
     ScopeKeptNothing,
@@ -68,11 +73,12 @@ impl RefreshStanding {
             RefreshStanding::Runs | RefreshStanding::Unasked => {
                 vec![format!(
                     "refresh the manifest: {}",
-                    refresh_command(manifest)
+                    refresh_command(manifest, false)
                 )]
             }
-            // The door line beside this one carries `canon roots unsuspend`.
-            RefreshStanding::DoorClosed => Vec::new(),
+            // The line beside this one carries the way back: `canon roots unsuspend`
+            // for a door, the refresh's own words for the zone or a query line.
+            RefreshStanding::WayBackStated => Vec::new(),
             // The set-aside line beside this one carries no act, so this owes
             // one — the same pair the refresh prints when it refuses here, led
             // by the sentence that says which line they answer.
@@ -99,6 +105,39 @@ impl RefreshStanding {
 const LOCK_PREDATES_MEASUREMENT: &str =
     "built before lock files recorded the scopes they were built from";
 
+/// A lock written before lock files recorded the time zone, in the words `apply`'s refusal
+/// and the report's `Lock:` line share — the sibling of [`LOCK_PREDATES_MEASUREMENT`].
+const LOCK_PREDATES_ZONE: &str = "built before lock files recorded the time zone";
+
+/// The lock's zone as `apply` names it: the clock its placements read on.
+fn lock_zone_line(zone: &RecordedZone) -> String {
+    format!("Time zone: {} (from the lock)", zone.name())
+}
+
+/// A lock naming a zone this machine's zone data does not know: the cause, what the caller
+/// says about it (`apply`: nothing was moved), and the three ways out — `apply`'s refusal
+/// and `cluster status`'s line in one spelling. The third way names *the same zone*,
+/// because any other known name would move where files go without the user meaning it to.
+fn lock_zone_not_known_here(name: &str, manifest: &Path, outcome: &str) -> Vec<String> {
+    let mut lead = format!(
+        "This machine's time zone data does not know {name}, the zone the lock was built in."
+    );
+    if !outcome.is_empty() {
+        lead.push(' ');
+        lead.push_str(outcome);
+    }
+    vec![
+        lead,
+        "  update this machine's time zone data, or".to_string(),
+        "  apply on the machine that built the lock, or".to_string(),
+        format!(
+            "  change the manifest's zone line to a name this machine knows for the same zone \
+             (for example, an older spelling), then {}",
+            refresh_command(manifest, false)
+        ),
+    ]
+}
+
 /// The refresh, as a user would type it — the one spelling of the command
 /// these remedies point at.
 ///
@@ -117,9 +156,14 @@ const LOCK_PREDATES_MEASUREMENT: &str =
 /// would be a second, weaker answer to a question the tree has settled — and
 /// weaker in a way that shows: it emits an unbalanced quote for a path carrying
 /// an apostrophe, which is a directory name people really have.
-fn refresh_command(manifest: &Path) -> String {
+///
+/// `edit` picks the form that opens the manifest in the editor before the
+/// refresh reads it — the way back from a line that does not read. A parameter
+/// for the reason [`apply_command`] gives for its own flag.
+fn refresh_command(manifest: &Path, edit: bool) -> String {
+    let flag = if edit { "--edit " } else { "" };
     format!(
-        "canon cluster refresh {}",
+        "canon cluster refresh {flag}{}",
         shell_quote(&manifest.display().to_string())
     )
 }
@@ -159,7 +203,7 @@ fn apply_command(manifest: &Path, resume: bool) -> String {
 /// through here at all: its next step is the decision table's answer, which
 /// asks the stronger question this one cannot.
 fn rebuild_remedy(manifest: &Path) -> String {
-    format!("Rebuild it: {}", refresh_command(manifest))
+    format!("Rebuild it: {}", refresh_command(manifest, false))
 }
 
 /// The way back from a manifest with no lock file beside it.
@@ -184,7 +228,7 @@ fn no_lock_remedy(manifest: &Path, recorded_lock_hash: &str) -> String {
         format!(
             "The last refresh matched nothing, so there is no lock to carry across.\n\
              Edit the query or scope in the manifest, then {} to select again.",
-            refresh_command(manifest)
+            refresh_command(manifest, false)
         )
     }
 }
@@ -274,7 +318,7 @@ fn scope_kept_nothing_way_back(manifest: &Path, set_aside: &[String]) -> Vec<Str
 fn scan_or_edit_scope(manifest: &Path, set_aside: &[String]) -> Vec<String> {
     let edit = format!(
         "If not, edit meta.scope, then `{}` to rewrite the lock.",
-        refresh_command(manifest)
+        refresh_command(manifest, false)
     );
     // The terminal rule cannot fire on an empty set-aside list, so this arm is
     // unreachable from the two production callers. Kept rather than asserted
@@ -291,6 +335,77 @@ fn scan_or_edit_scope(manifest: &Path, set_aside: &[String]) -> Vec<String> {
         ),
         edit,
     ]
+}
+
+/// Why this machine's zone cannot be written into a manifest, as the first clause of
+/// either command's refusal: the `TZ` value Canon could not read where one was set, the
+/// rule where `TZ` held one, and neither where neither is the cause.
+fn machine_zone_cause(unrecordable: &Unrecordable) -> String {
+    match unrecordable {
+        Unrecordable::Unknown {
+            unreadable_tz: None,
+        } => "cannot tell this machine's time zone".to_string(),
+        Unrecordable::Unknown {
+            unreadable_tz: Some(tz),
+        } => format!("TZ={tz} is not a time zone Canon can read"),
+        Unrecordable::RuleString(rule) => {
+            format!("TZ={rule} is a time zone rule with no name to record")
+        }
+        Unrecordable::UnnamedRules => {
+            "this machine's time zone has rules but no name to record".to_string()
+        }
+    }
+}
+
+/// `cluster generate`'s refusal where this machine's zone cannot be recorded: the cause,
+/// then the one way out — a run with `TZ` naming a zone.
+fn generate_machine_zone_refusal(unrecordable: &Unrecordable) -> String {
+    let set = match unrecordable {
+        Unrecordable::Unknown {
+            unreadable_tz: None,
+        } => "TZ set",
+        Unrecordable::Unknown { .. } | Unrecordable::RuleString(_) | Unrecordable::UnnamedRules => {
+            "TZ set to a zone name"
+        }
+    };
+    format!(
+        "{}; run it with {set}, for example TZ=Europe/Amsterdam canon cluster generate …",
+        machine_zone_cause(unrecordable)
+    )
+}
+
+/// What `cluster generate` says about the zone it recorded.
+fn zone_recorded_statement(zone: &RecordedZone) -> String {
+    format!(
+        "Times are read on {}; the manifest's zone line records it.",
+        zone.name()
+    )
+}
+
+/// Why a manifest's zone cannot be settled, in the words `cluster refresh` refuses with and
+/// `cluster status` names as what stops the refresh. A name this machine does not know is
+/// never called a typo: it may be newer than this machine's zone data.
+fn zone_refusal(refusal: &ZoneRefusal) -> String {
+    match refusal {
+        ZoneRefusal::Line(ZoneNameError::NotKnownHere(name)) => format!(
+            "this machine's time zone data does not know \"{name}\", the zone line in the \
+             manifest — correct the zone line, or update this machine's time zone data"
+        ),
+        ZoneRefusal::Line(ZoneNameError::RuleString(_)) => {
+            "the zone line holds a time zone rule, not a zone name — write a zone name, for \
+             example zone = \"Europe/Amsterdam\""
+                .to_string()
+        }
+        ZoneRefusal::Line(ZoneNameError::Empty) => {
+            "the zone line names no zone — write a zone name, or delete the line to take this \
+             machine's"
+                .to_string()
+        }
+        ZoneRefusal::Machine(unrecordable) => format!(
+            "{}; write a zone line (for example zone = \"Europe/Amsterdam\") or set TZ",
+            machine_zone_cause(unrecordable)
+        ),
+    }
 }
 
 /// The way back from a pattern that cannot expand, where no rebuild would
@@ -340,21 +455,202 @@ fn adjust_pattern_remedy(gaps: &PatternGaps) -> Vec<String> {
         );
     }
     if !gaps.too_coarse.is_empty() {
-        let entries: Vec<String> = gaps
-            .too_coarse
-            .iter()
-            .map(|c| format!("\"{c}?\""))
-            .collect();
         lines.push(
             "A time known only to a coarser grain than the pattern reads gives the pattern no value."
                 .to_string(),
         );
-        lines.push(format!(
-            "Add {} to the manifest's query to leave such files out, and refresh.",
-            entries.join(" and ")
-        ));
+        lines.push(coarse_way_out(gaps));
     }
     lines
+}
+
+/// The two ways out of a time too coarse for the pattern's modifier, one sentence for
+/// every command that states the cause. A coarser modifier takes effect at the next apply
+/// with no refresh, because the pattern is read when files are placed; a query entry
+/// changes what the lock holds, so only that way names the refresh.
+fn coarse_way_out(gaps: &PatternGaps) -> String {
+    let entries: Vec<String> = gaps
+        .too_coarse_chains()
+        .iter()
+        .map(|c| format!("\"{c}?\""))
+        .collect();
+    format!(
+        "Use a coarser modifier in the pattern, which takes effect at the next apply; or add {} \
+         to the manifest's query to leave such files out, then refresh.",
+        entries.join(" and ")
+    )
+}
+
+/// What `cluster refresh` says about times too coarse for the pattern: the counts
+/// ([`coarse_value_counts`]), then the ways out once.
+fn coarse_value_statements(gaps: &PatternGaps) -> Vec<String> {
+    if gaps.too_coarse.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = coarse_value_counts(gaps);
+    lines.push(coarse_way_out(gaps));
+    lines
+}
+
+/// One line per key, modifier and grain a time was too coarse for, with how many sources
+/// hold it — read by `cluster refresh` and `cluster status` alike; the ways out follow in
+/// each command's own place.
+fn coarse_value_counts(gaps: &PatternGaps) -> Vec<String> {
+    gaps.too_coarse
+        .iter()
+        .map(|((chain, grain), count)| {
+            let key = chain.split('|').next().unwrap_or(chain);
+            let (sources, them) = if *count == 1 {
+                ("source holds", "it")
+            } else {
+                ("sources hold", "them")
+            };
+            format!(
+                "{} {sources} {key} only to the {}, so {{{chain}}} has no value for {them}",
+                format_count(*count),
+                grain.word()
+            )
+        })
+        .collect()
+}
+
+/// What `cluster refresh` says when the lock it wrote cannot be read back for its statements:
+/// the refresh itself is done, and what is missing is said.
+fn statement_pass_failed(error: &anyhow::Error) -> String {
+    format!(
+        "Warning: the lock was written, but reading it back failed, so nothing is said about \
+         whether its pattern reads a time or about its coarse values: {error:#}"
+    )
+}
+
+/// What `cluster refresh` says about the zone a manifest had no line for.
+fn zone_line_recorded_statement(zone: &RecordedZone) -> String {
+    format!(
+        "Recorded this machine's time zone in the manifest: {}",
+        zone.name()
+    )
+}
+
+/// What `cluster refresh` says when the zone it records differs from the one the old lock
+/// was built in: in full where the run read an instant on the clock, since the change can
+/// move what is selected and where it lands; in one quiet clause where it read none, or where
+/// the pattern's reads are not known and the query read none.
+fn zone_change_statement(old: &RecordedZone, new: &RecordedZone, instant_read: bool) -> String {
+    let (old, new) = (old.name(), new.name());
+    if instant_read {
+        format!(
+            "Time zone changed from {old} to {new}: times in the query and in folder names are \
+             now read on {new}, which can change which sources a time query selects and which \
+             folder a file goes to"
+        )
+    } else {
+        format!("(time zone changed from {old} to {new})")
+    }
+}
+
+/// What a manifest command says when it read times on the manifest's zone and this machine
+/// keeps another.
+fn manifest_clock_statement(zone: &RecordedZone, machine: &UserZone) -> String {
+    format!(
+        "times read on {}, as the manifest records (this machine: {})",
+        zone.name(),
+        machine.label()
+    )
+}
+
+/// `cluster status`'s zone line where the lock carries a zone this machine reads: the zone
+/// the destinations above were placed on.
+fn status_lock_zone_line(zone: &RecordedZone) -> String {
+    format!("Time zone: {} (the lock's)", zone.name())
+}
+
+/// `cluster status`'s zone line where the lock names a zone this machine does not know.
+fn status_lock_zone_name_line(name: &str) -> String {
+    format!("Time zone: {name} (the lock's)")
+}
+
+/// `cluster status`'s zone line where the lock records none — there is no lock, or it
+/// predates the zone — and the manifest's line names one.
+fn status_manifest_zone_line(zone: &RecordedZone, lock_present: bool) -> String {
+    let lock = if lock_present {
+        "the lock records none"
+    } else {
+        "no lock"
+    };
+    format!("Time zone: {} (the manifest's; {lock})", zone.name())
+}
+
+/// `cluster status`'s zone line where neither the lock nor the manifest records a zone.
+fn status_no_zone_line_lead(zone: &RecordedZone, manifest: &Path) -> String {
+    format!(
+        "Time zone: none recorded; a refresh on this machine would record {}: {}",
+        zone.name(),
+        refresh_command(manifest, false)
+    )
+}
+
+/// `cluster status`'s zone line where the lock records no zone and the refresh would refuse:
+/// the manifest's line names none this machine can read, or there is no line and this
+/// machine's zone cannot be written down.
+fn status_zone_refusal_lead(refusal: &ZoneRefusal) -> String {
+    let lead = match refusal {
+        ZoneRefusal::Line(_) => "none this machine can read",
+        ZoneRefusal::Machine(_) => "none recorded",
+    };
+    format!(
+        "Time zone: {lead}; {}",
+        refresh_would_refuse(&zone_refusal(refusal))
+    )
+}
+
+/// The clause under the lock's zone where the manifest's line names another zone.
+fn manifest_zone_differs(zone: &RecordedZone, manifest: &Path) -> String {
+    format!(
+        "the manifest's zone line reads {}; {} brings the lock up to date",
+        zone.name(),
+        refresh_command(manifest, false)
+    )
+}
+
+/// The clause under the lock's zone where the manifest's line was deleted.
+fn manifest_zone_line_deleted(zone: &RecordedZone, manifest: &Path) -> String {
+    format!(
+        "the manifest has no zone line; a refresh on this machine would record {}: {}",
+        zone.name(),
+        refresh_command(manifest, false)
+    )
+}
+
+/// A recorded query line that does not parse, as `cluster refresh` refuses on it and `cluster
+/// status` names it: the line, its parse error, and the way back.
+fn query_line_refusal(line: &str, error: &str, manifest: &Path) -> String {
+    format!(
+        "the query line \"{line}\" cannot be read: {error} — `{}` to fix the query and select \
+         again",
+        refresh_command(manifest, true)
+    )
+}
+
+/// What stops a refresh — the manifest's zone or a query line — in the refresh's own words, as
+/// a report states it: the act it turns away named first, as the door lines do.
+fn refresh_would_refuse(cause: &str) -> String {
+    format!("cluster refresh would refuse: {cause}")
+}
+
+/// `cluster status`'s summary where it placed no entry, because the lock records no zone this
+/// machine can read: in place of the counts, which would assert a classification nobody made
+/// — every entry is unplaced or none is. Said once; the cause stands on the `Lock:` or zone line.
+fn unplaced_statement(count: usize) -> String {
+    let (entries, files) = if count == 1 {
+        ("entry", "its source file")
+    } else {
+        ("entries", "their source files")
+    };
+    format!(
+        "{} {entries} with no destination computed, and {files} not checked: the lock records no \
+         time zone this machine can read.",
+        format_count(count)
+    )
 }
 
 #[cfg(test)]
@@ -417,7 +713,7 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                r#"cli.rs: "canon cluster refresh {}","#.to_string(),
+                r#"cli.rs: "canon cluster refresh {flag}{}","#.to_string(),
                 r#"cli.rs: "canon apply {flag}{}","#.to_string(),
                 r#"cli.rs: "If the files are there, `canon scan {}` to index them.","#.to_string(),
             ],
@@ -432,6 +728,7 @@ mod tests {
     fn the_pattern_remedy_prints_one_pair_per_cause_met() {
         use super::adjust_pattern_remedy;
         use crate::archive::ops::pattern::PatternGaps;
+        use crate::core::domain::time::value::Precision;
 
         let save_time = [
             "A save time Canon cannot read gives the pattern no value.",
@@ -443,7 +740,10 @@ mod tests {
         ];
         let coarse = |keys: &[&str]| -> PatternGaps {
             PatternGaps {
-                too_coarse: keys.iter().map(|k| k.to_string()).collect(),
+                too_coarse: keys
+                    .iter()
+                    .map(|k| ((k.to_string(), Precision::Year), 1))
+                    .collect(),
                 ..Default::default()
             }
         };
@@ -462,6 +762,7 @@ mod tests {
             unreadable_save_time: _,
             too_coarse: _,
             fact_not_carried: _,
+            placed_an_instant: _,
         } = PatternGaps::default();
         for alone in [
             PatternGaps::for_lock(true),
@@ -497,18 +798,19 @@ mod tests {
             "{scope_alone:?}"
         );
 
-        // A too-coarse failure names each key and modifier it met as a query entry, in
-        // order, because that entry is what the user types.
+        // A too-coarse failure gives both ways out: a coarser modifier, read at the next
+        // apply, or each key and modifier it met as a query entry, in order, because that
+        // entry is what the user types — and only that way names the refresh.
         assert_eq!(
             adjust_pattern_remedy(&coarse(&["content.DateTimeOriginal|month"])),
             [
                 "A time known only to a coarser grain than the pattern reads gives the pattern no value.",
-                "Add \"content.DateTimeOriginal|month?\" to the manifest's query to leave such files out, and refresh.",
+                "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.DateTimeOriginal|month?\" to the manifest's query to leave such files out, then refresh.",
             ]
         );
         assert_eq!(
             adjust_pattern_remedy(&coarse(&["content.b|day", "content.a|month"]))[1],
-            "Add \"content.a|month?\" and \"content.b|day?\" to the manifest's query to leave such files out, and refresh."
+            "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.a|month?\" and \"content.b|day?\" to the manifest's query to leave such files out, then refresh."
         );
     }
 }

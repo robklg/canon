@@ -72,7 +72,7 @@ pub fn first_chars(s: &str, n: usize) -> String {
 ///
 /// Two deliberate exceptions. Machine-readable instants (the book's structured fields, a
 /// manifest's generation stamp) are UTC and carry the `Z` that says so. And a manifest's run
-/// — its selection and its placement — reads the zone the manifest was made in, so a pattern
+/// — its selection and its placement — reads the zone the manifest records, so a pattern
 /// places a file in the same folder no matter where the machine stands.
 pub fn format_date(ts: i64, zone: &UserZone) -> String {
     match clock_of(ts, zone) {

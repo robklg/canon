@@ -66,6 +66,8 @@ A time with no modifier writes the time as Canon prints it, at its precision:
 {content.DateTimeOriginal}    → 2024        (a time known only to the year)
 ```
 
+A pattern reads times on the manifest's [time zone](../commands/archive/cluster.md#the-manifests-time-zone), as the lock records it: a file saved at 23:30 UTC on 31 December 2023 has `{source.mtime|year}` `2024` in a manifest recording `Europe/Amsterdam` and `2023` in one recording `America/New_York`, on any machine. A camera's clock reading, which carries no zone, places as written.
+
 A time with a time of day, bare or through `|datetime` or `|time`, writes `:` into the folder or file name. exFAT, FAT32 and NTFS volumes and SMB shares refuse `:` in a name; for an archive on such storage, use `|date`, `|yearmonth` or `|year`.
 
 ## Path Accessors
@@ -116,7 +118,7 @@ When you run `canon cluster generate`, the manifest's comments list the facts wi
 A pattern has no value for a source in three cases:
 
 - **The source does not carry the fact.** Filter such sources out during generation, `--where 'DateTimeOriginal?'`, or import the missing facts via the [enrichment pipeline](../commands/enrich/index.md).
-- **A modifier reads a finer part than the time carries**, such as `{content.DateTimeOriginal|month}` on a time known only to `2024`. The reason reads `content.DateTimeOriginal|month has no value: the time is known only to the year`. `--where 'content.DateTimeOriginal|month?'` leaves such sources out (in a manifest, add `content.DateTimeOriginal|month?` to the query and refresh), and `--where 'NOT content.DateTimeOriginal|month?'` lists them.
+- **A modifier reads a finer part than the time carries**, such as `{content.DateTimeOriginal|month}` on a time known only to `2024`. The reason reads `content.DateTimeOriginal|month has no value: the time is known only to the year`. `--where 'content.DateTimeOriginal|month?'` leaves such sources out, and `--where 'NOT content.DateTimeOriginal|month?'` lists them. In a manifest, use a coarser modifier in the pattern, which takes effect at the next apply, or add `content.DateTimeOriginal|month?` to the query and refresh. A second manifest can take those sources into [year folders](../commands/archive/cluster.md).
 - **The file's save time is one Canon cannot read**, at the edge of the years 0000–9999 or beyond ([Save times](../concepts/facts.md#save-times)). This is not a missing fact, and no import supplies it. The reason reads `Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond`. `--where 'NOT source.mtime?'` finds such files; add `source.mtime?` to the manifest's query to leave them out, or correct the file's save time and scan again; either takes effect at the next `canon cluster refresh`.
 
 ## Common Patterns

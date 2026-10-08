@@ -16,13 +16,15 @@ use crate::archive::domain::{
     extract_notes_raw, LockEntry, LockHeader, LockScope, ManifestConfig, ManifestMeta,
     ManifestOptions, ManifestOutput, CURRENT_LOCK_VERSION, CURRENT_MANIFEST_VERSION,
 };
+use crate::core::domain::fact::FactValue;
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
 use crate::core::domain::scope::{DecisionScope, ScopeMatch, ScopeResolution};
 use crate::core::domain::source::Source;
 use crate::core::domain::time::now_epoch_secs;
-use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::time::value::Precision;
+use crate::core::domain::time::zone::{RecordedZone, UserZone};
 use crate::core::domain::{FactEntry, FactType};
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
@@ -31,7 +33,8 @@ use crate::expr::{
 };
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
-use super::manifest::{write_and_sync, write_lock_file};
+use super::manifest::{read_lock_file, write_and_sync, write_lock_file};
+use super::pattern::{evaluate_pattern, PatternGaps};
 
 // ============================================================================
 // Types
@@ -43,6 +46,8 @@ pub struct ClusterGenerateParams {
     pub filters: Vec<Filter>,
     pub allow_archived: bool,
     pub allow_duplicates: bool,
+    /// The clock the query reads times on: the manifest's zone, never the machine's.
+    pub clock: UserZone,
 }
 
 /// Computed plan for cluster generation. Contains all data the interface
@@ -55,7 +60,7 @@ pub struct ClusterGeneratePlan {
     /// Sources skipped because already in archive: (source_path, archive_path).
     pub archived: Vec<(String, String)>,
     /// Facts with 100% coverage across all lock entries: (key, type, description).
-    pub full_coverage_facts: Vec<(String, FactType, String)>,
+    pub full_coverage_facts: Vec<FullCoverageFact>,
     /// The listed built-ins every lock entry has a value for, in vocabulary order — all of
     /// them, unless a save time Canon cannot read leaves one short.
     pub full_coverage_builtins: Vec<BuiltinKey>,
@@ -69,6 +74,9 @@ pub struct ClusterGeneratePlan {
     pub excluded_count: usize,
     /// Number of unhashed sources skipped.
     pub unhashed_count: usize,
+    /// Whether the query read an instant on the clock — what decides whether the zone it
+    /// was read on is worth a sentence.
+    pub query_read_an_instant: bool,
 }
 
 // ============================================================================
@@ -94,11 +102,10 @@ pub fn plan_generate(
         },
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
-        // AUDIT: a manifest's selection reads UTC until a manifest records the zone it was made in;
-        // placement must never read the machine's zone.
-        clock: UserZone::utc(),
+        clock: params.clock.clone(),
     };
     let selection = select_sources(conn, &selection_params)?;
+    let query_read_an_instant = selection.read_an_instant;
 
     // 2. Separate hashed from unhashed sources
     let mut unhashed_count = 0usize;
@@ -231,6 +238,7 @@ pub fn plan_generate(
         not_archived_count,
         excluded_count: selection.excluded_count,
         unhashed_count,
+        query_read_an_instant,
     })
 }
 
@@ -254,6 +262,7 @@ impl ClusterGeneratePlan {
             not_archived_count: 0,
             excluded_count: 0,
             unhashed_count: 0,
+            query_read_an_instant: false,
         }
     }
 }
@@ -298,7 +307,9 @@ pub(super) fn measure_entries(entries: &mut [LockEntry], scope: &ScopeResolution
 /// The header a run writes: what it settled, as against what the manifest
 /// declares. Confirmed scopes only — a set-aside or unrooted line contributes
 /// nothing to a destination and must contribute nothing to the record either.
-fn lock_header(scope: &ScopeResolution) -> LockHeader {
+/// The zone is the one the run read on, so `apply` places on the clock the
+/// selection was made on.
+fn lock_header(scope: &ScopeResolution, zone: &RecordedZone) -> LockHeader {
     LockHeader {
         lock_version: CURRENT_LOCK_VERSION,
         scope: scope
@@ -310,6 +321,7 @@ fn lock_header(scope: &ScopeResolution) -> LockHeader {
                 rel_prefix: s.rel_prefix.clone(),
             })
             .collect(),
+        zone: Some(zone.name().to_string()),
     }
 }
 
@@ -334,6 +346,8 @@ pub struct ExecuteGenerateParams {
     pub archive_root_id: i64,
     pub base_dir: String,
     pub allow: Vec<String>,
+    /// The zone the run read on: written into the manifest's `zone` line and the lock.
+    pub zone: RecordedZone,
 }
 
 /// Result from executing a cluster generation — display data for the interface.
@@ -390,6 +404,9 @@ pub struct ExecuteRefreshParams {
     /// The known roots — see [`ExecuteGenerateParams::roots`].
     pub roots: Vec<Root>,
     pub config: ManifestConfig,
+    /// The zone the run read on, settled from the manifest's line or this machine's —
+    /// written back into both files, also where the query matched nothing.
+    pub zone: RecordedZone,
 }
 
 /// Result from executing a cluster refresh.
@@ -429,7 +446,7 @@ pub fn execute_generate(
     // lock that did not survive alongside it.
     write_lock_file(
         &params.lock_path,
-        &lock_header(&params.scope),
+        &lock_header(&params.scope, &params.zone),
         &plan.lock_entries,
     )?;
 
@@ -441,6 +458,7 @@ pub fn execute_generate(
             version: CURRENT_MANIFEST_VERSION,
             query: params.expanded_filters.clone(),
             scope: params.scope.recorded().to_vec(),
+            zone: Some(params.zone.name().to_string()),
             generated_at: current_timestamp(),
             lock_hash,
         },
@@ -507,7 +525,7 @@ pub fn execute_refresh(
         // then hash what landed on disk, then name that hash in the manifest.
         write_lock_file(
             &params.lock_path,
-            &lock_header(&params.scope),
+            &lock_header(&params.scope, &params.zone),
             &plan.lock_entries,
         )?;
         crate::core::ops::fs::compute_full_hash(&params.lock_path)?
@@ -522,6 +540,7 @@ pub fn execute_refresh(
             version: CURRENT_MANIFEST_VERSION,
             query: params.config.meta.query.clone(),
             scope: params.scope.recorded().to_vec(),
+            zone: Some(params.zone.name().to_string()),
             generated_at: current_timestamp(),
             lock_hash,
         },
@@ -553,6 +572,48 @@ pub fn execute_refresh(
             pattern: config.output.pattern.clone(),
         }),
     })
+}
+
+/// What the pattern meets over the lock a refresh has just written, read on the zone the
+/// run settled: the causes of every entry that will not expand — the too-coarse ones
+/// counted — and whether any entry that does places an instant on the clock.
+///
+/// It reads the lock back from disk, through the reader `apply` and `cluster status` use,
+/// so the three see one lock and ask it the same questions (`LockFile::unmeasured_reason`,
+/// `LockFile::pattern_needs_a_scope_it_lacks`). A pattern that does not parse, or a refresh
+/// that wrote no lock, meets nothing here: `apply` reports the first, and the second has
+/// nothing to place.
+pub fn pattern_gaps_for_written_lock(
+    conn: &mut Connection,
+    lock_path: &Path,
+    pattern: &str,
+    zone: &UserZone,
+) -> Result<PatternGaps> {
+    let Ok(pattern) = crate::expr::parse_pattern(pattern) else {
+        return Ok(PatternGaps::default());
+    };
+    let Some(lock) = read_lock_file(lock_path)? else {
+        return Ok(PatternGaps::default());
+    };
+    let mut gaps = PatternGaps::for_lock(lock.pattern_needs_a_scope_it_lacks(&pattern));
+    let unmeasured = lock.unmeasured_reason();
+    let root_paths: HashMap<i64, String> = repo::root::fetch_all(conn)?
+        .into_iter()
+        .map(|r| (r.id, r.path))
+        .collect();
+    let source_ids: Vec<i64> = lock.entries.iter().map(|e| e.id).collect();
+    let facts = crate::expr::prefetch_pattern_facts(
+        conn,
+        &source_ids,
+        &crate::expr::extract_fact_keys(&pattern),
+    )?;
+    for entry in &lock.entries {
+        match evaluate_pattern(&pattern, entry, unmeasured, &root_paths, &facts, zone) {
+            Ok(expansion) => gaps.placed(&expansion),
+            Err(e) => gaps.met(&e),
+        }
+    }
+    Ok(gaps)
 }
 
 // ============================================================================
@@ -654,6 +715,8 @@ fn assemble_manifest(
 ) -> Result<String> {
     let header = "# Canon manifest — edit pattern and Notes freely.\n\
                   # To change the query, edit it here then run: canon cluster refresh <manifest>\n\
+                  # zone: the time zone dates are read in, for the query and for folder names.\n\
+                  # Edit it, or delete it to take this machine's, then run: canon cluster refresh <manifest>\n\
                   # Other fields are managed by Canon — do not edit.\n\
                   #\n";
     let summary = generate_summary_comments(plan);
@@ -708,15 +771,28 @@ struct FactTypeTracker {
     text_count: usize,
     num_count: usize,
     time_count: usize,
+    /// The coarsest grain below a second any of its times was written at, and how many
+    /// were written at exactly that grain. Fractions are finer than seconds and never noted.
+    coarsest: Option<(Precision, usize)>,
 }
 
 impl FactTypeTracker {
-    fn add(&mut self, fact_type: FactType) {
+    fn add(&mut self, value: &FactValue) {
         self.count += 1;
-        match fact_type {
+        match value.kind() {
             FactType::Text | FactType::Path => self.text_count += 1,
             FactType::Num => self.num_count += 1,
             FactType::Time => self.time_count += 1,
+        }
+        if let FactValue::Time(time) = value {
+            let grain = time.precision();
+            if grain < Precision::Second {
+                self.coarsest = match self.coarsest {
+                    Some((coarsest, n)) if coarsest == grain => Some((coarsest, n + 1)),
+                    Some((coarsest, n)) if coarsest < grain => Some((coarsest, n)),
+                    Some(_) | None => Some((grain, 1)),
+                };
+            }
         }
     }
 
@@ -752,8 +828,17 @@ impl FactTypeTracker {
     }
 }
 
-/// A fully-covered fact: (key, dominant type, description).
-type FullCoverageFact = (String, FactType, String);
+/// A fact every selected source carries, as the manifest's facts comment lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullCoverageFact {
+    pub key: String,
+    /// The kind most of its values are.
+    pub kind: FactType,
+    pub description: String,
+    /// For a time key, the coarsest grain below a second any value was written at and how
+    /// many values were — what a pattern's finer modifier finds no value in.
+    pub coarsest: Option<(Precision, usize)>,
+}
 /// A mixed-type warning: (key, type breakdown).
 type MixedTypeWarning = (String, String);
 
@@ -777,15 +862,13 @@ fn compute_full_coverage_facts(
     for entry in entries {
         if let Some(facts) = all_facts.get(&entry.id) {
             for fact in facts {
-                let fact_type = fact.value.kind();
-
                 // Track uniqueness per source
                 let seen_key = format!("{}:{}", entry.id, fact.key);
                 if !seen_keys.contains(&seen_key) {
                     fact_counts
                         .entry(fact.key.clone())
                         .or_default()
-                        .add(fact_type);
+                        .add(&fact.value);
                     seen_keys.insert(seen_key);
                 }
             }
@@ -805,13 +888,15 @@ fn compute_full_coverage_facts(
     let mut full_coverage: Vec<FullCoverageFact> = fact_counts
         .into_iter()
         .filter(|(_, tracker)| tracker.count == source_count)
-        .map(|(key, tracker)| {
-            let description = get_fact_description(&key);
-            (key, tracker.dominant_type(), description)
+        .map(|(key, tracker)| FullCoverageFact {
+            description: get_fact_description(&key),
+            kind: tracker.dominant_type(),
+            coarsest: tracker.coarsest,
+            key,
         })
         .collect();
 
-    full_coverage.sort_by(|a, b| a.0.cmp(&b.0));
+    full_coverage.sort_by(|a, b| a.key.cmp(&b.key));
 
     (full_coverage, mixed_type_warnings)
 }
@@ -908,7 +993,7 @@ fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
 fn generate_fact_help(
     source_count: usize,
     full_coverage_builtins: &[BuiltinKey],
-    full_coverage_facts: &[(String, FactType, String)],
+    full_coverage_facts: &[FullCoverageFact],
     has_scope: bool,
 ) -> String {
     use crate::expr::{Modifier, ModifierCategory};
@@ -951,17 +1036,28 @@ fn generate_fact_help(
     // User facts with 100% coverage
     if !full_coverage_facts.is_empty() {
         help.push_str("# Content facts:\n");
-        for (key, fact_type, description) in full_coverage_facts {
-            let desc_part = if description.is_empty() {
+        for fact in full_coverage_facts {
+            let desc_part = if fact.description.is_empty() {
                 String::new()
             } else {
-                format!(" - {description}")
+                format!(" - {}", fact.description)
+            };
+            // A time key not all written to the second names its coarsest grain, so a
+            // pattern's finer modifier is not met by surprise at the next refresh or apply.
+            let coarse_part = match fact.coarsest {
+                Some((grain, count)) => format!(
+                    " — {} known only to the {}",
+                    crate::core::domain::format_count(count),
+                    grain.word()
+                ),
+                None => String::new(),
             };
             help.push_str(&format!(
-                "#   {:18} {:6}{}\n",
-                key,
-                fact_type.as_str(),
-                desc_part
+                "#   {:18} {:6}{}{}\n",
+                fact.key,
+                fact.kind.as_str(),
+                desc_part,
+                coarse_part
             ));
         }
         help.push_str("#\n");
@@ -1021,9 +1117,10 @@ fn inject_comments_before_key(toml_str: &str, key: &str, comments: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::parse_zone_name;
     use crate::core::testing::{
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
-        setup_test_db,
+        insert_time_fact, setup_test_db,
     };
     use crate::expr::Unmeasured;
 
@@ -1033,6 +1130,7 @@ mod tests {
             filters: vec![],
             allow_archived: false,
             allow_duplicates: false,
+            clock: UserZone::utc(),
         }
     }
 
@@ -1050,6 +1148,7 @@ mod tests {
                 scope: vec![],
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
                 lock_hash: "old".to_string(),
+                zone: None,
             },
             options: ManifestOptions { allow: vec![] },
             output: ManifestOutput {
@@ -1323,7 +1422,7 @@ mod tests {
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.full_coverage_facts.len(), 1);
-        assert_eq!(plan.full_coverage_facts[0].0, "content.Make");
+        assert_eq!(plan.full_coverage_facts[0].key, "content.Make");
     }
 
     #[test]
@@ -1383,13 +1482,13 @@ mod tests {
         assert!(help.contains("source.ext"), "{help}");
     }
 
-    /// A manifest's selection reads UTC whatever the machine's zone: a file saved at
-    /// 2023-12-31 23:30 UTC — already 2024 in Amsterdam — answers `source.mtime|year = 2023`
-    /// with Amsterdam on the machine. What a manifest takes must not depend on where it was
-    /// generated. The pin goes with the `// AUDIT:` marker it holds, when a manifest
-    /// records the zone it was made in.
+    /// A manifest's selection reads the zone it was handed, whatever the machine's: a file
+    /// saved at 2023-12-31 23:30 UTC is already 2024 in Amsterdam (the recorded zone) and
+    /// still 2023 in New York (the machine's) and in UTC, so `source.mtime|year = 2024`
+    /// takes it. What a manifest takes must not depend on where it is refreshed. The plan
+    /// also says the query read an instant, which is what the refresh's statements ask.
     #[test]
-    fn the_selection_reads_utc_whatever_the_machines_zone() {
+    fn generate_selects_on_the_recorded_zone() {
         use crate::core::domain::time::zone::{with_test_zone, UserZone};
         use crate::core::testing::insert_source_with_metadata;
         use crate::expr::Filter;
@@ -1397,18 +1496,83 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source_with_metadata(&conn, root, "a.jpg", Some(obj), 1000, 1704065400);
+        let recorded = parse_zone_name("Europe/Amsterdam").unwrap();
 
-        let selected = |conn: &mut Connection, filter: &str| {
+        let plan = |conn: &mut Connection, filter: &str| {
             let params = ClusterGenerateParams {
                 filters: vec![Filter::parse(filter).unwrap()],
+                clock: recorded.clock().clone(),
                 ..default_params()
             };
-            with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
-                plan_generate(conn, &params).unwrap().lock_entries.len()
+            with_test_zone(UserZone::for_test("America/New_York"), || {
+                plan_generate(conn, &params).unwrap()
             })
         };
-        assert_eq!(selected(&mut conn, "source.mtime|year = 2023"), 1);
-        assert_eq!(selected(&mut conn, "source.mtime|year = 2024"), 0);
+        assert_eq!(
+            plan(&mut conn, "source.mtime|year = 2024")
+                .lock_entries
+                .len(),
+            1
+        );
+        assert_eq!(
+            plan(&mut conn, "source.mtime|year = 2023")
+                .lock_entries
+                .len(),
+            0
+        );
+        assert!(plan(&mut conn, "source.mtime|year = 2024").query_read_an_instant);
+        assert!(!plan(&mut conn, "source.ext = jpg").query_read_an_instant);
+    }
+
+    /// **A time key not all written to the second names its coarsest grain** in the facts
+    /// comment, with how many values have it — so `{K|month}` over a value known only to the
+    /// year is not met by surprise. Fractions are finer than seconds and never noted; a key
+    /// all written to the second gets no note.
+    #[test]
+    fn a_time_key_names_its_coarsest_precision_in_the_facts_comment() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let mut ids = Vec::new();
+        for (i, name) in ["a.jpg", "b.jpg", "c.jpg", "d.jpg"].iter().enumerate() {
+            let obj = insert_object(&conn, &format!("hash{i}"), false);
+            ids.push(insert_source(&conn, root, name, Some(obj)));
+        }
+        for (id, when) in ids
+            .iter()
+            .zip(["2024", "2023", "2024-06", "2024-06-15T14:30:05"])
+        {
+            insert_time_fact(&conn, *id, "content.Taken", when);
+        }
+        for (id, when) in ids.iter().zip([
+            "2024-06-15T14:30:05",
+            "2024-06-15T14:30:05.5",
+            "2024-06-15T14:30:06",
+            "2024-06-15T14:30:07",
+        ]) {
+            insert_time_fact(&conn, *id, "content.Shot", when);
+        }
+
+        let mut params = default_params();
+        params.allow_duplicates = true;
+        let plan = plan_generate(&mut conn, &params).unwrap();
+        let taken = plan
+            .full_coverage_facts
+            .iter()
+            .find(|f| f.key == "content.Taken")
+            .unwrap();
+        assert_eq!(taken.coarsest, Some((Precision::Year, 2)));
+        let shot = plan
+            .full_coverage_facts
+            .iter()
+            .find(|f| f.key == "content.Shot")
+            .unwrap();
+        assert_eq!(shot.coarsest, None, "fractions are finer than seconds");
+
+        let help = generate_fact_help(4, &[], &plan.full_coverage_facts, false);
+        let line = help.lines().find(|l| l.contains("content.Taken")).unwrap();
+        assert!(line.ends_with(" — 2 known only to the year"), "{line}");
+        let line = help.lines().find(|l| l.contains("content.Shot")).unwrap();
+        assert!(!line.contains("known only"), "{line}");
     }
 
     // =========================================================================
@@ -1455,6 +1619,7 @@ mod tests {
             not_archived_count,
             excluded_count,
             unhashed_count,
+            query_read_an_instant: false,
         }
     }
 
@@ -1533,6 +1698,7 @@ mod tests {
             archive_root_id: 1,
             base_dir: "output".to_string(),
             allow: vec![],
+            zone: parse_zone_name("UTC").unwrap(),
         };
 
         let mut plan = plan;
@@ -1877,6 +2043,7 @@ mod tests {
                 archive_root_id: 1,
                 base_dir: String::new(),
                 allow: vec![],
+                zone: parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -1892,6 +2059,7 @@ mod tests {
                 scope: scope(),
                 roots: roots.clone(),
                 config: refresh_config(),
+                zone: parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -1930,6 +2098,7 @@ mod tests {
             archive_root_id: 1,
             base_dir: "output".to_string(),
             allow: vec![],
+            zone: parse_zone_name("UTC").unwrap(),
         };
 
         let mut plan = plan;
@@ -1964,6 +2133,7 @@ mod tests {
             archive_root_id: 1,
             base_dir: "output".to_string(),
             allow: vec![],
+            zone: parse_zone_name("UTC").unwrap(),
         };
         execute_generate(&mut plan, &params).unwrap();
 
@@ -2071,6 +2241,7 @@ mod tests {
                 archive_root_id: archive,
                 base_dir: String::new(),
                 allow: vec![],
+                zone: parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -2098,6 +2269,7 @@ mod tests {
                 base_dir_rel: "",
                 resume: false,
                 progress: None,
+                lock_zone: &parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -2170,6 +2342,7 @@ mod tests {
                 archive_root_id: archive,
                 base_dir: String::new(),
                 allow: vec![],
+                zone: parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -2199,6 +2372,7 @@ mod tests {
                 base_dir_rel: "",
                 resume: false,
                 progress: None,
+                lock_zone: &parse_zone_name("UTC").unwrap(),
             },
         )
         .unwrap();
@@ -2258,6 +2432,7 @@ base_dir = \"output\"\n";
             scope: ScopeResolution::from_outcomes(vec![]),
             roots: vec![],
             config,
+            zone: parse_zone_name("UTC").unwrap(),
         };
 
         let mut plan = plan;
@@ -2285,6 +2460,7 @@ base_dir = \"output\"\n";
             scope: ScopeResolution::from_outcomes(vec![]),
             roots: vec![],
             config: refresh_config(),
+            zone: parse_zone_name("UTC").unwrap(),
         };
 
         let result = execute_refresh(&mut empty_plan(), &params).unwrap();
@@ -2322,6 +2498,7 @@ base_dir = \"output\"\n";
             scope: ScopeResolution::from_outcomes(vec![]),
             roots: vec![],
             config: refresh_config(),
+            zone: parse_zone_name("UTC").unwrap(),
         };
 
         let result = execute_refresh(&mut empty_plan(), &params).unwrap();
@@ -2354,6 +2531,7 @@ base_dir = \"output\"\n";
             scope: ScopeResolution::from_outcomes(vec![]),
             roots: vec![],
             config: refresh_config(),
+            zone: parse_zone_name("UTC").unwrap(),
         };
 
         execute_refresh(&mut empty_plan(), &params).unwrap();
@@ -2442,6 +2620,7 @@ base_dir = \"output\"\n";
             archive_root_id: 1,
             base_dir: String::new(),
             allow: vec![],
+            zone: parse_zone_name("UTC").unwrap(),
         };
         let mut plan = plan;
         execute_generate(&mut plan, &params).unwrap();
@@ -2470,6 +2649,7 @@ base_dir = \"output\"\n";
             scope: ScopeResolution::from_outcomes(vec![]),
             roots: vec![],
             config: toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap(),
+            zone: parse_zone_name("UTC").unwrap(),
         };
         execute_refresh(&mut empty_plan(), &refresh_params).unwrap();
 

@@ -210,12 +210,19 @@ prefixes beside import.
 
 Times read through the frame rule on the clock the facility is handed — `SelectionParams.clock`,
 `EvalContext`'s `clock`, the display and report functions' `zone` — never the machine's; a
-manifest's run is handed UTC. A modifier answers `Modified`: a value, or
+manifest's run is handed the zone the manifest or its lock records. A modifier answers `Modified`: a value, or
 `NoValueCause::TooCoarse` where the time is coarser than the modifier reads. Every reader treats
 no value as a missing fact, `?` included; a pattern refuses with `PatternNoValue`, a typed cause
 the archive composes its remedy from, never its sentence. Two older readings stay under
 `// AUDIT:`: a typed `--where` date is a UTC instant (`domain/filter.rs`), and a number given to a
 time modifier is epoch seconds (`domain/transform.rs`).
+
+**A run says whether it read an instant on the clock** (`Selection.read_an_instant`,
+`EvalContext::read_an_instant`), decided by one rule, `domain/transform.rs::reads_an_instant`:
+an instant (a save time included) through a time modifier, or printed bare in a pattern; never
+a clock reading, an accessor or `|bucket`. The filter half skips a bare instant while a plain
+comparison still compares the stored number. Pinned by
+`the_instant_rule_reads_only_what_reads_a_clock`; a facility answer, with no roster row.
 
 ## Mechanics
 

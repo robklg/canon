@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::archive::domain::{
-    LockEntry, LockStanding, ManifestStanding, NextStep, OwedWayBack, RefreshRefusal,
+    settle_manifest_zone, LockEntry, LockHeaderStanding, LockStanding, ManifestStanding,
+    ManifestZone, NextStep, OwedWayBack, RefreshRefusal, ZoneRefusal,
 };
 use crate::core::domain::root::{ParkedRoot, Root};
 use crate::core::domain::time::zone::UserZone;
@@ -19,7 +20,7 @@ use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
 use crate::expr::{prefetch_pattern_facts, Unmeasured};
 
-use super::manifest::{read_lock_file, read_manifest_config};
+use super::manifest::{parse_recorded_query, read_lock_file, read_manifest_config, LockZone};
 use super::pattern::PatternGaps;
 
 /// What a destination path reads when the pattern could not be expanded for
@@ -218,11 +219,33 @@ pub struct ManifestStatus {
     /// for every source. Carried rather than recovered by the interface,
     /// which would otherwise have to match a display string to count.
     pub expansion_failure_count: usize,
+    /// The lock's zone, where the lock has a header to carry one.
+    pub lock_zone: Option<LockZone>,
+    /// The manifest's zone as a refresh here would settle it: its own line, or this machine's
+    /// where it has none — or why it cannot be settled (`settle_manifest_zone`, the refresh's
+    /// own reading). Read only for what the report says about a refresh.
+    pub manifest_zone: Result<ManifestZone, ZoneRefusal>,
+    /// Every recorded query line that does not parse, with its parse error — the lines
+    /// `cluster refresh` refuses on (`parse_recorded_query`, its own reading).
+    pub query_causes: Vec<(String, String)>,
+    /// How many lock entries have no destination computed, because the lock records no zone
+    /// this machine can read: every entry of such a lock, and none of any other. Counted in
+    /// no destination state — neither pending nor at the destination — and said once.
+    pub unplaced: usize,
 }
 
 impl ManifestStatus {
-    /// Are all source files accounted for (either at source or at destination)?
+    /// Are all source files accounted for — every entry checked, each at its source or at its
+    /// destination? Never over a lock placed nowhere: an entry with no destination computed was
+    /// not checked, so it is not accounted for.
     pub fn all_accounted_for(&self) -> bool {
+        self.unplaced == 0 && self.found_nothing_lost_or_wrong()
+    }
+
+    /// Whether the entries that were checked found no source lost and no destination of the
+    /// wrong size — the outermost gate of the next step, which a lock placed nowhere passes:
+    /// nothing was found wrong, and its step is the rebuild.
+    pub fn found_nothing_lost_or_wrong(&self) -> bool {
         self.source_lost == 0 && self.size_mismatch == 0
     }
 
@@ -248,6 +271,8 @@ impl ManifestStatus {
             parked_scope: !self.parked_scope.is_empty(),
             scope_kept_nothing: self.scope_kept_nothing,
             scope_confirms_nothing: self.scope_confirms_nothing,
+            zone_refusal: self.manifest_zone.as_ref().err().map(ZoneRefusal::kind),
+            query_unparseable: !self.query_causes.is_empty(),
         }
     }
 
@@ -257,9 +282,10 @@ impl ManifestStatus {
     }
 
     /// Whether `cluster refresh` could run at all — and where it could not,
-    /// which of its two refusals turns it away.
+    /// which of its refusals turns it away.
     ///
-    /// **Its two, which are neither of apply's.** A refresh re-queries from
+    /// **Its own, which are none of apply's.** The scope's two are the ones
+    /// below; the manifest's zone and an unparseable query line join them. A refresh re-queries from
     /// the recorded scope and rewrites the manifest and its lock — files that
     /// live where the user put them, never inside the archive root — so a
     /// parked **scope line** closes it, and neither a parked lock entry nor a
@@ -276,9 +302,10 @@ impl ManifestStatus {
     /// command that would run is named only where it brings the withheld act
     /// within reach, which is the table's `next_step` to state.
     ///
-    /// **It answers with the cause rather than a bare yes**, because the two
+    /// **It answers with the cause rather than a bare yes**, because the
     /// refusals leave the reader differently placed: a door is announced with
-    /// the act that opens it, a scope that kept nothing with a skipped line
+    /// the act that opens it, the manifest's zone and a query line in the
+    /// refresh's own words, and a scope that kept nothing with a skipped line
     /// naming no act at all. A caller that only wants the boolean reads
     /// `.is_none()`; a projection spelling that separately would be the same
     /// question asked twice.
@@ -301,9 +328,16 @@ impl ManifestStatus {
 ///
 /// This is a read-only diagnostic: no DB writes, no file operations.
 /// Needs `&mut Connection` because fact fetching uses temp tables.
+///
+/// Destinations are placed on **the lock's zone**, never `machine`'s: `machine` is read only
+/// for what a refresh here would record where the manifest has no zone line. A lock with no
+/// zone this machine can read — no header, no zone, or a zone this machine's data does not
+/// know — gets no destination at all: it records no clock, and placing it on any other would
+/// show a destination no run would use.
 pub fn compute_manifest_status(
     conn: &mut Connection,
     manifest_path: &Path,
+    machine: &UserZone,
 ) -> Result<ManifestStatus> {
     use super::pattern::evaluate_pattern;
     use crate::expr::{extract_fact_keys, parse_pattern};
@@ -330,10 +364,11 @@ pub fn compute_manifest_status(
     // The hash is asked only of a lock that was read. Asking it of an absent
     // one and calling the failure a mismatch would report a claim about bytes
     // nobody has, which is the second cause dressed as the first.
-    let (lock, unmeasured, pattern_needs_a_scope_it_lacks, lock_entries) =
+    let (lock, lock_zone, unmeasured, pattern_needs_a_scope_it_lacks, lock_entries) =
         match read_lock_file(&lock_path)? {
             None => (
                 LockStanding::absent(&config.meta.lock_hash),
+                None,
                 // Never read: the expansion loop below runs once per entry and
                 // there are none. Named rather than left to a default so the
                 // fact that nothing consumes it is visible here.
@@ -346,12 +381,19 @@ pub fn compute_manifest_status(
                     Ok(actual_hash) => actual_hash == config.meta.lock_hash,
                     Err(_) => false,
                 };
-                let standing = LockStanding::Read {
-                    hash_matches,
-                    carries_measurement: lock.header.is_some(),
+                let lock_zone = lock.zone();
+                let header = match &lock_zone {
+                    None => LockHeaderStanding::Absent,
+                    Some(LockZone::PredatesZone) => LockHeaderStanding::PredatesZone,
+                    Some(LockZone::NotKnownHere(_)) => LockHeaderStanding::ZoneNotKnownHere,
+                    Some(LockZone::Recorded(_)) => LockHeaderStanding::Sound,
                 };
                 (
-                    standing,
+                    LockStanding::Read {
+                        hash_matches,
+                        header,
+                    },
+                    lock_zone,
                     lock.unmeasured_reason(),
                     lock.pattern_needs_a_scope_it_lacks(&pattern),
                     lock.entries,
@@ -359,6 +401,8 @@ pub fn compute_manifest_status(
             }
         };
     let lock_entry_count = lock_entries.len();
+    let manifest_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
+    let (_, query_causes) = parse_recorded_query(&config.meta.query);
 
     // 3. Fetch roots, build root_paths map
     let roots = repo::root::fetch_all(conn)?;
@@ -388,8 +432,16 @@ pub fn compute_manifest_status(
     // scope line contributing nothing is part of that state.
     let scope = resolve_recorded_scope(conn, &config.meta.scope, &roots)?;
 
-    // Batch fetch facts for all lock entries if pattern uses content facts
-    let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
+    // Each entry with the clock it is placed on: the lock's zone, or — where the lock records
+    // none this machine can read — no entry at all, and every one of them unplaced.
+    let placed: Vec<(&LockEntry, &UserZone)> = match &lock_zone {
+        Some(LockZone::Recorded(zone)) => lock_entries.iter().map(|e| (e, zone.clock())).collect(),
+        Some(LockZone::PredatesZone | LockZone::NotKnownHere(_)) | None => Vec::new(),
+    };
+    let unplaced = lock_entry_count - placed.len();
+
+    // Batch fetch facts for the entries placed, if the pattern uses content facts
+    let source_ids: Vec<i64> = placed.iter().map(|(s, _)| s.id).collect();
     let facts = prefetch_pattern_facts(conn, &source_ids, &needed_keys)?;
 
     // 6. Evaluate patterns to get dest paths, then check filesystem + DB
@@ -400,13 +452,10 @@ pub fn compute_manifest_status(
     let mut entries = Vec::with_capacity(lock_entry_count);
     let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
 
-    // AUDIT: placement reads UTC until a manifest records the zone it was made in; it must never
-    // read the machine's zone.
-    let zone = UserZone::utc();
-    for lock_entry in &lock_entries {
+    for (lock_entry, zone) in placed {
         let dest_rel =
-            match evaluate_pattern(&pattern, lock_entry, unmeasured, &root_paths, &facts, &zone) {
-                Ok(rel) => rel,
+            match evaluate_pattern(&pattern, lock_entry, unmeasured, &root_paths, &facts, zone) {
+                Ok(expansion) => expansion.rel_path,
                 Err(e) => {
                     // If pattern expansion fails, we can't determine dest path.
                     // Use a placeholder and mark as not-at-dest. It is also the
@@ -530,12 +579,17 @@ pub fn compute_manifest_status(
         expansion_failures,
         pattern_gaps,
         expansion_failure_count,
+        lock_zone,
+        manifest_zone,
+        query_causes,
+        unplaced,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::parse_zone_name;
     use crate::core::testing::{
         insert_object, insert_root, insert_source_with_size, setup_test_db,
     };
@@ -553,6 +607,7 @@ mod tests {
             filters: vec![],
             allow_archived: false,
             allow_duplicates: false,
+            clock: UserZone::utc(),
         }
     }
 
@@ -565,6 +620,14 @@ mod tests {
     /// connection, the temp dir (the caller holds it so the files outlive the
     /// call), the manifest path and the archive directory.
     fn status_fixture(names: &[&str]) -> (Connection, tempfile::TempDir, PathBuf, PathBuf) {
+        status_fixture_in(names, "UTC")
+    }
+
+    /// [`status_fixture`], with the manifest and its lock recording `zone`.
+    fn status_fixture_in(
+        names: &[&str],
+        zone: &str,
+    ) -> (Connection, tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let src_dir = dir.path().join("photos");
         let archive_dir = dir.path().join("archive");
@@ -593,6 +656,7 @@ mod tests {
             archive_root_id: archive_root,
             base_dir: String::new(),
             allow: vec![],
+            zone: parse_zone_name(zone).unwrap(),
         };
         execute_generate(&mut plan, &params).unwrap();
 
@@ -621,7 +685,7 @@ mod tests {
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
         std::fs::remove_file(dir.path().join("cluster.lock")).unwrap();
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(
             status.lock,
             LockStanding::Absent {
@@ -647,7 +711,7 @@ mod tests {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
         std::fs::write(dir.path().join("cluster.lock"), "").unwrap();
 
-        let err = match compute_manifest_status(&mut conn, &manifest) {
+        let err = match compute_manifest_status(&mut conn, &manifest, &UserZone::utc()) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("an empty lock is not a state; it is a file that never finished"),
         };
@@ -664,7 +728,7 @@ mod tests {
     #[test]
     fn an_unscoped_manifest_confirms_nothing_and_keeps_nothing() {
         let (mut conn, _dir, manifest, _archive) = status_fixture(&["a.jpg"]);
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(status.scope_confirms_nothing, "no prefix was recorded");
         assert!(
             !status.scope_kept_nothing,
@@ -692,13 +756,13 @@ mod tests {
         let (mut conn, _dir, manifest, _archive) = status_fixture(&["a.jpg"]);
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
 
         assert!(
             matches!(
                 status.lock,
                 LockStanding::Read {
-                    carries_measurement: true,
+                    header: LockHeaderStanding::Sound,
                     ..
                 }
             ),
@@ -749,14 +813,14 @@ mod tests {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
 
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(
             status.pattern_gaps.needs_a_scope_it_lacks,
             "an unmeasured lock under a scope-relative pattern needs the scope it lacks"
         );
 
         rewrite_manifest_pattern(&manifest, "{source.rel_path}");
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(
             !status.pattern_gaps.needs_a_scope_it_lacks,
             "a pattern that never names the scope key needs no scope"
@@ -764,7 +828,7 @@ mod tests {
 
         measure_lock_by_hand(dir.path());
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(
             !status.pattern_gaps.needs_a_scope_it_lacks,
             "a measured lock lacks nothing the pattern needs — the pattern alone cannot say this"
@@ -803,7 +867,7 @@ mod tests {
         set_lock_mtime(dir.path(), "a.jpg", 253402300799);
 
         rewrite_manifest_pattern(&manifest, "{source.mtime|year}/{filename}");
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(status.pattern_gaps.unreadable_save_time);
         assert!(!status.pattern_gaps.fact_not_carried);
         assert!(status.pattern_gaps.too_coarse.is_empty());
@@ -827,25 +891,146 @@ mod tests {
             .unwrap();
         crate::core::testing::insert_fact(&conn, a, "content.Make", "Canon");
         rewrite_manifest_pattern(&manifest, "{content.Make}/{source.mtime|year}");
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(status.pattern_gaps.unreadable_save_time);
         assert!(status.pattern_gaps.fact_not_carried);
     }
 
-    /// The report places by UTC too, until a manifest records the zone it was made in —
-    /// the same destination `apply` would compute, whatever the machine's zone.
+    /// **The report places on the lock's zone, whatever the machine's** — the same
+    /// destination `apply` computes: 23:30 UTC on New Year's Eve 2023 is 2024 in Amsterdam
+    /// (the lock's zone) and still 2023 in New York (the machine's).
     #[test]
-    fn the_report_places_by_utc_whatever_the_machines_zone() {
-        use crate::core::domain::time::zone::{with_test_zone, UserZone};
-        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+    fn status_places_on_the_locks_zone_whatever_the_machines() {
+        use crate::core::domain::time::zone::with_test_zone;
+        let (mut conn, dir, manifest, _archive) = status_fixture_in(&["a.jpg"], "Europe/Amsterdam");
         set_lock_mtime(dir.path(), "a.jpg", 1704065400);
         rewrite_manifest_pattern(&manifest, "{source.mtime|year}/{filename}");
 
-        let status = with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
-            compute_manifest_status(&mut conn, &manifest).unwrap()
+        let new_york = UserZone::for_test("America/New_York");
+        let status = with_test_zone(new_york.clone(), || {
+            compute_manifest_status(&mut conn, &manifest, &new_york).unwrap()
         });
         let dest = &status.entries[0].dest_path;
-        assert!(dest.ends_with("/2023/a.jpg"), "{dest}");
+        assert!(dest.ends_with("/2024/a.jpg"), "{dest}");
+        assert_eq!(status.unplaced, 0);
+    }
+
+    /// Write the lock header's `zone`, by hand — or take it away, as a lock written before
+    /// lock files recorded the zone has none. The manifest's hash goes stale; the hash is
+    /// not the question here.
+    fn rewrite_lock_zone(dir: &Path, zone: Option<&str>) {
+        super::super::manifest::fixtures::set_lock_header_zone(&dir.join("cluster.lock"), zone);
+    }
+
+    /// Write the manifest's `zone` line, the way a user editing the file does — or delete it.
+    fn rewrite_manifest_zone(manifest: &Path, zone: Option<&str>) {
+        let text = std::fs::read_to_string(manifest).unwrap();
+        let rewritten: String = text
+            .lines()
+            .filter_map(|line| {
+                if line.starts_with("zone = ") {
+                    zone.map(|z| format!("zone = \"{z}\"\n"))
+                } else {
+                    Some(format!("{line}\n"))
+                }
+            })
+            .collect();
+        std::fs::write(manifest, rewritten).unwrap();
+    }
+
+    /// **A lock whose zone this machine does not know gets no destination**: no entry is
+    /// placed, none is counted pending or at the destination, every one is counted once as
+    /// unplaced — and the step is the rebuild, since the manifest's own line names a zone
+    /// this machine knows.
+    #[test]
+    fn status_with_a_lock_zone_not_known_here_computes_no_destination() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg", "b.jpg"]);
+        rewrite_lock_zone(dir.path(), Some("Mars/Olympus_Mons"));
+
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert!(matches!(
+            status.lock,
+            LockStanding::Read {
+                header: LockHeaderStanding::ZoneNotKnownHere,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&status.lock_zone, Some(LockZone::NotKnownHere(n)) if n == "Mars/Olympus_Mons")
+        );
+        assert_eq!(status.unplaced, 2);
+        assert_eq!(
+            status.pending + status.at_destination + status.source_lost,
+            0
+        );
+        assert!(status.entries.is_empty(), "no entry carries a destination");
+        assert_eq!(status.next_step(), NextStep::Rebuild);
+    }
+
+    /// **A lock without a zone gets no destination either** — it records no clock at all,
+    /// UTC included — and the step is the rebuild that writes one.
+    #[test]
+    fn a_lock_without_a_zone_gets_no_destination_and_the_rebuild() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        rewrite_lock_zone(dir.path(), None);
+
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert!(matches!(
+            status.lock,
+            LockStanding::Read {
+                header: LockHeaderStanding::PredatesZone,
+                ..
+            }
+        ));
+        assert_eq!(status.unplaced, 1);
+        assert_eq!(status.pending, 0);
+        assert!(
+            !status.all_accounted_for(),
+            "an entry nobody checked is not accounted for"
+        );
+        assert!(status.found_nothing_lost_or_wrong());
+        assert_eq!(status.next_step(), NextStep::Rebuild);
+    }
+
+    /// **A manifest zone line the lock has not seen is reported, and apply still runs**:
+    /// placement reads the lock's zone, and only a refresh brings the line into it.
+    #[test]
+    fn status_names_a_manifest_zone_the_lock_has_not_seen() {
+        let (mut conn, _dir, manifest, _archive) =
+            status_fixture_in(&["a.jpg"], "Europe/Amsterdam");
+        rewrite_manifest_zone(&manifest, Some("America/New_York"));
+
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert!(
+            matches!(&status.lock_zone, Some(LockZone::Recorded(z)) if z.name() == "Europe/Amsterdam")
+        );
+        assert!(
+            matches!(&status.manifest_zone, Ok(ManifestZone::Recorded(z)) if z.name() == "America/New_York")
+        );
+        assert_eq!(status.next_step(), NextStep::Apply);
+    }
+
+    /// **A deleted zone line reads as the zone a refresh here would record** — this
+    /// machine's — and an unreadable one as what stops the refresh, never the apply.
+    #[test]
+    fn status_names_a_deleted_zone_line_with_the_zone_a_refresh_would_record() {
+        let (mut conn, _dir, manifest, _archive) =
+            status_fixture_in(&["a.jpg"], "Europe/Amsterdam");
+        rewrite_manifest_zone(&manifest, None);
+
+        let new_york = UserZone::for_test("America/New_York");
+        let status = compute_manifest_status(&mut conn, &manifest, &new_york).unwrap();
+        assert!(
+            matches!(&status.manifest_zone, Ok(ManifestZone::FromMachine(z)) if z.name() == "America/New_York")
+        );
+
+        // A line that was there, now misspelled.
+        let (mut conn, _dir, manifest, _archive) =
+            status_fixture_in(&["a.jpg"], "Europe/Amsterdam");
+        rewrite_manifest_zone(&manifest, Some("Europe/Amsterdm"));
+        let status = compute_manifest_status(&mut conn, &manifest, &new_york).unwrap();
+        assert_eq!(status.refresh_refused_by(), Some(RefreshRefusal::ZoneLine));
+        assert_eq!(status.next_step(), NextStep::Apply);
     }
 
     /// Write `output.pattern` into a manifest, the way a user editing the file
@@ -885,7 +1070,7 @@ mod tests {
             .unwrap();
         rewrite_manifest_scope(&manifest, &[root, "/canon-test/no-such-root".to_string()]);
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
 
         assert_eq!(status.unrooted_scope, ["/canon-test/no-such-root"]);
         assert!(
@@ -931,7 +1116,7 @@ mod tests {
         let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
         std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.at_destination, 1);
         assert_eq!(status.source_still_present, 1);
         assert_eq!(status.pending, 0);
@@ -943,7 +1128,7 @@ mod tests {
     fn compute_manifest_status_counts_a_file_still_waiting() {
         let (mut conn, _dir, manifest, _archive) = status_fixture(&["waiting.jpg"]);
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.pending, 1);
         assert_eq!(status.at_destination, 0);
         assert_eq!(status.size_mismatch, 0);
@@ -955,7 +1140,7 @@ mod tests {
         let (mut conn, _dir, manifest, archive) = status_fixture(&["resized.jpg"]);
         std::fs::write(archive.join("resized.jpg"), b"aa").unwrap();
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.size_mismatch, 1);
         assert_eq!(status.at_destination, 0);
         assert_eq!(status.pending, 0);
@@ -967,7 +1152,7 @@ mod tests {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["gone.jpg"]);
         std::fs::remove_file(dir.path().join("photos").join("gone.jpg")).unwrap();
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.source_lost, 1);
         assert_eq!(status.at_destination, 0);
         assert_eq!(status.pending, 0);
@@ -978,18 +1163,18 @@ mod tests {
     fn manifest_status_is_accounted_for_unless_content_is_lost_or_wrong() {
         let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
         std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
-        let settled = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let settled = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(settled.all_accounted_for());
 
         // Still waiting counts as accounted for — the file is where it began.
         std::fs::remove_file(archive.join("settled.jpg")).unwrap();
-        let waiting = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let waiting = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(waiting.pending, 1);
         assert!(waiting.all_accounted_for());
 
         // A destination of the wrong size is not, even with the source intact.
         std::fs::write(archive.join("settled.jpg"), b"aa").unwrap();
-        let mismatched = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let mismatched = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(mismatched.size_mismatch, 1);
         assert!(!mismatched.all_accounted_for());
     }
@@ -1006,7 +1191,7 @@ mod tests {
         std::fs::write(archive.join("broken.jpg"), b"aa").unwrap();
         std::fs::remove_file(dir.path().join("photos").join("broken.jpg")).unwrap();
 
-        let status = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.at_destination, 1);
         assert_eq!(status.size_mismatch, 1);
         assert_eq!(
@@ -1029,7 +1214,7 @@ mod tests {
     #[test]
     fn compute_manifest_status_flags_a_lock_file_that_no_longer_matches() {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
-        let fresh = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let fresh = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(matches!(
             fresh.lock,
             LockStanding::Read {
@@ -1048,7 +1233,7 @@ mod tests {
         let entries: String = content.lines().skip(1).map(|l| format!("{l}\n")).collect();
         std::fs::write(&lock, format!("{content}{entries}")).unwrap();
 
-        let tampered = compute_manifest_status(&mut conn, &manifest).unwrap();
+        let tampered = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(matches!(
             tampered.lock,
             LockStanding::Read {
@@ -1127,5 +1312,65 @@ mod tests {
         assert!(parked_lock_entries(&conn, &[entry(9999, parked)], &roots)
             .unwrap()
             .is_empty());
+    }
+
+    /// **An unparseable query is named as what stops the refresh, beside the zone's cause**,
+    /// read by the refresh's own parse — so the report names no rebuild the query turns away.
+    #[test]
+    fn status_names_an_unparseable_query_as_what_stops_the_refresh() {
+        let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
+        rewrite_lock_zone(dir.path(), None);
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let text: String = text
+            .lines()
+            .map(|l| {
+                if l.starts_with("query = ") {
+                    "query = [\"source.ext = (\"]\n".to_string()
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect();
+        std::fs::write(&manifest, text).unwrap();
+        rewrite_manifest_zone(&manifest, Some("Europe/Amsterdm"));
+
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert_eq!(status.query_causes.len(), 1, "{:?}", status.query_causes);
+        assert!(status.manifest_zone.is_err());
+        assert_eq!(status.refresh_refused_by(), Some(RefreshRefusal::ZoneLine));
+        assert!(status
+            .standing()
+            .obstacles()
+            .contains(&crate::archive::domain::Obstacle::QueryUnreadable));
+        assert_eq!(
+            status.next_step(),
+            NextStep::None,
+            "no rebuild the refresh refuses"
+        );
+    }
+
+    /// **The report counts times too coarse for the pattern**, per key, modifier and grain —
+    /// the counts `cluster refresh` states, read off the same typed cause.
+    #[test]
+    fn status_counts_coarse_values_per_key_and_grain() {
+        use crate::core::domain::time::value::Precision;
+        let (mut conn, _dir, manifest, _archive) = status_fixture(&["a.jpg", "b.jpg"]);
+        for name in ["a.jpg", "b.jpg"] {
+            let id: i64 = conn
+                .query_row("SELECT id FROM sources WHERE rel_path = ?", [name], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            crate::core::testing::insert_time_fact(&conn, id, "content.Taken", "2024");
+        }
+        rewrite_manifest_pattern(&manifest, "{content.Taken|month}/{filename}");
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert_eq!(
+            status
+                .pattern_gaps
+                .too_coarse
+                .get(&("content.Taken|month".to_string(), Precision::Year)),
+            Some(&2)
+        );
     }
 }

@@ -4,12 +4,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::archive::domain::{
-    parse_manifest_allow, parse_manifest_config, LockStanding, ManifestConfig, NextStep,
-    OwedWayBack, RefreshRefusal,
+    parse_manifest_allow, parse_manifest_config, settle_manifest_zone, LockHeaderStanding,
+    LockStanding, ManifestConfig, ManifestZone, NextStep, OwedWayBack, RefreshRefusal,
 };
 use crate::archive::ops::generate::{
     ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteRefreshParams,
 };
+use crate::archive::ops::manifest::read_lock_zone_tolerantly;
+use crate::archive::ops::manifest::{parse_recorded_query, LockZone};
+use crate::archive::ops::pattern::PatternGaps;
 use crate::archive::ops::{generate as generate_ops, status as status_ops};
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
@@ -17,6 +20,7 @@ use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorVerb, ParkedRoot, RefusedAct, RefusedActs};
 use crate::core::domain::scope::ScopeResolution;
+use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, UserZone};
 use crate::core::ops::decision::{
     DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
 };
@@ -46,6 +50,7 @@ pub fn generate(
     command_line: &str,
     ledger: &LedgerConfig,
     no_receipt: bool,
+    machine: &UserZone,
 ) -> Result<()> {
     // Prevent overwriting existing TOML config (unless --force)
     if output_path.exists() && !options.force {
@@ -55,6 +60,14 @@ pub fn generate(
             output_path.display()
         );
     }
+
+    // The zone the manifest will record, and the clock the query reads on: this machine's,
+    // where it can be written down. Refused before anything is selected or written — a
+    // manifest that could not say which clock it was made on would place on a different
+    // one at its next refresh.
+    let zone = machine
+        .recordable()
+        .map_err(|u| anyhow::anyhow!(super::generate_machine_zone_refusal(&u)))?;
 
     // Require at least one of path scope or filters
     if scope_prefixes.is_empty() && expanded_filters.is_empty() {
@@ -107,6 +120,7 @@ pub fn generate(
                 filters: parsed_filters,
                 allow_archived: options.allow_archived,
                 allow_duplicates: options.allow_duplicates,
+                clock: zone.clock().clone(),
             };
             generate_ops::plan_generate(conn, &params)?
         }
@@ -133,6 +147,7 @@ pub fn generate(
         archive_root_id,
         base_dir,
         allow: allow_values_to_strings(options),
+        zone: zone.clone(),
     };
 
     let decision = DecisionParams {
@@ -194,6 +209,7 @@ pub fn generate(
     }
 
     println!("{}", full_summary);
+    println!("{}", super::zone_recorded_statement(&zone));
 
     warn_if_written_file_blocks_placement(&result.pattern, dest, &[output_path, &lock_path]);
 
@@ -244,6 +260,7 @@ fn parse_manifest(content: &str, config_path: &Path) -> Result<(ManifestConfig, 
     Ok((config, allow_archived, allow_duplicates))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn refresh(
     db: &mut Db,
     config_path: &Path,
@@ -252,6 +269,7 @@ pub fn refresh(
     command_line: &str,
     ledger: &LedgerConfig,
     no_receipt: bool,
+    machine: &UserZone,
 ) -> Result<()> {
     let launch = |path: &Path| open_editor(path);
     let editor: Option<EditorPass> = if edit { Some(&launch) } else { None };
@@ -263,6 +281,7 @@ pub fn refresh(
         command_line,
         ledger,
         no_receipt,
+        machine,
     )
 }
 
@@ -284,6 +303,7 @@ fn refresh_with_editor(
     command_line: &str,
     ledger: &LedgerConfig,
     no_receipt: bool,
+    machine: &UserZone,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
@@ -353,6 +373,27 @@ fn refresh_with_editor(
             .write_all(&scope_statements(&scope, &doors, refusing));
     }
 
+    // Every other cause a refresh refuses on is collected before any is
+    // answered, so one run reports them all: the manifest's zone, settled from
+    // its line or this machine's, and every query line that will not parse.
+    // Nothing reads the zone or the query before this point, and nothing is
+    // written until every cause is clear.
+    let settled_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
+    let (parsed_filters, query_causes) = parse_recorded_query(&config.meta.query);
+    let mut causes: Vec<String> = Vec::new();
+    if let Err(refusal) = &settled_zone {
+        causes.push(super::zone_refusal(refusal));
+    }
+    causes.extend(
+        query_causes
+            .iter()
+            .map(|(line, error)| super::query_line_refusal(line, error, config_path)),
+    );
+    let aborted = format!(
+        "Refresh aborted — {} and its lock file are unchanged.",
+        config_path.display()
+    );
+
     // A parked scope line refuses the **whole** refresh, and the lock is
     // exactly where it was — including a line standing beside live ones. The
     // argument door's set-aside does not conjugate here: an argument is a
@@ -362,11 +403,14 @@ fn refresh_with_editor(
     // archive a partial collection under a manifest claiming the full one.
     // Exit 1 with no `Error:` prefix — nothing went wrong; the user closed the
     // door — and no decision row, because nothing was done.
+    //
+    // The door's own lines went out above; the other causes follow them on
+    // the same stream, then the abort once.
     if !doors.is_empty() {
-        println!(
-            "Refresh aborted — {} and its lock file are unchanged.",
-            config_path.display()
-        );
+        for cause in &causes {
+            println!("{cause}");
+        }
+        println!("{aborted}");
         std::process::exit(1);
     }
 
@@ -380,23 +424,26 @@ fn refresh_with_editor(
     // `trail` do. That mints a type and changes a pinned barrel, so it is
     // recorded rather than done here.
     if refusing {
-        bail!(
-            "{}\n\
-             Refresh aborted — {} and its lock file are unchanged.\n\
-             {}",
-            no_sources_known(scope.set_aside()),
-            config_path.display(),
-            super::scan_or_edit_scope(config_path, scope.set_aside()).join("\n")
-        );
+        let mut lines = vec![no_sources_known(scope.set_aside())];
+        lines.extend(causes);
+        lines.push(aborted);
+        lines.extend(super::scan_or_edit_scope(config_path, scope.set_aside()));
+        bail!("{}", lines.join("\n"));
     }
+    let manifest_zone = match settled_zone {
+        Ok(zone) if causes.is_empty() => zone,
+        _ => {
+            causes.push(aborted);
+            bail!("{}", causes.join("\n"));
+        }
+    };
+    let zone = manifest_zone.zone().clone();
 
-    // Parse filters from config
-    let parsed_filters: Vec<Filter> = config
-        .meta
-        .query
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    // The old lock's zone, read before anything is written — tolerantly: a lock
+    // that is gone, headerless, zoneless or unreadable gives no comparison and
+    // never a refusal.
+    let old_lock_zone =
+        read_lock_zone_tolerantly(&lock_path).and_then(|text| parse_zone_name(&text).ok());
 
     // Plan, from the **confirmed** register — the one the measurement and the
     // lock header are built from. A rooted prefix is re-queried in the
@@ -415,6 +462,7 @@ fn refresh_with_editor(
                 filters: parsed_filters,
                 allow_archived,
                 allow_duplicates,
+                clock: zone.clock().clone(),
             };
             generate_ops::plan_generate(conn, &plan_params)?
         }
@@ -456,6 +504,7 @@ fn refresh_with_editor(
         scope: scope.clone(),
         roots: refresh_roots,
         config,
+        zone: zone.clone(),
     };
 
     // A refresh whose query now matches nothing records nothing — the 0-item
@@ -466,6 +515,16 @@ fn refresh_with_editor(
     if plan.lock_entries.is_empty() {
         generate_ops::execute_refresh(&mut plan, &exec_params)?;
         println!("No sources matched the query");
+        let statements = refresh_zone_statements(
+            &manifest_zone,
+            old_lock_zone.as_ref(),
+            machine,
+            plan.query_read_an_instant,
+            Some(&PatternGaps::default()),
+        );
+        for line in statements {
+            println!("{line}");
+        }
         // The manifest only: this arm removed the lock file, and a warning
         // about a file standing in the way would be naming one that no longer
         // stands anywhere.
@@ -532,11 +591,84 @@ fn refresh_with_editor(
         eprintln!("{w}");
     }
 
+    // The decision is settled; the recorder's hold on the connection ends here.
+    drop(recorder);
+
+    // What the pattern meets over the lock just written, on the zone just
+    // settled — read only for what the statements below say about it.
+    // The refresh has run and is recorded; this pass only composes sentences, so a failure
+    // here is said as a warning and never turns the finished refresh into an error.
+    let statements = match generate_ops::pattern_gaps_for_written_lock(
+        conn,
+        &lock_path,
+        &r.pattern,
+        zone.clock(),
+    ) {
+        Ok(gaps) => refresh_zone_statements(
+            &manifest_zone,
+            old_lock_zone.as_ref(),
+            machine,
+            plan.query_read_an_instant,
+            Some(&gaps),
+        ),
+        Err(e) => {
+            eprintln!("{}", super::statement_pass_failed(&e));
+            refresh_zone_statements(
+                &manifest_zone,
+                old_lock_zone.as_ref(),
+                machine,
+                plan.query_read_an_instant,
+                None,
+            )
+        }
+    };
+    for line in statements {
+        println!("{line}");
+    }
+
     if let Some(root) = &placement_root {
         warn_if_written_file_blocks_placement(&r.pattern, root, &[config_path, &lock_path]);
     }
 
     Ok(())
+}
+
+/// What a refresh says about its zone once it has run, in order: a zone line it had to
+/// record, a zone that differs from the one the old lock was built in, the clock it read
+/// on where that is not this machine's, and the times too coarse for the pattern.
+///
+/// The clock is worth a sentence only where the run read an instant on it — the query's
+/// filters or the pattern's placements; a clock reading reads the same on any clock. Every
+/// comparison is between parsed zones, never text (`RecordedZone::same_zone`).
+///
+/// `gaps` is `None` where reading the written lock back failed: what the pattern placed is
+/// then unknown, so no sentence that turns on it is said — the coarse values, and the clock
+/// and the zone change's full form unless the query alone read an instant. A zone change is
+/// still said, in its quiet clause, since it is read from the two zones and not from the
+/// lock.
+fn refresh_zone_statements(
+    manifest_zone: &ManifestZone,
+    old_lock_zone: Option<&RecordedZone>,
+    machine: &UserZone,
+    query_read_an_instant: bool,
+    gaps: Option<&PatternGaps>,
+) -> Vec<String> {
+    let zone = manifest_zone.zone();
+    let instant_read = query_read_an_instant || gaps.is_some_and(|g| g.placed_an_instant);
+    let mut lines = Vec::new();
+    if let ManifestZone::FromMachine(recorded) = manifest_zone {
+        lines.push(super::zone_line_recorded_statement(recorded));
+    }
+    if let Some(old) = old_lock_zone.filter(|old| !old.same_zone(zone)) {
+        lines.push(super::zone_change_statement(old, zone, instant_read));
+    }
+    if instant_read && !zone.clock().reads_like(machine) {
+        lines.push(super::manifest_clock_statement(zone, machine));
+    }
+    if let Some(gaps) = gaps {
+        lines.extend(super::coarse_value_statements(gaps));
+    }
+    lines
 }
 
 // ============================================================================
@@ -670,7 +802,7 @@ fn write_next_step(
     status: &status_ops::ManifestStatus,
     manifest_path: &Path,
 ) {
-    if status.pending == 0 || !status.all_accounted_for() {
+    if (status.pending == 0 && status.unplaced == 0) || !status.found_nothing_lost_or_wrong() {
         return;
     }
     match status.next_step() {
@@ -694,7 +826,7 @@ fn write_next_step(
             let _ = writeln!(
                 handle,
                 "To rebuild the lock: {}",
-                super::refresh_command(manifest_path)
+                super::refresh_command(manifest_path, false)
             );
         }
         NextStep::Apply => {
@@ -744,7 +876,7 @@ fn lock_line(lock: LockStanding, entry_count: usize) -> String {
             manifest_names_a_hash: true,
         } => "Lock: none — the manifest names a lock file that is not there.".to_string(),
         LockStanding::Read {
-            carries_measurement: false,
+            header: LockHeaderStanding::Absent,
             ..
         } => format!(
             "Lock: {} entries — {}",
@@ -752,9 +884,159 @@ fn lock_line(lock: LockStanding, entry_count: usize) -> String {
             super::LOCK_PREDATES_MEASUREMENT
         ),
         LockStanding::Read {
-            carries_measurement: true,
+            header: LockHeaderStanding::PredatesZone,
+            ..
+        } => format!(
+            "Lock: {} entries — {}",
+            format_count(entry_count),
+            super::LOCK_PREDATES_ZONE
+        ),
+        // A zone this machine does not know is stated on the zone line, with its ways out.
+        LockStanding::Read {
+            header: LockHeaderStanding::Sound | LockHeaderStanding::ZoneNotKnownHere,
             ..
         } => format!("Lock: {} entries", format_count(entry_count)),
+    }
+}
+
+/// The report's zone line and its clauses: the zone placement reads — the lock's — and what
+/// the manifest's own line says a refresh would do about it.
+///
+/// Composed rather than printed so which sentence each pairing gets is a value a test can
+/// read. The lock's zone leads, because it is what the destinations above were placed on;
+/// where the lock records none this machine can read, the manifest's leads and the lock's
+/// state stands on the `Lock:` line or, for a zone this machine does not know, here with its
+/// ways out. Every comparison is between parsed zones (`RecordedZone::same_zone`).
+fn zone_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
+    let lock_zone = match &status.lock_zone {
+        Some(LockZone::Recorded(zone)) => {
+            lines.push(super::status_lock_zone_line(zone));
+            Some(zone)
+        }
+        Some(LockZone::NotKnownHere(name)) => {
+            lines.push(super::status_lock_zone_name_line(name));
+            // The cause under the zone, and its ways out under the cause.
+            for line in super::lock_zone_not_known_here(name, manifest, "") {
+                lines.push(format!("  {line}"));
+            }
+            None
+        }
+        Some(LockZone::PredatesZone) | None => {
+            // No zone in the lock to lead with: the manifest's own line leads, as it stands.
+            let lock_present = matches!(status.lock, LockStanding::Read { .. });
+            match &status.manifest_zone {
+                Ok(ManifestZone::Recorded(zone)) => {
+                    lines.push(super::status_manifest_zone_line(zone, lock_present));
+                }
+                Ok(ManifestZone::FromMachine(zone)) => {
+                    lines.push(super::status_no_zone_line_lead(zone, manifest));
+                }
+                Err(refusal) => lines.push(super::status_zone_refusal_lead(refusal)),
+            }
+            return lines;
+        }
+    };
+    match &status.manifest_zone {
+        Ok(ManifestZone::Recorded(zone)) => {
+            if lock_zone.is_none_or(|lock| !lock.same_zone(zone)) {
+                lines.push(format!(
+                    "  {}",
+                    super::manifest_zone_differs(zone, manifest)
+                ));
+            }
+        }
+        Ok(ManifestZone::FromMachine(zone)) => {
+            lines.push(format!(
+                "  {}",
+                super::manifest_zone_line_deleted(zone, manifest)
+            ));
+        }
+        Err(refusal) => lines.push(format!(
+            "  {}",
+            super::refresh_would_refuse(&super::zone_refusal(refusal))
+        )),
+    }
+    lines
+}
+
+/// The lines under the report's `Lock:` line, in the order `cluster refresh` states its own
+/// causes: the doors first, then the recorded scope's skipped and unrooted lines, then the
+/// zone, then each query line the refresh would refuse on.
+///
+/// Stated on stdout, this command's own scope channel — a report's scope belongs beside its
+/// header, not on a side channel. Status is a **report about acts it does not perform**: it
+/// states every cause this manifest's acts would be turned away by and refuses nothing of its
+/// own. The causes can hold at once — a scope line naming a closed root, entries standing behind
+/// one, the destination, the zone, each query line — and each names the act it turns away, in
+/// the conditional; composed in one place so a root reached more than one way is stated once.
+fn state_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in manifest_door_lines(status) {
+        let _ = writeln!(out, "{line}");
+    }
+    write_unrooted_scope(&mut out, &status.unrooted_scope);
+    crate::scope::write_set_asides(&mut out, &status.set_aside_scope);
+    for line in zone_lines(status, manifest) {
+        let _ = writeln!(out, "{line}");
+    }
+    for (line, error) in &status.query_causes {
+        let refusal = super::query_line_refusal(line, error, manifest);
+        let _ = writeln!(out, "{}", super::refresh_would_refuse(&refusal));
+    }
+    out
+}
+
+/// The block for entries the pattern gave no destination: how many, each distinct reason, the
+/// first few sources, and — where a time was too coarse for the pattern — the counted lines
+/// `cluster refresh` states, per key, modifier and grain. The ways out follow with the next
+/// step. Composed rather than printed so the block is a value a test can read.
+fn expansion_failure_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
+    if status.expansion_failures.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "{} of {} entries have no destination:",
+        format_count(status.expansion_failure_count),
+        format_count(status.lock_entry_count),
+    )];
+    for reason in &status.expansion_failures {
+        lines.push(format!("  {reason}"));
+    }
+    // Which ones, not only how many: the per-entry table shows a fixed status word, so
+    // without this the report names a count and never a file. Capped like every other
+    // listing here.
+    const SHOWN: usize = 5;
+    let failed: Vec<&status_ops::StatusEntry> = status
+        .entries
+        .iter()
+        .filter(|e| e.dest_path.starts_with(status_ops::EXPANSION_FAILED))
+        .collect();
+    for entry in failed.iter().take(SHOWN) {
+        lines.push(format!("  {}", entry.source_path));
+    }
+    if failed.len() > SHOWN {
+        lines.push(format!(
+            "  ... and {} more",
+            format_count(failed.len() - SHOWN)
+        ));
+    }
+    lines.extend(super::coarse_value_counts(&status.pattern_gaps));
+    lines
+}
+
+/// The report's summary line. A lock placed nowhere gets no counts: every one would be a zero
+/// nobody measured, the lost-source count among them.
+fn summary_line(status: &status_ops::ManifestStatus) -> String {
+    if status.unplaced > 0 {
+        format!("Summary: {}", super::unplaced_statement(status.unplaced))
+    } else {
+        format!(
+            "Summary: {} at destination, {} pending, {} source files missing.",
+            format_count(status.at_destination),
+            format_count(status.pending),
+            format_count(status.source_lost),
+        )
     }
 }
 
@@ -930,8 +1212,13 @@ fn allow_values_to_strings(options: &GenerateOptions) -> Vec<String> {
 // Status
 // ============================================================================
 
-pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Result<()> {
-    let status = status_ops::compute_manifest_status(conn, manifest_path)?;
+pub fn status(
+    conn: &mut Connection,
+    manifest_path: &Path,
+    verbose: bool,
+    machine: &UserZone,
+) -> Result<()> {
+    let status = status_ops::compute_manifest_status(conn, manifest_path, machine)?;
 
     // Header
     println!("Manifest: {}", status.manifest_path);
@@ -949,22 +1236,11 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
         eprintln!("Warning: lock file hash mismatch — manifest may be out of sync.");
     }
     println!("{}", lock_line(status.lock, status.lock_entry_count));
-    // Stated on stdout, this command's own scope channel — a report's scope
-    // belongs beside its header, not on a side channel.
-    //
-    // Status is a **report about acts it does not perform**: it states every
-    // door this manifest reaches behind and refuses nothing of its own. Three
-    // causes can hold at once — a scope line naming a closed root, entries
-    // standing behind one, and the destination — and each names the act it
-    // turns away, in the conditional. Composed in one place so a root reached
-    // more than one way is stated once.
     {
-        let mut out = std::io::stdout().lock();
-        for line in manifest_door_lines(&status) {
-            let _ = writeln!(out, "{line}");
-        }
-        write_unrooted_scope(&mut out, &status.unrooted_scope);
-        crate::scope::write_set_asides(&mut out, &status.set_aside_scope);
+        use std::io::Write as _;
+        let _ = std::io::stdout()
+            .lock()
+            .write_all(&state_lines(&status, manifest_path));
     }
     println!();
 
@@ -1044,40 +1320,15 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
     // status word. Said here, once per distinct reason rather than once per
     // source, because a pattern fails the same way for every entry and N
     // copies of one sentence is not a report.
-    if !status.expansion_failures.is_empty() {
-        println!(
-            "{} of {} entries have no destination:",
-            format_count(status.expansion_failure_count),
-            format_count(status.lock_entry_count),
-        );
-        for reason in &status.expansion_failures {
-            println!("  {reason}");
-        }
-        // Which ones, not only how many: the per-entry table below shows a
-        // fixed status word, so without this the report names a count and
-        // never a file. Capped like every other listing here.
-        const SHOWN: usize = 5;
-        let failed: Vec<&status_ops::StatusEntry> = status
-            .entries
-            .iter()
-            .filter(|e| e.dest_path.starts_with(status_ops::EXPANSION_FAILED))
-            .collect();
-        for entry in failed.iter().take(SHOWN) {
-            println!("  {}", entry.source_path);
-        }
-        if failed.len() > SHOWN {
-            println!("  ... and {} more", format_count(failed.len() - SHOWN));
+    let failures = expansion_failure_lines(&status);
+    if !failures.is_empty() {
+        for line in failures {
+            println!("{line}");
         }
         println!();
     }
 
-    // Summary
-    println!(
-        "Summary: {} at destination, {} pending, {} source files missing.",
-        format_count(status.at_destination),
-        format_count(status.pending),
-        format_count(status.source_lost),
-    );
+    println!("{}", summary_line(&status));
     if status.source_still_present > 0 {
         println!(
             "         {} at destination with source still present.",
@@ -1093,7 +1344,9 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
 
     // Safety assessment. Over an empty lock the claim is vacuous, so it is
     // not made: a line saying every file is accounted for, above nothing,
-    // reads as a claim about files that do not exist.
+    // reads as a claim about files that do not exist. Over entries with no
+    // destination computed the predicate itself answers no, and the warnings
+    // below each need a count that was measured.
     if status.all_accounted_for() {
         if status.lock_entry_count > 0 {
             println!("All source files accounted for.");
@@ -1130,8 +1383,13 @@ pub fn status(conn: &mut Connection, manifest_path: &Path, verbose: bool) -> Res
             // whether or not the archive is open.
             let refresh = match status.refresh_refused_by() {
                 None => super::RefreshStanding::Runs,
-                Some(RefreshRefusal::Door) => super::RefreshStanding::DoorClosed,
                 Some(RefreshRefusal::ScopeKeptNothing) => super::RefreshStanding::ScopeKeptNothing,
+                Some(
+                    RefreshRefusal::Door
+                    | RefreshRefusal::ZoneLine
+                    | RefreshRefusal::NoMachineZone
+                    | RefreshRefusal::Query,
+                ) => super::RefreshStanding::WayBackStated,
             };
             for line in super::source_lost_remedy(manifest_path, refresh, &status.set_aside_scope) {
                 println!("{line}");
@@ -1197,6 +1455,16 @@ mod tests {
     }
 
     fn run_refresh(db: &mut Db, manifest_path: &Path, editor: Option<EditorPass>) -> Result<()> {
+        run_refresh_on(db, manifest_path, editor, &UserZone::utc())
+    }
+
+    /// A refresh on a machine whose zone is `machine`.
+    fn run_refresh_on(
+        db: &mut Db,
+        manifest_path: &Path,
+        editor: Option<EditorPass>,
+        machine: &UserZone,
+    ) -> Result<()> {
         refresh_with_editor(
             db,
             manifest_path,
@@ -1205,6 +1473,7 @@ mod tests {
             "canon cluster refresh",
             &LedgerConfig::default(),
             true,
+            machine,
         )
     }
 
@@ -1292,6 +1561,30 @@ mod tests {
             expansion_failures: Vec::new(),
             pattern_gaps: Default::default(),
             expansion_failure_count: 0,
+            // The zone the lock's header standing describes, and a manifest line naming the
+            // same zone: a row that is not about the zone poses no question about it.
+            lock_zone: match lock {
+                LockStanding::Absent { .. }
+                | LockStanding::Read {
+                    header: LockHeaderStanding::Absent,
+                    ..
+                } => None,
+                LockStanding::Read {
+                    header: LockHeaderStanding::PredatesZone,
+                    ..
+                } => Some(LockZone::PredatesZone),
+                LockStanding::Read {
+                    header: LockHeaderStanding::ZoneNotKnownHere,
+                    ..
+                } => Some(LockZone::NotKnownHere("Mars/Olympus_Mons".to_string())),
+                LockStanding::Read {
+                    header: LockHeaderStanding::Sound,
+                    ..
+                } => Some(LockZone::Recorded(parse_zone_name("UTC").unwrap())),
+            },
+            manifest_zone: Ok(ManifestZone::Recorded(parse_zone_name("UTC").unwrap())),
+            query_causes: Vec::new(),
+            unplaced: 0,
         };
         // The ordinary manifest, so a row that is not about the scope poses no
         // question about it; a row that is calls `with_scope` itself. Set
@@ -1366,7 +1659,7 @@ mod tests {
     fn sound_lock() -> LockStanding {
         LockStanding::Read {
             hash_matches: true,
-            carries_measurement: true,
+            header: LockHeaderStanding::Sound,
         }
     }
 
@@ -1374,7 +1667,7 @@ mod tests {
     fn old_lock() -> LockStanding {
         LockStanding::Read {
             hash_matches: true,
-            carries_measurement: false,
+            header: LockHeaderStanding::Absent,
         }
     }
 
@@ -1563,7 +1856,7 @@ mod tests {
     fn a_hash_mismatch_points_at_the_rebuild_not_the_apply() {
         let mismatched = LockStanding::Read {
             hash_matches: false,
-            carries_measurement: true,
+            header: LockHeaderStanding::Sound,
         };
         for (pending, at_destination) in [(2, 0), (1, 1)] {
             let status = status_with(pending, at_destination, 0, mismatched);
@@ -1685,15 +1978,15 @@ mod tests {
                 "refresh the manifest: canon cluster refresh m.toml".to_string(),
             ]
         );
-        // A door states its own way back in the report, with the act that
-        // opens it, so repeating one here would be noise.
-        let door_closed = super::super::source_lost_remedy(
+        // A door, the zone or a query line states its own way back in the
+        // report, so repeating one here would be noise.
+        let way_back_stated = super::super::source_lost_remedy(
             Path::new("m.toml"),
-            super::super::RefreshStanding::DoorClosed,
+            super::super::RefreshStanding::WayBackStated,
             &set_aside,
         );
         assert_eq!(
-            door_closed,
+            way_back_stated,
             vec!["Check if the source volume is connected.".to_string()]
         );
         // The terminal rule does not. `no sources known at <p> — skipped`
@@ -1817,7 +2110,7 @@ mod tests {
             super::lock_line(
                 LockStanding::Read {
                     hash_matches: true,
-                    carries_measurement: true
+                    header: LockHeaderStanding::Sound
                 },
                 4200
             ),
@@ -1835,7 +2128,7 @@ mod tests {
             let line = super::lock_line(
                 LockStanding::Read {
                     hash_matches,
-                    carries_measurement: false,
+                    header: LockHeaderStanding::Absent,
                 },
                 2,
             );
@@ -2175,6 +2468,7 @@ mod tests {
             "canon cluster generate",
             &LedgerConfig::default(),
             true,
+            &UserZone::utc(),
         )
         .expect("a sourceless scope is a nothing-matched run, never a panic");
 
@@ -2943,5 +3237,687 @@ mod tests {
 
         let lock = fs::read_to_string(&lock_path).unwrap();
         assert!(lock.contains("a.jpg"), "got: {lock}");
+    }
+
+    /// **The zone line and its clauses**, one per pairing of what the lock records and what
+    /// the manifest's line says a refresh here would do: the lock's zone leads; a manifest
+    /// line naming another zone, a deleted line and an unreadable one each add their clause;
+    /// a line naming the same zone adds none.
+    #[test]
+    fn the_status_zone_line_names_the_locks_zone_and_what_a_refresh_would_change() {
+        let manifest = Path::new("/m/c.toml");
+        let zone = |n: &str| parse_zone_name(n).unwrap();
+        let sound = LockStanding::Read {
+            hash_matches: true,
+            header: LockHeaderStanding::Sound,
+        };
+        let mut status = status_with(1, 0, 0, sound);
+        status.lock_zone = Some(LockZone::Recorded(zone("Europe/Amsterdam")));
+
+        status.manifest_zone = Ok(ManifestZone::Recorded(zone("europe/amsterdam")));
+        assert_eq!(
+            zone_lines(&status, manifest),
+            ["Time zone: Europe/Amsterdam (the lock's)"]
+        );
+
+        status.manifest_zone = Ok(ManifestZone::Recorded(zone("America/New_York")));
+        assert_eq!(
+            zone_lines(&status, manifest),
+            [
+                "Time zone: Europe/Amsterdam (the lock's)",
+                "  the manifest's zone line reads America/New_York; canon cluster refresh /m/c.toml brings the lock up to date",
+            ]
+        );
+
+        status.manifest_zone = Ok(ManifestZone::FromMachine(zone("America/New_York")));
+        assert_eq!(
+            zone_lines(&status, manifest)[1],
+            "  the manifest has no zone line; a refresh on this machine would record America/New_York: canon cluster refresh /m/c.toml"
+        );
+
+        status.manifest_zone = Err(crate::archive::domain::ZoneRefusal::Line(
+            crate::core::domain::time::zone::ZoneNameError::NotKnownHere(
+                "Europe/Amsterdm".to_string(),
+            ),
+        ));
+        assert!(
+            zone_lines(&status, manifest)[1].starts_with(
+                "  cluster refresh would refuse: this machine's time zone data does not know \"Europe/Amsterdm\""
+            ),
+            "{:?}",
+            zone_lines(&status, manifest)
+        );
+    }
+
+    /// **With no zone in the lock, the manifest's line leads**: as it stands, with no lock
+    /// or with a lock that records none — the lock's age stands on the `Lock:` line.
+    #[test]
+    fn status_with_no_lock_shows_the_manifests_zone_line() {
+        let manifest = Path::new("/m/c.toml");
+        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
+        let mut status = status_with(
+            0,
+            0,
+            0,
+            LockStanding::Absent {
+                manifest_names_a_hash: false,
+            },
+        );
+        status.manifest_zone = Ok(ManifestZone::Recorded(amsterdam.clone()));
+        assert_eq!(
+            zone_lines(&status, manifest),
+            ["Time zone: Europe/Amsterdam (the manifest's; no lock)"]
+        );
+
+        let mut status = status_with(
+            1,
+            0,
+            0,
+            LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::PredatesZone,
+            },
+        );
+        status.manifest_zone = Ok(ManifestZone::Recorded(amsterdam.clone()));
+        assert_eq!(
+            zone_lines(&status, manifest),
+            ["Time zone: Europe/Amsterdam (the manifest's; the lock records none)"]
+        );
+        assert_eq!(
+            lock_line(status.lock, 1),
+            "Lock: 1 entries — built before lock files recorded the time zone"
+        );
+
+        status.manifest_zone = Ok(ManifestZone::FromMachine(amsterdam));
+        assert_eq!(
+            zone_lines(&status, manifest),
+            ["Time zone: none recorded; a refresh on this machine would record Europe/Amsterdam: canon cluster refresh /m/c.toml"]
+        );
+    }
+
+    /// **The third way out names the same zone**: a lock zone this machine does not know is
+    /// stated with its cause and the three ways out, the last asking for a name this machine
+    /// knows *for the same zone* — any other would move where files go.
+    #[test]
+    fn the_third_way_out_names_the_same_zone() {
+        let mut status = status_with(
+            1,
+            0,
+            0,
+            LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::ZoneNotKnownHere,
+            },
+        );
+        status.lock_zone = Some(LockZone::NotKnownHere("Europe/Kyiv".to_string()));
+        status.manifest_zone = Ok(ManifestZone::Recorded(
+            parse_zone_name("Europe/Kiev").unwrap(),
+        ));
+        let lines = zone_lines(&status, Path::new("/m/c.toml"));
+        assert_eq!(lines[0], "Time zone: Europe/Kyiv (the lock's)");
+        assert_eq!(
+            lines[1],
+            "  This machine's time zone data does not know Europe/Kyiv, the zone the lock was built in."
+        );
+        assert_eq!(
+            lines[4],
+            "    change the manifest's zone line to a name this machine knows for the same zone (for example, an older spelling), then canon cluster refresh /m/c.toml"
+        );
+        assert_eq!(
+            lines[5],
+            "  the manifest's zone line reads Europe/Kiev; canon cluster refresh /m/c.toml brings the lock up to date"
+        );
+    }
+
+    // =========================================================================
+    // The manifest's zone at generate and refresh
+    // =========================================================================
+
+    /// [`manifest_text`] with a `zone` line under the query.
+    fn manifest_text_zoned(query: &str, zone: &str) -> String {
+        manifest_text(query).replacen(
+            "generated_at = ",
+            &format!("zone = \"{zone}\"\ngenerated_at = "),
+            1,
+        )
+    }
+
+    /// One source saved at 2023-12-31 23:30 UTC — 2024 in Amsterdam, 2023 in New York and
+    /// in UTC — and a manifest asking for `query` on `zone`, if any.
+    fn new_year_setup(dir: &Path, query: &str, zone: Option<&str>) -> (Db, PathBuf, PathBuf) {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash-ny", false);
+        crate::core::testing::insert_source_with_metadata(
+            &conn,
+            root,
+            "a.jpg",
+            Some(obj),
+            1000,
+            1704065400,
+        );
+        let manifest_path = dir.join("cluster.toml");
+        let text = match zone {
+            Some(z) => manifest_text_zoned(query, z),
+            None => manifest_text(query),
+        };
+        fs::write(&manifest_path, text).unwrap();
+        let lock_path = manifest_path.with_extension("lock");
+        (Db::from_connection(conn), manifest_path, lock_path)
+    }
+
+    fn lock_header_zone(lock_path: &Path) -> Option<String> {
+        let first = fs::read_to_string(lock_path).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(first.lines().next().unwrap()).unwrap();
+        header["zone"].as_str().map(str::to_string)
+    }
+
+    /// **A refresh selects on the manifest's zone, never the machine's**: the New Year file
+    /// is 2024 in Amsterdam, the manifest's zone, and 2023 on this New York machine.
+    #[test]
+    fn refresh_selects_on_the_manifests_zone_not_the_machines() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, lock) = new_year_setup(
+            dir.path(),
+            "source.mtime|year = 2024",
+            Some("Europe/Amsterdam"),
+        );
+        run_refresh_on(
+            &mut db,
+            &manifest,
+            None,
+            &UserZone::for_test("America/New_York"),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&lock).unwrap();
+        assert!(text.contains("a.jpg"), "the 2024 file is selected: {text}");
+        assert_eq!(lock_header_zone(&lock).as_deref(), Some("Europe/Amsterdam"));
+    }
+
+    /// **With no zone line a refresh records this machine's**, in both files, and says so.
+    #[test]
+    fn refresh_without_a_zone_line_records_the_machines_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, lock) = new_year_setup(dir.path(), "source.ext = jpg", None);
+        let new_york = UserZone::for_test("America/New_York");
+        run_refresh_on(&mut db, &manifest, None, &new_york).unwrap();
+        assert!(fs::read_to_string(&manifest)
+            .unwrap()
+            .contains("zone = \"America/New_York\""));
+        assert_eq!(lock_header_zone(&lock).as_deref(), Some("America/New_York"));
+
+        let recorded = new_york.recordable().unwrap();
+        let lines = refresh_zone_statements(
+            &ManifestZone::FromMachine(recorded),
+            None,
+            &new_york,
+            false,
+            Some(&PatternGaps::default()),
+        );
+        assert_eq!(
+            lines,
+            ["Recorded this machine's time zone in the manifest: America/New_York"]
+        );
+    }
+
+    /// **A zone line differing from the canonical name only by case is written back in the
+    /// canonical form.**
+    #[test]
+    fn refresh_writes_the_zone_line_in_its_canonical_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, lock) =
+            new_year_setup(dir.path(), "source.ext = jpg", Some("europe/amsterdam"));
+        run_refresh(&mut db, &manifest, None).unwrap();
+        assert!(fs::read_to_string(&manifest)
+            .unwrap()
+            .contains("zone = \"Europe/Amsterdam\""));
+        assert_eq!(lock_header_zone(&lock).as_deref(), Some("Europe/Amsterdam"));
+    }
+
+    /// **Every refusal cause is reported in one run**: an unreadable zone line, then the query
+    /// line that will not parse — the order `cluster status` states them in — then the abort
+    /// once; and neither file is touched.
+    #[test]
+    fn refresh_reports_every_refusal_cause_in_one_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, lock) =
+            new_year_setup(dir.path(), "source.ext = (", Some("Europe/Amsterdm"));
+        fs::write(&lock, "the lock from last time\n").unwrap();
+        let before = fs::read_to_string(&manifest).unwrap();
+
+        let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
+        let zone_at = err
+            .find("this machine's time zone data does not know \"Europe/Amsterdm\"")
+            .unwrap_or_else(|| panic!("{err}"));
+        let query_at = err
+            .find("the query line \"source.ext = (\" cannot be read")
+            .unwrap_or_else(|| panic!("the query's own cause is reported too: {err}"));
+        let aborted_at = err
+            .find("Refresh aborted")
+            .unwrap_or_else(|| panic!("{err}"));
+        assert!(zone_at < query_at && query_at < aborted_at, "{err}");
+        assert_eq!(err.matches("Refresh aborted").count(), 1, "{err}");
+        assert_eq!(fs::read_to_string(&manifest).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(&lock).unwrap(),
+            "the lock from last time\n"
+        );
+    }
+
+    /// **The scope's refusal comes first**: a recorded scope that kept nothing is stated
+    /// before the zone's cause, which is still stated, before the abort.
+    #[test]
+    fn the_scope_refusals_come_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, _lock) =
+            new_year_setup(dir.path(), "source.ext = jpg", Some("Europe/Amsterdm"));
+        let text = fs::read_to_string(&manifest).unwrap().replacen(
+            "generated_at = ",
+            "scope = [\"/photos/nothing-here\"]\ngenerated_at = ",
+            1,
+        );
+        fs::write(&manifest, text).unwrap();
+
+        let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
+        let scope_at = err
+            .find("no sources known")
+            .unwrap_or_else(|| panic!("{err}"));
+        let zone_at = err
+            .find("Europe/Amsterdm")
+            .unwrap_or_else(|| panic!("{err}"));
+        let aborted_at = err
+            .find("Refresh aborted")
+            .unwrap_or_else(|| panic!("{err}"));
+        assert!(scope_at < zone_at && zone_at < aborted_at, "{err}");
+    }
+
+    /// **No zone line on a machine whose zone cannot be written down is refused**, naming
+    /// both ways out, and nothing is written.
+    #[test]
+    fn refresh_refuses_no_zone_line_on_a_machine_it_cannot_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, lock) = new_year_setup(dir.path(), "source.ext = jpg", None);
+        let before = fs::read_to_string(&manifest).unwrap();
+        let err = format!(
+            "{:#}",
+            run_refresh_on(&mut db, &manifest, None, &UserZone::for_test_unknown(None))
+                .unwrap_err()
+        );
+        assert!(
+            err.contains(
+                "cannot tell this machine's time zone; write a zone line (for example zone = \"Europe/Amsterdam\") or set TZ"
+            ),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&manifest).unwrap(), before);
+        assert!(!lock.exists());
+    }
+
+    /// **The clock line is said where the run read an instant and the clock is not this
+    /// machine's** — and only there: a clock reading reads the same on any clock, and a
+    /// machine on the same rules needs no line.
+    #[test]
+    fn refresh_states_the_clock_when_it_differs_and_an_instant_is_read() {
+        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
+        let new_york = UserZone::for_test("America/New_York");
+        let recorded = ManifestZone::Recorded(amsterdam.clone());
+        let placed = PatternGaps {
+            placed_an_instant: true,
+            ..Default::default()
+        };
+        let line = "times read on Europe/Amsterdam, as the manifest records (this machine: America/New_York)";
+
+        let query = refresh_zone_statements(
+            &recorded,
+            Some(&amsterdam),
+            &new_york,
+            true,
+            Some(&PatternGaps::default()),
+        );
+        assert_eq!(query, [line]);
+        let pattern =
+            refresh_zone_statements(&recorded, Some(&amsterdam), &new_york, false, Some(&placed));
+        assert_eq!(pattern, [line]);
+        let same_machine = refresh_zone_statements(
+            &recorded,
+            Some(&amsterdam),
+            &UserZone::for_test("Europe/Amsterdam"),
+            true,
+            Some(&placed),
+        );
+        assert!(same_machine.is_empty(), "{same_machine:?}");
+    }
+
+    #[test]
+    fn refresh_is_silent_about_the_clock_when_only_clock_readings_are_read() {
+        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
+        let lines = refresh_zone_statements(
+            &ManifestZone::Recorded(amsterdam.clone()),
+            Some(&amsterdam),
+            &UserZone::for_test("America/New_York"),
+            false,
+            Some(&PatternGaps::default()),
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    /// **Where the written lock could not be read back, what was measured is still said, and
+    /// nothing more**: the query's own instant is known from the plan, so the full zone change
+    /// and the clock follow from it; a query that read none leaves the pattern's reads unknown,
+    /// so only the quiet clause — and never a coarse count.
+    #[test]
+    fn a_failed_read_back_says_what_was_measured_and_nothing_more() {
+        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
+        let new_york = parse_zone_name("America/New_York").unwrap();
+        let machine = UserZone::for_test("Europe/Amsterdam");
+        let recorded = ManifestZone::Recorded(new_york.clone());
+
+        let query_read = refresh_zone_statements(&recorded, Some(&amsterdam), &machine, true, None);
+        assert_eq!(
+            query_read,
+            [
+                "Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now read on America/New_York, which can change which sources a time query selects and which folder a file goes to",
+                "times read on America/New_York, as the manifest records (this machine: Europe/Amsterdam)",
+            ]
+        );
+        let unknown = refresh_zone_statements(&recorded, Some(&amsterdam), &machine, false, None);
+        assert_eq!(
+            unknown,
+            ["(time zone changed from Europe/Amsterdam to America/New_York)"]
+        );
+    }
+
+    /// **A zone different from the old lock's is stated**: in full where an instant was
+    /// read, in one quiet clause where none was — and never for a link naming the same zone.
+    #[test]
+    fn refresh_states_a_zone_change_from_the_old_lock() {
+        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
+        let new_york = parse_zone_name("America/New_York").unwrap();
+        let machine = UserZone::for_test("America/New_York");
+        let recorded = ManifestZone::Recorded(new_york.clone());
+
+        let full = refresh_zone_statements(
+            &recorded,
+            Some(&amsterdam),
+            &machine,
+            true,
+            Some(&PatternGaps::default()),
+        );
+        assert_eq!(
+            full,
+            ["Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now read on America/New_York, which can change which sources a time query selects and which folder a file goes to"]
+        );
+        let quiet = refresh_zone_statements(
+            &recorded,
+            Some(&amsterdam),
+            &machine,
+            false,
+            Some(&PatternGaps::default()),
+        );
+        assert_eq!(
+            quiet,
+            ["(time zone changed from Europe/Amsterdam to America/New_York)"]
+        );
+
+        let link = parse_zone_name("US/Eastern").unwrap();
+        let none = refresh_zone_statements(
+            &recorded,
+            Some(&link),
+            &machine,
+            true,
+            Some(&PatternGaps::default()),
+        );
+        assert!(none.is_empty(), "a link names the same zone: {none:?}");
+    }
+
+    /// **An old lock gives no comparison and no refusal**: a refresh over a lock with no
+    /// zone, no header or no parse at all runs, and records its zone.
+    #[test]
+    fn an_old_lock_gives_no_comparison_and_no_refusal() {
+        for old in [
+            "{\"lock_version\":2,\"scope\":[]}\n",
+            "{\"id\":1}\n",
+            "not a lock at all\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut db, manifest, lock) =
+                new_year_setup(dir.path(), "source.ext = jpg", Some("Europe/Amsterdam"));
+            fs::write(&lock, old).unwrap();
+            run_refresh(&mut db, &manifest, None).unwrap();
+            assert_eq!(lock_header_zone(&lock).as_deref(), Some("Europe/Amsterdam"));
+        }
+    }
+
+    /// **Times too coarse for the pattern are stated with counts and both ways out**, read
+    /// over the lock the refresh just wrote.
+    #[test]
+    fn refresh_states_coarse_values_with_counts_and_both_ways_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, lock) =
+            new_year_setup(dir.path(), "source.ext = jpg", Some("Europe/Amsterdam"));
+        let id: i64 = db
+            .conn_mut()
+            .query_row("SELECT id FROM sources WHERE rel_path = 'a.jpg'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        crate::core::testing::insert_time_fact(db.conn_mut(), id, "content.Taken", "2024");
+        run_refresh(&mut db, &manifest, None).unwrap();
+
+        let gaps = generate_ops::pattern_gaps_for_written_lock(
+            db.conn_mut(),
+            &lock,
+            "{content.Taken|month}/{filename}",
+            parse_zone_name("Europe/Amsterdam").unwrap().clock(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::coarse_value_statements(&gaps),
+            [
+                "1 source holds content.Taken only to the year, so {content.Taken|month} has no value for it",
+                "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.Taken|month?\" to the manifest's query to leave such files out, then refresh.",
+            ]
+        );
+    }
+
+    /// **`generate` records this machine's zone in both files.**
+    #[test]
+    fn generate_records_the_machines_zone_in_both_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, _manifest, _lock) = setup(dir.path());
+        let out = dir.path().join("generated.toml");
+        generate_into(&mut db, &out, &UserZone::for_test("Europe/Amsterdam")).unwrap();
+        assert!(fs::read_to_string(&out)
+            .unwrap()
+            .contains("zone = \"Europe/Amsterdam\""));
+        assert_eq!(
+            lock_header_zone(&out.with_extension("lock")).as_deref(),
+            Some("Europe/Amsterdam")
+        );
+    }
+
+    /// **`generate` refuses a machine zone it cannot record**, by name and before the
+    /// selection: nothing is written and no decision is recorded.
+    #[test]
+    fn generate_refuses_a_machine_zone_it_cannot_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, _manifest, _lock) = setup(dir.path());
+        let out = dir.path().join("generated.toml");
+        for (machine, said) in [
+            (
+                UserZone::for_test_unknown(None),
+                "cannot tell this machine's time zone; run it with TZ set, for example TZ=Europe/Amsterdam canon cluster generate",
+            ),
+            (
+                UserZone::for_test_unknown(Some("Europe/Amsterdm")),
+                "TZ=Europe/Amsterdm is not a time zone Canon can read; run it with TZ set to a zone name",
+            ),
+        ] {
+            let err = format!("{:#}", generate_into(&mut db, &out, &machine).unwrap_err());
+            assert!(err.contains(said), "{err}");
+            assert!(!out.exists());
+            assert!(!out.with_extension("lock").exists());
+            let decisions: i64 = db
+                .conn_mut()
+                .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(decisions, 0);
+        }
+    }
+
+    /// `cluster generate` over the `/photos` root `setup` builds, into `/archive`.
+    fn generate_into(db: &mut Db, out: &Path, machine: &UserZone) -> Result<()> {
+        if crate::core::repo::root::fetch_all(db.conn_mut())
+            .unwrap()
+            .iter()
+            .all(|r| r.path != "/archive")
+        {
+            insert_root(db.conn_mut(), "/archive", "archive", false);
+        }
+        generate(
+            db,
+            &["/photos".to_string()],
+            &[],
+            &[],
+            Path::new("/archive"),
+            out,
+            &GenerateOptions {
+                force: false,
+                allow_archived: false,
+                allow_duplicates: false,
+                show_archived: false,
+                no_edit: true,
+            },
+            "canon cluster generate",
+            &LedgerConfig::default(),
+            true,
+            machine,
+        )
+    }
+
+    /// **A lock placed nowhere asserts no counts**: its summary names the unplaced entries and
+    /// that their source files were not checked, never "0 source files missing" over files
+    /// nobody looked at.
+    #[test]
+    fn a_lock_placed_nowhere_asserts_no_counts() {
+        let mut status = status_with(
+            0,
+            0,
+            0,
+            LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::PredatesZone,
+            },
+        );
+        status.lock_entry_count = 2;
+        status.unplaced = 2;
+        assert_eq!(
+            summary_line(&status),
+            "Summary: 2 entries with no destination computed, and their source files not checked: the lock records no time zone this machine can read."
+        );
+        status.unplaced = 0;
+        assert!(summary_line(&status).contains("source files missing"));
+    }
+
+    /// **A lock placed nowhere still gets its next step, the rebuild**: nothing was found
+    /// wrong in it, only left unchecked, so the gate that withholds a step over lost or
+    /// wrong-sized files does not withhold this one — for either header that leaves no zone.
+    #[test]
+    fn a_lock_placed_nowhere_names_the_rebuild() {
+        for header in [
+            LockHeaderStanding::PredatesZone,
+            LockHeaderStanding::ZoneNotKnownHere,
+        ] {
+            let mut status = status_with(
+                0,
+                0,
+                0,
+                LockStanding::Read {
+                    hash_matches: true,
+                    header,
+                },
+            );
+            status.lock_entry_count = 2;
+            status.unplaced = 2;
+            assert_eq!(
+                next_step(&status),
+                "\nTo rebuild the lock: canon cluster refresh m.toml\n",
+                "{header:?}"
+            );
+        }
+    }
+
+    /// **The report states coarse values with their counts**, in refresh's words, inside the
+    /// block for entries with no destination.
+    #[test]
+    fn status_states_coarse_values_with_their_counts() {
+        use crate::core::domain::time::value::Precision;
+        let mut status = status_with(
+            0,
+            0,
+            0,
+            LockStanding::Read {
+                hash_matches: true,
+                header: LockHeaderStanding::Sound,
+            },
+        );
+        status.lock_entry_count = 2;
+        status.expansion_failures = vec![
+            "content.Taken|month has no value: the time is known only to the year".to_string(),
+        ];
+        status.expansion_failure_count = 2;
+        status.pattern_gaps.too_coarse =
+            [(("content.Taken|month".to_string(), Precision::Year), 2)].into();
+        let lines = expansion_failure_lines(&status);
+        assert!(
+            lines.contains(
+                &"2 sources hold content.Taken only to the year, so {content.Taken|month} has no value for them"
+                    .to_string()
+            ),
+            "{lines:?}"
+        );
+    }
+
+    /// **The report states the causes in the order `cluster refresh` does**: a door first, then
+    /// the zone, then each query line — each query line naming itself and the way back.
+    #[test]
+    fn status_states_the_door_then_the_zone_then_the_query() {
+        let mut status = status_with(1, 0, 0, sound_lock());
+        with_scope_and_doors(
+            &mut status,
+            RecordedScope::AllConfirmed,
+            vec![crate::core::domain::root::ParkedPath {
+                path: "/photos/2011".to_string(),
+                root: ParkedRoot {
+                    root_id: 1,
+                    root_path: "/photos".to_string(),
+                },
+            }],
+        );
+        status.manifest_zone = Err(crate::archive::domain::ZoneRefusal::Line(
+            crate::core::domain::time::zone::ZoneNameError::NotKnownHere(
+                "Europe/Amsterdm".to_string(),
+            ),
+        ));
+        status.query_causes = vec![(
+            "source.ext = (".to_string(),
+            "Expected value, got LParen".to_string(),
+        )];
+        let text = String::from_utf8(state_lines(&status, Path::new("/m/c.toml"))).unwrap();
+        let door = text.find("suspended").unwrap_or_else(|| panic!("{text}"));
+        let zone = text
+            .find("Europe/Amsterdm")
+            .unwrap_or_else(|| panic!("{text}"));
+        let query = text
+            .find("source.ext = (")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(door < zone && zone < query, "{text}");
+        assert!(
+            text.contains(
+                "cluster refresh would refuse: the query line \"source.ext = (\" cannot be read: Expected value, got LParen — `canon cluster refresh --edit /m/c.toml` to fix the query and select again"
+            ),
+            "{text}"
+        );
     }
 }

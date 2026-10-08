@@ -65,6 +65,9 @@ pub struct Selection {
     pub included_archived_count: usize,
     /// Which status predicates appeared in filter expressions.
     pub used_status: UsedStatus,
+    /// Whether the filters read an instant on the clock
+    /// (`expr::domain::transform::reads_an_instant`).
+    pub read_an_instant: bool,
 }
 
 impl Selection {
@@ -125,6 +128,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
             included_excluded_count,
             included_archived_count,
             used_status: UsedStatus::default(),
+            read_an_instant: false,
         });
     }
 
@@ -144,6 +148,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
         included_excluded_count,
         included_archived_count,
         used_status: filter_result.used_status,
+        read_an_instant: filter_result.read_an_instant,
     })
 }
 

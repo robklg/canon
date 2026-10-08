@@ -179,7 +179,7 @@ Canon determines whether each alias is a key or an expression by parsing the val
 
 ## Using Modifiers
 
-Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list. A time modifier reads the time on [your clock](../concepts/facts.md#how-canon-shows-a-time); a manifest's query reads it in UTC.
+Modifiers can be applied to fact keys using the `|` syntax. See [Facts](facts.md#modifiers) for the complete list. A time modifier reads the time on [your clock](../concepts/facts.md#how-canon-shows-a-time); in a manifest's query it reads the manifest's [time zone](../commands/archive/cluster.md#the-manifests-time-zone).
 
 ```bash
 # Files from 2024

@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::archive::domain::LockEntry;
+use crate::archive::domain::{mtime_change, LockEntry};
 use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::path_strip_prefix;
-use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::time::zone::RecordedZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::{prefetch_pattern_facts, Pattern, Unmeasured};
 
@@ -63,6 +63,9 @@ pub struct ApplyPlanParams<'a> {
     pub pattern_needs_a_scope_it_lacks: bool,
     /// Root ID → root path cache (from core::repo::root::fetch_all).
     pub root_paths: &'a HashMap<i64, String>,
+    /// The zone the lock was built in: the clock placement reads every time on, and the
+    /// clock the pre-flight line prints save times on. Never the machine's.
+    pub lock_zone: &'a RecordedZone,
     /// Destination archive root ID.
     pub archive_root_id: i64,
     /// Relative base directory within archive root (config.output.base_dir).
@@ -325,9 +328,6 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
     let mut transfers: Vec<ApplyTransfer> = Vec::with_capacity(params.sources.len());
 
-    // AUDIT: placement reads UTC until a manifest records the zone it was made in; it must never
-    // read the machine's zone.
-    let zone = UserZone::utc();
     for source in params.sources {
         match evaluate_pattern(
             params.pattern,
@@ -335,9 +335,10 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             params.unmeasured,
             params.root_paths,
             &facts,
-            &zone,
+            params.lock_zone.clock(),
         ) {
-            Ok(dest_rel) => {
+            Ok(expansion) => {
+                let dest_rel = expansion.rel_path;
                 let archive_rel_path = compute_archive_rel_path(params.base_dir_rel, &dest_rel);
                 let source_root_path = params
                     .root_paths
@@ -552,7 +553,11 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                 mismatches.push(format!("size: {} → {}", transfer.size, db_source.size));
             }
             if db_source.mtime != transfer.mtime {
-                mismatches.push(format!("mtime: {} → {}", transfer.mtime, db_source.mtime));
+                mismatches.push(mtime_change(
+                    transfer.mtime,
+                    db_source.mtime,
+                    params.lock_zone,
+                ));
             }
             if db_source.partial_hash.is_empty() {
                 mismatches.push("partial hash: missing in DB".to_string());
@@ -1016,6 +1021,7 @@ fn classify_resume_entries<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::parse_zone_name;
     use crate::core::testing::{
         insert_fact, insert_object, insert_root, insert_source_excluded,
         insert_source_with_metadata, setup_test_db,
@@ -1068,8 +1074,13 @@ mod tests {
             base_dir_rel: "",
             resume: false,
             progress: None,
+            lock_zone: &UTC_LOCK_ZONE,
         }
     }
+
+    /// The lock zone every test here plans on, unless it is the subject.
+    static UTC_LOCK_ZONE: std::sync::LazyLock<RecordedZone> =
+        std::sync::LazyLock::new(|| parse_zone_name("UTC").unwrap());
 
     // =========================================================================
     // Pattern expansion and destination computation
@@ -1179,12 +1190,11 @@ mod tests {
         assert!(plan.violations.expansion_failures.is_empty());
     }
 
-    /// **Placement reads UTC until a manifest records the zone it was made in**, whatever
-    /// the machine's zone: 23:30 UTC on New Year's Eve 2023 is 1 January 2024 in Amsterdam,
-    /// and `{source.mtime|year}` still places it under `2023`. The pin goes with the
-    /// `// AUDIT:` marker it holds, when the lock carries the zone.
+    /// **Placement reads the lock's zone, whatever the machine's**: 23:30 UTC on New Year's
+    /// Eve 2023 is 1 January 2024 in Amsterdam (the lock's zone) and still 2023 in New York
+    /// (the machine's) and in UTC, so `{source.mtime|year}` places it under `2024`.
     #[test]
-    fn placement_reads_utc_whatever_the_machines_zone() {
+    fn apply_places_on_the_locks_zone_whatever_the_machines() {
         use crate::core::domain::time::zone::{with_test_zone, UserZone};
         let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
@@ -1207,12 +1217,17 @@ mod tests {
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let plan = with_test_zone(UserZone::for_test("Europe/Amsterdam"), || {
-            let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let lock_zone = parse_zone_name("Europe/Amsterdam").unwrap();
+
+        let plan = with_test_zone(UserZone::for_test("America/New_York"), || {
+            let params = ApplyPlanParams {
+                lock_zone: &lock_zone,
+                ..default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id)
+            };
             plan_apply(&mut conn, &params).unwrap()
         });
         assert_eq!(plan.transfers.len(), 1);
-        assert_eq!(plan.transfers[0].dest_rel_path, "2023/a.jpg");
+        assert_eq!(plan.transfers[0].dest_rel_path, "2024/a.jpg");
     }
 
     #[test]

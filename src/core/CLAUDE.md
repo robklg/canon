@@ -62,9 +62,17 @@ padded — and `FactValue::Time` carries it. Three owners sit there:
   (`with_test_zone`). Build-refused by `the_machine_zone_is_read_only_by_its_owner`.
 - **The list of spellings** (`reading::read_time`): the one place a written time's form and
   precision are decided, pinned per row; recognised here, with no roster row.
+- **The zone-name parse** (`zone::parse_zone_name`): the one reading of a written zone name — a
+  manifest's line, a lock's — into a `RecordedZone`: a known name (canonical case), `UTC`, or an
+  offset spelled `±HH:MM`; a rule string is refused, never flattened, and an unknown name is not
+  known here. `UserZone::recordable` builds the same type from the machine's rules. Zones are the
+  same when names match or rules agree through their whole history (`RecordedZone::same_zone`),
+  so a link never reads as a change. Build-refused by `zone_rules_are_looked_up_only_by_their_owner`.
+  Not reached: the machine's own zone, read by `UserZone::machine`.
 
 **Where they do not apply**: machine fields (receipts, the book's structured fields, a
-manifest's stamp) are UTC with `Z`; a manifest's run reads UTC, not the machine's zone.
+manifest's stamp) are UTC with `Z`. A manifest's run reads the zone the manifest or its lock
+records, never the machine's.
 
 **A stored time is `value_time` plus four `time_*` columns** (form, offset, fraction,
 precision), read and written only through `repo::fact`'s conversion pair (`fact_value_params`,
