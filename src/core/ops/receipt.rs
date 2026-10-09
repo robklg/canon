@@ -159,6 +159,10 @@ pub struct ReceiptMeta {
     /// (Move|Rename). Omitted for every other receipt type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_disposition: Option<String>,
+    /// The clock the command read times on (`Europe/Amsterdam`), copied from the decision's
+    /// one value, so the receipt and the row cannot name two clocks. Additive under
+    /// `receipt_version = 1`: a receipt written before it has no `zone`.
+    pub zone: String,
     /// The root this receipt is anchored to (the `[meta.locus]` table). Kept
     /// last so the declaration reads in the order the file is written: a TOML
     /// table has to follow every scalar key of its parent, and the serializer
@@ -394,6 +398,7 @@ mod tests {
                 command_line: "canon apply manifest.toml".to_string(),
                 manifest: Some("/Volumes/Archive/manifest.toml".to_string()),
                 origin_disposition: Some("retained".to_string()),
+                zone: "UTC".to_string(),
                 locus: ReceiptLocus {
                     path: "/Volumes/Archive".to_string(),
                     id: 7,

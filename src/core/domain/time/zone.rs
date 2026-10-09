@@ -98,21 +98,6 @@ impl UserZone {
         &self.label
     }
 
-    /// The first instant of `date` on this clock: the earlier instant where midnight repeats,
-    /// and the first instant after the gap where midnight is skipped. The one sanctioned
-    /// computation from a clock reading to an instant, for the trail's fetch bounds.
-    ///
-    /// `None` where that midnight lies outside the instants jiff holds — 9999-12-31 on a clock
-    /// less than two hours ahead of UTC (the last instant, `Timestamp::MAX`, is
-    /// 9999-12-30T22:00Z), or a day at jiff's first, near −9999-01-01: no instant is that day's
-    /// start, and the caller draws its bound beyond every time Canon reads, not at one of them.
-    pub fn day_start(&self, date: Date) -> Option<Timestamp> {
-        self.tz
-            .to_ambiguous_timestamp(date.at(0, 0, 0, 0))
-            .compatible()
-            .ok()
-    }
-
     /// Today's date on this clock, read through the one owner of "now".
     pub fn today(&self) -> Date {
         let now = Timestamp::from_second(now_epoch_secs()).unwrap_or(Timestamp::UNIX_EPOCH);
@@ -200,6 +185,45 @@ impl RecordedZone {
     /// a link its own name, so the name alone would call them two.
     pub fn same_zone(&self, other: &RecordedZone) -> bool {
         self.name == other.name || self.clock.reads_like(&other.clock)
+    }
+}
+
+/// The clock a record states it read times on — the decision row's `zone`, the receipt's
+/// `[meta].zone`, the book's sentences and its `meta.toml` all copy this one value, built
+/// once per decision, so the records of one act cannot name two clocks. A record must be
+/// readable without Canon, so the value is the text a stranger reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadTimesOn(String);
+
+impl ReadTimesOn {
+    /// For a command that reads the user's clock: the zone's name where it has one, a fixed
+    /// offset's name, a `TZ` rule as written; rules with no name and no rule text are named
+    /// by their offset now, said to be the offset at run time; a zone Canon cannot read is
+    /// UTC, said to be unknown.
+    pub fn of_user(zone: &UserZone) -> Self {
+        match zone.recordable() {
+            Ok(recorded) => ReadTimesOn::of_manifest(&recorded),
+            Err(Unrecordable::RuleString(rule)) => ReadTimesOn(rule),
+            Err(Unrecordable::UnnamedRules) => {
+                let now = Timestamp::from_second(now_epoch_secs()).unwrap_or(Timestamp::UNIX_EPOCH);
+                ReadTimesOn(format!(
+                    "local rules with no name (UTC{} at run time)",
+                    offset_name(zone.tz.to_offset(now))
+                ))
+            }
+            Err(Unrecordable::Unknown { .. }) => {
+                ReadTimesOn("UTC (this machine's time zone is unknown)".to_string())
+            }
+        }
+    }
+
+    /// For a manifest's run: the zone the manifest records, by its recorded name.
+    pub fn of_manifest(zone: &RecordedZone) -> Self {
+        ReadTimesOn(zone.name.clone())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -871,5 +895,54 @@ mod tests {
                 jiff::civil::date(2023, 12, 31)
             );
         });
+    }
+
+    /// **A record names the clock it read times on in text a stranger can read**: a zone by
+    /// its name, a fixed offset by its name, a `TZ` rule as written, unnamed rules by their
+    /// offset at run time, and a zone Canon cannot read as UTC, said to be unknown — the same
+    /// text whether or not `TZ` held something unreadable. A manifest's run names the zone the
+    /// manifest records.
+    #[test]
+    fn read_times_on_states_each_kind_of_zone() {
+        let of = |zone: &UserZone| ReadTimesOn::of_user(zone).as_str().to_string();
+        assert_eq!(
+            of(&UserZone::for_test("Europe/Amsterdam")),
+            "Europe/Amsterdam"
+        );
+        assert_eq!(
+            of(&UserZone::for_test_offset(Offset::from_hours(3).unwrap())),
+            "+03:00"
+        );
+        let rule = "EST5EDT,M3.2.0,M11.1.0";
+        assert_eq!(of(&zone_from(Some(rule), TimeZone::posix(rule))), rule);
+
+        let unnamed = zone_from(None, TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3"));
+        assert_eq!(unnamed.label(), &ZoneLabel::UnnamedRules);
+        // 2024-07-01T00:00:00Z, summer time; 2024-01-15T00:00:00Z, winter.
+        with_test_now(1_719_792_000, || {
+            assert_eq!(
+                of(&unnamed),
+                "local rules with no name (UTC+02:00 at run time)"
+            );
+        });
+        with_test_now(1_705_276_800, || {
+            assert_eq!(
+                of(&unnamed),
+                "local rules with no name (UTC+01:00 at run time)"
+            );
+        });
+
+        for unknown in [
+            UserZone::for_test_unknown(None),
+            UserZone::for_test_unknown(Some("Europe/Amsterdm")),
+        ] {
+            assert_eq!(of(&unknown), "UTC (this machine's time zone is unknown)");
+        }
+
+        let recorded = parse_zone_name("europe/amsterdam").unwrap();
+        assert_eq!(
+            ReadTimesOn::of_manifest(&recorded).as_str(),
+            "Europe/Amsterdam"
+        );
     }
 }

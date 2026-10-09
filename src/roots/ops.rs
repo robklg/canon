@@ -327,6 +327,7 @@ pub fn execute_unsuspend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use crate::core::repo::db::open_in_memory_for_test;
 
     fn setup_test_db() -> Connection {
@@ -672,6 +673,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: crate::core::domain::config::LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 

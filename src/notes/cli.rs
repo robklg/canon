@@ -18,6 +18,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::root::{DoorVerb, Root};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{resolve_scope, Door};
 use crate::core::repo::{self, Db};
@@ -89,6 +90,7 @@ pub fn run(
                 record_enabled: config.recording != RecordingMode::Off,
                 receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
                 ledger_config: config.clone(),
+                zone: ReadTimesOn::of_user(crate::user_zone()),
             };
             let result = notes_ops::execute_clear_recursive(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);
@@ -109,6 +111,7 @@ pub fn run(
                 record_enabled: config.recording != RecordingMode::Off,
                 receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
                 ledger_config: config.clone(),
+                zone: ReadTimesOn::of_user(crate::user_zone()),
             };
             let result = notes_ops::execute_clear_exact(conn, &scope, Some(&decision))?;
             eprintln!("{}", result.summary);

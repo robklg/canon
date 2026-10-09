@@ -32,6 +32,7 @@ pub(super) struct ApplyReceiptItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 
     /// The zone a test lock records: the reference zone, never the machine's.
     fn lock_zone() -> crate::core::domain::time::zone::RecordedZone {
@@ -71,6 +72,7 @@ mod tests {
                 command_line: "canon apply manifest.toml".to_string(),
                 manifest: Some("/Volumes/Archive/manifest.toml".to_string()),
                 origin_disposition: Some("retained".to_string()),
+                zone: "UTC".to_string(),
                 locus: ReceiptLocus {
                     path: "/Volumes/Archive".to_string(),
                     id: 7,
@@ -119,6 +121,7 @@ mod tests {
                 command_line: "canon apply m.lock".to_string(),
                 manifest: None,
                 origin_disposition: None,
+                zone: "UTC".to_string(),
                 locus: ReceiptLocus {
                     path: "/archive".to_string(),
                     id: 1,
@@ -188,6 +191,7 @@ mod tests {
                 layout: ReceiptLayout::Central,
                 root: None,
             },
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 

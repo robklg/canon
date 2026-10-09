@@ -52,16 +52,22 @@ machine's time zone.
 
 **Time is one noun, read one way.** `domain::time` holds `TimeValue` — an instant, an instant
 with its recorded offset, or a clock reading, each at the precision it was written at, never
-padded — and `FactValue::Time` carries it. Three owners sit there:
+padded — and `FactValue::Time` carries it. Its owners:
 - **The frame rule** (`TimeValue::on_clock`): every time reads on the user's clock — an instant
   through the zone, a clock reading as written, never a clock reading turned into an instant;
   `printed` is the one form shown, `iso_text` the stored form written out. Verifier
-  `the_frame_rule_reads_both_clock_change_hours_on_the_users_clock`.
+  `the_frame_rule_reads_both_clock_change_hours_on_the_users_clock`. It gives a `ClockSpan`,
+  which owns the printing (`printed`; `printed_as_asked` keeps a typed fraction) and the
+  comparisons, `lies_inside` and `starts_at_or_after`: they read only spans, so nothing
+  converts a clock reading to an instant. `clock_secs_as_if_utc` counts a reading as if UTC
+  for storage's encoding (its inverse is `repo::fact`'s read) and a speed path's bounds,
+  never a comparison or a selection.
 - **The user's-zone owner** (`zone::UserZone::machine`): reads `TZ` and the system zone once;
   everything else takes a `UserZone` as a parameter, and no test reads the machine's zone
   (`with_test_zone`). Build-refused by `the_machine_zone_is_read_only_by_its_owner`.
 - **The list of spellings** (`reading::read_time`): the one place a written time's form and
-  precision are decided, pinned per row; recognised here, with no roster row.
+  precision are decided, pinned per row; recognised here, with no roster row. The forms a
+  refusal shows (`EXAMPLE_FORMS`, `EXAMPLE_WITH_OFFSET`) are pinned to read through it.
 - **The zone-name parse** (`zone::parse_zone_name`): the one reading of a written zone name — a
   manifest's line, a lock's — into a `RecordedZone`: a known name (canonical case), `UTC`, or an
   offset spelled `±HH:MM`; a rule string is refused, never flattened, and an unknown name is not
@@ -69,6 +75,12 @@ padded — and `FactValue::Time` carries it. Three owners sit there:
   same when names match or rules agree through their whole history (`RecordedZone::same_zone`),
   so a link never reads as a change. Build-refused by `zone_rules_are_looked_up_only_by_their_owner`.
   Not reached: the machine's own zone, read by `UserZone::machine`.
+- **The record's clock text** (`zone::ReadTimesOn`): the one composition of the clock a durable
+  record says it read times on — `of_user` from the user's zone, `of_manifest` from a
+  manifest's. Built once per decision as `DecisionParams.zone` and copied to the row, the
+  receipt's `[meta].zone` and a book, so none can name a different clock. Pinned by
+  `the_row_and_the_receipt_state_the_same_clock` (the book's pin is retire's); recognised here,
+  with no roster row. Not reached: a sentence naming the zone on screen speaks `ZoneLabel`.
 
 **Where they do not apply**: machine fields (receipts, the book's structured fields, a
 manifest's stamp) are UTC with `Z`. A manifest's run reads the zone the manifest or its lock

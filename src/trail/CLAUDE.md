@@ -80,6 +80,14 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   (`domain::place::looks_like_decision_id`), a real folder named `191` having had evidence and never
   reached it. Exit non-zero via `TrailExit::PlaceUnknown` when every asked-about place is unknown,
   no `Error:` prefix, stdout left clean. Guard: `an_ancestor_scope_is_never_history_evidence`.
+- **The time lens reads a period on the user's clock** (`domain::timeline::TimeLens`).
+  `parse_when` reads `today`, `yesterday` and weekday names, and the rest through core's list
+  of spellings. The lens reads the period once into a `ClockSpan` (the label, in `cli.rs`, again
+  by the same rule); `selects` reads each row's time on the clock and asks the span, so the
+  repeated hour selects both its moments and the "not shown" count matches what is shown
+  (`unscoped_times_in` returns times, never a count). `fetch_window` is a speed path wider than
+  any offset, never deciding a row. A day covered in part is headed by its part (`day_part`).
+  Pin: `the_time_lens_selects_both_moments_of_the_repeated_hour`.
 **Crossings conventions** (`domain/crossings.rs`, `ops/crossings.rs`, `render::print_crossings`) — the counterpart door, the trail's fourth axis beside place, time and one decision:
 
 - **A closed door is remembering, and the gate is conjugated behind it.** `open_scope` matches

@@ -15,6 +15,7 @@ use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorRefused, DoorVerb, ParkedRoot};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::domain::time::zone::RecordedZone;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
@@ -678,6 +679,7 @@ pub fn run(
         record_enabled: ledger.recording != RecordingMode::Off && !options.dry_run,
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt && !options.dry_run,
         ledger_config: ledger.clone(),
+        zone: ReadTimesOn::of_manifest(&lock_zone),
     };
 
     let receipt_ctx = if decision.receipt_enabled {

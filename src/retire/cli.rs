@@ -7,6 +7,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::format::{format_date, format_size, format_time_ago};
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorVerb, Root};
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::scope::parse_root_spec_any;
 use crate::core::repo::{self, Db};
@@ -276,6 +277,7 @@ pub fn retire(
             reason: reason.map(|r| r.to_string()),
             now,
             zone: crate::user_zone().clone(),
+            read_times_on: ReadTimesOn::of_user(crate::user_zone()),
             command_line: command_line.to_string(),
             config: config.clone(),
         },

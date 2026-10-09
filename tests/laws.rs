@@ -792,7 +792,8 @@ const LAWS: &[Law] = &[
         // Every time is read on the user's clock, one way: an instant through the zone, a
         // clock reading as written, never a clock reading turned into an instant. The
         // verifier pins the span through both clock-change hours; the comparison-level
-        // claim joins it when typed dates bind to spans.
+        // claim joins it when `--where` binds typed dates to spans (the trail's period
+        // comparisons are pinned beside the span, in `value.rs` and the trail).
         name: "frame rule",
         owner: "core/domain/time/value.rs",
         verifier: "the_frame_rule_reads_both_clock_change_hours_on_the_users_clock",

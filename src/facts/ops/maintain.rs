@@ -406,6 +406,7 @@ pub fn execute_prune_excluded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     #[test]
@@ -475,6 +476,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: crate::core::domain::config::LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 

@@ -1,5 +1,6 @@
 use jiff::civil::date;
 
+use crate::core::domain::time::value::{Precision, TimeValue};
 use crate::core::domain::time::zone::UserZone;
 
 use crate::core::repo;
@@ -7,12 +8,25 @@ use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::trail::domain::placement::RowAspect;
 use crate::trail::domain::timeline::{TimelineEvent, WhenValue};
-use crate::trail::ops::compute::{classify_extraction_rows, compute_trail, day_start, TrailView};
+use crate::trail::ops::compute::{classify_extraction_rows, compute_trail, TrailView};
 
 use super::fixtures::{
     aspects_of, decision_ids, extraction_row, insert_decision_at, insert_note_at, params, scope,
     scope_display,
 };
+
+/// Midnight UTC on `day` in seconds since 1970: a fixed instant, never a zone conversion.
+fn utc_midnight(day: jiff::civil::Date) -> i64 {
+    jiff::tz::Offset::UTC
+        .to_timestamp(day.at(0, 0, 0, 0))
+        .unwrap()
+        .as_second()
+}
+
+/// `day` as a time-lens period: a clock reading at day grain.
+fn whole_day(day: jiff::civil::Date) -> TimeValue {
+    TimeValue::clock(day.at(0, 0, 0, 0), Precision::Day).unwrap()
+}
 
 #[test]
 fn scoped_visibility_is_bidirectional() {
@@ -361,7 +375,7 @@ fn extraction_rollup_none_for_time_lens_view() {
     .unwrap();
 
     let mut p = params(vec!["/a".to_string()]);
-    p.timeframe = Some(WhenValue::Since(date(2020, 1, 1)));
+    p.timeframe = Some(WhenValue::Since(whole_day(date(2020, 1, 1))));
     let result = compute_trail(&conn, &p).unwrap();
     assert!(result.extraction_rollup.is_none());
 }
@@ -589,7 +603,7 @@ fn time_lens_applies_the_same_placement_law() {
     let source_root = insert_test_root(&conn, "/a", "source", false);
     insert_test_root(&conn, "/archive", "archive", false);
     let day = date(2026, 7, 10);
-    let apply = insert_decision_at(&conn, "apply", day_start(day, &UserZone::utc()) + 3_600);
+    let apply = insert_decision_at(&conn, "apply", utc_midnight(day) + 3_600);
     repo::decision::replace_extractions(
         &conn,
         &[extraction_row(
@@ -605,12 +619,12 @@ fn time_lens_applies_the_same_placement_law() {
     .unwrap();
 
     let mut p = params(vec!["/archive/m/03".to_string()]);
-    p.timeframe = Some(WhenValue::Since(day));
+    p.timeframe = Some(WhenValue::Since(whole_day(day)));
     let result = compute_trail(&conn, &p).unwrap();
     assert!(decision_ids(&result.view).is_empty());
 
     let mut wide = params(vec!["/archive/m".to_string()]);
-    wide.timeframe = Some(WhenValue::Since(day));
+    wide.timeframe = Some(WhenValue::Since(whole_day(day)));
     let seen = compute_trail(&conn, &wide).unwrap();
     assert_eq!(decision_ids(&seen.view), vec![apply]);
 }
@@ -864,7 +878,7 @@ fn arrival_rollup_none_for_time_lens_view_but_decision_still_listed() {
     let source_root = insert_test_root(&conn, "/a", "source", false);
     insert_test_root(&conn, "/archive", "archive", false);
     let day1 = date(2026, 7, 10);
-    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
+    let ts1 = utc_midnight(day1) + 3600;
     let apply = insert_decision_at(&conn, "apply", ts1);
     repo::decision::replace_extractions(
         &conn,
@@ -881,7 +895,7 @@ fn arrival_rollup_none_for_time_lens_view_but_decision_still_listed() {
     .unwrap();
 
     let mut p = params(vec!["/archive".to_string()]);
-    p.timeframe = Some(WhenValue::Since(day1));
+    p.timeframe = Some(WhenValue::Since(whole_day(day1)));
     let result = compute_trail(&conn, &p).unwrap();
     assert!(result.arrival_rollup.is_none());
     match &result.view {
@@ -1074,7 +1088,7 @@ fn rearrangement_rollup_none_for_global_and_time_lens_views() {
     let conn = open_in_memory_for_test();
     let archive = insert_test_root(&conn, "/archive", "archive", false);
     let day = date(2026, 7, 10);
-    let d = insert_decision_at(&conn, "apply", day_start(day, &UserZone::utc()) + 3600);
+    let d = insert_decision_at(&conn, "apply", utc_midnight(day) + 3600);
     repo::decision::replace_extractions(
         &conn,
         &[extraction_row(
@@ -1093,7 +1107,7 @@ fn rearrangement_rollup_none_for_global_and_time_lens_views() {
     assert!(global.rearrangement_rollup.is_none());
 
     let mut p = params(vec!["/archive".to_string()]);
-    p.timeframe = Some(WhenValue::Since(day));
+    p.timeframe = Some(WhenValue::Since(whole_day(day)));
     let timed = compute_trail(&conn, &p).unwrap();
     assert!(timed.rearrangement_rollup.is_none());
 }
@@ -1192,8 +1206,8 @@ fn time_lens_groups_days_and_rolls_up() {
     // implementation uses, so the test is timezone-independent.
     let day1 = date(2026, 7, 10);
     let day2 = date(2026, 7, 11);
-    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
-    let ts2 = day_start(day2, &UserZone::utc()) + 3600;
+    let ts1 = utc_midnight(day1) + 3600;
+    let ts2 = utc_midnight(day2) + 3600;
 
     let scan = insert_decision_at(&conn, "scan", ts1);
     scope(&conn, scan, root, "");
@@ -1213,7 +1227,7 @@ fn time_lens_groups_days_and_rolls_up() {
     }
 
     let mut p = params(vec!["/a".to_string()]);
-    p.timeframe = Some(WhenValue::Since(day1));
+    p.timeframe = Some(WhenValue::Since(whole_day(day1)));
     let result = compute_trail(&conn, &p).unwrap();
     match &result.view {
         TrailView::Days(days) => {
@@ -1227,7 +1241,7 @@ fn time_lens_groups_days_and_rolls_up() {
     }
 
     // --on day2 excludes day1.
-    p.timeframe = Some(WhenValue::On(day2));
+    p.timeframe = Some(WhenValue::On(whole_day(day2)));
     let result = compute_trail(&conn, &p).unwrap();
     assert_eq!(decision_ids(&result.view), vec![apply]);
 }
@@ -1243,7 +1257,7 @@ fn time_lens_includes_extraction_touching_decision_in_right_day() {
     let conn = open_in_memory_for_test();
     let root = insert_test_root(&conn, "/a", "source", false);
     let day1 = date(2026, 7, 10);
-    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
+    let ts1 = utc_midnight(day1) + 3600;
 
     // Global selection scope (no decision_scopes row) — only the
     // extraction row ties it to this view.
@@ -1263,7 +1277,7 @@ fn time_lens_includes_extraction_touching_decision_in_right_day() {
     .unwrap();
 
     let mut p = params(vec!["/a".to_string()]);
-    p.timeframe = Some(WhenValue::Since(day1));
+    p.timeframe = Some(WhenValue::Since(whole_day(day1)));
     let result = compute_trail(&conn, &p).unwrap();
     match &result.view {
         TrailView::Days(days) => {
@@ -1292,7 +1306,7 @@ fn time_lens_day_archived_rollup_reflects_apply_stamps_regardless_of_extraction_
     let root = insert_test_root(&conn, "/a", "source", false);
     let archive_root = insert_test_root(&conn, "/archive", "archive", false);
     let day1 = date(2026, 7, 10);
-    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
+    let ts1 = utc_midnight(day1) + 3600;
 
     let apply = insert_decision_at(&conn, "apply", ts1);
     scope(&conn, apply, root, "");
@@ -1331,7 +1345,7 @@ fn time_lens_day_archived_rollup_reflects_apply_stamps_regardless_of_extraction_
     }
 
     let mut p = params(vec!["/a".to_string()]);
-    p.timeframe = Some(WhenValue::Since(day1));
+    p.timeframe = Some(WhenValue::Since(whole_day(day1)));
     let result = compute_trail(&conn, &p).unwrap();
     match &result.view {
         TrailView::Days(days) => {
@@ -1346,7 +1360,7 @@ fn time_lens_global_view_unchanged_by_extraction_rows() {
     let conn = open_in_memory_for_test();
     let root = insert_test_root(&conn, "/a", "source", false);
     let day1 = date(2026, 7, 10);
-    let ts1 = day_start(day1, &UserZone::utc()) + 3600;
+    let ts1 = utc_midnight(day1) + 3600;
     let apply = insert_decision_at(&conn, "apply", ts1);
     repo::decision::replace_extractions(
         &conn,
@@ -1363,7 +1377,7 @@ fn time_lens_global_view_unchanged_by_extraction_rows() {
     .unwrap();
 
     let mut p = params(Vec::new());
-    p.timeframe = Some(WhenValue::Since(day1));
+    p.timeframe = Some(WhenValue::Since(whole_day(day1)));
     let result = compute_trail(&conn, &p).unwrap();
     assert_eq!(result.unscoped_decisions, 0); // global view: never counted
     match &result.view {
@@ -1603,19 +1617,160 @@ fn the_time_lens_keeps_the_clock_change_days_boundaries() {
                 inside.push(id);
             }
         }
-        let mut p = params(vec!["/a".to_string()]);
-        p.clock = UserZone::for_test(zone);
-        p.timeframe = Some(WhenValue::On(day));
-        let result = compute_trail(&conn, &p).unwrap();
-        assert_eq!(decision_ids(&result.view), inside, "{zone} {day}");
-        match &result.view {
-            TrailView::Days(days) => {
-                assert_eq!(days.len(), 1, "{zone} {day}");
-                assert_eq!(days[0].date, day, "{zone} {day}");
+        // The scoped path and the global one (the fetch window, then the exact test).
+        for prefixes in [vec!["/a".to_string()], Vec::new()] {
+            let mut p = params(prefixes.clone());
+            p.clock = UserZone::for_test(zone);
+            p.timeframe = Some(WhenValue::On(whole_day(day)));
+            let result = compute_trail(&conn, &p).unwrap();
+            assert_eq!(
+                decision_ids(&result.view),
+                inside,
+                "{zone} {day} {prefixes:?}"
+            );
+            match &result.view {
+                TrailView::Days(days) => {
+                    assert_eq!(days.len(), 1, "{zone} {day}");
+                    assert_eq!(days[0].date, day, "{zone} {day}");
+                }
+                TrailView::Recent(_) => panic!("time lens must be Days"),
             }
-            TrailView::Recent(_) => panic!("time lens must be Days"),
         }
     }
+}
+
+fn secs(text: &str) -> i64 {
+    text.parse::<jiff::Timestamp>().unwrap().as_second()
+}
+
+fn read(text: &str) -> TimeValue {
+    crate::core::domain::time::reading::read_time(text).unwrap()
+}
+
+fn days_of(view: &TrailView) -> &[crate::trail::DayGroup] {
+    match view {
+        TrailView::Days(days) => days,
+        TrailView::Recent(_) => panic!("time lens must be Days"),
+    }
+}
+
+/// The exactness pin, through the whole read: in Amsterdam `--on 2024-10-27T02:30` selects
+/// both decisions recorded at 02:30 on the user's clock — before and after the clocks went
+/// back — and neither 02:29 nor 02:31; in New York the same moments read on 26 October and
+/// neither is selected.
+#[test]
+fn the_time_lens_selects_both_moments_of_the_repeated_hour() {
+    let conn = open_in_memory_for_test();
+    insert_decision_at(&conn, "scan", secs("2024-10-27T00:29:00Z"));
+    let first = insert_decision_at(&conn, "scan", secs("2024-10-27T00:30:00Z"));
+    let second = insert_decision_at(&conn, "scan", secs("2024-10-27T01:30:59Z"));
+    insert_decision_at(&conn, "scan", secs("2024-10-27T01:31:00Z"));
+    for (zone, expected) in [
+        ("Europe/Amsterdam", vec![first, second]),
+        ("America/New_York", vec![]),
+    ] {
+        let mut p = params(Vec::new());
+        p.clock = UserZone::for_test(zone);
+        p.timeframe = Some(WhenValue::On(read("2024-10-27T02:30")));
+        let result = compute_trail(&conn, &p).unwrap();
+        assert_eq!(decision_ids(&result.view), expected, "{zone}");
+    }
+}
+
+/// A `--since` shorter than a day heads its first day from the time asked, holding only what
+/// was recorded from then, and later days whole; an `--on` shorter than a day heads its one
+/// day with the period. Each day's rollup counts only the decisions the lens selected.
+#[test]
+fn the_first_day_of_a_since_minute_is_partial() {
+    use crate::trail::render::day_heading;
+    let conn = open_in_memory_for_test();
+    let morning = insert_decision_at(&conn, "exclude_set", secs("2024-06-15T09:00:00Z"));
+    let at = insert_decision_at(&conn, "exclude_set", secs("2024-06-15T14:30:10Z"));
+    let later = insert_decision_at(&conn, "exclude_set", secs("2024-06-15T18:00:00Z"));
+    let next_day = insert_decision_at(&conn, "exclude_set", secs("2024-06-16T09:00:00Z"));
+    for id in [morning, at, later, next_day] {
+        conn.execute(
+            "UPDATE decisions SET count_completed = 1 WHERE id = ?",
+            [id],
+        )
+        .unwrap();
+    }
+
+    let mut p = params(Vec::new());
+    p.timeframe = Some(WhenValue::Since(read("2024-06-15T14:30")));
+    let result = compute_trail(&conn, &p).unwrap();
+    assert_eq!(decision_ids(&result.view), vec![at, later, next_day]);
+    let headings: Vec<String> = days_of(&result.view).iter().map(day_heading).collect();
+    assert_eq!(
+        headings,
+        vec![
+            "Saturday 2024-06-15, from 14:30 — excluded 2 files".to_string(),
+            "Sunday 2024-06-16 — excluded 1 file".to_string(),
+        ]
+    );
+
+    p.timeframe = Some(WhenValue::On(read("2024-06-15T14:30")));
+    let result = compute_trail(&conn, &p).unwrap();
+    assert_eq!(decision_ids(&result.view), vec![at]);
+    let headings: Vec<String> = days_of(&result.view).iter().map(day_heading).collect();
+    assert_eq!(
+        headings,
+        vec!["Saturday 2024-06-15, 14:30 — excluded 1 file".to_string()]
+    );
+}
+
+/// A note and a global decision one second outside the period are left out, and the scoped
+/// view's "not shown" count agrees with what the lens shows.
+#[test]
+fn notes_and_the_unscoped_count_follow_the_lens() {
+    let conn = open_in_memory_for_test();
+    let root = insert_test_root(&conn, "/a", "source", false);
+    let start = secs("2024-06-15T14:30:00Z");
+    let end = secs("2024-06-15T14:31:00Z");
+    let scoped = insert_decision_at(&conn, "scan", start);
+    scope(&conn, scoped, root, "");
+    insert_decision_at(&conn, "import_facts", start + 30); // global, inside
+    insert_decision_at(&conn, "import_facts", start - 1); // global, outside
+    insert_decision_at(&conn, "import_facts", end); // global, outside
+    insert_note_at(&conn, root, "", start + 1);
+    insert_note_at(&conn, root, "", start - 1);
+    insert_note_at(&conn, root, "", end);
+
+    let mut p = params(vec!["/a".to_string()]);
+    p.timeframe = Some(WhenValue::On(read("2024-06-15T14:30")));
+    let result = compute_trail(&conn, &p).unwrap();
+    assert_eq!(decision_ids(&result.view), vec![scoped]);
+    assert_eq!(result.unscoped_decisions, 1);
+    let notes: Vec<i64> = days_of(&result.view)
+        .iter()
+        .flat_map(|d| &d.events)
+        .filter_map(|e| match e {
+            TimelineEvent::Note(n) => Some(n.created_at),
+            TimelineEvent::Decision(_) => None,
+        })
+        .collect();
+    assert_eq!(notes, vec![start + 1]);
+}
+
+/// A period typed to a fraction of a second is a point: `--since` it starts at the next
+/// whole second, and its first day is headed with the fraction as asked, never cut to a
+/// second that holds a decision the period does not select.
+#[test]
+fn a_fraction_period_heads_its_day_as_asked() {
+    use crate::trail::render::day_heading;
+    let conn = open_in_memory_for_test();
+    insert_decision_at(&conn, "scan", secs("2024-06-15T14:30:05Z"));
+    let next = insert_decision_at(&conn, "scan", secs("2024-06-15T14:30:06Z"));
+    let mut p = params(Vec::new());
+    p.timeframe = Some(WhenValue::Since(read("2024-06-15T14:30:05.45")));
+    let result = compute_trail(&conn, &p).unwrap();
+    assert_eq!(decision_ids(&result.view), vec![next]);
+    let days = days_of(&result.view);
+    assert!(day_heading(&days[0]).starts_with("Saturday 2024-06-15, from 14:30:05.45 — "));
+
+    p.timeframe = Some(WhenValue::On(read("2024-06-15T14:30:05.45")));
+    let result = compute_trail(&conn, &p).unwrap();
+    assert!(days_of(&result.view).is_empty());
 }
 
 /// The last days a time can be read on answer as they always did: `--on 9999-12-31` and
@@ -1634,9 +1789,9 @@ fn the_time_lens_answers_at_the_edge_of_the_years() {
         scope(&conn, last, root, "");
 
         for (when, expected) in [
-            (WhenValue::On(date(9999, 12, 31)), vec![]),
-            (WhenValue::Since(date(9999, 12, 31)), vec![]),
-            (WhenValue::On(date(9999, 12, 30)), vec![last]),
+            (WhenValue::On(whole_day(date(9999, 12, 31))), vec![]),
+            (WhenValue::Since(whole_day(date(9999, 12, 31))), vec![]),
+            (WhenValue::On(whole_day(date(9999, 12, 30))), vec![last]),
         ] {
             let mut p = params(vec!["/a".to_string()]);
             p.clock = UserZone::for_test(zone);

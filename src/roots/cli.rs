@@ -10,6 +10,7 @@ use crate::core::domain::format::format_time_ago;
 use crate::core::domain::format_count;
 use crate::core::domain::root::DoorVerb;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::domain::Root;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{parse_root_spec, parse_root_spec_any, resolve_path, RootLookup};
@@ -192,6 +193,7 @@ pub fn remove(
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
+        zone: ReadTimesOn::of_user(crate::user_zone()),
     };
     let result = crate::roots::ops::execute_remove(conn, &plan, Some(&decision))?;
     println!("{}", result.summary);
@@ -259,6 +261,7 @@ pub fn suspend(
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
+        zone: ReadTimesOn::of_user(crate::user_zone()),
     };
 
     match crate::roots::ops::execute_suspend(conn, root_id, Some(&decision)) {
@@ -315,6 +318,7 @@ pub fn unsuspend(
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
+        zone: ReadTimesOn::of_user(crate::user_zone()),
     };
 
     match crate::roots::ops::execute_unsuspend(conn, root_id, Some(&decision)) {

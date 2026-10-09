@@ -11,38 +11,9 @@ use anyhow::Result;
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::repo::db::Connection;
-use crate::core::repo::decision::DecisionScopeRow;
+use crate::core::repo::decision::{decision_from_row, DecisionScopeRow, DECISION_COLUMNS};
 use crate::core::repo::source::BATCH_SIZE;
 use crate::trail::domain::timeline::StampAgg;
-
-const DECISION_COLUMNS: &str = "id, command, scope, command_line, reason, status,
-                count_attempted, count_completed, count_failed, count_skipped,
-                summary, canon_version, created_at,
-                receipt_root_id, receipt_rel_path";
-
-fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<Decision> {
-    let scope_json: Option<String> = row.get(2)?;
-    // A scope that doesn't parse reads as no scope rather than failing the
-    // whole query — one corrupt row must not take the trail down with it.
-    let scope = scope_json.and_then(|s| serde_json::from_str(&s).ok());
-    Ok(Decision {
-        id: row.get(0)?,
-        command: row.get(1)?,
-        scope,
-        command_line: row.get(3)?,
-        reason: row.get(4)?,
-        status: row.get(5)?,
-        count_attempted: row.get(6)?,
-        count_completed: row.get(7)?,
-        count_failed: row.get(8)?,
-        count_skipped: row.get(9)?,
-        summary: row.get(10)?,
-        canon_version: row.get(11)?,
-        created_at: row.get(12)?,
-        receipt_root_id: row.get(13)?,
-        receipt_rel_path: row.get(14)?,
-    })
-}
 
 /// Fetch the most recent decisions, newest first. `limit: None` fetches all.
 pub fn fetch_recent(conn: &Connection, limit: Option<usize>) -> Result<Vec<Decision>> {
@@ -79,20 +50,30 @@ pub fn fetch_in_range(conn: &Connection, start: i64, end: i64) -> Result<Vec<Dec
     Ok(decisions)
 }
 
-/// Count decisions with no scope-index rows (global operations), optionally
-/// restricted to `start <= created_at < end`.
-pub fn count_unscoped(conn: &Connection, range: Option<(i64, i64)>) -> Result<i64> {
-    let base = "SELECT COUNT(*) FROM decisions d
-                WHERE NOT EXISTS (SELECT 1 FROM decision_scopes s WHERE s.decision_id = d.id)";
-    let count = match range {
-        Some((start, end)) => conn.query_row(
-            &format!("{base} AND d.created_at >= ? AND d.created_at < ?"),
-            [start, end],
-            |row| row.get(0),
-        )?,
-        None => conn.query_row(base, [], |row| row.get(0))?,
-    };
-    Ok(count)
+/// Count decisions with no scope-index rows (global operations).
+pub fn count_unscoped(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM decisions d
+         WHERE NOT EXISTS (SELECT 1 FROM decision_scopes s WHERE s.decision_id = d.id)",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// The `created_at` of every decision with no scope-index rows (global operations) with
+/// `start <= created_at < end` — the time lens's fetch window; the lens selects from these.
+pub fn unscoped_times_in(conn: &Connection, start: i64, end: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.created_at FROM decisions d
+         WHERE NOT EXISTS (SELECT 1 FROM decision_scopes s WHERE s.decision_id = d.id)
+           AND d.created_at >= ? AND d.created_at < ?",
+    )?;
+    let rows = stmt.query_map([start, end], |row| row.get::<_, i64>(0))?;
+    let mut times = Vec::new();
+    for row in rows {
+        times.push(row?);
+    }
+    Ok(times)
 }
 
 /// Of the given decision ids, return those with no `decision_scopes` row
@@ -345,8 +326,8 @@ mod tests {
         insert_decision_at(&conn, "import_facts", 150);
         insert_decision_at(&conn, "import_facts", 250);
 
-        assert_eq!(count_unscoped(&conn, None).unwrap(), 2);
-        assert_eq!(count_unscoped(&conn, Some((100, 200))).unwrap(), 1);
+        assert_eq!(count_unscoped(&conn).unwrap(), 2);
+        assert_eq!(unscoped_times_in(&conn, 100, 200).unwrap(), vec![150]);
         // The scoped counts above are only meaningful against the total.
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))

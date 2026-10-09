@@ -31,6 +31,15 @@ use jiff::tz::Offset;
 
 use super::value::{Precision, TimeValue, TimeValueError};
 
+/// The list's forms as a person is shown them — one per grain a date is usually asked at —
+/// so a refusal that names the forms shows the ones this list reads, never a copy written
+/// beside it. Each reads through [`read_time`] (pinned).
+pub const EXAMPLE_FORMS: [&str; 4] = ["2024", "2024-06", "2024-06-15", "2024-06-15 14:30"];
+
+/// A time with an offset as a person is shown it — for the refusal of an offset on a date
+/// alone. Reads through [`read_time`] (pinned).
+pub const EXAMPLE_WITH_OFFSET: &str = "2024-06-15 14:30 +02:00";
+
 /// Why text did not read as a time. `Display` is the user-facing sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeReadError {
@@ -528,6 +537,30 @@ mod tests {
         );
         // A clock reading in the same years is in the line.
         assert!(read_time("9999-12-31T23:59:59").is_ok());
+    }
+
+    /// The forms a refusal shows are forms this list reads, at the grains they claim.
+    #[test]
+    fn the_example_forms_read_through_the_one_list() {
+        let grains = [
+            Precision::Year,
+            Precision::Month,
+            Precision::Day,
+            Precision::Minute,
+        ];
+        assert_eq!(
+            EXAMPLE_FORMS.len(),
+            grains.len(),
+            "every shown form has its grain"
+        );
+        for (text, grain) in EXAMPLE_FORMS.iter().zip(grains) {
+            let value = read_time(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(value.precision(), grain, "{text}");
+            assert_eq!(value.form(), TimeForm::Clock, "{text}");
+        }
+        let offset = read_time(EXAMPLE_WITH_OFFSET).unwrap();
+        assert_eq!(offset.form(), TimeForm::InstantWithOffset);
+        assert_eq!(offset.precision(), Precision::Minute);
     }
 
     #[test]

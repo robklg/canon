@@ -4,6 +4,7 @@ use std::io::BufRead;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::ops::decision::{
     ArmedRecorder, DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
 };
@@ -99,6 +100,7 @@ pub fn import_run(
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
+        zone: ReadTimesOn::of_user(crate::user_zone()),
     };
     // Armed as the backstop for anything the two explicit arms below do not
     // reach. Both of those settle first, which makes the guard a no-op there.
@@ -264,14 +266,19 @@ mod tests {
             pos: 0,
         });
 
-        let err = import_run(
-            &mut db,
-            reader,
-            false,
-            false,
-            "canon import-facts",
-            &LedgerConfig::default(),
-            true,
+        let err = crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                import_run(
+                    &mut db,
+                    reader,
+                    false,
+                    false,
+                    "canon import-facts",
+                    &LedgerConfig::default(),
+                    true,
+                )
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("Failed to read line from stdin"));

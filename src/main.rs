@@ -489,10 +489,10 @@ enum Commands {
         /// Today's story (sugar for --since today)
         #[arg(long, conflicts_with_all = ["since", "on"])]
         today: bool,
-        /// Story from a day onward: today, yesterday, a weekday, or YYYY-MM-DD
+        /// Story from a period onward: today, yesterday, a weekday, or a date or time (2024-06, 2024-06-15, ...)
         #[arg(long, conflicts_with = "on")]
         since: Option<String>,
-        /// One day's story: today, yesterday, a weekday, or YYYY-MM-DD
+        /// One period's story: today, yesterday, a weekday, or a date or time (2024-06, 2024-06-15, ...)
         #[arg(long)]
         on: Option<String>,
         /// Maximum decisions to show (default: 20)

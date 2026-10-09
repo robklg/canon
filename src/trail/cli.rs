@@ -13,15 +13,17 @@ use anyhow::{anyhow, Result};
 
 use crate::core::domain::format::format_date;
 use crate::core::domain::root::Root;
+use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Db};
 use crate::trail::domain::composition::{card_applies, ViewShape};
-use crate::trail::domain::timeline::{parse_when, WhenValue};
+use crate::trail::domain::timeline::{parse_when, ParsedWhen, WhenValue};
 use crate::trail::jsonl::{print_crossings_jsonl, print_jsonl, JsonRetiredScopeEvent};
 use crate::trail::ops;
 use crate::trail::ops::compute::{TrailParams, DEFAULT_LIMIT};
 use crate::trail::ops::show::{PointerRelocation, ScopeRelation, ShowScope};
 use crate::trail::render::{
     drew_from_lines, format_counts, format_datetime, print_crossings, print_human,
+    read_times_on_line, when_refusal,
 };
 
 pub struct TrailArgs {
@@ -54,13 +56,23 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
     let zone = crate::user_zone();
     let today = zone.today();
     let (timeframe, time_label) = if args.today {
-        (Some(WhenValue::Since(today)), Some("today".to_string()))
+        let today = parse_when("today", today).map_err(|cause| anyhow!(cause))?;
+        (
+            Some(WhenValue::Since(today.value)),
+            Some("today".to_string()),
+        )
     } else if let Some(input) = &args.since {
-        let date = parse_when(input, today).map_err(|e| anyhow!(e))?;
-        (Some(WhenValue::Since(date)), Some(format!("since {input}")))
+        let parsed = read_when("--since", input, today)?;
+        (
+            Some(WhenValue::Since(parsed.value)),
+            Some(format!("since {}", when_label(input, &parsed, zone))),
+        )
     } else if let Some(input) = &args.on {
-        let date = parse_when(input, today).map_err(|e| anyhow!(e))?;
-        (Some(WhenValue::On(date)), Some(format!("on {input}")))
+        let parsed = read_when("--on", input, today)?;
+        (
+            Some(WhenValue::On(parsed.value)),
+            Some(format!("on {}", when_label(input, &parsed, zone))),
+        )
     } else {
         (None, None)
     };
@@ -126,6 +138,21 @@ pub fn run(db: &mut Db, args: TrailArgs) -> Result<TrailExit> {
         );
     }
     Ok(TrailExit::Reported)
+}
+
+/// A time-lens value, or the trail's own refusal of it.
+fn read_when(flag: &str, input: &str, today: jiff::civil::Date) -> Result<ParsedWhen> {
+    parse_when(input, today).map_err(|cause| anyhow!(when_refusal(flag, input, cause)))
+}
+
+/// The lens label's period: a relative word as typed, a typed date as its period on the
+/// user's clock, named as it was asked (`2024:06:15` → `2024-06-15`).
+fn when_label(input: &str, parsed: &ParsedWhen, zone: &UserZone) -> String {
+    if parsed.relative {
+        input.to_string()
+    } else {
+        parsed.value.on_clock(zone).printed_as_asked()
+    }
 }
 
 pub struct CrossingsArgs {
@@ -650,6 +677,7 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
         println!("  reason:   \"{reason}\"");
     }
     println!("  command:  {}", d.command_line);
+    println!("{}", read_times_on_line(d.zone.as_deref()));
     if show.scopes.is_empty() {
         println!("  scope:    global");
     } else {
@@ -761,6 +789,56 @@ fn show_scope_lines(scopes: &[ShowScope]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::core::testing::{insert_root, setup_test_db};
+
+    fn label(flag: &str, input: &str, zone: &UserZone) -> String {
+        let today = jiff::civil::date(2026, 7, 12);
+        let parsed = read_when(flag, input, today).unwrap();
+        let word = if flag == "--on" { "on" } else { "since" };
+        format!("{word} {}", when_label(input, &parsed, zone))
+    }
+
+    /// The lens label names the period asked for, on the user's clock: a typed date by its
+    /// printed form, a relative word as typed.
+    #[test]
+    fn the_lens_label_prints_the_period() {
+        let ams = UserZone::for_test("Europe/Amsterdam");
+        let nyc = UserZone::for_test("America/New_York");
+        assert_eq!(label("--on", "2024:06:15", &ams), "on 2024-06-15");
+        assert_eq!(
+            label("--on", "2024-06-15T14:30+02:00", &nyc),
+            "on 2024-06-15 08:30"
+        );
+        assert_eq!(label("--since", "saturday", &ams), "since saturday");
+        assert_eq!(label("--since", "2024-06", &ams), "since 2024-06");
+        assert_eq!(
+            label("--on", "2024-06-15T14:30:05.45", &ams),
+            "on 2024-06-15 14:30:05.45"
+        );
+    }
+
+    /// A period typed to a fraction of a second is named with its fraction, never cut to the
+    /// second: the label the lens header and the empty answer both print.
+    #[test]
+    fn a_fraction_period_is_named_as_asked() {
+        let zone = UserZone::for_test("Europe/Amsterdam");
+        assert_eq!(
+            label("--on", "2024-06-15T14:30:05.45", &zone),
+            "on 2024-06-15 14:30:05.45"
+        );
+        assert_eq!(
+            label("--since", "2024-06-15T14:30:05.45", &zone),
+            "since 2024-06-15 14:30:05.45"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_when_is_refused_by_the_trail() {
+        let today = jiff::civil::date(2026, 7, 12);
+        let err = read_when("--on", "2024-1-5", today)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("cannot read the date for --on\n"), "{err}");
+    }
 
     fn roots_of(conn: &rusqlite::Connection) -> Vec<Root> {
         repo::root::fetch_all(conn).unwrap()

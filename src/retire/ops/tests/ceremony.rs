@@ -3,20 +3,22 @@ use rusqlite::Connection;
 use crate::core::domain::config::RecordingMode;
 use crate::core::domain::decision::Decision;
 use crate::core::domain::format::format_date;
-use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::retire::domain::book_dir_name;
-use crate::retire::ops::ceremony::BindPlan;
+use crate::retire::ops::ceremony::{BindPlan, BoundBook};
+use crate::retire::ops::frame::{finalize_telling, TellingArtifact};
 use crate::retire::ops::verify::verify_book;
 use crate::retire::ops::{plan_bind, ReleaseOutcome, RetireCeremony, SHELF_DIR};
+use crate::story::StoryParams;
 
 use super::fixtures::{
-    begin_with, compile_to, every_fate_fixture, insert_decision, insert_source, ledger_config,
-    scope, set_decision_extras, test_telling, CEREMONY_NOW,
+    begin_in, begin_with, compile_to, every_fate_fixture, insert_decision, insert_source,
+    ledger_config, scope, set_decision_extras, test_telling, CEREMONY_NOW,
 };
 
 fn plan_for(conn: &Connection, root_id: i64) -> BindPlan {
@@ -863,4 +865,87 @@ fn a_failure_after_release_leaves_the_committed_row_alone() {
     assert_eq!(after.status, "completed", "the commit's own word stands");
     assert_eq!(after.summary, before.summary);
     assert_eq!(after.count_completed, before.count_completed);
+}
+
+// The book's clock
+
+/// Bind the telling the ceremony composes, untouched — the path a `--yes`
+/// retirement takes.
+fn bind_composed(ceremony: &mut RetireCeremony, conn: &Connection) -> BoundBook {
+    let draft = ceremony.compose_telling(conn).unwrap();
+    let telling = TellingArtifact {
+        text: finalize_telling(&draft).unwrap(),
+        hand_edited: false,
+        params: StoryParams::default(),
+    };
+    ceremony.bind(conn, telling).unwrap()
+}
+
+fn book_file(book: &BoundBook, name: &str) -> String {
+    std::fs::read_to_string(book.dir.join(name)).unwrap()
+}
+
+/// A stranger opening the book learns which clock its dates are on: beside the
+/// date `story.md` is written on, in `README.md` for every other file and the
+/// folder's name, and as `meta.toml`'s `zone` for a program.
+#[test]
+fn a_book_states_its_time_zone() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let amsterdam = UserZone::for_test("Europe/Amsterdam");
+    let stated = ReadTimesOn::of_user(&amsterdam);
+    let mut ceremony = begin_in(&conn, root_id, RecordingMode::Full, amsterdam, stated);
+    let book = bind_composed(&mut ceremony, &conn);
+
+    let story = book_file(&book, "story.md");
+    let lines: Vec<&str> = story.lines().collect();
+    let written_on = lines
+        .iter()
+        .position(|l| l.ends_with("It was written on 2025-07-20, the day the place was retired."))
+        .unwrap_or_else(|| panic!("no written-on line in:\n{story}"));
+    assert_eq!(
+        lines[written_on + 1],
+        "Its dates are in this time zone: Europe/Amsterdam."
+    );
+
+    let readme = book_file(&book, "README.md");
+    assert!(
+        readme.contains(
+            "Dates in this book's text — this file, story.md, timeline.md, notes.md — and\n\
+             in this folder's name are in this time zone: Europe/Amsterdam. The times in\n\
+             inventory.jsonl and meta.toml are in UTC.\n"
+        ),
+        "{readme}"
+    );
+
+    let meta: toml::Value = toml::from_str(&book_file(&book, "meta.toml")).unwrap();
+    assert_eq!(meta["zone"].as_str(), Some("Europe/Amsterdam"));
+    verify_book(&book.dir).unwrap();
+}
+
+/// The book states the clock the decision row states — one value, copied to
+/// both, never composed twice. The ceremony is handed a stated clock that
+/// differs from the one its dates read on, so a book that composed its own
+/// text from the zone it reads dates on would say `UTC` here.
+///
+/// *Smoke*: have the compile write `ReadTimesOn::of_user(&params.zone)`, or
+/// the frame do the same; each fails one assertion below.
+#[test]
+fn the_book_and_the_retirement_record_state_the_same_zone() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let stated = ReadTimesOn::of_user(&UserZone::for_test("Europe/Amsterdam"));
+    let mut ceremony = begin_in(&conn, root_id, RecordingMode::Full, UserZone::utc(), stated);
+    let book = bind_composed(&mut ceremony, &conn);
+
+    let row = retire_decision_row(&conn, &ceremony);
+    assert_eq!(row.zone.as_deref(), Some("Europe/Amsterdam"));
+    let meta: toml::Value = toml::from_str(&book_file(&book, "meta.toml")).unwrap();
+    assert_eq!(meta["zone"].as_str(), row.zone.as_deref(), "meta.toml");
+    assert!(
+        book_file(&book, "story.md").contains("Its dates are in this time zone: Europe/Amsterdam."),
+        "story.md"
+    );
+    assert!(
+        book_file(&book, "README.md").contains("in this time zone: Europe/Amsterdam."),
+        "README.md"
+    );
 }

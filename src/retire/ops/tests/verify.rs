@@ -1,4 +1,5 @@
 use crate::core::domain::config::RecordingMode;
+use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo;
 use crate::core::repo::db::open_in_memory_for_test;
@@ -242,7 +243,8 @@ fn a_book_without_a_story_claim_still_verifies() {
         &CompileParams {
             reason: None,
             now: 1_753_000_000,
-            zone: crate::core::domain::time::zone::UserZone::utc(),
+            zone: UserZone::utc(),
+            read_times_on: ReadTimesOn::of_user(&UserZone::utc()),
             dest_dir: dest.clone(),
             ceremony_decision_id: None,
             telling: None,
@@ -369,7 +371,8 @@ fn existing_compile_target_is_an_explicit_collision() {
         &CompileParams {
             reason: None,
             now: 0,
-            zone: crate::core::domain::time::zone::UserZone::utc(),
+            zone: UserZone::utc(),
+            read_times_on: ReadTimesOn::of_user(&UserZone::utc()),
             dest_dir: dest,
             ceremony_decision_id: None,
             telling: None,
@@ -377,4 +380,26 @@ fn existing_compile_target_is_an_explicit_collision() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("already exists"));
+}
+
+/// A book's `zone` states a clock for the reader; the verifier checks nothing
+/// against it, so a book bound before the field existed verifies the same.
+#[test]
+fn the_verifier_reads_a_book_with_or_without_its_zone() {
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let book_dir = tempfile::tempdir().unwrap();
+    let dest = book_dir.path().join("book");
+    compile_to(&conn, root_id, &dest);
+    verify_book(&dest).unwrap();
+
+    let meta_path = dest.join("meta.toml");
+    let meta = std::fs::read_to_string(&meta_path).unwrap();
+    let without: String = meta
+        .lines()
+        .filter(|l| !l.starts_with("zone = "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_ne!(without, meta, "the compiled book carries the field");
+    std::fs::write(&meta_path, without).unwrap();
+    verify_book(&dest).unwrap();
 }

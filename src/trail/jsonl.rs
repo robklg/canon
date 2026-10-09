@@ -401,6 +401,7 @@ mod tests {
             summary: Some("applied".to_string()),
             receipt_root_id: None,
             receipt_rel_path: None,
+            zone: None,
         };
         let rows = vec![DecisionExtraction {
             decision_id: 61,

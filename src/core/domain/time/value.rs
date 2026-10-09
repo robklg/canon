@@ -229,32 +229,10 @@ impl TimeValue {
 
     /// The one printed spelling, on the user's clock, at the value's precision:
     /// `2024`, `2024-06`, `2024-06-15`, `2024-06-15 14:30`, `2024-06-15 14:30:05`. A fraction
-    /// prints to the second, truncated. Never an offset.
+    /// prints to the second, truncated. Never an offset. The span's own spelling
+    /// ([`ClockSpan::printed`]), read through the frame rule.
     pub fn printed(&self, zone: &UserZone) -> String {
-        let span = self.on_clock(zone);
-        let s = span.start;
-        match span.precision {
-            Precision::Year => format!("{:04}", s.year()),
-            Precision::Month => format!("{:04}-{:02}", s.year(), s.month()),
-            Precision::Day => format!("{:04}-{:02}-{:02}", s.year(), s.month(), s.day()),
-            Precision::Minute => format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}",
-                s.year(),
-                s.month(),
-                s.day(),
-                s.hour(),
-                s.minute()
-            ),
-            Precision::Second | Precision::Fraction => format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                s.year(),
-                s.month(),
-                s.day(),
-                s.hour(),
-                s.minute(),
-                s.second()
-            ),
-        }
+        self.on_clock(zone).printed()
     }
 
     /// The one ISO 8601 spelling of what is stored: its form, its precision and its offset —
@@ -332,12 +310,16 @@ impl TimeValue {
     pub fn legacy_epoch_number(&self) -> i64 {
         match self.0 {
             Repr::Instant { at, .. } => floor_seconds(at.as_second(), at.subsec_nanosecond()),
-            Repr::Clock { at, .. } => {
-                let since = at.duration_since(civil::date(1970, 1, 1).at(0, 0, 0, 0));
-                seconds_floor(since)
-            }
+            Repr::Clock { at, .. } => clock_secs_as_if_utc(at),
         }
     }
+}
+
+/// A clock reading counted as seconds since 1970 as if it were UTC, rounded toward the past:
+/// arithmetic on the reading alone, no zone and no offset read. An encoding and a bound, never
+/// a reading of the user's clock: no comparison or selection may use it.
+pub fn clock_secs_as_if_utc(at: DateTime) -> i64 {
+    seconds_floor(at.duration_since(civil::date(1970, 1, 1).at(0, 0, 0, 0)))
 }
 
 /// Seconds rounded toward the past, whatever sign the sub-second part carries.
@@ -369,17 +351,25 @@ fn written(at: DateTime, precision: Precision) -> String {
             at.minute(),
             at.second()
         ),
-        Precision::Fraction => {
-            let digits = format!("{:09}", at.subsec_nanosecond());
-            let kept = digits.trim_end_matches('0');
-            let kept = if kept.is_empty() { "0" } else { kept };
-            format!(
-                "{date}T{:02}:{:02}:{:02}.{kept}",
-                at.hour(),
-                at.minute(),
-                at.second()
-            )
-        }
+        Precision::Fraction => format!(
+            "{date}T{:02}:{:02}:{:02}.{}",
+            at.hour(),
+            at.minute(),
+            at.second(),
+            fraction_digits(at.subsec_nanosecond())
+        ),
+    }
+}
+
+/// A fraction of a second's digits as written back: no trailing zeros, never rounded, and
+/// always at least one digit, so the text reads back at fraction precision.
+fn fraction_digits(nanos: i32) -> String {
+    let digits = format!("{nanos:09}");
+    let kept = digits.trim_end_matches('0');
+    if kept.is_empty() {
+        "0".to_string()
+    } else {
+        kept.to_string()
     }
 }
 
@@ -399,14 +389,6 @@ impl ClockSpan {
     /// arithmetic); the start itself for a fraction, which is a point. At the top of year
     /// 9999 the next grain is past the last clock reading jiff holds, and the end is that
     /// last reading.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "half of the frame rule's span, pinned now; its first production reader is \
-                      the comparison a typed date binds to"
-        )
-    )]
     pub fn end(&self) -> DateTime {
         let grain = match self.precision {
             Precision::Year => 1.year(),
@@ -421,6 +403,69 @@ impl ClockSpan {
 
     pub fn precision(&self) -> Precision {
         self.precision
+    }
+
+    /// Whether this whole period lies inside `period` — what `=` means against a typed
+    /// period. Clock readings only: no instant is computed.
+    pub fn lies_inside(&self, period: &ClockSpan) -> bool {
+        self.start >= period.start && self.end() <= period.end()
+    }
+
+    /// Whether this period starts at or after `period`'s start — what `>=` means against a
+    /// typed period.
+    pub fn starts_at_or_after(&self, period: &ClockSpan) -> bool {
+        self.start >= period.start
+    }
+
+    /// The one printed spelling of a time: `2024`, `2024-06`, `2024-06-15`,
+    /// `2024-06-15 14:30`, `2024-06-15 14:30:05`. A fraction prints to the second, truncated,
+    /// never rounded. Never an offset.
+    pub fn printed(&self) -> String {
+        self.spelled(false)
+    }
+
+    /// A typed period named back as it was asked: [`printed`](Self::printed), except that a
+    /// period written to a fraction of a second keeps its fraction digits
+    /// (`2024-06-15 14:30:05.45` — no trailing zeros, never rounded). It names a period a
+    /// person asked for; a stored value always prints through `printed`.
+    pub fn printed_as_asked(&self) -> String {
+        self.spelled(true)
+    }
+
+    /// The period's spelling; with `fraction`, a fraction's digits are kept.
+    fn spelled(&self, fraction: bool) -> String {
+        let s = self.start;
+        let date = match self.precision {
+            Precision::Year => return format!("{:04}", s.year()),
+            Precision::Month => return format!("{:04}-{:02}", s.year(), s.month()),
+            _ => format!("{:04}-{:02}-{:02}", s.year(), s.month(), s.day()),
+        };
+        match self.printed_time(fraction) {
+            Some(time) => format!("{date} {time}"),
+            None => date,
+        }
+    }
+
+    /// The time of day alone, as asked: `14:30`, `14:30:05`, `14:30:05.45`; `None` for a
+    /// period of a day or longer.
+    pub fn printed_time_as_asked(&self) -> Option<String> {
+        self.printed_time(true)
+    }
+
+    /// The time of day at the period's grain; with `fraction`, a fraction's digits are kept.
+    fn printed_time(&self, fraction: bool) -> Option<String> {
+        let s = self.start;
+        let (h, m, sec) = (s.hour(), s.minute(), s.second());
+        match self.precision {
+            Precision::Year | Precision::Month | Precision::Day => None,
+            Precision::Minute => Some(format!("{h:02}:{m:02}")),
+            Precision::Second => Some(format!("{h:02}:{m:02}:{sec:02}")),
+            Precision::Fraction if !fraction => Some(format!("{h:02}:{m:02}:{sec:02}")),
+            Precision::Fraction => Some(format!(
+                "{h:02}:{m:02}:{sec:02}.{}",
+                fraction_digits(s.subsec_nanosecond())
+            )),
+        }
     }
 }
 
@@ -471,6 +516,80 @@ mod tests {
         assert_eq!(skipped.on_clock(&zone).start(), dt("2024-03-31T02:30:00"));
         assert_eq!(skipped.on_clock(&zone).end(), dt("2024-03-31T02:31:00"));
         assert_eq!(skipped.printed(&zone), "2024-03-31 02:30");
+    }
+
+    fn span(text: &str) -> ClockSpan {
+        read_time(text).unwrap().on_clock(&ams())
+    }
+
+    /// The trail's period reading is the whole-period table's first two rows: `=P` holds when
+    /// the whole value lies inside the period, `>=P` when it starts at or after the period's
+    /// start. Both read clock readings only.
+    #[test]
+    fn clock_span_comparisons_follow_the_whole_period_table() {
+        let second = span("2024-06-15 14:30:05");
+        for period in ["2024-06-15 14:30", "2024-06-15", "2024-06", "2024"] {
+            assert!(second.lies_inside(&span(period)), "{period}");
+        }
+        // One tick past the end of the minute lies outside it.
+        assert!(!span("2024-06-15 14:31:00").lies_inside(&span("2024-06-15 14:30")));
+        assert!(!span("2024-06-15 14:29:59").lies_inside(&span("2024-06-15 14:30")));
+        // A whole period inside itself; a longer one is not inside a shorter one.
+        assert!(span("2024-06").lies_inside(&span("2024-06")));
+        assert!(!span("2024-06").lies_inside(&span("2024-06-15")));
+
+        let minute = span("2024-06-15 14:30");
+        assert!(span("2024-06-15 14:30:00").starts_at_or_after(&minute));
+        assert!(span("2025-01-01 00:00:00").starts_at_or_after(&minute));
+        assert!(!span("2024-06-15 14:29:59").starts_at_or_after(&minute));
+
+        // A fraction is a point: no second lies inside it, and the first second at or after
+        // it is the next whole one.
+        let point = span("2024-06-15 14:30:05.45");
+        assert!(!second.lies_inside(&point));
+        assert!(!second.starts_at_or_after(&point));
+        assert!(span("2024-06-15 14:30:06").starts_at_or_after(&point));
+
+        // The last periods of 9999 end at the last reading jiff holds and still compare.
+        let last = span("9999-12-31 23:59:59");
+        assert!(last.lies_inside(&span("9999")));
+        assert!(last.lies_inside(&span("9999-12-31")));
+        assert!(last.starts_at_or_after(&span("9999-12-31")));
+    }
+
+    #[test]
+    fn a_period_is_named_as_asked_with_its_fraction() {
+        let cases = [
+            ("2024", "2024", None),
+            ("2024-06", "2024-06", None),
+            ("2024:06:15", "2024-06-15", None),
+            ("2024-06-15 14:30", "2024-06-15 14:30", Some("14:30")),
+            (
+                "2024-06-15 14:30:05",
+                "2024-06-15 14:30:05",
+                Some("14:30:05"),
+            ),
+            (
+                "2024-06-15T14:30:05.45",
+                "2024-06-15 14:30:05.45",
+                Some("14:30:05.45"),
+            ),
+            (
+                "2024-06-15T14:30:05.450",
+                "2024-06-15 14:30:05.45",
+                Some("14:30:05.45"),
+            ),
+        ];
+        for (text, asked, time) in cases {
+            let span = span(text);
+            assert_eq!(span.printed_as_asked(), asked, "{text}");
+            assert_eq!(span.printed_time_as_asked().as_deref(), time, "{text}");
+        }
+        // A stored value's one printed spelling still truncates the fraction.
+        assert_eq!(
+            span("2024-06-15T14:30:05.45").printed(),
+            "2024-06-15 14:30:05"
+        );
     }
 
     #[test]

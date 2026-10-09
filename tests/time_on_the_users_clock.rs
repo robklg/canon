@@ -536,3 +536,145 @@ fn a_refresh_states_the_door_before_the_zone_cause() {
     assert!(!refused.stderr.contains("Error:"), "{}", refused.stderr);
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), before);
 }
+
+impl Home {
+    /// The ids of the decisions recorded under `command`, oldest first, read from the trail.
+    fn decision_ids(&self, command: &str) -> Vec<i64> {
+        let run = self.run("UTC", &["trail", "--global", "--jsonl"], None);
+        let mut ids: Vec<i64> = run
+            .stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|v| v["type"] == "decision" && v["command"] == command)
+            .filter_map(|v| v["id"].as_i64())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// `trail show <id>`'s `read times on:` value, checked to sit on the line after `command:`.
+    fn shown_zone(&self, id: i64) -> String {
+        let run = self.run("UTC", &["trail", "show", &id.to_string()], None);
+        let lines: Vec<&str> = run.stdout.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("  read times on: "))
+            .unwrap_or_else(|| panic!("no read times on line:\n{}", run.stdout));
+        assert!(
+            at > 0 && lines[at - 1].starts_with("  command:"),
+            "read times on: must follow command:\n{}",
+            run.stdout
+        );
+        lines[at]
+            .strip_prefix("  read times on: ")
+            .expect("found by its prefix")
+            .to_string()
+    }
+
+    /// The `[meta].zone` of decision `id`'s receipt, found by its file name anywhere under
+    /// the archive root.
+    fn receipt_zone(&self, id: i64, command: &str) -> String {
+        let name = format!("{id:06}-{command}.toml");
+        let mut stack = vec![self.path("archive")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.file_name().is_some_and(|n| n == name.as_str()) {
+                    let receipt: toml::Value =
+                        std::fs::read_to_string(&path).unwrap().parse().unwrap();
+                    return receipt["meta"]["zone"]
+                        .as_str()
+                        .expect("[meta].zone")
+                        .to_string();
+                }
+            }
+        }
+        panic!("no receipt {name} under the archive");
+    }
+}
+
+/// **A manifest's run records the manifest's zone**: a manifest made in Amsterdam, refreshed
+/// and applied on a New York machine, records `Europe/Amsterdam` on the generate, refresh and
+/// apply rows and in apply's receipt — the clock their times were read on, never the machine's.
+#[test]
+fn a_manifest_run_records_the_manifests_zone() {
+    let home = Home::new();
+    let manifest = home.manifest_made_in("Europe/Amsterdam");
+    home.run("America/New_York", &["cluster", "refresh", &manifest], None);
+    home.run("America/New_York", &["apply", &manifest, "--yes"], None);
+
+    for command in ["cluster_generate", "cluster_refresh", "apply"] {
+        let ids = home.decision_ids(command);
+        assert_eq!(ids.len(), 1, "{command}: {ids:?}");
+        assert_eq!(home.shown_zone(ids[0]), "Europe/Amsterdam", "{command}");
+    }
+    let apply = home.decision_ids("apply")[0];
+    assert_eq!(home.receipt_zone(apply, "apply"), "Europe/Amsterdam");
+}
+
+/// **A record states the clock its command read**: `exclude set --where` on a New York
+/// machine records `America/New_York` on its row and in its receipt; on a machine whose `TZ`
+/// Canon cannot read, both say UTC and that the zone is unknown.
+#[test]
+fn an_exclusion_records_the_users_zone() {
+    for (tz, said) in [
+        ("America/New_York", "America/New_York"),
+        (
+            "Europe/Amsterdm",
+            "UTC (this machine's time zone is unknown)",
+        ),
+    ] {
+        let home = Home::new();
+        std::fs::create_dir_all(home.path("archive")).unwrap();
+        let archive = home.path_str("archive");
+        home.run(
+            "UTC",
+            &["scan", "--add", "--role", "archive", &archive],
+            None,
+        );
+        let photos = home.path_str("photos");
+        home.run(
+            tz,
+            &[
+                "exclude",
+                "set",
+                &photos,
+                "--where",
+                "filename = 'f0.jpg'",
+                "--yes",
+            ],
+            None,
+        );
+
+        let ids = home.decision_ids("exclude_set");
+        assert_eq!(ids.len(), 1, "{tz}: {ids:?}");
+        assert_eq!(home.shown_zone(ids[0]), said, "{tz}");
+        assert_eq!(home.receipt_zone(ids[0], "exclude_set"), said, "{tz}");
+    }
+}
+
+/// **The trail refuses a date it cannot read with its own refusal**: a one-digit month is not
+/// in the one list, so `trail --on 2024-1-5` exits non-zero naming the flag and the forms.
+#[test]
+fn the_trail_refuses_a_date_outside_the_one_list() {
+    let home = Home::new();
+    let refused = home.attempt(
+        "Europe/Amsterdam",
+        &["trail", "--global", "--on", "2024-1-5"],
+    );
+    assert!(!refused.success);
+    assert!(
+        refused
+            .stderr
+            .contains("cannot read the date for --on\n  \"2024-1-5\" is not in the right format."),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.contains("2024, 2024-06, 2024-06-15"),
+        "{}",
+        refused.stderr
+    );
+}

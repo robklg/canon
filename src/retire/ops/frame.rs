@@ -8,7 +8,7 @@
 use anyhow::{bail, Result};
 
 use crate::core::domain::format::{format_count, format_date, format_size};
-use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 use crate::story::{
     fmt_locations, reference_place_lines, LocationAggregate, StoryParams, StoryReport, Voicing,
 };
@@ -23,6 +23,8 @@ pub struct TellingFrame {
     pub bound_on: i64,
     /// The clock the prose dates read on: the user's.
     pub zone: UserZone,
+    /// The same clock as the book states it, beside the date it is written on.
+    pub read_times_on: ReadTimesOn,
     /// `CARGO_PKG_VERSION` — the closing stamp names its writer.
     pub canon_version: String,
     /// Where the chosen content lives now: the aggregate over the apply
@@ -124,6 +126,10 @@ pub fn compose_reference_telling(report: &StoryReport, frame: &TellingFrame) -> 
     lines.push(format!(
         "let go, and why. It was written on {}, the day the place was retired.",
         format_date(frame.bound_on, &frame.zone)
+    ));
+    lines.push(format!(
+        "Its dates are in this time zone: {}.",
+        frame.read_times_on.as_str()
     ));
     lines.push("It is plain text and needs nothing but a reader.".into());
     lines.push(String::new());
@@ -552,6 +558,7 @@ mod tests {
             retirement_reason: Some("the story is complete".to_string()),
             bound_on: 0,
             zone: UserZone::utc(),
+            read_times_on: ReadTimesOn::of_user(&UserZone::utc()),
             canon_version: "0.9.0".to_string(),
             archived_destinations: locations(&[("/archive/media", 5)]),
             drive_ledger: Some(3),

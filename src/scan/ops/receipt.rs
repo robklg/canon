@@ -115,6 +115,7 @@ pub fn write_deletion_receipts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use tempfile::TempDir;
 
     use crate::core::domain::config::{LedgerConfig, RecordingMode};
@@ -133,6 +134,7 @@ mod tests {
                 recording,
                 ..LedgerConfig::default()
             },
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 

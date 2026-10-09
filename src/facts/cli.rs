@@ -7,6 +7,7 @@ use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
@@ -569,6 +570,7 @@ pub fn delete_facts(
                 && !no_receipt
                 && !options.dry_run,
             ledger_config: config.clone(),
+            zone: ReadTimesOn::of_user(crate::user_zone()),
         };
         let result = execute_delete(
             conn,
@@ -619,6 +621,7 @@ pub fn prune_stale(
             record_enabled: config.recording != RecordingMode::Off && !dry_run,
             receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
             ledger_config: config.clone(),
+            zone: ReadTimesOn::of_user(crate::user_zone()),
         };
         let result = execute_prune_stale(conn, Some(&decision))?;
         println!("{}", result.summary);
@@ -670,6 +673,7 @@ pub fn prune_orphaned_objects(
             record_enabled: config.recording != RecordingMode::Off && !dry_run,
             receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
             ledger_config: config.clone(),
+            zone: ReadTimesOn::of_user(crate::user_zone()),
         };
         let result = execute_prune_orphaned(db, Some(&decision))?;
         println!("{}", result.summary);
@@ -737,6 +741,7 @@ pub fn prune_excluded_facts(
             record_enabled: config.recording != RecordingMode::Off && !dry_run,
             receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
             ledger_config: config.clone(),
+            zone: ReadTimesOn::of_user(crate::user_zone()),
         };
         let result = execute_prune_excluded(conn, scope, Some(&decision))?;
         if !result.summary.is_empty() {

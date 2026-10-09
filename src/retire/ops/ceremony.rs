@@ -11,6 +11,7 @@ use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format::format_date;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::receipt::LedgerRootOutcome;
@@ -151,6 +152,9 @@ pub struct CeremonyParams {
     pub now: i64,
     /// The clock the book's prose dates read on: the user's.
     pub zone: UserZone,
+    /// The same clock as the records state it — copied into the decision row
+    /// and the book, so the two cannot name different clocks.
+    pub read_times_on: ReadTimesOn,
     pub command_line: String,
     pub config: LedgerConfig,
 }
@@ -168,6 +172,8 @@ pub struct RetireCeremony {
     reason: Option<String>,
     now: i64,
     zone: UserZone,
+    /// The clock the book and the decision row state: one value, copied to both.
+    read_times_on: ReadTimesOn,
     /// Review-time basis for the release movement's world-moved re-check.
     snapshot_source_count: i64,
     snapshot_max_decision_id: Option<i64>,
@@ -212,6 +218,7 @@ pub fn begin_ceremony(
         // recording alone.
         receipt_enabled: false,
         ledger_config: params.config,
+        zone: params.read_times_on.clone(),
     };
     let recorder = DecisionRecorder::start(conn, &decision, None);
 
@@ -222,6 +229,7 @@ pub fn begin_ceremony(
         reason: params.reason,
         now: params.now,
         zone: params.zone,
+        read_times_on: params.read_times_on,
         snapshot_source_count: review.snapshot_source_count,
         snapshot_max_decision_id: review.snapshot_max_decision_id,
         released: false,
@@ -281,6 +289,7 @@ impl RetireCeremony {
             retirement_reason: self.reason.clone(),
             bound_on: self.now,
             zone: self.zone.clone(),
+            read_times_on: self.read_times_on.clone(),
             canon_version: env!("CARGO_PKG_VERSION").to_string(),
             archived_destinations: crate::story::aggregate_locations(
                 &dirs,
@@ -330,6 +339,7 @@ impl RetireCeremony {
                 reason: self.reason.clone(),
                 now: self.now,
                 zone: self.zone.clone(),
+                read_times_on: self.read_times_on.clone(),
                 dest_dir: self.plan.temp_dir.clone(),
                 ceremony_decision_id: self.recorder.decision_id(),
                 telling: Some(telling),

@@ -120,7 +120,12 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   stamps, the inventory's `mtime`); **prose** dates and the book's directory name are the
   binder's day (`core::domain::format::format_date`), the day the story
   inside and the trail's own filing both use — without the split, a book bound in the evening
-  dates its README a day after its story. Hashes
+  dates its README a day after its story. **The book states its clock**: one
+  `ReadTimesOn`, built when the ceremony begins, is the retirement decision's zone and is
+  copied into `story.md`'s opening, the README's dates paragraph and `meta.toml`'s top-level
+  `zone`, so the book and the decision row cannot name two clocks
+  (`the_book_and_the_retirement_record_state_the_same_zone`). The verifier does not read
+  `zone`: it is a statement for the reader, and a book bound without it verifies. Hashes
   are `sha256:`-prefixed: Canon-independence is the format's point. `BookMeta` declares its values
   before its sub-tables, matching the order TOML writes them in.
 - **`verify_book` is production code, not a test helper** — the release movement's hinge: it

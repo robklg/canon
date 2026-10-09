@@ -532,6 +532,7 @@ mod tests {
             created_at,
             receipt_root_id: None,
             receipt_rel_path: None,
+            zone: None,
         }
     }
 

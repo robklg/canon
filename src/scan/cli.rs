@@ -7,6 +7,7 @@ use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::format::shell_quote;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::ops::scope::{cwd_for, resolve_root_path_any};
 use crate::core::repo::{self, Connection, Db};
@@ -169,6 +170,7 @@ pub fn run(
         record_enabled: config.recording != RecordingMode::Off,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
         ledger_config: config.clone(),
+        zone: ReadTimesOn::of_user(crate::user_zone()),
     };
     let mut recorder = DecisionRecorder::start(conn, &decision, None);
 
@@ -649,24 +651,29 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn run_scan(db: &Db, paths: &[PathBuf], missing: bool) -> Result<()> {
-        run(
-            db,
-            paths,
-            None,
-            false,
-            None,
-            false,
-            true,
-            false,
-            true,
-            missing,
-            "canon scan",
-            &LedgerConfig {
-                recording: RecordingMode::Records,
-                ..LedgerConfig::default()
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                run(
+                    db,
+                    paths,
+                    None,
+                    false,
+                    None,
+                    false,
+                    true,
+                    false,
+                    true,
+                    missing,
+                    "canon scan",
+                    &LedgerConfig {
+                        recording: RecordingMode::Records,
+                        ..LedgerConfig::default()
+                    },
+                    true,
+                    None,
+                )
             },
-            true,
-            None,
         )
     }
 
@@ -937,24 +944,29 @@ mod tests {
         recording: RecordingMode,
         missing: bool,
     ) -> Result<()> {
-        run(
-            db,
-            paths,
-            role,
-            add,
-            None,
-            false,
-            no_hash,
-            false,
-            true,
-            missing,
-            "canon scan",
-            &LedgerConfig {
-                recording,
-                ..LedgerConfig::default()
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                run(
+                    db,
+                    paths,
+                    role,
+                    add,
+                    None,
+                    false,
+                    no_hash,
+                    false,
+                    true,
+                    missing,
+                    "canon scan",
+                    &LedgerConfig {
+                        recording,
+                        ..LedgerConfig::default()
+                    },
+                    false,
+                    None,
+                )
             },
-            false,
-            None,
         )
     }
 

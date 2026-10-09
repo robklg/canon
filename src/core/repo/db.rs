@@ -484,6 +484,11 @@ fn migrations() -> Migrations<'static> {
              CREATE INDEX facts_key_entity ON facts(key, entity_type, entity_id);
              CREATE UNIQUE INDEX facts_entity_key_uq ON facts(entity_type, entity_id, key);",
         ),
+        // 9: the clock a decision read times on, as the text its receipt states
+        //    (`ReadTimesOn`). NULL is a decision recorded before Canon kept the
+        //    zone; nothing is backfilled, because nothing recorded which clock
+        //    an older decision read.
+        M::up("ALTER TABLE decisions ADD COLUMN zone TEXT;"),
     ])
 }
 
@@ -1293,5 +1298,34 @@ mod tests {
                 .unwrap_or_else(|e| panic!("({columns}) = ({values}) must be stored: {e}"));
             conn.execute("DELETE FROM facts", []).unwrap();
         }
+    }
+
+    /// A decision recorded before migration 9 reads no zone; one recorded after reads the
+    /// text it was given.
+    #[test]
+    fn migration9_leaves_an_older_decision_without_a_zone() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 8).unwrap();
+        conn.execute_batch(
+            "INSERT INTO decisions (id, command, command_line, status, canon_version, created_at)
+                 VALUES (1, 'scan', 'canon scan', 'completed', '0.6.0', 500);",
+        )
+        .unwrap();
+
+        migrations().to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO decisions (id, command, command_line, status, canon_version, created_at, zone)
+                 VALUES (2, 'scan', 'canon scan', 'completed', '0.7.0', 600, 'Europe/Amsterdam');",
+        )
+        .unwrap();
+
+        let zone_of = |id: i64| -> Option<String> {
+            conn.query_row("SELECT zone FROM decisions WHERE id = ?", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(zone_of(1), None);
+        assert_eq!(zone_of(2).as_deref(), Some("Europe/Amsterdam"));
     }
 }

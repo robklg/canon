@@ -8,6 +8,7 @@ use crate::core::domain::format_count;
 use crate::core::domain::path::validate_paths_in_roots;
 use crate::core::domain::root::find_containing_root;
 use crate::core::domain::scope::DecisionScope;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::{resolve_ledger_root, LedgerRootOutcome, ReceiptPlacement};
 use crate::core::ops::scope::{classify_all_indexed, resolve_path};
@@ -53,6 +54,7 @@ fn make_decision(
         record_enabled: config.recording != RecordingMode::Off && !dry_run,
         receipt_enabled: config.recording == RecordingMode::Full && !no_receipt && !dry_run,
         ledger_config: config.clone(),
+        zone: ReadTimesOn::of_user(crate::user_zone()),
     })
 }
 
@@ -1066,14 +1068,19 @@ mod tests {
             yes: true,
         };
 
-        let result = set_by_id(
-            &mut db,
-            source_id,
-            &options,
-            "test",
-            &LedgerConfig::default(),
-            false,
-            None,
+        let result = crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                set_by_id(
+                    &mut db,
+                    source_id,
+                    &options,
+                    "test",
+                    &LedgerConfig::default(),
+                    false,
+                    None,
+                )
+            },
         );
         assert!(result.is_ok());
 
@@ -1348,14 +1355,19 @@ mod tests {
             verbose: false,
             yes: true,
         };
-        set_by_path(
-            &mut db,
-            Path::new(&format!("/photos/{NFC_DIR}/a.jpg")),
-            &options,
-            "test",
-            &LedgerConfig::default(),
-            true,
-            None,
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                set_by_path(
+                    &mut db,
+                    Path::new(&format!("/photos/{NFC_DIR}/a.jpg")),
+                    &options,
+                    "test",
+                    &LedgerConfig::default(),
+                    true,
+                    None,
+                )
+            },
         )
         .unwrap();
 
@@ -1388,14 +1400,19 @@ mod tests {
             verbose: false,
             yes: true,
         };
-        set_object_by_file(
-            &mut db,
-            Path::new(&format!("/photos/{NFC_DIR}/a.jpg")),
-            &options,
-            "test",
-            &LedgerConfig::default(),
-            true,
-            None,
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                set_object_by_file(
+                    &mut db,
+                    Path::new(&format!("/photos/{NFC_DIR}/a.jpg")),
+                    &options,
+                    "test",
+                    &LedgerConfig::default(),
+                    true,
+                    None,
+                )
+            },
         )
         .unwrap();
 

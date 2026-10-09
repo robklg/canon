@@ -37,6 +37,17 @@ words to Canon's own:
 | empty file | `contentless` |
 | returned to consideration | `restored` |
 
+It also states the time zone the book's dates are in. The dates written as text, in
+the README itself, `story.md`, `timeline.md` and `notes.md`, and the date in the book
+folder's name are on the clock of the person who bound the book; the times in
+`inventory.jsonl` and `meta.toml` are in UTC:
+
+```
+Dates in this book's text — this file, story.md, timeline.md, notes.md — and
+in this folder's name are in this time zone: Europe/Amsterdam. The times in
+inventory.jsonl and meta.toml are in UTC.
+```
+
 ## story.md
 
 The story as told: the same reading [`canon roots
@@ -46,7 +57,8 @@ it lives now, what was let go and why, in plain words.
 
 The page runs in a fixed order:
 
-1. An opening that orients the reader: what this document is, and its date.
+1. An opening that orients the reader: what this document is, its date, and the time
+   zone its dates are in (`Its dates are in this time zone: Europe/Amsterdam.`).
 2. A short explanation of how to read the entries.
 3. The places, in full. A bound story is never capped.
 4. A tally of where everything went.
@@ -147,6 +159,10 @@ The machine-readable half, `version = 1`:
 - `gaps` — every self-explaining gap: unreadable receipts (per-item origin degraded
   to `covered`), an ungathered ledger, and so on. An empty list asserts that nothing
   this book should hold is missing from it.
+- `zone` — the time zone the book's prose dates and folder name are in, the same text
+  the retirement decision records ([the time zone a decision reads times
+  on](../concepts/decisions.md#the-time-zone-a-decision-reads-times-on)). Absent in
+  books bound before it was added; such books verify unchanged.
 - `[identity]` — path, role, comment, suspension, `first_indexed` (when the earliest
   surviving row was first indexed — row evidence, honest on roots older than
   decision recording), last scan, `compiled_at`, the user's reason, `decision_id`

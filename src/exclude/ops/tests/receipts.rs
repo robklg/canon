@@ -1,5 +1,6 @@
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::Connection;
@@ -42,6 +43,7 @@ fn full_decision(command: DecisionCommand) -> DecisionParams {
         record_enabled: true,
         receipt_enabled: true,
         ledger_config: LedgerConfig::default(),
+        zone: ReadTimesOn::of_user(&UserZone::utc()),
     }
 }
 
@@ -83,6 +85,7 @@ fn run_exclusion_rolls_back_on_error() {
         record_enabled: true,
         receipt_enabled: false,
         ledger_config: LedgerConfig::default(),
+        zone: ReadTimesOn::of_user(&UserZone::utc()),
     };
 
     let result = run_exclusion::<ExcludeReceipt, _>(
@@ -132,6 +135,7 @@ fn decision_scopes_populated_for_scoped_exclude() {
         record_enabled: true,
         receipt_enabled: false,
         ledger_config: LedgerConfig::default(),
+        zone: ReadTimesOn::of_user(&UserZone::utc()),
     };
 
     execute_set(
@@ -170,6 +174,7 @@ fn decision_scopes_empty_for_global_exclude() {
         record_enabled: true,
         receipt_enabled: false,
         ledger_config: LedgerConfig::default(),
+        zone: ReadTimesOn::of_user(&UserZone::utc()),
     };
 
     execute_set(

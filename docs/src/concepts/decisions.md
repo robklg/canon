@@ -34,6 +34,29 @@ Each decision captures:
 - **Summary** — the completion message you saw
 - **Canon version** — which version produced the record
 - **Timestamp** — when the command started
+- **Time zone** — the zone the command read times on
+
+### The time zone a decision reads times on
+
+A decision records the time zone its command read times on: your clock's zone when it ran, or, for `cluster generate`, `cluster refresh` and `apply`, the zone the manifest records ([the manifest's time zone](../commands/archive/cluster.md#the-manifests-time-zone)). The record and every receipt the decision writes carry the same text: [`trail show`](../commands/query/trail.md#inspecting-one-decision-trail-show) prints it as `read times on:`, and a receipt holds it as `zone` in `[meta]`.
+
+A zone with no name is recorded as what Canon read:
+
+| Your clock | Recorded as |
+|---|---|
+| A named zone | `Europe/Amsterdam` |
+| A fixed offset | `+03:00` |
+| A `TZ` rule with no name | the rule as written: `CET-1CEST,M3.5.0,M10.5.0/3` |
+| Zone rules with no name and no rule text | `local rules with no name (UTC+01:00 at run time)` |
+| A zone Canon cannot read | `UTC (this machine's time zone is unknown)` |
+
+A decision recorded before Canon kept the zone has none, and `trail show` says what its times meant then:
+
+```
+  read times on: UTC (recorded before Canon kept the zone; then a bare number against a time was seconds since 1970, and a typed date one moment at UTC midnight)
+```
+
+A receipt with no `zone` field was written then too: Canon read every time in UTC, a bare number against a time as seconds since 1970, and a typed date as one moment at UTC midnight.
 
 ## Two-Phase Recording
 
@@ -86,6 +109,7 @@ transition = "deleted"
 posture = "observed"
 status = "completed"
 # ...summary, canon_version, command_line...
+zone = "Europe/Amsterdam"
 
 [meta.locus]
 path = "/mnt/old-drive/photos"
@@ -95,6 +119,7 @@ id = 3
 - **`transition`** — the *what*, in fixed vocabulary: `archived`, `excluded`, `restored` (an exclusion undone), or `deleted`. This is the same word `canon trail` uses for the same action; the trail and the receipt tell one story in one vocabulary.
 - **`posture`** — whether Canon **performed** the change or **observed** one the world made. A scan-detected deletion is `observed`: Canon witnessed a loss, it did not cause one. Every other receipt today is `performed`.
 - **`[meta.locus]`** — the identity of the root the receipt is anchored to, making its placement into data. Locus is the *receipt's* where, not the action's: an exclusion run in a source folder has its `scope` there and its per-item `root`s there, but its locus is the archive ledger root, because that is where the receipt itself lives. **`path`** is the root's canonical path captured at write time — authoritative for a human and for rebuilding an index from disk, and still meaningful after a drive is remounted elsewhere or a receipt is copied off its root. **`id`** is the join key against a live database. Both are always present.
+- **`zone`** — the time zone the decision read times on, the same text as its record ([above](#the-time-zone-a-decision-reads-times-on)).
 - **`origin_disposition`** — apply receipts only: `retained` (a copy; the content now lives in two places) or `relocated` (a move; the origin no longer holds the file).
 
 **The granularity rule.** Subjects that can span roots always carry their own per-item root identity: apply items keep their `source_root`; exclusion and object entries keep their `root`. The **locus** root is always meta-level. Receipt-level-only identity (no per-item root, as in a deletion receipt) is valid exactly where single-root-ness is guaranteed by construction: a deletion receipt is coalesced to one root, so its items inherit the meta locus.

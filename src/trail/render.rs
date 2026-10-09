@@ -8,11 +8,14 @@ use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::RegisteredFate;
 use crate::core::domain::format::{cap_path, clock_of, format_count, format_date, format_size};
 use crate::core::domain::root::{Root, ROOT_SUSPENDED_MARKER};
+use crate::core::domain::time::reading::{TimeReadError, EXAMPLE_FORMS, EXAMPLE_WITH_OFFSET};
 use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::scope::ResolvedScope;
 use crate::trail::domain::composition::{CompositionCard, OriginLine, TransitionedLine};
 use crate::trail::domain::placement::{aggregate_placement_lines, RowAspect, ScopeMatch};
-use crate::trail::domain::timeline::{decision_act, DayRollup, FateLine, TimelineEvent};
+use crate::trail::domain::timeline::{
+    decision_act, DayGroup, DayPart, DayRollup, FateLine, TimelineEvent,
+};
 use crate::trail::ops::compute::{
     ArrivalRollup, ExtractionRollup, RearrangementRollup, DEFAULT_LIMIT,
 };
@@ -188,12 +191,7 @@ pub(super) fn print_human(
             };
             for day in days {
                 println!();
-                let weekday = day.date.strftime("%A %Y-%m-%d");
-                if day.rollup.is_empty() {
-                    println!("{weekday}");
-                } else {
-                    println!("{weekday} — {}", format_rollup(&day.rollup));
-                }
+                println!("{}", day_heading(day));
                 println!();
                 for event in &day.events {
                     if long {
@@ -1853,6 +1851,85 @@ fn headline(d: &Decision) -> String {
     }
 }
 
+/// A time-lens day's heading: the weekday and date, then how much of the day the period
+/// covers where it covers only part (`, from 14:30` for the first day of a `--since` shorter
+/// than a day, `, 14:30` for an `--on` shorter than a day), then the rollup of what the lens
+/// selected that day, when there is any.
+pub(super) fn day_heading(day: &DayGroup) -> String {
+    let mut heading = day.date.strftime("%A %Y-%m-%d").to_string();
+    match &day.part {
+        DayPart::Whole => {}
+        DayPart::From(time) => heading.push_str(&format!(", from {time}")),
+        DayPart::Only(time) => heading.push_str(&format!(", {time}")),
+    }
+    if !day.rollup.is_empty() {
+        heading.push_str(&format!(" — {}", format_rollup(&day.rollup)));
+    }
+    heading
+}
+
+/// `trail show`'s line naming the clock the decision read times on, as its record states it.
+/// A decision recorded before Canon kept the zone states none, and the line says what its
+/// times meant then: UTC, a bare number against a time as seconds since 1970, and a typed
+/// date as one moment at UTC midnight.
+pub(super) fn read_times_on_line(zone: Option<&str>) -> String {
+    match zone {
+        Some(zone) => format!("  read times on: {zone}"),
+        None => "  read times on: UTC (recorded before Canon kept the zone; then a bare number \
+                 against a time was seconds since 1970, and a typed date one moment at UTC \
+                 midnight)"
+            .to_string(),
+    }
+}
+
+/// The trail's own refusal of an `--on`/`--since` value it cannot read: what it could not
+/// read, why, and the forms it reads — the one list's shown forms
+/// (`reading::EXAMPLE_FORMS`), never a copy written here — beside the three words that are
+/// the trail's alone.
+///
+/// The value is always echoed quoted, inner `"` doubled: a value that does not read as a
+/// time is shown quoted, so where its text begins and ends is never in doubt. A shown form
+/// is quoted where it holds a space.
+pub(super) fn when_refusal(flag: &str, input: &str, cause: TimeReadError) -> String {
+    let why = match cause {
+        TimeReadError::NotInList => "is not in the right format.",
+        TimeReadError::ImpossibleDate => "is not a date that exists.",
+        TimeReadError::OffsetOnDateAlone => "has an offset but no time of day.",
+        TimeReadError::OutOfRange | TimeReadError::YearOutOfRange => {
+            "lies outside the years 0000–9999."
+        }
+    };
+    let forms: Vec<String> = EXAMPLE_FORMS.iter().map(|f| shown_form(f)).collect();
+    let mut hint = format!(
+        "Type today, yesterday, a weekday name (saturday), or a date: {}",
+        forms.join(", ")
+    );
+    if cause == TimeReadError::OffsetOnDateAlone {
+        hint.push_str(&format!(
+            ", or a time with an offset: {}",
+            shown_form(EXAMPLE_WITH_OFFSET)
+        ));
+    }
+    format!(
+        "cannot read the date for {flag}\n  {} {why}\n  {hint}",
+        quoted(input)
+    )
+}
+
+/// Text in double quotes, any `"` inside it doubled.
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('"', "\"\""))
+}
+
+/// A form as a refusal shows it: bare, or quoted where it holds a space.
+fn shown_form(form: &str) -> String {
+    if form.contains(' ') {
+        quoted(form)
+    } else {
+        form.to_string()
+    }
+}
+
 fn format_rollup(rollup: &DayRollup) -> String {
     let mut parts = Vec::new();
     if rollup.deleted.files > 0 {
@@ -1925,6 +2002,74 @@ fn format_time(ts: i64, zone: &UserZone) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `trail show` names the clock the decision's record states.
+    #[test]
+    fn show_prints_read_times_on_after_command() {
+        assert_eq!(
+            read_times_on_line(Some("America/New_York")),
+            "  read times on: America/New_York"
+        );
+        assert_eq!(
+            read_times_on_line(Some("UTC (this machine's time zone is unknown)")),
+            "  read times on: UTC (this machine's time zone is unknown)"
+        );
+    }
+
+    /// A decision recorded before Canon kept the zone says what its times meant then.
+    #[test]
+    fn show_explains_a_decision_recorded_before_the_zone() {
+        assert_eq!(
+            read_times_on_line(None),
+            "  read times on: UTC (recorded before Canon kept the zone; then a bare number against \
+             a time was seconds since 1970, and a typed date one moment at UTC midnight)"
+        );
+    }
+
+    /// The trail's refusal: its own heading naming the flag, the value echoed quoted with
+    /// inner `"` doubled, a cause line per cause, and the forms the one list shows.
+    #[test]
+    fn the_trail_refusal_names_its_flag_and_the_forms() {
+        let forms = "Type today, yesterday, a weekday name (saturday), or a date: \
+                     2024, 2024-06, 2024-06-15, \"2024-06-15 14:30\"";
+        assert_eq!(
+            when_refusal("--on", "2024-1-5", TimeReadError::NotInList),
+            format!(
+                "cannot read the date for --on\n  \"2024-1-5\" is not in the right format.\n  {forms}"
+            )
+        );
+        for (cause, why) in [
+            (TimeReadError::ImpossibleDate, "is not a date that exists."),
+            (
+                TimeReadError::OutOfRange,
+                "lies outside the years 0000–9999.",
+            ),
+            (
+                TimeReadError::YearOutOfRange,
+                "lies outside the years 0000–9999.",
+            ),
+        ] {
+            assert_eq!(
+                when_refusal("--since", "x", cause),
+                format!("cannot read the date for --since\n  \"x\" {why}\n  {forms}")
+            );
+        }
+        assert_eq!(
+            when_refusal("--on", "2023-12-31-05:00", TimeReadError::OffsetOnDateAlone),
+            format!(
+                "cannot read the date for --on\n  \"2023-12-31-05:00\" has an offset but no \
+                 time of day.\n  {forms}, or a time with an offset: \"2024-06-15 14:30 +02:00\""
+            )
+        );
+        assert!(
+            when_refusal("--on", "say \"when\"", TimeReadError::NotInList)
+                .contains("  \"say \"\"when\"\"\" is not in the right format.")
+        );
+        // The shown forms are the one list's own, not a copy.
+        for form in EXAMPLE_FORMS {
+            assert!(forms.contains(form), "{form}");
+        }
+    }
     use crate::core::domain::decision::Decision;
     use crate::trail::domain::composition::BucketCount;
     use crate::trail::domain::timeline::TimelineEvent;
@@ -1964,6 +2109,7 @@ mod tests {
             created_at: 0,
             receipt_root_id: None,
             receipt_rel_path: None,
+            zone: None,
         }
     }
 
@@ -4105,7 +4251,11 @@ mod tests {
     /// first, the timestamp derived from it, never the reverse.
     fn local_ts_on(date_str: &str) -> i64 {
         let date: jiff::civil::Date = date_str.parse().unwrap();
-        UserZone::utc().day_start(date).unwrap().as_second() + 12 * 3600
+        // Noon UTC on the day: a fixed instant, never a zone conversion.
+        jiff::tz::Offset::UTC
+            .to_timestamp(date.at(12, 0, 0, 0))
+            .unwrap()
+            .as_second()
     }
 
     /// The card's origin entry in the door's shape: the path ends its own

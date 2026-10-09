@@ -16,6 +16,7 @@ pub fn insert_started(
     command_line: &str,
     reason: Option<&str>,
     canon_version: &str,
+    zone: &str,
     receipt_root_id: Option<i64>,
     receipt_rel_path: Option<&str>,
 ) -> Result<i64> {
@@ -24,10 +25,10 @@ pub fn insert_started(
 
     conn.execute(
         "INSERT INTO decisions (command, scope, command_line, reason, status, canon_version, created_at,
-                                receipt_root_id, receipt_rel_path)
-         VALUES (?1, ?2, ?3, ?4, 'started', ?5, ?6, ?7, ?8)",
+                                zone, receipt_root_id, receipt_rel_path)
+         VALUES (?1, ?2, ?3, ?4, 'started', ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![command, scope_json, command_line, reason, canon_version, now,
-                          receipt_root_id, receipt_rel_path],
+                          zone, receipt_root_id, receipt_rel_path],
     )?;
 
     Ok(conn.last_insert_rowid())
@@ -154,12 +155,14 @@ pub fn set_scope_receipt(
 // Read layer (trail consumption)
 // ============================================================================
 
-const DECISION_COLUMNS: &str = "id, command, scope, command_line, reason, status,
+/// The columns [`decision_from_row`] reads, in its order — the one decision-row reader every
+/// read of `decisions` goes through, here and in the trail.
+pub(crate) const DECISION_COLUMNS: &str = "id, command, scope, command_line, reason, status,
                 count_attempted, count_completed, count_failed, count_skipped,
                 summary, canon_version, created_at,
-                receipt_root_id, receipt_rel_path";
+                receipt_root_id, receipt_rel_path, zone";
 
-fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<Decision> {
+pub(crate) fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<Decision> {
     let scope_json: Option<String> = row.get(2)?;
     // A scope that doesn't parse reads as no scope rather than failing the
     // whole query — one corrupt row must not take the trail down with it.
@@ -180,6 +183,7 @@ fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<Decision> {
         created_at: row.get(12)?,
         receipt_root_id: row.get(13)?,
         receipt_rel_path: row.get(14)?,
+        zone: row.get(15)?,
     })
 }
 
@@ -421,6 +425,7 @@ mod tests {
             "canon scan /photos",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -438,6 +443,7 @@ mod tests {
             "canon apply m.lock",
             None,
             "0.4.0",
+            "UTC",
             Some(3),
             Some("000001-apply.toml"),
         )
@@ -450,8 +456,18 @@ mod tests {
     #[test]
     fn test_decisions_receipt_columns_nullable() {
         let conn = setup_test_db();
-        let id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
         let d = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(d.receipt_root_id, None);
         assert_eq!(d.receipt_rel_path, None);
@@ -462,8 +478,18 @@ mod tests {
         // One corrupt row must not take the whole trail down: an unparseable
         // decisions.scope value reads as no scope, not a panic or an error.
         let conn = setup_test_db();
-        let id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
         conn.execute("UPDATE decisions SET scope = 'not json' WHERE id = ?", [id])
             .unwrap();
         let d = fetch_by_id(&conn, id).unwrap().unwrap();
@@ -473,8 +499,18 @@ mod tests {
     #[test]
     fn test_decision_scopes_insert_and_select() {
         let conn = setup_test_db();
-        let decision_id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let decision_id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (?, ?, ?)",
             rusqlite::params![decision_id, 1, "photos"],
@@ -500,6 +536,7 @@ mod tests {
             "canon exclude set",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -534,6 +571,7 @@ mod tests {
             "canon exclude set",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -581,6 +619,7 @@ mod tests {
             "canon scan --all",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -621,6 +660,7 @@ mod tests {
             "canon scan --all",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -663,6 +703,7 @@ mod tests {
             "canon scan /photos",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -700,6 +741,7 @@ mod tests {
             "canon scan --all",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -729,6 +771,7 @@ mod tests {
             "canon scan --all",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -759,6 +802,7 @@ mod tests {
             "canon scan --all",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -770,6 +814,7 @@ mod tests {
             "canon scan --all",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -800,6 +845,7 @@ mod tests {
             "canon exclude set --where 'ext=dll'",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -822,6 +868,7 @@ mod tests {
             "canon import-facts",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -841,6 +888,7 @@ mod tests {
             "canon exclude set --reason 'OS files'",
             Some("OS files"),
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -853,8 +901,18 @@ mod tests {
     #[test]
     fn insert_started_null_reason() {
         let conn = setup_test_db();
-        let id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert!(decision.reason.is_none());
@@ -863,8 +921,18 @@ mod tests {
     #[test]
     fn insert_started_status_is_started() {
         let conn = setup_test_db();
-        let id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
 
         let decision = fetch_by_id(&conn, id).unwrap().unwrap();
         assert_eq!(decision.status, "started");
@@ -873,8 +941,18 @@ mod tests {
     #[test]
     fn update_completed_changes_status() {
         let conn = setup_test_db();
-        let id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
 
         update_completed(
             &conn,
@@ -902,6 +980,7 @@ mod tests {
             "canon apply m.lock",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -936,6 +1015,7 @@ mod tests {
             "canon roots rm id:1",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )
@@ -961,8 +1041,18 @@ mod tests {
     #[test]
     fn update_completed_with_summary() {
         let conn = setup_test_db();
-        let id =
-            insert_started(&conn, "scan", None, "canon scan", None, "0.4.0", None, None).unwrap();
+        let id = insert_started(
+            &conn,
+            "scan",
+            None,
+            "canon scan",
+            None,
+            "0.4.0",
+            "UTC",
+            None,
+            None,
+        )
+        .unwrap();
 
         update_completed(
             &conn,
@@ -993,6 +1083,7 @@ mod tests {
             "canon apply m.lock",
             None,
             "0.4.0",
+            "UTC",
             None,
             None,
         )

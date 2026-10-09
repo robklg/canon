@@ -26,7 +26,7 @@ use crate::trail::{TrailParams, TrailResult, TrailView};
 
 use super::{iso_utc, strip_hash_prefix};
 use crate::core::domain::format::format_date;
-use crate::core::domain::time::zone::UserZone;
+use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 
 pub struct CompileParams {
     /// The user's `--reason`, bound onto the identity page.
@@ -35,6 +35,9 @@ pub struct CompileParams {
     pub now: i64,
     /// The clock the prose dates read on: the user's. Machine fields stay UTC.
     pub zone: UserZone,
+    /// The same clock as the book states it: in `README.md` and as
+    /// `meta.toml`'s `zone`.
+    pub read_times_on: ReadTimesOn,
     /// Target directory. Must not exist — a leftover directory is an
     /// explicit collision, never silently overwritten. The ceremony passes
     /// a temp name beside the shelf; the final rename is the placement step.
@@ -517,13 +520,15 @@ fn fate_counts(entries: &[BookEntry]) -> MetaCounts {
     counts
 }
 
-// Values (version, gaps) are declared before the sub-tables so the struct reads
+// Values (version, gaps, zone) are declared before the sub-tables so the struct reads
 // in the order meta.toml is written: TOML requires a table to follow every
 // scalar key of its parent, and the serializer arranges that on its own.
 #[derive(Serialize)]
 struct BookMeta<'a> {
     version: u32,
     gaps: &'a [String],
+    /// The clock the book's prose dates are in (additive within format v1).
+    zone: &'a str,
     identity: MetaIdentity<'a>,
     account: MetaAccount,
     posture: MetaPosture,
@@ -648,6 +653,7 @@ fn write_meta(
     let meta = BookMeta {
         version: 1,
         gaps,
+        zone: params.read_times_on.as_str(),
         identity: MetaIdentity {
             path: &story.root.path,
             role: &story.root.role,
@@ -716,6 +722,12 @@ fn write_readme(
         "The bound story of a retired root — complete, self-contained, and readable\n\
          without Canon. Compiled {}.\n\n",
         format_date(params.now, &params.zone)
+    ));
+    out.push_str(&format!(
+        "Dates in this book's text — this file, story.md, timeline.md, notes.md — and\n\
+         in this folder's name are in this time zone: {}. The times in\n\
+         inventory.jsonl and meta.toml are in UTC.\n\n",
+        params.read_times_on.as_str()
     ));
     if params.telling.is_some() {
         // The front door names the way in: the book opens as a story, not

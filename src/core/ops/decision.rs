@@ -6,6 +6,7 @@ use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::time::now_epoch_secs;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::ops::receipt::{
     compute_ledger_root_receipt_rel_path, compute_targeted_receipt_rel_path, finalize_receipt,
     write_receipt, ReceiptKind, ReceiptLocus, ReceiptMeta, ReceiptPlacement, ReceiptRef,
@@ -28,6 +29,9 @@ pub struct DecisionParams {
     pub receipt_enabled: bool,
     /// Ledger config for receipt path computation.
     pub ledger_config: LedgerConfig,
+    /// The clock this decision reads times on, built once by the caller; the row and every
+    /// receipt copy it.
+    pub zone: ReadTimesOn,
 }
 
 impl DecisionParams {
@@ -67,6 +71,7 @@ impl DecisionParams {
             command_line: self.command_line.clone(),
             manifest,
             origin_disposition: kind.origin_disposition().map(str::to_string),
+            zone: self.zone.as_str().to_string(),
             locus: ReceiptLocus {
                 path: locus.1.to_string(),
                 id: locus.0,
@@ -242,6 +247,7 @@ impl DecisionRecorder {
             &params.command_line,
             params.reason.as_deref(),
             canon_version,
+            params.zone.as_str(),
             None, // receipt fields populated below via update_receipt_path
             None,
         ) {
@@ -783,6 +789,7 @@ fn populate_decision_scopes(
 mod tests {
     use super::*;
     use crate::core::domain::config::{LedgerConfig, RecordingMode};
+    use crate::core::domain::time::zone::UserZone;
     use crate::core::repo::db::open_in_memory_for_test;
     use tempfile::tempdir;
 
@@ -804,6 +811,7 @@ mod tests {
             record_enabled,
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 
@@ -921,6 +929,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
 
         let recorder = DecisionRecorder::start(&conn, &params, None);
@@ -975,6 +984,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
         let recorder = DecisionRecorder::start(&conn, &params, None);
         assert!(recorder.decision_id().is_some());
@@ -1067,6 +1077,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: true,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 
@@ -1139,6 +1150,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false, // disabled
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
         let ctx = ReceiptPlacement::Targeted {
             archive_root_id: 1,
@@ -1809,6 +1821,7 @@ mod tests {
             record_enabled: config.recording != RecordingMode::Off,
             receipt_enabled: config.recording == RecordingMode::Full && !no_receipt,
             ledger_config: config,
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 
@@ -1869,6 +1882,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: true,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
         let placement = ReceiptPlacement::LedgerRoot {
             root_id: 3,
@@ -1947,6 +1961,59 @@ mod tests {
         assert!(recorder.take_warnings().is_empty());
     }
 
+    /// **The row and the receipt state the same clock**: both copy the decision's one
+    /// `ReadTimesOn`, so `decisions.zone` and the receipt's `[meta].zone` cannot differ.
+    #[test]
+    fn the_row_and_the_receipt_state_the_same_clock() {
+        #[derive(serde::Serialize)]
+        struct Body {
+            meta: ReceiptMeta,
+        }
+
+        let conn = setup_test_db();
+        let dir = tempdir().unwrap();
+        let params = DecisionParams {
+            zone: ReadTimesOn::of_user(&UserZone::for_test("America/New_York")),
+            ..make_receipt_params()
+        };
+        let ctx = ReceiptPlacement::Targeted {
+            archive_root_id: 1,
+            archive_root_path: dir.path().to_str().unwrap().to_string(),
+            base_dir_rel: String::new(),
+        };
+        let mut recorder = DecisionRecorder::start(&conn, &params, Some(&ctx));
+        let id = recorder.decision_id().unwrap();
+        let path = recorder.receipt_abs_path().unwrap().to_path_buf();
+        let body = Body {
+            meta: params.receipt_meta(
+                id,
+                DecisionStatus::Completed,
+                "done",
+                (1, dir.path().to_str().unwrap()),
+                ReceiptKind::ExcludeSet,
+                None,
+            ),
+        };
+        recorder.complete_with_receipt(
+            &conn,
+            DecisionStatus::Completed,
+            DecisionCounts {
+                attempted: Some(1),
+                completed: Some(1),
+                failed: Some(0),
+                skipped: None,
+            },
+            "done",
+            Some(&body),
+        );
+
+        let row = repo::decision::fetch_by_id(&conn, id).unwrap().unwrap();
+        let receipt: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let receipt_zone = receipt["meta"]["zone"].as_str();
+        assert_eq!(row.zone.as_deref(), Some("America/New_York"));
+        assert_eq!(receipt_zone, row.zone.as_deref());
+    }
+
     #[test]
     fn test_complete_with_receipt_none_writes_no_file() {
         let conn = setup_test_db();
@@ -2005,6 +2072,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
         let mut recorder = DecisionRecorder::start(&conn, &params, None);
         let decision_id = recorder.decision_id().unwrap();
@@ -2059,6 +2127,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
         let mut recorder = DecisionRecorder::start(&conn, &params, None);
         let decision_id = recorder.decision_id().unwrap();
@@ -2111,6 +2180,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: false,
             ledger_config: LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
 
         let recorder = DecisionRecorder::start(&conn, &params, None);

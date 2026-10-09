@@ -8,7 +8,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use jiff::civil::Date;
-use jiff::ToSpan;
 
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::format::clock_of;
@@ -21,7 +20,7 @@ use crate::trail::domain::placement::{
     placement_in_view, row_aspect, scopes_touch, RowAspect, ScopeMatch,
 };
 use crate::trail::domain::timeline::{
-    group_by_day, merge_events, DayGroup, TimelineEvent, WhenValue,
+    group_by_day, merge_events, DayGroup, TimeLens, TimelineEvent, WhenValue,
 };
 
 /// Default decision-window cap for timeline views.
@@ -36,7 +35,7 @@ pub struct TrailParams {
     pub include_notes: bool,
     /// Decision-window cap; `None` = `--all`.
     pub limit: Option<usize>,
-    /// The user's clock: the time lens's day boundaries and the day each event falls on.
+    /// The user's clock: the time lens's period, and the day each event falls on.
     pub clock: UserZone,
 }
 
@@ -139,12 +138,20 @@ pub struct TrailResult {
 }
 
 pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailResult> {
-    let range = params.timeframe.map(|when| when_range(when, &params.clock));
+    let clock = &params.clock;
+    // The period read once on the user's clock. Selection is the lens's exact test; the
+    // database fetch reads only its wider window, a speed path.
+    let lens = params.timeframe.map(|when| TimeLens::new(when, clock));
 
     let (mut decisions, unscoped, notes, placements, rollups, scope_matches, view_root) =
         if params.prefixes.is_empty() {
-            let decisions = match range {
-                Some((start, end)) => crate::trail::repo::fetch_in_range(conn, start, end)?,
+            let decisions = match &lens {
+                Some(lens) => {
+                    let (start, end) = lens.fetch_window();
+                    let mut fetched = crate::trail::repo::fetch_in_range(conn, start, end)?;
+                    fetched.retain(|d| lens.selects(d.created_at, clock));
+                    fetched
+                }
                 None => crate::trail::repo::fetch_recent(conn, None)?,
             };
             let notes = if params.include_notes {
@@ -205,11 +212,20 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
             ids.dedup();
 
             let mut decisions = repo::decision::fetch_by_ids(conn, &ids)?;
-            if let Some((start, end)) = range {
-                decisions.retain(|d| d.created_at >= start && d.created_at < end);
+            if let Some(lens) = &lens {
+                decisions.retain(|d| lens.selects(d.created_at, clock));
             }
 
-            let unscoped_raw = crate::trail::repo::count_unscoped(conn, range)?;
+            let unscoped_raw = match &lens {
+                Some(lens) => {
+                    let (start, end) = lens.fetch_window();
+                    crate::trail::repo::unscoped_times_in(conn, start, end)?
+                        .into_iter()
+                        .filter(|&ts| lens.selects(ts, clock))
+                        .count() as i64
+                }
+                None => crate::trail::repo::count_unscoped(conn)?,
+            };
             // Footer honesty: a decision surfaced here only via an extraction
             // or arrival row (no decision_scopes row of its own) must not
             // also be counted as "not shown" — restricted to ids that
@@ -243,7 +259,7 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
 
             // Whole-history rollups: every touching row, never capped by the
             // decision-window limit. Scope-lens only — never a time-lens view.
-            let rollups = if range.is_none() {
+            let rollups = if lens.is_none() {
                 let floors: Vec<&str> = roots.iter().map(|r| r.path.as_str()).collect();
                 build_rollups(&placements, &floors)
             } else {
@@ -275,16 +291,10 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
     // decisions from the timeline. A scope with no decisions still shows its
     // notes (the timeline's thought voice survives an actionless place).
     let mut notes = notes;
-    let span_start = match (range, decisions.first()) {
-        (Some((start, _)), _) => Some(start),
-        (None, Some(oldest)) => Some(oldest.created_at),
-        (None, None) => None,
-    };
-    if let Some(start) = span_start {
-        notes.retain(|n| n.created_at >= start);
-    }
-    if let Some((_, end)) = range {
-        notes.retain(|n| n.created_at < end);
+    match (&lens, decisions.first()) {
+        (Some(lens), _) => notes.retain(|n| lens.selects(n.created_at, clock)),
+        (None, Some(oldest)) => notes.retain(|n| n.created_at >= oldest.created_at),
+        (None, None) => {}
     }
 
     // JSONL completeness: the full extraction rows (not touching-filtered)
@@ -297,7 +307,7 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
 
     let events = merge_events(decisions, notes); // ascending, stable tie-break
 
-    let view = if params.timeframe.is_some() {
+    let view = if let Some(lens) = &lens {
         let ids: Vec<i64> = events
             .iter()
             .filter_map(|e| match e {
@@ -308,9 +318,9 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
         let stamps = crate::trail::repo::aggregate_stamped_by_decisions(conn, &ids)?;
         let dated: Vec<(Date, TimelineEvent)> = events
             .into_iter()
-            .map(|e| (day_of(e.created_at(), &params.clock), e))
+            .map(|e| (day_of(e.created_at(), clock), e))
             .collect();
-        TrailView::Days(group_by_day(dated, &stamps))
+        TrailView::Days(group_by_day(dated, &stamps, lens))
     } else {
         TrailView::Recent(events)
     };
@@ -647,35 +657,6 @@ fn build_rollups(
         arrival: build_arrival_rollup(entered.into_iter()),
         rearrangement: build_rearrangement_rollup(stayed.into_iter()),
     }
-}
-
-/// Epoch range [start, end) for a time-lens value, on the user's clock.
-fn when_range(when: WhenValue, zone: &UserZone) -> (i64, i64) {
-    match when {
-        WhenValue::Since(date) => (day_start(date, zone), i64::MAX),
-        // A day with no next day (9999-12-31) runs to the end of what the lens reads.
-        WhenValue::On(date) => (
-            day_start(date, zone),
-            date.checked_add(1.day())
-                .map_or(i64::MAX, |next| day_start(next, zone)),
-        ),
-    }
-}
-
-/// The first instant of `date` on the user's clock, in epoch seconds — the earlier one
-/// where midnight repeats, the first after the gap where it is skipped (`UserZone::day_start`).
-///
-/// `pub(super)`, not private: several tests in the externalized test module build epoch
-/// timestamps directly (`day_start(day, &zone) + 3600`) rather than hardcoding an epoch.
-///
-/// A day whose midnight no instant reaches is bounded past the readable line on its side
-/// (`i64::MAX` after year 0, `i64::MIN` before), so every readable time — the last one,
-/// `Timestamp::MAX`, included — falls on the day it reads as.
-pub(super) fn day_start(date: Date, zone: &UserZone) -> i64 {
-    zone.day_start(date)
-        .map_or(if date.year() > 0 { i64::MAX } else { i64::MIN }, |at| {
-            at.as_second()
-        })
 }
 
 /// The day an event falls on, on the user's clock, read through the frame rule. No decision

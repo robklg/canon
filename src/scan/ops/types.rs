@@ -516,6 +516,7 @@ mod tests {
             command_line: "canon test".to_string(),
             manifest: None,
             origin_disposition: None,
+            zone: "UTC".to_string(),
             locus: ReceiptLocus {
                 path: "/vol".to_string(),
                 id: 42,

@@ -24,6 +24,9 @@ canon trail --since saturday
 # One specific day
 canon trail --on 2026-05-12
 
+# One month
+canon trail --on 2026-05
+
 # One decision in full
 canon trail show 61
 
@@ -228,7 +231,25 @@ Saturday 2026-07-12 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB
 #65   11:30  excluded  /mnt/old-disk/misc    Excluded 210 duplicates (kept 105) · "redundant backup"
 ```
 
-`<when>` accepts `today`, `yesterday`, a weekday name (the most recent one, today included), or a date (`YYYY-MM-DD`). Days follow your local timezone.
+`<when>` is `today`, `yesterday`, a weekday name (the most recent one, today included), or a time in any form Canon [reads as a time](../../concepts/facts.md#how-canon-reads-a-time): `2026`, `2026-07`, `2026-07-12`, `"2026-07-12 14:30"`, and the rest. Each names a period on your clock, as long as its precision: `--on 2026-07` is July 2026, `--since 2026` is everything from the start of 2026, and `--on "2026-07-12 14:30"` is that minute. A time with an offset is placed by its offset and read on your clock.
+
+The header names the period as your clock reads it (`— on 2026-07`, `— since 2026-07-12 14:30`); a word stays as typed (`— since saturday`). A day the period covers only in part says which part: the first day of a `--since` from a time of day reads `from` that time, and a period shorter than a day names its time. The counts on that line are the part's own:
+
+```
+Decision trail: all roots — since 2026-07-12 09:00
+
+Saturday 2026-07-12, from 09:00 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 1 other action
+```
+
+A `<when>` the trail cannot read is refused with the reason and the forms it reads:
+
+```
+Error: cannot read the date for --on
+  "2024-1-5" is not in the right format.
+  Type today, yesterday, a weekday name (saturday), or a date: 2024, 2024-06, 2024-06-15, "2024-06-15 14:30"
+```
+
+The reason is one of `is not in the right format.`, `is not a date that exists.`, `has an offset but no time of day.` (the hint then adds a time with an offset: `"2024-06-15 14:30 +02:00"`), or `lies outside the years 0000–9999.`.
 
 Each day opens with a rollup by fate: **deleted** (deletions a scan observed), **archived** (apply), **excluded**, plus a count of other actions (scans that deleted nothing, manifest generation, imports, and so on). Sizes are computed from the index and shown when reliable; for older decisions whose files have since been touched by newer decisions, the size is omitted rather than guessed.
 
@@ -465,12 +486,15 @@ Decision #61 — exclude_duplicates
   counts:   attempted 315, completed 210, failed 0, skipped 105
   reason:   "redundant backup"
   command:  canon exclude duplicates /mnt/old-drive/photos --prefer /archive ...
+  read times on: Europe/Amsterdam
   scope:    /mnt/old-drive/photos  (here)
   version:  0.5.2
   summary:  Excluded 210 duplicates (kept 105)
   receipts:
     /archive/.canon-ledger/000061-exclude_duplicates.toml
 ```
+
+`read times on:` names the time zone the decision read its times on, as its record states it ([decisions](../../concepts/decisions.md#the-time-zone-a-decision-reads-times-on)).
 
 For an `apply` decision, a `drew from:` section lists what it took from each source root: path, files, and size. The path is a snapshot recorded at apply time, so it renders even after the root itself is gone from Canon. A root Canon no longer indexes ends its line with `(root removed)`: the path stays primary (it is the answer to "where did this come from?"), and the marker states that the path is history, not a place you can visit. For a copy, the originals may still exist at the origin, but they are no longer part of Canon's universe:
 
@@ -562,8 +586,8 @@ canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summa
 |------|---------|
 | `--global` | All roots, ignoring current-directory scope |
 | `--today` | Time lens: today (sugar for `--since today`) |
-| `--since <when>` | Time lens: from a day onward |
-| `--on <when>` | Time lens: one day |
+| `--since <when>` | Time lens: from the start of a period onward |
+| `--on <when>` | Time lens: within one period |
 | `--limit N` | Show at most N decisions (default 20) |
 | `--all` | No cap |
 | `--no-notes` | Decisions only |

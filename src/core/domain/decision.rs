@@ -99,6 +99,9 @@ pub struct Decision {
     pub created_at: i64,
     pub receipt_root_id: Option<i64>,
     pub receipt_rel_path: Option<String>,
+    /// The clock the decision read times on, as its receipt states it; `None` for a decision
+    /// recorded before Canon kept the zone.
+    pub zone: Option<String>,
 }
 
 #[cfg(test)]

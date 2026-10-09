@@ -894,6 +894,7 @@ fn build_new_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 
     /// The zone a test lock records: the reference zone, never the machine's.
     fn lock_zone() -> crate::core::domain::time::zone::RecordedZone {
@@ -1705,6 +1706,7 @@ mod tests {
                 layout: ReceiptLayout::Central,
                 root: None,
             },
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         }
     }
 
@@ -2605,6 +2607,7 @@ mod tests {
                 layout: ReceiptLayout::Alongside,
                 root: None,
             },
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
 
         let params = ApplyExecuteParams {

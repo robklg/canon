@@ -327,6 +327,7 @@ pub fn survey_note_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use crate::core::testing::{insert_note, insert_root, setup_test_db};
 
     #[test]
@@ -668,6 +669,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: true,
             ledger_config: crate::core::domain::config::LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
 
         let result = execute_clear_recursive(&mut conn, &scope, Some(&decision)).unwrap();
@@ -725,6 +727,7 @@ mod tests {
             record_enabled: true,
             receipt_enabled: true,
             ledger_config: crate::core::domain::config::LedgerConfig::default(),
+            zone: ReadTimesOn::of_user(&UserZone::utc()),
         };
 
         let result = execute_clear_exact(&mut conn, &scope, Some(&decision)).unwrap();

@@ -20,6 +20,7 @@ use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorVerb, ParkedRoot, RefusedAct, RefusedActs};
 use crate::core::domain::scope::ScopeResolution;
+use crate::core::domain::time::zone::ReadTimesOn;
 use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, UserZone};
 use crate::core::ops::decision::{
     DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
@@ -162,6 +163,7 @@ pub fn generate(
         record_enabled: ledger.recording != RecordingMode::Off,
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt,
         ledger_config: ledger.clone(),
+        zone: ReadTimesOn::of_manifest(&zone),
     };
     // The receipt context is None on purpose, and that — not the flag
     // computed above — is what stops a receipt file being written. Generating
@@ -542,6 +544,7 @@ fn refresh_with_editor(
         record_enabled: ledger.recording != RecordingMode::Off,
         receipt_enabled: ledger.recording == RecordingMode::Full && !no_receipt,
         ledger_config: ledger.clone(),
+        zone: ReadTimesOn::of_manifest(&zone),
     };
     // The receipt context is None on purpose, and that — not the flag
     // computed above — is what stops a receipt file being written. Generating
