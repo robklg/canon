@@ -73,17 +73,31 @@ Example output:
 Facts: all roots
 Sources matching filters: 34692
 
-Fact                               Count   Coverage
-────────────────────────────────────────────────────
-source.ext                         34692     100.0%  (built-in)
-source.size                        34692     100.0%  (built-in)
-source.mtime                       34692     100.0%  (built-in)
-source.path                        34692     100.0%  (built-in)
-content.hash.sha256                34692     100.0%
-content.mime                       34692     100.0%
-content.Model                       7935      22.9%
-content.Make                        7935      22.9%
+Fact                             Type      Count   Coverage
+────────────────────────────────────────────────────────────
+source.ext                       text      34692     100.0%  (built-in)
+source.size                    number      34692     100.0%  (built-in)
+source.mtime                     time      34692     100.0%  (built-in)
+source.path                      path      34692     100.0%  (derived)
+source.rel_path                  path      34692     100.0%  (built-in)
+filename                         text      34692     100.0%  (derived)
+content.Make                     text       7935      22.9%
+content.Model                    text       7935      22.9%
+content.hash.sha256              text      34692     100.0%
+content.mime                     text      34692     100.0%
+
+(4 built-in/derived facts hidden, use --all to show)
 ...
+```
+
+Type is the key's type, determined from all of its facts: `text`, `number`, `time`, or `path`. Count and Coverage are for the sources in scope. A key whose facts hold more than one type lists as `mixed`, and each such key is listed under the table, with the command to convert it:
+
+```
+2 keys are of mixed type, so filters and patterns cannot use their values:
+only values of one type can be compared or formatted correctly.
+To inspect each and learn how to convert to one type:
+  `canon facts convert content.CreateDate`
+  `canon facts convert 'content.File Size'`
 ```
 
 Example grouped output (`--by-root`):

@@ -11,7 +11,7 @@ needs restating somewhere else, that is the signal something belongs in this fac
 
 **Modules**: `domain/key`, `domain/transform`, `domain/pattern`, `domain/vantage`,
 `domain/filter`, `domain/cache`, `domain/value`, `domain/alias`, `ops/filter`,
-`ops/pattern`, `ops/selection`, `ops/alias`, `repo`.
+`ops/pattern`, `ops/selection`, `ops/alias`, `ops/value`, `repo`.
 
 ## Strata
 
@@ -32,15 +32,16 @@ law is applied rather than merely stated. `selection` is the set of sources an o
 reports over or acts on — it lives here rather than beside any one command because exploring
 and acting must resolve to the same set. `alias` is the half of alias expansion that needs the
 outside world: the rewriting rules are a domain concern, reading the file they rewrite from is
-this one.
+this one. `value` reads a stored key's one value for a batch of sources.
 
 **`repo.rs`** — what the language needs read out of the database before it can be evaluated:
-`prefetch_facts` and `prefetch_status_data` fill the cache, `is_known_key` and `get_fact_value`
-each answer one question about one key, and `fetch_source_row` reads one source's row.
+`prefetch_facts` and `prefetch_status_data` fill the cache, `is_known_key` answers whether a key
+is known, `fetch_source_row` reads one source's row, and
+`fetch_key_rows` reads a key's rows per source, on the source and on its content.
 
 ## The front door
 
-`src/expr.rs` re-exports the whole of the facility from outside, in three groups it names.
+`src/expr.rs` re-exports the whole of the facility from outside, in two groups it names.
 The surface is pinned exactly — `subsystem_barrels_seal_to_their_pinned_surfaces`
 (`tests/architecture.rs`) — so changing it means editing the pin in the same commit.
 Everything else is private, and the strata are private modules: how the facility divides
@@ -54,8 +55,6 @@ itself is its own business, and rearranging it must not be visible to any caller
   leave one unnamed, so carrying it would record demand that does not exist. The
   `#[allow(unused_imports)]` sits on the re-export statement rather than on the file, so a
   re-export that goes dead for any other reason still says so.
-- **Reached past the language** — `get_fact_value`, a point read one caller still asks
-  directly. It closes when that caller is rewritten to ask the language instead.
 
 **Every inbound reach is at the front door.** Nothing outside names `expr::domain::…` or
 `expr::ops::…`, and nothing inside reaches a sibling subsystem's internals in either
@@ -172,13 +171,12 @@ spelling appearing anywhere outside.
 `resolve_fact_value` tries the built-in first and falls back to stored facts, so shadowing is
 already structurally impossible there. No canon-wide reach is claimed.
 
-Where it does **not** apply, and these are not oversights — three sites outside spell the same
-bytes for three different verbs, and unifying them would be a false equality:
+Where it does **not** apply, and these are not oversights — two sites outside spell the same
+bytes for two different verbs, and unifying them would be a false equality:
 `facts/domain.rs` reserves an import namespace (it refuses `source.*` on the way *in* — same
 bytes, opposite direction); `facts/ops/maintain.rs` protects facts from deletion (a different
-set, `source.*` *and* `policy.*`); `worklist/ops.rs` routes an entity lookup (source table vs
-object table — a dispatch switch, not a supply claim). They are the matcher's stated
-exemptions, each with its verb named there.
+set, `source.*` *and* `policy.*`). They are the matcher's stated exemptions, each with its
+verb named there.
 
 One narrowing to know about: the law drops only what the context actually supplies, never the
 whole `source.` namespace. A `source.*` key that is not a built-in is supplied by nothing and
@@ -189,8 +187,9 @@ such a row, which is why the widening is unreachable in practice and pinned anyw
 ## The per-source comparison reads its row through `repo`
 
 `ops/filter.rs` speaks no SQL. A built-in key compared or tested for existence is resolved per
-source, and the row it is resolved from — the source's attributes and the object its content
-facts hang off — comes from `repo.rs`'s `fetch_source_row`. The comparison stays in `ops`;
+source, and the row it is resolved from — the source's attributes — comes from `repo.rs`'s
+`fetch_source_row`. Every other key, the hash keys included, is compared on the source's one
+value, read from the prefetched cache (`FactCache::value`). The comparison stays in `ops`;
 moving it into `repo` would put comparison logic in the repository instead.
 
 ## Built-in values are derived once
@@ -205,6 +204,24 @@ Pinned per reader. Not bound: pattern aliases' own modifier chains.
 Separately, a written key keeps its prefix only where a stored key can carry one (`source.`,
 `content.`); `object.` names a key in patterns alone. Agreement with import is pinned on sampled
 prefixes beside import.
+
+## The source-value law
+
+**A source has one value for a stored key**: its content's fact; the source's own only where the
+content has none. `source_value` (`domain/value.rs`) decides it. Readers reach it
+through `FactCache::value` (the filter), `fetch_source_values` (`ops/value.rs`: patterns, `facts`
+reports, `worklist --emit`), or `source_values` (`domain/value.rs`), which `cluster generate`
+hands the facts it already holds for a source; none outside pairs the two rows or picks
+between them, and which row a fact sits on is the fact noun's (`FactEntry::is_on_source`). Why:
+a filter matching either row selected sources the report beside it never counted.
+
+Pinned by `one_source_one_value_in_filter_report_pattern_and_worklist`, which asks the four
+surfaces, an empty file among its sources; `cluster generate`'s facts comment by its own
+`the_coverage_comment_reads_one_value_per_source`.
+
+Where it does **not** apply: a key's type (`core::repo::fact::key_types` reads every row); `?` on a
+hash key, true too for a source linked to content with no stored hash; a computed built-in, never
+read from the facts table.
 
 ## The clock is a parameter
 

@@ -16,7 +16,9 @@ rebuildably and proves it**, **lends the hands** that touch disk, **conjugates**
 through one grammar, and **defends its own laws**.
 
 **The bidirectional rule.** Core never tells — no narration, no voice; its outputs are facts
-and typed results, and the voice belongs to the tellers. And tellers never warrant — a
+and typed results, and the voice belongs to the tellers. Two sentences are the stated
+exceptions, each described below beside the nouns it speaks of, with why it is here: the
+closed door's and a mixed key's. And tellers never warrant — a
 subsystem that re-derives a claim core already makes has made a second claim, and two
 mechanics for one claim are a safety defect waiting to disagree with themselves. Every
 boundary question here resolves against this law first.
@@ -28,7 +30,7 @@ positive half alone, is what gets reviewed when either changes.
 
 | Warrant | Positive mechanic | Limit, and where it is enforced |
 |---|---|---|
-| **Identity** | the hash; one content, one object — `ops::fs::compute_partial_hash`/`compute_full_hash`, `domain::object` | **contentless** — identity claims about empty content are vacuous. `domain::source::is_contentless` is the one place `size == 0` is written; the SQL projections in `repo::object` carry it into every archived-ness query |
+| **Identity** | the hash; one content, one object — `ops::fs::compute_partial_hash`/`compute_full_hash`, `domain::object` | **contentless** — identity claims about empty content are vacuous. `domain::source::is_contentless_size` is the one place `size == 0` is written, and `Source::is_contentless` asks it; the SQL projections in `repo::object` carry it into every archived-ness query |
 | **Standing** | the two-register resolution account — `domain::resolution::{classify_present, classify_absent, build_account}` | **the asymmetric verdict** — unresolved is provable, ready never is. Coverage is a containment fact: precise about content, silent about shape and worth |
 | **Happening** | decision, receipt, transition — `ops::decision`, `ops::receipt`, `domain::fate` | **the posture law** — an observation must never read as an act. `domain::fate::fate_posture` is the one derivation, keyed on `(family, aspect)` |
 | **Place** | path and scope mechanics — `domain::path`, `domain::scope`, `ops::scope` | **exactness at the edge** — a place claim is a boundary claim, and nearly-under is not under. `domain::path::path_is_under` is where that boundary is decided — `/a/bc` is not under `/a/b` — and `Source::matches_scope` asks it rather than deciding again; `repo::db::path_at_or_under_sql`/`path_strictly_under_sql` are its registered SQL projections, the one sanctioned rel_path boundary spelling |
@@ -39,7 +41,8 @@ positive half alone, is what gets reviewed when either changes.
 
 `Source`, `Root`, `RootSpec`, `Object`, `ArchiveCopy`/`ArchiveLocation`,
 `FactEntry`/`FactType`/`FactValue`, and the predicates
-that read them (`is_excluded`, `is_contentless`, `matches_scope`, `find_containing_root`).
+that read them (`is_excluded`, `is_contentless`/`is_contentless_size`, `matches_scope`,
+`find_containing_root`, `FactEntry::is_on_source`), and `KeyTypes`, the types a key's facts hold.
 Every subsystem speaks these; nothing here knows about any subsystem. Beside them the pure
 shape the nouns need to be handled at all — `domain::{path, scope, format, include, config}`:
 path manipulation and offline resolution, `ScopeMatch` and `DecisionScope`, display
@@ -125,6 +128,15 @@ without an `Error:` prefix.
 
 These are here because the Feature-First Structure ADR names them as the spine, not because
 two consumers were counted. The membership criteria below apply to everything else.
+
+`domain::fact` holds the second sentence: the
+statement that a key is of mixed type and its way out (`mixed_type_statement`,
+`mixed_type_way_out`), which quote each key themselves so a printed command runs. It speaks of
+the key's type (`KeyTypes`, beside it), and its consumers sit in two subsystems and two layers:
+`facts`' listing and `cluster`'s stderr print it, and `archive/ops/generate.rs` writes the way
+out into a manifest, an artifact. No subsystem's operations stratum can serve both, because
+`facts` reaches no sibling and no sibling reaches it. **Where it does not apply**: the listing's
+columns and the type words, which stay with whoever prints them.
 
 ### It warrants — `domain::{resolution, fate, extraction}`
 
@@ -305,6 +317,9 @@ in unsettled.
   is effectively the whole tree. A subsystem's *exclusive* SQL is the opposite case and lives
   in that subsystem's own `repo` stratum (`trail/repo.rs`, `scan/repo.rs`, and the rest) — the
   split is by who reads it, not by what table it touches.
+  **A key's type is read from the key's row set**: `repo::fact::key_types` reads every fact of
+  the key and joins nothing, so suspension, scope, presence and role can never enter it; a
+  key with no facts has no type.
 - **`ops::ledger`** — the extraction ledger's maintenance path (`ledger reindex`): rebuilds
   the `decision_extractions` projection from apply receipts already on disk. This is the
   *prove* half of the verb, and it lives with the discipline it proves: the claim that the
@@ -667,7 +682,8 @@ Three questions, in order:
 
 1. **Does it warrant, or does it tell?** Anything that narrates — composes a sentence, chooses
    a voice, decides what the user reads — is a teller's, however many tellers want it. Core
-   hands out facts and typed results.
+   hands out facts and typed results. The closed door's sentence and the mixed-key
+   statement are the exceptions, each here because its consumers sit in more than one layer.
 2. **Is it substrate, or one subsystem's finished output?** A sibling's computed result
    consumed wholesale is an ordinary product dependency, not shared ground.
 3. **Is it consumed by ≥2 subsystems, or named as spine by the Feature-First Structure ADR?**

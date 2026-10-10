@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::source::Source;
 use crate::core::repo::Connection;
-use crate::expr::get_fact_value;
+use crate::expr::fetch_source_values;
 
 /// A single worklist entry, ready for JSONL serialization.
 #[derive(Serialize)]
@@ -40,14 +40,15 @@ pub struct WorklistResult {
 /// Build worklist entries from selected sources.
 ///
 /// When `unique_content` is true, only the first source per object_id is included.
-/// When `emit_keys` is non-empty, fact values are fetched and attached to each entry.
+/// When `emit_keys` is non-empty, each emitted source's one value per key is attached,
+/// read in one batch per key, by the key as given.
 pub fn build_entries(
-    conn: &Connection,
+    conn: &mut Connection,
     sources: &[Source],
     unique_content: bool,
     emit_keys: &[String],
 ) -> Result<WorklistResult> {
-    let mut entries = Vec::new();
+    let mut emitted: Vec<&Source> = Vec::new();
     let mut seen_objects: HashSet<i64> = HashSet::new();
     let mut skipped_unhashed: u64 = 0;
     let mut skipped_duplicate: u64 = 0;
@@ -64,38 +65,42 @@ pub fn build_entries(
                 continue;
             }
         }
-
-        let facts = if emit_keys.is_empty() {
-            None
-        } else {
-            let mut map = HashMap::new();
-            for key in emit_keys {
-                let (entity_type, entity_id) = if key.starts_with("source.") {
-                    ("source", Some(source.id))
-                } else {
-                    ("object", source.object_id)
-                };
-                let value = match entity_id {
-                    Some(eid) => get_fact_value(conn, entity_type, eid, key)?
-                        .map(|v| emit_value(&v))
-                        .unwrap_or(serde_json::Value::Null),
-                    None => serde_json::Value::Null,
-                };
-                map.insert(key.clone(), value);
-            }
-            Some(map)
-        };
-
-        entries.push(WorklistEntry {
-            source_id: source.id,
-            path: source.path(),
-            root_id: source.root_id,
-            size: source.size,
-            mtime: source.mtime,
-            basis_rev: source.basis_rev,
-            facts,
-        });
+        emitted.push(source);
     }
+
+    let ids: Vec<i64> = emitted.iter().map(|s| s.id).collect();
+    let mut values_by_key = Vec::with_capacity(emit_keys.len());
+    for key in emit_keys {
+        values_by_key.push((key, fetch_source_values(conn, &ids, key)?));
+    }
+
+    let entries = emitted
+        .into_iter()
+        .map(|source| {
+            let facts = (!emit_keys.is_empty()).then(|| {
+                values_by_key
+                    .iter()
+                    .map(|(key, values)| {
+                        let value = values
+                            .get(&source.id)
+                            .and_then(Option::as_ref)
+                            .map(|entry| emit_value(&entry.value))
+                            .unwrap_or(serde_json::Value::Null);
+                        ((*key).clone(), value)
+                    })
+                    .collect()
+            });
+            WorklistEntry {
+                source_id: source.id,
+                path: source.path(),
+                root_id: source.root_id,
+                size: source.size,
+                mtime: source.mtime,
+                basis_rev: source.basis_rev,
+                facts,
+            }
+        })
+        .collect();
 
     Ok(WorklistResult {
         entries,
@@ -123,7 +128,10 @@ mod tests {
     use crate::core::domain::time::reading::read_time;
     use crate::core::repo::fact::{fact_value_params, FACT_VALUE_COLUMNS};
     use crate::core::repo::source::fetch_by_id;
-    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::testing::{
+        insert_fact, insert_object, insert_object_fact, insert_root, insert_source,
+        insert_source_with_size, setup_test_db,
+    };
 
     fn emitted(written: &str) -> serde_json::Value {
         emit_value(&FactValue::Time(read_time(written).unwrap()))
@@ -169,7 +177,7 @@ mod tests {
 
     #[test]
     fn a_time_key_always_emits_strings_and_mtime_stays_epoch_seconds() {
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let written = [
             "2024",
@@ -184,7 +192,8 @@ mod tests {
             sources.push(fetch_by_id(&conn, id).unwrap().unwrap());
         }
 
-        let result = build_entries(&conn, &sources, false, &["content.When".to_string()]).unwrap();
+        let result =
+            build_entries(&mut conn, &sources, false, &["content.When".to_string()]).unwrap();
 
         assert_eq!(result.entries.len(), written.len());
         for (entry, source) in result.entries.iter().zip(&sources) {
@@ -192,5 +201,48 @@ mod tests {
             assert!(json["facts"]["content.When"].is_string(), "{json}");
             assert_eq!(json["mtime"], serde_json::json!(source.mtime));
         }
+    }
+
+    /// `--emit` writes each source's one value: the content's fact over the source's own, an
+    /// empty file's as well, and a file with only its own fact that one. A `source.` key
+    /// reads through the same rule, and no Canon writer stores one, so it emits null.
+    #[test]
+    fn worklist_emits_one_value_per_source() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let content = insert_object(&conn, "datahash", false);
+        let empty = insert_object(&conn, "emptyhash", false);
+        let two_rows = insert_source_with_size(&conn, root, "a.jpg", Some(content), 100);
+        let empty_file = insert_source_with_size(&conn, root, "e.jpg", Some(empty), 0);
+        let own_only = insert_source(&conn, root, "o.jpg", None);
+        for (object, source) in [(content, two_rows), (empty, empty_file)] {
+            insert_object_fact(&conn, object, "content.Make", "Canon");
+            insert_fact(&conn, source, "content.Make", "Nikon");
+        }
+        insert_fact(&conn, own_only, "content.Make", "Sony");
+        let sources: Vec<Source> = [two_rows, empty_file, own_only]
+            .iter()
+            .map(|&id| fetch_by_id(&conn, id).unwrap().unwrap())
+            .collect();
+
+        let keys = ["content.Make".to_string(), "source.size".to_string()];
+        let result = build_entries(&mut conn, &sources, false, &keys).unwrap();
+
+        let emitted: Vec<(serde_json::Value, serde_json::Value)> = result
+            .entries
+            .iter()
+            .map(|entry| {
+                let facts = entry.facts.as_ref().unwrap();
+                (facts["content.Make"].clone(), facts["source.size"].clone())
+            })
+            .collect();
+        assert_eq!(
+            emitted,
+            vec![
+                (serde_json::json!("Canon"), serde_json::Value::Null),
+                (serde_json::json!("Canon"), serde_json::Value::Null),
+                (serde_json::json!("Sony"), serde_json::Value::Null),
+            ]
+        );
     }
 }

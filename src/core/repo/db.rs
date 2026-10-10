@@ -489,6 +489,11 @@ fn migrations() -> Migrations<'static> {
         //    zone; nothing is backfilled, because nothing recorded which clock
         //    an older decision read.
         M::up("ALTER TABLE decisions ADD COLUMN zone TEXT;"),
+        // 10: the key-type lookup (`core::repo::fact::key_types`) — which types a key's
+        //    facts hold, read at every listing and, later, every binding and import
+        //    batch — answered from this index alone. Its expressions must match the
+        //    query's exactly for SQLite to use it. No stored value changes.
+        M::up("CREATE INDEX facts_key_type ON facts(key, value_time IS NULL, value_num IS NULL);"),
     ])
 }
 
@@ -1121,7 +1126,8 @@ mod tests {
         )
         .unwrap();
 
-        migrations().to_latest(&mut conn).unwrap();
+        // To migration 8 itself: later migrations add indexes of their own.
+        migrations().to_version(&mut conn, 8).unwrap();
 
         /// (id, time_form, time_precision, time_offset, time_nanos, observed_at, observed_basis_rev)
         type Row = (

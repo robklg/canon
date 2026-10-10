@@ -239,10 +239,100 @@ pub fn fact_value_to_display(value: &FactValue, zone: &UserZone) -> String {
     }
 }
 
+/// A source's value for a key: its content's fact, and its own only where the content has
+/// none. Every reader of a stored key's value per source asks this, so a filter, a report, a
+/// pattern and a worklist cannot see two different values for one source.
+///
+/// Generic over what it holds: the filter's cache holds references, the fetch owned entries.
+pub fn source_value<T>(on_source: Option<T>, on_content: Option<T>) -> Option<T> {
+    on_content.or(on_source)
+}
+
+/// A source's one value for each stored key it holds, from all of its facts on the source and
+/// on its content, each picked by `source_value` — for a reader that already holds every fact
+/// of a source and needs no second fetch.
+pub fn source_values(facts: &[FactEntry]) -> HashMap<&str, &FactValue> {
+    let mut rows: HashMap<&str, (Option<&FactValue>, Option<&FactValue>)> = HashMap::new();
+    for fact in facts {
+        let pair = rows.entry(fact.key.as_str()).or_default();
+        if fact.is_on_source() {
+            pair.0 = Some(&fact.value);
+        } else {
+            pair.1 = Some(&fact.value);
+        }
+    }
+    rows.into_iter()
+        .filter_map(|(key, (on_source, on_content))| {
+            source_value(on_source, on_content).map(|value| (key, value))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::domain::fact::FactValue;
+
+    /// A source's facts in hand give one value per key, picked by the same rule: the
+    /// content's where both rows hold the key, the source's where only it does.
+    #[test]
+    fn a_sources_facts_in_hand_give_one_value_per_key() {
+        let fact = |on: &str, key: &str, value: &str| FactEntry {
+            key: key.to_string(),
+            value: FactValue::Text(value.to_string()),
+            entity_type: on.to_string(),
+            entity_id: 1,
+        };
+        let facts = [
+            fact("source", "content.Make", "Nikon"),
+            fact("object", "content.Make", "Canon"),
+            fact("source", "content.Lens", "50mm"),
+            fact("object", "content.Model", "R5"),
+        ];
+        let text = |values: HashMap<&str, &FactValue>| {
+            let mut out: Vec<(String, String)> = values
+                .into_iter()
+                .map(|(k, v)| match v {
+                    FactValue::Text(t) => (k.to_string(), t.clone()),
+                    other => panic!("only text facts here: {other:?}"),
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            text(source_values(&facts)),
+            pairs(&[
+                ("content.Lens", "50mm"),
+                ("content.Make", "Canon"),
+                ("content.Model", "R5"),
+            ])
+        );
+    }
+
+    /// Every combination of a fact on the source and a fact on its content.
+    #[test]
+    fn a_source_reads_its_contents_fact_first() {
+        let source = Some("source");
+        let content = Some("content");
+        for (on_source, on_content, expected) in [
+            (source, content, content),
+            (source, None, source),
+            (None, content, content),
+            (None, None, None),
+        ] {
+            assert_eq!(
+                source_value(on_source, on_content),
+                expected,
+                "source {on_source:?}, content {on_content:?}"
+            );
+        }
+    }
 
     /// A probe with every attribute populated, so a resolver arm that
     /// answers at all answers for this one. The equality below is only as

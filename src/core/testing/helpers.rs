@@ -129,6 +129,15 @@ pub fn insert_fact(conn: &Connection, source_id: i64, key: &str, value: &str) {
     .unwrap();
 }
 
+/// Insert a text fact on content (an object), the other half of a source's two rows.
+pub fn insert_object_fact(conn: &Connection, object_id: i64, key: &str, value: &str) {
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_text, observed_at) VALUES ('object', ?, ?, ?, 0)",
+        rusqlite::params![object_id, key, value],
+    )
+    .unwrap();
+}
+
 /// Check if a source is excluded in the DB.
 pub fn is_source_excluded(conn: &Connection, source_id: i64) -> bool {
     conn.query_row(

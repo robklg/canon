@@ -9,7 +9,7 @@
 mod helpers;
 
 pub use helpers::{
-    insert_fact, insert_note, insert_object, insert_root, insert_source, insert_source_excluded,
-    insert_source_with_metadata, insert_source_with_size, insert_time_fact, is_object_excluded,
-    is_source_excluded, migrated_time, plant_failure, setup_test_db,
+    insert_fact, insert_note, insert_object, insert_object_fact, insert_root, insert_source,
+    insert_source_excluded, insert_source_with_metadata, insert_source_with_size, insert_time_fact,
+    is_object_excluded, is_source_excluded, migrated_time, plant_failure, setup_test_db,
 };

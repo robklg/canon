@@ -25,12 +25,16 @@ Facts are namespaced:
 
 When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`.
 
+A source has one value for each key. A `content.*` key can be held on the source as well as on its content; filters, `canon facts`, patterns and `canon worklist` all read the facts from the content, except for the facts that exist only on the source.
+
 ## Value Types
 
 Canon stores facts as:
 - **Text**: Strings like `"Apple"` or `"image/jpeg"`; enables string matching (`=`, `~` glob) and string modifiers (`|lowercase`, `|stem`)
 - **Numbers**: Integers or decimals like `1024` or `3.14`; enables numeric comparisons (`>1000`) and the `|bucket` modifier
 - **Times**: Points or periods on one timeline, like a capture date or a save time; enables the time modifiers (`|year`, `|month`). See [Times](#times) below
+
+A key's type is determined from all of its facts. A key whose facts hold more than one type lists as `mixed` in [`canon facts`](../commands/query/facts.md).
 
 Type hints can be provided during import to ensure correct parsing. See [Enriching](../commands/enrich/index.md) for details.
 

@@ -4,6 +4,7 @@ pub(super) mod import;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
+use crate::core::domain::fact::FactType;
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
@@ -23,7 +24,7 @@ use crate::facts::ops::maintain::{
 use crate::facts::ops::report::{
     compute_all_keys, compute_distribution, compute_grouped_distribution,
     compute_root_distribution, AllKeysResult, DistributionResult, GroupedDistributionResult,
-    RootDistributionResult,
+    KeyInfo, RootDistributionResult,
 };
 
 /// Check if a parsed key represents source.root (for special display formatting)
@@ -229,23 +230,7 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
     let _ = writeln!(handle, "{}", "─".repeat(60));
 
     for key_info in &result.keys {
-        let coverage = (key_info.count as f64 / result.total_sources as f64) * 100.0;
-        let suffix = match key_info.category {
-            BuiltinKeyCategory::BuiltIn => "  (built-in)",
-            BuiltinKeyCategory::Derived => "  (derived)",
-            BuiltinKeyCategory::Stored => "",
-        };
-        if writeln!(
-            handle,
-            "{:<30} {:>6} {:>10} {:>9.1}%{}",
-            key_info.key,
-            key_info.fact_type.as_str(),
-            key_info.count,
-            coverage,
-            suffix
-        )
-        .is_err()
-        {
+        if writeln!(handle, "{}", key_row(key_info, result.total_sources)).is_err() {
             break;
         }
     }
@@ -261,6 +246,14 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
         );
     }
 
+    let mixed = mixed_key_lines(result);
+    if !mixed.is_empty() {
+        let _ = writeln!(handle);
+        for line in mixed {
+            let _ = writeln!(handle, "{line}");
+        }
+    }
+
     if show_status_predicates {
         let _ = writeln!(handle, "\nStatus Predicates (use in --where):");
         let _ = writeln!(handle, "  {:<14} content exists in an archive", "archived?");
@@ -272,6 +265,41 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
             "enriched?"
         );
     }
+}
+
+/// One key's row in the listing: its name, the key's type word, the scope's count and
+/// coverage, and what kind of key it is.
+fn key_row(key_info: &KeyInfo, total_sources: usize) -> String {
+    let coverage = (key_info.count as f64 / total_sources as f64) * 100.0;
+    let suffix = match key_info.category {
+        BuiltinKeyCategory::BuiltIn => "  (built-in)",
+        BuiltinKeyCategory::Derived => "  (derived)",
+        BuiltinKeyCategory::Stored => "",
+    };
+    format!(
+        "{:<30} {:>6} {:>10} {:>9.1}%{}",
+        key_info.key,
+        key_info.types.word(),
+        key_info.count,
+        coverage,
+        suffix
+    )
+}
+
+/// The lines under the listing that name its keys of mixed type: the statement, then the
+/// way out, one command per key; none when no listed key is mixed.
+fn mixed_key_lines(result: &AllKeysResult) -> Vec<String> {
+    use crate::core::domain::fact::{mixed_type_statement, mixed_type_way_out};
+
+    let mixed: Vec<&str> = result
+        .keys
+        .iter()
+        .filter(|key_info| key_info.types.is_mixed())
+        .map(|key_info| key_info.key.as_str())
+        .collect();
+    let mut lines = mixed_type_statement(&mixed);
+    lines.extend(mixed_type_way_out(&mixed));
+    lines
 }
 
 /// A value as the distribution table's first column shows it: labelled when
@@ -476,8 +504,8 @@ fn display_grouped_distribution(
 // ============================================================================
 
 pub struct DeleteOptions {
-    pub entity_type: String,        // "source" or "object"
-    pub value_type: Option<String>, // "text", "num", or "time"
+    pub entity_type: String, // "source" or "object"
+    pub value_type: Option<FactType>,
     pub dry_run: bool,
     /// The visibility the equivalent `ls --where` would have used at this
     /// scope. Deletion must act on the population the user could preview.
@@ -539,7 +567,7 @@ pub fn delete_facts(
         &source_ids,
         key,
         &options.entity_type,
-        options.value_type.as_deref(),
+        options.value_type,
     )?;
 
     let entity_label = if options.entity_type == "source" {
@@ -577,7 +605,7 @@ pub fn delete_facts(
             &source_ids,
             key,
             &options.entity_type,
-            options.value_type.as_deref(),
+            options.value_type,
             &plan,
             Some(&decision),
         )?;
@@ -778,6 +806,97 @@ pub fn show_aliases() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // The key listing
+    // =========================================================================
+
+    fn stored(key: &str, types: &[(FactType, u64)]) -> KeyInfo {
+        KeyInfo {
+            key: key.to_string(),
+            count: 1,
+            category: BuiltinKeyCategory::Stored,
+            types: crate::core::domain::fact::KeyTypes::from_counts(types.iter().copied()).unwrap(),
+        }
+    }
+
+    fn listing(keys: Vec<KeyInfo>) -> AllKeysResult {
+        AllKeysResult {
+            keys,
+            total_sources: 1,
+        }
+    }
+
+    #[test]
+    fn the_listing_prints_the_type_words() {
+        for (types, word) in [
+            (vec![(FactType::Text, 3)], "text"),
+            (vec![(FactType::Num, 3)], "number"),
+            (vec![(FactType::Time, 3)], "time"),
+            (vec![(FactType::Text, 2), (FactType::Num, 1)], "mixed"),
+        ] {
+            let row = key_row(&stored("content.K", &types), 1);
+            assert_eq!(
+                row,
+                format!("{:<30} {word:>6} {:>10} {:>9.1}%", "content.K", 1, 100.0)
+            );
+        }
+        assert!(!key_row(&stored("content.K", &[(FactType::Num, 1)]), 1).contains("num "));
+    }
+
+    #[test]
+    fn one_mixed_key_is_named_with_its_command() {
+        let result = listing(vec![
+            stored("content.Make", &[(FactType::Text, 4)]),
+            stored(
+                "content.File Size",
+                &[(FactType::Text, 2), (FactType::Num, 5)],
+            ),
+        ]);
+        assert_eq!(
+            mixed_key_lines(&result),
+            vec![
+                "'content.File Size' is of mixed type, so filters and patterns cannot use its values:",
+                "only values of one type can be compared or formatted correctly.",
+                "To inspect it and learn how to convert it to one type:",
+                "  `canon facts convert 'content.File Size'`",
+            ]
+        );
+    }
+
+    #[test]
+    fn several_mixed_keys_are_each_named() {
+        let result = listing(vec![
+            stored(
+                "content.CreateDate",
+                &[(FactType::Text, 1), (FactType::Time, 9)],
+            ),
+            stored("content.Make", &[(FactType::Text, 4)]),
+            stored(
+                "content.File Size",
+                &[(FactType::Text, 2), (FactType::Num, 5)],
+            ),
+        ]);
+        assert_eq!(
+            mixed_key_lines(&result),
+            vec![
+                "2 keys are of mixed type, so filters and patterns cannot use their values:",
+                "only values of one type can be compared or formatted correctly.",
+                "To inspect each and learn how to convert to one type:",
+                "  `canon facts convert content.CreateDate`",
+                "  `canon facts convert 'content.File Size'`",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_mixed_key_prints_no_lines() {
+        let result = listing(vec![
+            stored("content.Make", &[(FactType::Text, 4)]),
+            stored("content.Width", &[(FactType::Num, 4)]),
+        ]);
+        assert!(mixed_key_lines(&result).is_empty());
+    }
 
     // =========================================================================
     // value_cell tests

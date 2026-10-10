@@ -16,11 +16,10 @@ through `core::domain::time::reading`, never as epoch seconds. `cli.rs` — the
 `canon facts` command surface. `cli/import.rs` — the `canon import-facts` one.
 
 **The fact noun is split, not moved.** `FactEntry`, `FactType` and `FactValue` stay in
-`core::domain::fact`, and `batch_fetch_for_sources`/`batch_fetch_key_for_sources` stay in
-`core/repo/fact.rs`, because `archive` and `expr::domain::value` consume them too — only
-what facts alone speaks lives here. `ops/report.rs` calls `batch_fetch_key_for_sources`
-in core directly: an operations stratum reaching the shared repository is the ordinary
-edge, not a barrel item.
+`core::domain::fact`, and `batch_fetch_for_sources` stays in `core/repo/fact.rs`, because
+`archive` and the expression facility consume the nouns, and `archive` the fetch — only what
+facts alone speaks lives here. `ops/report.rs` reads values through `expr::fetch_source_values`,
+one per source. The key listing's Type is the key's (`core::repo::fact::key_types`), never the scope's.
 
 **Four of this subsystem's five decision sites arm their recorder; `execute_delete` cannot.**
 An armed recorder holds a shared connection for the whole run, and the delete needs a mutable
@@ -58,12 +57,11 @@ the decision's scope.
 file's own path, so a single entry naming one of them leaves the other unmatched and
 fails the build. Repairing one call site deletes that file's entry, never both.
 
-**Barrel** (`facts.rs`), all `main.rs`-facing: `run`, `import_run`, `delete_facts`,
+**Barrel** (`facts.rs`), `main.rs`-facing: `run`, `import_run`, `delete_facts`,
 `DeleteOptions`, `prune_stale`, `prune_orphaned_objects`, `prune_excluded_facts`,
-`show_aliases`. `cli.rs` declares `pub(super) mod import;` and `ops.rs` declares
+`show_aliases`, plus `compute_distribution`, which the source-value law's verifier reads. `cli.rs` declares `pub(super) mod import;` and `ops.rs` declares
 `report`/`maintain`/`import` the same way, so nothing below the front door is reachable
-from outside it. No repo-tier item is on the barrel: nothing outside `main.rs` reaches
-facts at all.
+from outside it. No repo-tier item is on the barrel: nothing else reaches facts.
 
 **The prunes consult no door.** `prune-stale`, `prune-orphaned-objects` and `prune-excluded-facts`
 read no `Door`, `RootLookup` or `ParkedRoot`, by design: pruning is index maintenance over rows

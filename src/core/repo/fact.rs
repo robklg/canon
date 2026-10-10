@@ -16,11 +16,11 @@
 //! ```ignore
 //! use crate::core::repo;
 //!
-//! // Fetch a specific fact key for sources
-//! let facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
-//! for (source_id, entry) in &facts {
-//!     if let Some(fact) = entry {
-//!         println!("{}: {:?}", source_id, fact.value);
+//! // Every fact each source carries, on the source and on its content.
+//! let facts = repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
+//! for (source_id, entries) in &facts {
+//!     for fact in entries {
+//!         println!("{}: {} = {:?}", source_id, fact.key, fact.value);
 //!     }
 //! }
 //! ```
@@ -35,11 +35,11 @@ use jiff::{SignedDuration, Timestamp};
 use rusqlite::types::Value as SqlValue;
 
 use super::db::{populate_temp_sources, Connection};
-use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::fact::{FactEntry, FactType, FactValue, KeyTypes};
 use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 
-// Note: We use temp tables (populate_temp_sources) instead of IN clause chunking,
-// so BATCH_SIZE is not needed here. The temp table pattern handles large sets better.
+// Source-keyed fetches fill a temp table (populate_temp_sources) rather than chunk an IN
+// list; `key_types`, keyed by fact key, chunks its key list instead (KEY_TYPES_CHUNK).
 
 /// Fetch all facts for the given source IDs.
 ///
@@ -109,72 +109,52 @@ pub fn batch_fetch_for_sources(
     Ok(result)
 }
 
-/// Fetch facts for a specific key only.
+/// Keys per `key_types` query, under SQLite's bound-variable limit.
+const KEY_TYPES_CHUNK: usize = 900;
+
+/// The types each key's facts hold — read from the key's row set: every fact of the key,
+/// on every root, of every source, of any content, present or not. No join, so suspension,
+/// scope, presence and role can never enter a key's type. A key with no facts is absent
+/// from the map: it has no type.
 ///
-/// Efficient for fetching one fact key across many sources.
-/// Returns map from source_id to Option<FactEntry>.
-/// None indicates the source lacks this fact.
-pub fn batch_fetch_key_for_sources(
-    conn: &mut Connection,
-    source_ids: &[i64],
-    key: &str,
-) -> Result<HashMap<i64, Option<FactEntry>>> {
-    if source_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    // Populate temp table with source IDs
-    populate_temp_sources(conn, source_ids)?;
-
-    // Query specific key using UNION ALL
-    let query = format!(
-        r#"
-        SELECT ts.id as source_id, f.key, f.entity_type, f.entity_id, {cols}
-        FROM temp_sources ts
-        JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
-
-        UNION ALL
-
-        SELECT ts.id as source_id, f.key, f.entity_type, f.entity_id, {cols}
-        FROM temp_sources ts
-        JOIN sources s ON s.id = ts.id
-        JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
-        WHERE s.object_id IS NOT NULL
-    "#,
-        cols = fact_value_columns_of("f")
-    );
-
-    let mut stmt = conn.prepare(&query)?;
-    let rows = stmt.query_map([key], |row| {
-        let source_id: i64 = row.get(0)?;
-        let key: String = row.get(1)?;
-        let entity_type: String = row.get(2)?;
-        let entity_id: i64 = row.get(3)?;
-        let value = fact_value_at(row, 4)?;
-
-        Ok(value.map(|value| {
-            (
-                source_id,
-                FactEntry::new(key, value, entity_type, entity_id),
-            )
-        }))
-    })?;
-
-    // Initialize result with None for all source IDs
-    let mut result: HashMap<i64, Option<FactEntry>> =
-        source_ids.iter().map(|&id| (id, None)).collect();
-
-    // Fill in found facts
-    for row in rows {
-        if let Some((source_id, entry)) = row? {
-            result.insert(source_id, Some(entry));
+/// The grouping expressions are written exactly as the `facts_key_type` index holds them,
+/// so SQLite answers from the index alone.
+pub fn key_types(conn: &Connection, keys: &[&str]) -> Result<HashMap<String, KeyTypes>> {
+    let mut counts: HashMap<String, Vec<(FactType, u64)>> = HashMap::new();
+    for chunk in keys.chunks(KEY_TYPES_CHUNK) {
+        let mut stmt = conn.prepare(&key_types_sql(chunk.len()))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            let key: String = row.get(0)?;
+            let no_time: bool = row.get(1)?;
+            let no_num: bool = row.get(2)?;
+            let n: i64 = row.get(3)?;
+            let t = match (no_time, no_num) {
+                (false, _) => FactType::Time,
+                (true, false) => FactType::Num,
+                (true, true) => FactType::Text,
+            };
+            Ok((key, t, n as u64))
+        })?;
+        for row in rows {
+            let (key, t, n) = row?;
+            counts.entry(key).or_default().push((t, n));
         }
     }
+    Ok(counts
+        .into_iter()
+        .filter_map(|(key, c)| KeyTypes::from_counts(c).map(|types| (key, types)))
+        .collect())
+}
 
-    // Clean up temp table
-    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-
-    Ok(result)
+/// `key_types`' query for `n` keys. Its expressions repeat `facts_key_type`'s, which is what
+/// lets SQLite answer it from that index.
+fn key_types_sql(n: usize) -> String {
+    let placeholders = vec!["?"; n].join(", ");
+    format!(
+        "SELECT key, value_time IS NULL, value_num IS NULL, COUNT(*) FROM facts
+         WHERE key IN ({placeholders})
+         GROUP BY key, value_time IS NULL, value_num IS NULL"
+    )
 }
 
 /// The value columns of `facts`, in the order [`fact_value_at`] reads them and
@@ -441,56 +421,118 @@ mod tests {
     }
 
     // =========================================================================
-    // batch_fetch_key_for_sources tests
+    // key_types — the key's row set
     // =========================================================================
 
-    #[test]
-    fn batch_fetch_key_for_sources_empty_ids() {
-        let mut conn = setup_test_db();
-        let result = batch_fetch_key_for_sources(&mut conn, &[], "content.Make").unwrap();
-        assert!(result.is_empty());
+    fn insert_fact_num(conn: &Connection, entity_type: &str, entity_id: i64, key: &str, n: f64) {
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_num, observed_at, observed_basis_rev)
+             VALUES (?1, ?2, ?3, ?4, 0, CASE WHEN ?1 = 'source' THEN 0 ELSE NULL END)",
+            rusqlite::params![entity_type, entity_id, key, n],
+        )
+        .unwrap();
     }
 
+    /// Every fact of the key counts, wherever it sits: on a suspended root, on a source no
+    /// longer present, on an excluded source, and on content no source holds.
     #[test]
-    fn batch_fetch_key_for_sources_found() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file.txt", Some(100));
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-        insert_fact_text(&conn, "object", 100, "content.Model", "EOS");
-
-        let result = batch_fetch_key_for_sources(&mut conn, &[1], "content.Make").unwrap();
-        let entry = result.get(&1).unwrap().as_ref().unwrap();
-        assert_eq!(entry.key, "content.Make");
-        match &entry.value {
-            FactValue::Text(s) => assert_eq!(s, "Canon"),
-            _ => panic!("Expected Text variant"),
+    fn key_types_reads_every_row_of_the_key() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/open");
+        insert_root(&conn, 2, "/parked");
+        conn.execute("UPDATE roots SET suspended = 1 WHERE id = 2", [])
+            .unwrap();
+        insert_source(&conn, 1, 1, "present.jpg", None);
+        insert_source(&conn, 2, 2, "parked.jpg", None);
+        insert_source(&conn, 3, 1, "gone.jpg", None);
+        conn.execute("UPDATE sources SET present = 0 WHERE id = 3", [])
+            .unwrap();
+        insert_source(&conn, 4, 1, "dismissed.jpg", None);
+        conn.execute("UPDATE sources SET excluded = 1 WHERE id = 4", [])
+            .unwrap();
+        insert_object(&conn, 100, "held-by-nothing");
+        for id in 1..=4 {
+            insert_fact_num(&conn, "source", id, "content.W", 1.0);
         }
+        insert_fact_num(&conn, "object", 100, "content.W", 1.0);
+        insert_fact_text(&conn, "source", 1, "content.Other", "x");
+
+        let types = key_types(&conn, &["content.W", "content.Missing"]).unwrap();
+        assert_eq!(types["content.W"].counts(), &[(FactType::Num, 5)]);
+        assert!(
+            !types.contains_key("content.Missing"),
+            "a key with no facts has no type"
+        );
+        assert!(!types.contains_key("content.Other"), "only the keys asked");
     }
 
     #[test]
-    fn batch_fetch_key_for_sources_missing() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_source(&conn, 1, 1, "file.txt", None);
+    fn key_types_reports_two_types_with_their_counts() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/r");
+        insert_source(&conn, 1, 1, "a", None);
+        insert_source(&conn, 2, 1, "b", None);
+        insert_source(&conn, 3, 1, "c", None);
+        insert_fact_text(&conn, "source", 1, "content.D", "yesterday");
+        insert_fact_num(&conn, "source", 2, "content.D", 7.0);
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision, observed_at, observed_basis_rev)
+             VALUES ('source', 3, 'content.D', 0, 'clock', 'second', 0, 0)",
+            [],
+        )
+        .unwrap();
 
-        let result = batch_fetch_key_for_sources(&mut conn, &[1], "content.Make").unwrap();
-        assert!(result.get(&1).unwrap().is_none());
+        let types = key_types(&conn, &["content.D"]).unwrap();
+        let d = &types["content.D"];
+        assert_eq!(d.word(), "mixed");
+        assert_eq!(
+            d.counts(),
+            &[(FactType::Text, 1), (FactType::Num, 1), (FactType::Time, 1)]
+        );
     }
 
+    /// The lookup and its grouping are answered from `facts_key_type`: the query's
+    /// expressions repeat the index's, so no step sorts the rows again.
     #[test]
-    fn batch_fetch_key_for_sources_partial() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file1.txt", Some(100));
-        insert_source(&conn, 2, 1, "file2.txt", None);
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
+    fn the_type_lookup_uses_its_index() {
+        let conn = setup_test_db();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", key_types_sql(1)))
+            .unwrap()
+            .query_map(["content.D"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("facts_key_type")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
 
-        let result = batch_fetch_key_for_sources(&mut conn, &[1, 2], "content.Make").unwrap();
-        assert!(result.get(&1).unwrap().is_some());
-        assert!(result.get(&2).unwrap().is_none());
+    /// More keys than SQLite binds in one statement (32,766), so the list must be cut, and
+    /// the types merged back across the cuts.
+    #[test]
+    fn key_types_batches_large_key_lists() {
+        const KEYS: usize = 33_000;
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/r");
+        insert_source(&conn, 1, 1, "a", None);
+        let keys: Vec<String> = (0..KEYS).map(|i| format!("content.K{i}")).collect();
+        let tx = conn.transaction().unwrap();
+        for key in &keys {
+            insert_fact_text(&tx, "source", 1, key, "v");
+        }
+        tx.commit().unwrap();
+        // The list is past what one statement binds, so an uncut query would fail.
+        assert!(conn.prepare(&key_types_sql(KEYS)).is_err());
+        let asked: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let types = key_types(&conn, &asked).unwrap();
+        assert_eq!(types.len(), KEYS);
+        assert!(types.values().all(|t| t.single() == Some(FactType::Text)));
     }
 
     // =========================================================================
@@ -585,8 +627,8 @@ mod tests {
 
     /// A stored time outside the years every zone reads in 0000–9999 — reachable only by a
     /// pre-upgrade import late in year 9999 with a negative offset, which the old parser
-    /// stored as a second in year 10000 — is no value for that fact, and the fetches over it
-    /// complete.
+    /// stored as a second in year 10000 — is no value for that fact, and the fetch over it
+    /// completes.
     #[test]
     fn a_stored_time_outside_the_readable_line_is_no_value_and_the_fetch_completes() {
         let mut conn = setup_test_db();
@@ -610,9 +652,6 @@ mod tests {
         )
         .unwrap();
 
-        let by_key = batch_fetch_key_for_sources(&mut conn, &[1, 2], "content.T").unwrap();
-        assert!(by_key[&1].is_none(), "the unreadable time has no value");
-        assert!(by_key[&2].is_some());
         let all = batch_fetch_for_sources(&mut conn, &[1, 2]).unwrap();
         assert!(!all.contains_key(&1));
         assert_eq!(all[&2].len(), 1, "only the readable fact");

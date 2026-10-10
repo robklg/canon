@@ -2,21 +2,22 @@
 //! database before it can be evaluated.
 //!
 //! Two prefetches fill the cache the evaluation half reads — one for facts,
-//! one for the status predicates — two point reads answer a single
-//! question about a single key, and one reads the source row a per-source
-//! comparison works from. Batch in, domain types out.
+//! one for the status predicates — one point read answers whether a key is
+//! known, one reads the source row a per-source comparison works from, and
+//! one reads a key's rows per source, on the source and on its content, for the
+//! one rule that picks between them. Batch in, domain types out.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
-use std::collections::HashSet;
+use rusqlite::Connection;
+use std::collections::{HashMap, HashSet};
 
 use super::domain::cache::FactCache;
 use super::domain::filter::{StatusPredicate, UsedStatus};
 use super::domain::key::{is_builtin_key, parse_key_with_modifiers, BuiltinKey};
 use super::domain::value::SourceAttributes;
-use crate::core::domain::fact::FactValue;
+use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::repo::db::populate_temp_sources;
-use crate::core::repo::fact::{fact_value_at, fact_value_columns_of, FACT_VALUE_COLUMNS};
+use crate::core::repo::fact::{fact_value_at, fact_value_columns_of};
 
 // ============================================================================
 // Fact Prefetching
@@ -43,48 +44,29 @@ pub fn prefetch_facts(
         .filter_map(|k| parse_key_with_modifiers(k).ok().map(|(base, _, _)| base))
         .collect();
 
-    // Skip built-in keys (they don't need DB lookups)
-    let stored_keys: Vec<&String> = base_keys.iter().filter(|k| !is_builtin_key(k)).collect();
+    // A built-in the source row computes needs no lookup; every other key is
+    // read from the facts table under its stored name, the hash keys included
+    // (the parser has already read `hash` as `content.hash.sha256`).
+    let stored_keys: Vec<&String> = base_keys
+        .iter()
+        .filter(|k| !BuiltinKey::from_str(k).is_some_and(|b| b.is_computed()))
+        .collect();
 
     for key in &base_keys {
         cache.prefetched_keys.insert(key.clone());
     }
 
     if stored_keys.is_empty() {
-        // The keys the resolver cannot answer from the source row (the hash
-        // keys) exist through the object link, so they need source_objects
-        // even with no stored keys.
-        if base_keys
-            .iter()
-            .any(|k| BuiltinKey::from_str(k).is_some_and(|b| !b.is_computed()))
-        {
-            // Filling the temp source table opens and commits a transaction
-            // of its own, and clears whatever a previous fill left behind.
-            // Two consequences hold for every query in this module that uses
-            // it, here and below: none of them may run inside an outer
-            // transaction, and the drops that follow each one are tidiness
-            // rather than correctness. Hoisting the fills into a single
-            // shared setup looks like an obvious simplification and would
-            // break the first of those.
-            populate_temp_sources(conn, source_ids)?;
-            let mappings: Vec<(i64, i64)> = conn
-                .prepare(
-                    "SELECT ts.id, s.object_id
-                     FROM temp_sources ts
-                     JOIN sources s ON s.id = ts.id
-                     WHERE s.object_id IS NOT NULL",
-                )?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            for (source_id, object_id) in mappings {
-                cache.source_objects.insert(source_id, object_id);
-            }
-            conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
-        }
         return Ok(cache);
     }
 
-    // Create temp table for source IDs
+    // Filling the temp source table opens and commits a transaction of its
+    // own, and clears whatever a previous fill left behind. Two consequences
+    // hold for every query in this module that uses it, here and below: none
+    // of them may run inside an outer transaction, and the drops that follow
+    // each one are tidiness rather than correctness. Hoisting the fills into
+    // a single shared setup looks like an obvious simplification and would
+    // break the first of those.
     populate_temp_sources(conn, source_ids)?;
 
     // Fetch source->object mappings
@@ -292,13 +274,12 @@ pub fn is_known_key(conn: &Connection, base_key: &str) -> Result<bool> {
 }
 
 /// A source row as a per-source comparison reads it: the attributes the built-in keys are
-/// resolved from, whether its device and inode columns hold a value (a NULL one has no value
-/// to read), and the object its content facts hang off.
+/// resolved from, and whether its device and inode columns hold a value (a NULL one has no
+/// value to read).
 pub struct SourceRow {
     pub attributes: SourceAttributes,
     pub has_device: bool,
     pub has_inode: bool,
-    pub object_id: Option<i64>,
 }
 
 /// One source's row, for a per-source comparison; `None` for an id with no row.
@@ -306,8 +287,7 @@ pub fn fetch_source_row(conn: &Connection, source_id: i64) -> Result<Option<Sour
     use rusqlite::OptionalExtension;
     Ok(conn
         .query_row(
-            "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.mtime, s.device, s.inode,
-                    s.object_id
+            "SELECT s.id, s.root_id, r.path, s.rel_path, s.size, s.mtime, s.device, s.inode
              FROM sources s JOIN roots r ON s.root_id = r.id WHERE s.id = ?",
             [source_id],
             |row| {
@@ -326,7 +306,6 @@ pub fn fetch_source_row(conn: &Connection, source_id: i64) -> Result<Option<Sour
                     },
                     has_device: device.is_some(),
                     has_inode: inode.is_some(),
-                    object_id: row.get(8)?,
                 })
             },
         )
@@ -334,25 +313,166 @@ pub fn fetch_source_row(conn: &Connection, source_id: i64) -> Result<Option<Sour
 }
 
 // ============================================================================
-// Value Handling
+// A key's rows per source
 // ============================================================================
 
-pub fn get_fact_value(
-    conn: &Connection,
-    entity_type: &str,
-    entity_id: i64,
+/// One source's rows for one key: the fact on the source and the fact on its content —
+/// everything the rule that picks a source's value reads.
+pub(super) struct KeyRowsOf {
+    pub on_source: Option<FactEntry>,
+    pub on_content: Option<FactEntry>,
+}
+
+/// A key's rows for a batch of sources. A source holding neither row is absent from the
+/// map, and so is a stored value Canon cannot read: it is no row.
+pub(super) fn fetch_key_rows(
+    conn: &mut Connection,
+    source_ids: &[i64],
     key: &str,
-) -> Result<Option<FactValue>> {
-    use rusqlite::OptionalExtension;
-    let value = conn
-        .query_row(
-            &format!(
-                "SELECT {FACT_VALUE_COLUMNS} FROM facts
-                 WHERE entity_type = ? AND entity_id = ? AND key = ?"
-            ),
-            params![entity_type, entity_id, key],
-            |row| fact_value_at(row, 0),
+) -> Result<HashMap<i64, KeyRowsOf>> {
+    if source_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    populate_temp_sources(conn, source_ids)?;
+
+    let query = format!(
+        r#"
+        SELECT ts.id, f.key, f.entity_type, f.entity_id, {cols}
+        FROM temp_sources ts
+        JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
+
+        UNION ALL
+
+        SELECT ts.id, f.key, f.entity_type, f.entity_id, {cols}
+        FROM temp_sources ts
+        JOIN sources s ON s.id = ts.id
+        JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
+        WHERE s.object_id IS NOT NULL
+    "#,
+        cols = fact_value_columns_of("f")
+    );
+
+    let mut rows: HashMap<i64, KeyRowsOf> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(&query)?;
+        let fetched = stmt.query_map([key], |row| {
+            let source_id: i64 = row.get(0)?;
+            let key: String = row.get(1)?;
+            let entity_type: String = row.get(2)?;
+            let entity_id: i64 = row.get(3)?;
+            let value = fact_value_at(row, 4)?;
+            Ok(value.map(|value| {
+                (
+                    source_id,
+                    FactEntry::new(key, value, entity_type, entity_id),
+                )
+            }))
+        })?;
+        for row in fetched {
+            let Some((source_id, entry)) = row? else {
+                continue;
+            };
+            let of = rows.entry(source_id).or_insert(KeyRowsOf {
+                on_source: None,
+                on_content: None,
+            });
+            if entry.is_on_source() {
+                of.on_source = Some(entry);
+            } else {
+                of.on_content = Some(entry);
+            }
+        }
+    }
+
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::testing::{
+        insert_fact, insert_object, insert_object_fact, insert_root, insert_source, setup_test_db,
+    };
+
+    fn text(entry: &Option<FactEntry>) -> Option<&str> {
+        match entry.as_ref().map(|e| &e.value) {
+            Some(FactValue::Text(s)) => Some(s.as_str()),
+            Some(other) => panic!("expected text, got {other:?}"),
+            None => None,
+        }
+    }
+
+    #[test]
+    fn fetch_key_rows_empty_ids() {
+        let mut conn = setup_test_db();
+        let rows = fetch_key_rows(&mut conn, &[], "content.Make").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn fetch_key_rows_found() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/root", "source", false);
+        let obj = insert_object(&conn, "abc123", false);
+        let source = insert_source(&conn, root, "file.txt", Some(obj));
+        insert_object_fact(&conn, obj, "content.Make", "Canon");
+        insert_object_fact(&conn, obj, "content.Model", "EOS");
+        insert_fact(&conn, source, "content.Make", "Nikon");
+
+        let rows = fetch_key_rows(&mut conn, &[source], "content.Make").unwrap();
+        let of = &rows[&source];
+        assert_eq!(text(&of.on_content), Some("Canon"));
+        assert_eq!(text(&of.on_source), Some("Nikon"));
+        assert_eq!(of.on_content.as_ref().unwrap().key, "content.Make");
+    }
+
+    #[test]
+    fn fetch_key_rows_missing() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/root", "source", false);
+        let source = insert_source(&conn, root, "file.txt", None);
+
+        let rows = fetch_key_rows(&mut conn, &[source], "content.Make").unwrap();
+        assert!(!rows.contains_key(&source));
+    }
+
+    #[test]
+    fn fetch_key_rows_partial() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/root", "source", false);
+        let obj = insert_object(&conn, "abc123", false);
+        let hashed = insert_source(&conn, root, "file1.txt", Some(obj));
+        let unhashed = insert_source(&conn, root, "file2.txt", None);
+        insert_object_fact(&conn, obj, "content.Make", "Canon");
+
+        let rows = fetch_key_rows(&mut conn, &[hashed, unhashed], "content.Make").unwrap();
+        assert_eq!(text(&rows[&hashed].on_content), Some("Canon"));
+        assert!(rows[&hashed].on_source.is_none());
+        assert!(!rows.contains_key(&unhashed));
+    }
+
+    /// A stored time Canon cannot place on its timeline — a clock reading stored as a second
+    /// in year 10000 — is no row for that key, and the fetch over it completes.
+    #[test]
+    fn a_stored_time_outside_the_readable_line_is_no_row_and_the_key_fetch_completes() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let a = insert_source(&conn, root, "a.jpg", None);
+        let b = insert_source(&conn, root, "b.jpg", None);
+        // 10000-01-01T04:00:00 counted as if UTC: a second past the last year Canon reads.
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision, observed_at, observed_basis_rev)
+             VALUES ('source', ?1, 'content.T', 253402315200, 'clock', 'second', 0, 0),
+                    ('source', ?2, 'content.T', 1704067200, 'clock', 'second', 0, 0)",
+            [a, b],
         )
-        .optional()?;
-    Ok(value.flatten())
+        .unwrap();
+
+        let rows = fetch_key_rows(&mut conn, &[a, b], "content.T").unwrap();
+        assert!(!rows.contains_key(&a), "the unreadable time is no row");
+        assert!(rows[&b].on_source.is_some());
+    }
 }

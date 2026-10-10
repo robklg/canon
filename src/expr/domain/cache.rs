@@ -3,14 +3,16 @@
 //! Evaluating a filter over many sources one fact at a time is a query per
 //! source per key, so values are fetched in bulk first and read from here.
 //! The cache holds source facts, object facts, the source-to-object map, and
-//! the sets that answer the status predicates. Values are the fact noun's own
-//! (`core::domain::fact::FactValue`), read from storage through the one
-//! column conversion in `core::repo::fact`.
+//! the sets that answer the status predicates. A source's value for a key is
+//! read through `value`, the one-value rule applied.
+//! Values are the fact noun's own (`core::domain::fact::FactValue`), read
+//! from storage through the one column conversion in `core::repo::fact`.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::core::domain::fact;
 use crate::expr::domain::transform::InstantRecord;
+use crate::expr::domain::value::source_value;
 
 // ============================================================================
 // Fact Cache for Bulk Prefetching
@@ -59,6 +61,15 @@ impl FactCache {
         self.source_objects
             .get(&source_id)
             .and_then(|obj_id| self.object_facts.get(&(*obj_id, key.to_string())))
+    }
+
+    /// The source's one value for a stored key: the content's fact first, the source's own
+    /// where the content has none (`source_value`).
+    pub fn value(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
+        source_value(
+            self.get_source_fact(source_id, key),
+            self.get_object_fact(source_id, key),
+        )
     }
 
     pub fn get_object_id(&self, source_id: i64) -> Option<i64> {

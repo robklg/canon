@@ -3,10 +3,11 @@
 //! `apply_filters` is the whole of it from outside — hand it source ids and
 //! parsed filters, get back the ids that match. Inside, the work runs against
 //! a prefetched cache rather than a query per source, with a per-source
-//! fallback for the built-in keys that are derived from source columns instead
+//! read for the built-in keys that are derived from source columns instead
 //! of stored as facts. Those values are read through the resolver that owns
 //! them (`get_builtin_value`), never derived again here; the source row they
-//! are read from comes from the repository stratum beside this one.
+//! are read from comes from the repository stratum beside this one. A stored
+//! key is compared on the source's one value, read through the cache.
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -24,7 +25,7 @@ use crate::expr::domain::transform::{
 };
 use crate::expr::domain::value::get_builtin_value;
 use crate::expr::repo::{
-    fetch_source_row, get_fact_value, is_known_key, prefetch_facts, prefetch_status_data, SourceRow,
+    fetch_source_row, is_known_key, prefetch_facts, prefetch_status_data, SourceRow,
 };
 
 // ============================================================================
@@ -106,55 +107,36 @@ fn validate_filter_keys(conn: &Connection, filters: &[Filter]) -> Result<()> {
 // Fact Checking Functions
 // ============================================================================
 
-/// Check one comparison for a source: a built-in key is read through the
-/// resolver from the source row, anything else is a stored fact. This is used
-/// by the cached version for the built-in keys and for nothing it holds.
-fn check_fact_compare(
+/// Check one comparison against a built-in the source row computes, read
+/// through the resolver that owns its meaning and only through it: where the
+/// row cannot answer one (a NULL device or inode, a save time outside the
+/// years Canon reads) no comparison matches, and never a stored row of its
+/// name. (`?` reads a NULL device or inode as 0, as `facts` reports it.)
+#[allow(clippy::too_many_arguments)]
+fn check_computed_compare(
     conn: &Connection,
     source_id: i64,
+    builtin: BuiltinKey,
+    accessor: &Option<PathAccessor>,
+    modifiers: &[ModifierCall],
     key: &str,
     op: CompareOp,
     value: &str,
     zone: &UserZone,
     record: &InstantRecord,
 ) -> Result<bool> {
-    let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
     let Some(row) = fetch_source_row(conn, source_id)? else {
         return Ok(false);
     };
-    let matches = |fact_value: FactValue| {
-        apply_accessor_and_modifiers(fact_value, &accessor, &modifiers, key, zone, record)
+    Ok(builtin_value(&row, builtin).is_some_and(|fact_value| {
+        apply_accessor_and_modifiers(fact_value, accessor, modifiers, key, zone, record)
             .is_some_and(|modified| compare_fact_value(&modified, op, value))
-    };
-
-    // Built-in keys the source row computes are read through the resolver that
-    // owns their meaning, and only through it: where the row cannot answer one
-    // (a NULL device or inode, a save time outside the years Canon reads) no
-    // comparison matches, and never a stored row of its name. (`?` reads a NULL
-    // device or inode as 0, as `facts` reports it.) The hash keys, which no
-    // source row computes, fall through to the stored-fact lookup.
-    if let Some(builtin) = BuiltinKey::from_str(&base_key) {
-        if builtin.is_computed() {
-            return Ok(builtin_value(&row, builtin).is_some_and(matches));
-        }
-    }
-
-    // Check source facts then object facts
-    if get_fact_value(conn, "source", source_id, &base_key)?.is_some_and(matches) {
-        return Ok(true);
-    }
-    if let Some(obj_id) = row.object_id {
-        if get_fact_value(conn, "object", obj_id, &base_key)?.is_some_and(matches) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    }))
 }
 
 /// A built-in's value for one source row, through the resolver that owns it — `None` where
-/// the row cannot answer it: a hash key, a NULL device or inode, or a save time outside the
-/// years Canon reads.
+/// the row cannot answer it: a NULL device or inode, or a save time outside the years Canon
+/// reads.
 fn builtin_value(row: &SourceRow, builtin: BuiltinKey) -> Option<FactValue> {
     if (builtin == BuiltinKey::SourceDevice && !row.has_device)
         || (builtin == BuiltinKey::SourceInode && !row.has_inode)
@@ -243,19 +225,13 @@ fn check_fact_exists_cached(
         }
     };
 
-    // Check cache for stored facts
-    if cache.has_key(&base_key) {
-        for value in [
-            cache.get_source_fact(source_id, &base_key),
-            cache.get_object_fact(source_id, &base_key),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if exists_through(value.clone()) {
-                return Ok(true);
-            }
-        }
+    // A stored key exists where the source's one value does.
+    if cache.has_key(&base_key)
+        && cache
+            .value(source_id, &base_key)
+            .is_some_and(|value| exists_through(value.clone()))
+    {
+        return Ok(true);
     }
 
     // A built-in the source row answers (`is_computed`) exists where the resolver gives it
@@ -284,44 +260,33 @@ fn check_fact_compare_cached(
 ) -> Result<bool> {
     let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
 
-    // Handle built-in keys (still need DB for source columns)
-    if BuiltinKey::from_str(&base_key).is_some() {
-        // For built-ins, fall back to uncached version (they query source table, not facts)
-        return check_fact_compare(conn, source_id, key, op, value, zone, &cache.instant_read);
+    if let Some(builtin) = BuiltinKey::from_str(&base_key).filter(BuiltinKey::is_computed) {
+        return check_computed_compare(
+            conn,
+            source_id,
+            builtin,
+            &accessor,
+            &modifiers,
+            key,
+            op,
+            value,
+            zone,
+            &cache.instant_read,
+        );
     }
 
-    // Use cache for stored facts
-    if let Some(fact_value) = cache.get_source_fact(source_id, &base_key) {
-        if let Some(modified) = apply_accessor_and_modifiers(
+    // Every other key, the hash keys included, compares the source's one value.
+    Ok(cache.value(source_id, &base_key).is_some_and(|fact_value| {
+        apply_accessor_and_modifiers(
             fact_value.clone(),
             &accessor,
             &modifiers,
             key,
             zone,
             &cache.instant_read,
-        ) {
-            if compare_fact_value(&modified, op, value) {
-                return Ok(true);
-            }
-        }
-    }
-
-    if let Some(fact_value) = cache.get_object_fact(source_id, &base_key) {
-        if let Some(modified) = apply_accessor_and_modifiers(
-            fact_value.clone(),
-            &accessor,
-            &modifiers,
-            key,
-            zone,
-            &cache.instant_read,
-        ) {
-            if compare_fact_value(&modified, op, value) {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
+        )
+        .is_some_and(|modified| compare_fact_value(&modified, op, value))
+    }))
 }
 
 fn check_fact_in_cached(
@@ -1251,6 +1216,123 @@ mod tests {
         assert_eq!(
             selected(&mut conn, &all, "content.Make|year?", &zone),
             vec![texted]
+        );
+    }
+
+    // ========================================================================
+    // A source's one value
+    // ========================================================================
+
+    /// A source whose content holds `content.Make=Canon` and which holds `Nikon` itself: the
+    /// content's fact is its one value, so the source's own never matches.
+    #[test]
+    fn the_filter_compares_the_one_value() {
+        use crate::core::testing::{insert_fact, insert_object_fact, insert_source_with_size};
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let content = insert_object(&conn, "datahash");
+        let two_rows = insert_source_with_size(&conn, root, "a.jpg", Some(content), 100);
+        insert_object_fact(&conn, content, "content.Make", "Canon");
+        insert_fact(&conn, two_rows, "content.Make", "Nikon");
+        let zone = UserZone::utc();
+
+        for (clause, want) in [
+            ("content.Make!=Nikon", vec![two_rows]),
+            ("content.Make=Canon", vec![two_rows]),
+            ("content.Make=Nikon", vec![]),
+            ("content.Make!=Canon", vec![]),
+            ("content.Make IN (Nikon)", vec![]),
+            ("NOT content.Make=Nikon", vec![two_rows]),
+        ] {
+            assert_eq!(
+                selected(&mut conn, &[two_rows], clause, &zone),
+                want,
+                "{clause}"
+            );
+        }
+    }
+
+    /// A key exists for a source exactly where its one value does: a source holding only its own
+    /// fact and one whose content holds the only fact both have it, and where the two disagree
+    /// through a modifier, the content's answers.
+    #[test]
+    fn existence_reads_the_one_value() {
+        use crate::core::testing::{insert_fact, insert_object_fact, insert_source_with_size};
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let content = insert_object(&conn, "datahash");
+        let dated = insert_object(&conn, "datedhash");
+        let own_only = insert_source_with_size(&conn, root, "o.jpg", None, 100);
+        let content_only = insert_source_with_size(&conn, root, "c.jpg", Some(content), 100);
+        let neither = insert_source_with_size(&conn, root, "n.jpg", None, 100);
+        let disagree = insert_source_with_size(&conn, root, "d.jpg", Some(dated), 100);
+        insert_fact(&conn, own_only, "content.Make", "Sony");
+        insert_object_fact(&conn, content, "content.Make", "Canon");
+
+        // The content knows only the year; the source's own fact knows the month.
+        let year = FactValue::Time(crate::core::domain::time::reading::read_time("2024").unwrap());
+        let p = crate::core::repo::fact::fact_value_params(&year).unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO facts (entity_type, entity_id, key, {}, observed_at)
+                 VALUES ('object', ?1, 'content.When', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+                crate::core::repo::fact::FACT_VALUE_COLUMNS
+            ),
+            rusqlite::params![dated, p[0], p[1], p[2], p[3], p[4], p[5], p[6]],
+        )
+        .unwrap();
+        insert_time_fact(&conn, disagree, "content.When", "2024-06-15T14:30:05");
+        let zone = UserZone::utc();
+
+        let all = [own_only, content_only, neither, disagree];
+        assert_eq!(
+            selected(&mut conn, &all, "content.Make?", &zone),
+            vec![own_only, content_only]
+        );
+        assert_eq!(
+            selected(&mut conn, &all, "content.When?", &zone),
+            vec![disagree]
+        );
+        assert!(
+            selected(&mut conn, &all, "content.When|month?", &zone).is_empty(),
+            "the content's year-only value has no month, whatever the source's own fact says"
+        );
+    }
+
+    /// The hash keys are read from the facts table under their stored name, through the
+    /// cache like any stored key; `hash` is that key under another name.
+    #[test]
+    fn a_hash_key_reads_through_the_cache() {
+        use crate::core::testing::insert_object_fact;
+        let full = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let content = insert_object(&conn, "datahash");
+        let other = insert_object(&conn, "otherhash");
+        insert_object_fact(&conn, content, "content.hash.sha256", full);
+        insert_object_fact(&conn, other, "content.hash.sha256", "711e96");
+        let subject = insert_source_with_object(&conn, root, "a.txt", Some(content));
+        let neighbour = insert_source_with_object(&conn, root, "b.txt", Some(other));
+        let ids = [subject, neighbour];
+
+        let cache = prefetch_facts(&mut conn, &ids, &["hash".to_string()]).unwrap();
+        assert!(matches!(
+            cache.value(subject, "content.hash.sha256"),
+            Some(FactValue::Text(h)) if h == full
+        ));
+        let zone = UserZone::utc();
+        assert_eq!(
+            selected(
+                &mut conn,
+                &ids,
+                &format!("content.hash.sha256={full}"),
+                &zone
+            ),
+            vec![subject]
+        );
+        assert_eq!(
+            selected(&mut conn, &ids, &format!("hash={full}"), &zone),
+            vec![subject]
         );
     }
 }

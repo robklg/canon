@@ -812,6 +812,17 @@ const LAWS: &[Law] = &[
         record: "2026-09-26",
     },
     Law {
+        // A source's value for a stored key: the content's fact, the source's own only where
+        // the content has none. Every reader of a source's value goes through it, inside the
+        // facility or out.
+        name: "source-value",
+        owner: "expr/domain/value.rs",
+        verifier: "one_source_one_value_in_filter_report_pattern_and_worklist",
+        reach: Reach::Canon,
+        authority: Authority::Distilled,
+        record: "2026-09-26",
+    },
+    Law {
         // A zone a person names — a manifest's `zone` line — is read by
         // `parse_zone_name` alone, beside the user's-zone owner; a lookup of zone
         // rules anywhere else is build-refused. Wider reach is a board grant.

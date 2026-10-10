@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 use crate::core::domain::config::{parse_ledger_config, LedgerConfig};
+use crate::core::domain::fact::FactType;
 use crate::core::domain::root::{find_containing_root, DoorVerb};
 use crate::core::domain::time::zone::{UserZone, ZoneLabel};
 use crate::core::domain::IncludeSet;
@@ -147,6 +148,11 @@ mod worklist;
 // of them.
 #[cfg(test)]
 mod contentless_law_tests;
+
+// The source-value law's verifier, at the crate root for the same reason: it reads a source's
+// value through every surface that takes one — filter, report, pattern, worklist.
+#[cfg(test)]
+mod source_value_law_tests;
 
 #[derive(Parser)]
 #[command(name = "canon")]
@@ -676,6 +682,19 @@ enum TrailAction {
     },
 }
 
+/// `--value-type`'s parser: the type words as printed, and quietly the older
+/// spellings, which are accepted and never listed — read through the one
+/// reading of a type word (`FactType::parse_word`).
+fn value_type_word() -> impl clap::builder::TypedValueParser<Value = FactType> {
+    use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
+    PossibleValuesParser::new([
+        PossibleValue::new("text"),
+        PossibleValue::new("number").alias("num"),
+        PossibleValue::new("time").alias("datetime"),
+    ])
+    .try_map(|word| FactType::parse_word(&word).ok_or(format!("not a type word: {word}")))
+}
+
 #[derive(Subcommand)]
 enum FactsAction {
     /// Delete facts by key
@@ -690,9 +709,9 @@ enum FactsAction {
         /// Entity type: 'source' or 'object'
         #[arg(long, value_name = "TYPE")]
         on: String,
-        /// Filter by value storage type (text, num, or time)
-        #[arg(long, value_parser = ["text", "num", "time"])]
-        value_type: Option<String>,
+        /// Filter by value storage type (text, number, or time)
+        #[arg(long, value_parser = value_type_word())]
+        value_type: Option<FactType>,
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
@@ -1913,6 +1932,64 @@ mod tests {
             notice_for(&zone).as_deref(),
             Some("TZ=Europe/Amsterdm is not a time zone Canon can read; times are read in UTC")
         );
+    }
+
+    fn value_type_of(word: &str) -> Option<FactType> {
+        let argv = [
+            "canon",
+            "facts",
+            "delete",
+            "content.W",
+            "--on",
+            "object",
+            "--value-type",
+            word,
+        ];
+        match Cli::try_parse_from(argv).ok()?.command {
+            Commands::Facts {
+                action: Some(FactsAction::Delete { value_type, .. }),
+                ..
+            } => value_type,
+            _ => None,
+        }
+    }
+
+    /// `num` and `number` are one type, and so are `datetime` and `time`; `path` is not
+    /// offered.
+    #[test]
+    fn value_type_num_and_number_delete_the_same_rows() {
+        assert_eq!(value_type_of("number"), Some(FactType::Num));
+        assert_eq!(value_type_of("num"), Some(FactType::Num));
+        assert_eq!(value_type_of("time"), Some(FactType::Time));
+        assert_eq!(value_type_of("datetime"), Some(FactType::Time));
+        assert_eq!(value_type_of("text"), Some(FactType::Text));
+        assert_eq!(value_type_of("path"), None);
+    }
+
+    /// The whole help line names `number`, and `num` appears nowhere in it.
+    #[test]
+    fn the_value_type_help_line_says_number() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("facts")
+            .and_then(|c| c.find_subcommand_mut("delete"))
+            .expect("facts delete")
+            .render_long_help()
+            .to_string();
+        let line: String = help
+            .lines()
+            .skip_while(|l| !l.contains("--value-type"))
+            .take_while(|l| !l.trim_start().starts_with("--yes"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(line.contains("text, number, or time"), "{line}");
+        assert!(
+            line.contains("[possible values: text, number, time]"),
+            "{line}"
+        );
+        assert!(!line.contains("num,") && !line.contains("num]"), "{line}");
+        assert!(!line.contains("datetime"), "{line}");
     }
 
     /// A flag the named subcommand cannot honor must be refused, never dropped.

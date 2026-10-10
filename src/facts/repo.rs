@@ -12,17 +12,14 @@ use crate::core::repo::db::{populate_temp_sources, Connection};
 use crate::core::repo::fact::{fact_value_at, fact_value_params, FACT_VALUE_COLUMNS};
 use crate::facts::domain::SourceFact;
 
-/// Count fact keys across sources.
-///
-/// Returns (key, count, fact_type) tuples for all stored facts.
-/// Used by `canon facts` (no --key) to show fact coverage.
+/// Count fact keys across sources: each stored key with how many of the given sources hold
+/// it, on the source or on its content. Used by `canon facts` (no --key) for each key's Count
+/// and Coverage; a key's type is read from all its facts, never from these
+/// (`core::repo::fact::key_types`).
 ///
 /// Only counts stored facts from the facts table. Built-in/derived facts
 /// are handled separately by the command layer.
-pub fn count_fact_keys(
-    conn: &mut Connection,
-    source_ids: &[i64],
-) -> Result<Vec<(String, usize, FactType)>> {
+pub fn count_fact_keys(conn: &mut Connection, source_ids: &[i64]) -> Result<Vec<(String, usize)>> {
     if source_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -30,23 +27,20 @@ pub fn count_fact_keys(
     // Populate temp table with source IDs
     populate_temp_sources(conn, source_ids)?;
 
-    // Count distinct source IDs per key, determine dominant type.
+    // Count distinct source IDs per key.
     // We count sources (not entities) because multiple sources can share an object.
     // A source with the same key at both source-level and object-level is counted
     // once (COUNT(DISTINCT id)), not twice.
     let query = r#"
-        SELECT key,
-               COUNT(DISTINCT id) as cnt,
-               MAX(CASE WHEN value_time IS NOT NULL THEN 1 ELSE 0 END) as is_time,
-               MAX(CASE WHEN value_num IS NOT NULL THEN 1 ELSE 0 END) as is_num
+        SELECT key, COUNT(DISTINCT id) as cnt
         FROM (
-            SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
+            SELECT ts.id, f.key
             FROM temp_sources ts
             JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
 
             UNION ALL
 
-            SELECT ts.id, f.key, f.value_text, f.value_num, f.value_time
+            SELECT ts.id, f.key
             FROM temp_sources ts
             JOIN sources s ON s.id = ts.id
             JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
@@ -60,19 +54,7 @@ pub fn count_fact_keys(
     let rows = stmt.query_map([], |row| {
         let key: String = row.get(0)?;
         let count: i64 = row.get(1)?;
-        let is_time: i64 = row.get(2)?;
-        let is_num: i64 = row.get(3)?;
-
-        // Determine fact type from the MAX flags
-        let fact_type = if is_time == 1 {
-            FactType::Time
-        } else if is_num == 1 {
-            FactType::Num
-        } else {
-            FactType::Text
-        };
-
-        Ok((key, count as usize, fact_type))
+        Ok((key, count as usize))
     })?;
 
     let result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -271,12 +253,15 @@ pub fn insert_object_fact(
 // ============================================================================
 
 /// Build SQL clause for value type filter.
-fn value_type_clause(value_type: Option<&str>) -> &'static str {
+fn value_type_clause(value_type: Option<FactType>) -> &'static str {
     match value_type {
-        Some("text") => "AND value_text IS NOT NULL",
-        Some("num") => "AND value_num IS NOT NULL",
-        Some("time") => "AND value_time IS NOT NULL",
-        _ => "",
+        Some(FactType::Text) => "AND value_text IS NOT NULL",
+        Some(FactType::Num) => "AND value_num IS NOT NULL",
+        Some(FactType::Time) => "AND value_time IS NOT NULL",
+        // Unreachable: `--value-type`'s parser offers no `path`, because a path is
+        // derived and never stored — so no fact matches it.
+        Some(FactType::Path) => "AND 0",
+        None => "",
     }
 }
 
@@ -287,7 +272,7 @@ fn value_type_clause(value_type: Option<&str>) -> &'static str {
 /// * `source_ids` - Source IDs to scope the operation
 /// * `key` - Fact key to match
 /// * `entity_type` - "source" or "object"
-/// * `value_type` - Optional filter: "text", "num", or "time"
+/// * `value_type` - Optional filter: the stored type
 ///
 /// # Returns
 /// Tuple of (total_fact_count, distinct_entity_count)
@@ -296,7 +281,7 @@ pub fn count_by_criteria(
     source_ids: &[i64],
     key: &str,
     entity_type: &str,
-    value_type: Option<&str>,
+    value_type: Option<FactType>,
 ) -> Result<(i64, i64)> {
     if source_ids.is_empty() {
         return Ok((0, 0));
@@ -382,7 +367,7 @@ pub fn count_by_criteria(
 /// * `source_ids` - Source IDs to scope the operation
 /// * `key` - Fact key to match
 /// * `entity_type` - "source" or "object"
-/// * `value_type` - Optional filter: "text", "num", or "time"
+/// * `value_type` - Optional filter: the stored type
 ///
 /// # Returns
 /// Number of fact rows deleted
@@ -391,7 +376,7 @@ pub fn delete_by_criteria(
     source_ids: &[i64],
     key: &str,
     entity_type: &str,
-    value_type: Option<&str>,
+    value_type: Option<FactType>,
 ) -> Result<usize> {
     if source_ids.is_empty() {
         return Ok(0);
@@ -685,37 +670,6 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "content.Make");
         assert_eq!(result[0].1, 1); // count
-        assert!(matches!(result[0].2, FactType::Text));
-    }
-
-    #[test]
-    fn count_fact_keys_type_detection() {
-        let mut conn = setup_test_db();
-        insert_root(&conn, 1, "/root");
-        insert_object(&conn, 100, "abc123");
-        insert_source(&conn, 1, 1, "file.txt", Some(100));
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-        insert_fact_num(&conn, "object", 100, "content.Width", 4000.0);
-        insert_fact_time(&conn, "object", 100, "content.DateTimeOriginal", 1704067200);
-
-        let result = count_fact_keys(&mut conn, &[1]).unwrap();
-        assert_eq!(result.len(), 3);
-
-        // Find each key and check type
-        let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
-        assert!(matches!(make.2, FactType::Text));
-
-        let width = result
-            .iter()
-            .find(|(k, _, _)| k == "content.Width")
-            .unwrap();
-        assert!(matches!(width.2, FactType::Num));
-
-        let date = result
-            .iter()
-            .find(|(k, _, _)| k == "content.DateTimeOriginal")
-            .unwrap();
-        assert!(matches!(date.2, FactType::Time));
     }
 
     #[test]
@@ -730,7 +684,7 @@ mod tests {
         insert_fact_text(&conn, "object", 101, "content.Make", "Nikon");
 
         let result = count_fact_keys(&mut conn, &[1, 2]).unwrap();
-        let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
+        let make = result.iter().find(|(k, _)| k == "content.Make").unwrap();
         assert_eq!(make.1, 2); // Both sources have this key
     }
 
@@ -745,7 +699,7 @@ mod tests {
         insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
 
         let result = count_fact_keys(&mut conn, &[1, 2]).unwrap();
-        let make = result.iter().find(|(k, _, _)| k == "content.Make").unwrap();
+        let make = result.iter().find(|(k, _)| k == "content.Make").unwrap();
         // Should count 2 (both sources) even though fact is on one object
         assert_eq!(make.1, 2);
     }
@@ -765,7 +719,7 @@ mod tests {
         insert_fact_text(&conn, "object", 100, "content.mime", "image/jpeg");
 
         let result = count_fact_keys(&mut conn, &[1]).unwrap();
-        let mime = result.iter().find(|(k, _, _)| k == "content.mime").unwrap();
+        let mime = result.iter().find(|(k, _)| k == "content.mime").unwrap();
         // Must be 1, not 2 — one source, one key
         assert_eq!(mime.1, 1);
     }
@@ -1231,18 +1185,36 @@ mod tests {
         insert_fact_time(&conn, "source", 1, "content.DateTimeOriginal", 1704067200);
 
         // Only text
-        let (count, _) =
-            count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("text")).unwrap();
+        let (count, _) = count_by_criteria(
+            &mut conn,
+            &[1],
+            "content.Make",
+            "source",
+            Some(FactType::Text),
+        )
+        .unwrap();
         assert_eq!(count, 1);
 
         // Only num - should not match text key
-        let (count, _) =
-            count_by_criteria(&mut conn, &[1], "content.Make", "source", Some("num")).unwrap();
+        let (count, _) = count_by_criteria(
+            &mut conn,
+            &[1],
+            "content.Make",
+            "source",
+            Some(FactType::Num),
+        )
+        .unwrap();
         assert_eq!(count, 0);
 
         // Num key with num filter
-        let (count, _) =
-            count_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
+        let (count, _) = count_by_criteria(
+            &mut conn,
+            &[1],
+            "content.Width",
+            "source",
+            Some(FactType::Num),
+        )
+        .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1336,8 +1308,14 @@ mod tests {
         insert_fact_num(&conn, "source", 1, "content.Width", 4000.0);
 
         // Delete only num facts with key content.Width
-        let deleted =
-            delete_by_criteria(&mut conn, &[1], "content.Width", "source", Some("num")).unwrap();
+        let deleted = delete_by_criteria(
+            &mut conn,
+            &[1],
+            "content.Width",
+            "source",
+            Some(FactType::Num),
+        )
+        .unwrap();
         assert_eq!(deleted, 1);
 
         // Text fact should still exist

@@ -6,8 +6,9 @@ source, for a tool to read and answer with facts on stdin (`canon import-facts`,
 `facts/`).
 
 `cli.rs` parses, selects and writes; `ops.rs` builds the entries. Sealed behind a barrel of
-`run`, called only by `main.rs`; no sibling subsystem reaches in, and this subsystem reaches no
-sibling but the expression facility.
+`run`, called only by `main.rs`, plus `build_entries`, read only by the source-value law's
+verifier at the crate root; no sibling subsystem reaches in, and this subsystem reaches no sibling but the expression
+facility.
 
 **The JSONL entry shape is a public contract**, not an internal struct. `WorklistEntry` is what
 every external enrichment tool parses, so a field rename or removal is a breaking change to
@@ -22,13 +23,12 @@ tool saw fewer files than they selected, and why. The two-tier stream discipline
 follows: the data goes to stdout, everything about the run goes to stderr, so piping stays
 clean.
 
-**Facts are fetched per key, per source** — `emit_keys` drives one `get_fact_value` call each.
-A key starting with `source.` reads against the source; anything else reads against its object,
-and a source with no object yields null rather than an error. It is a per-source read in a loop
-over the whole selection: for a large selection with several keys, the instrument's cost centre.
+**`--emit` writes each source's one value per key** — `emit_keys` drives one
+`expr::fetch_source_values` call each, over every emitted source at once: the content's fact,
+the source's own where the content has none. Every key reads through
+it, `source.` keys included, and no Canon writer stores a `source.` fact (import refuses the
+namespace; a built-in's value is already an entry field), so `--emit source.size` is null.
 
-**`--emit` does not normalize its keys.** `get_fact_value` is a bare read of the facts table by
-the key as typed, so `--emit geo.lat` finds nothing where the stored key is `content.geo.lat`,
-and `--emit source.size` is null by construction (import refuses that namespace, so no such row
-can exist — the value is already an entry field). `--where` *does* normalize, so one command
+**`--emit` does not normalize its keys.** The key is read as typed, so `--emit geo.lat` finds
+nothing where the stored key is `content.geo.lat`. `--where` *does* normalize, so one command
 line can filter on a key it then emits as null.

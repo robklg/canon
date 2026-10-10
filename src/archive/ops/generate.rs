@@ -16,7 +16,7 @@ use crate::archive::domain::{
     extract_notes_raw, LockEntry, LockHeader, LockScope, ManifestConfig, ManifestMeta,
     ManifestOptions, ManifestOutput, CURRENT_LOCK_VERSION, CURRENT_MANIFEST_VERSION,
 };
-use crate::core::domain::fact::FactValue;
+use crate::core::domain::fact::{mixed_type_way_out, FactValue, KeyTypes};
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
@@ -25,11 +25,12 @@ use crate::core::domain::source::Source;
 use crate::core::domain::time::now_epoch_secs;
 use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::{RecordedZone, UserZone};
-use crate::core::domain::{FactEntry, FactType};
+use crate::core::domain::FactEntry;
 use crate::core::repo::{self, Connection};
 use crate::expr::Filter;
 use crate::expr::{
-    get_builtin_value, BuiltinKey, ScopeVantage, SourceAttributes, OBJECT_HASH, SCOPE_REL_PATH,
+    get_builtin_value, source_values, BuiltinKey, ScopeVantage, SourceAttributes, OBJECT_HASH,
+    SCOPE_REL_PATH,
 };
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
@@ -59,13 +60,11 @@ pub struct ClusterGeneratePlan {
     pub lock_entries: Vec<LockEntry>,
     /// Sources skipped because already in archive: (source_path, archive_path).
     pub archived: Vec<(String, String)>,
-    /// Facts with 100% coverage across all lock entries: (key, type, description).
+    /// Stored keys every lock entry has a value for, each with the key's own types.
     pub full_coverage_facts: Vec<FullCoverageFact>,
     /// The listed built-ins every lock entry has a value for, in vocabulary order — all of
     /// them, unless a save time Canon cannot read leaves one short.
     pub full_coverage_builtins: Vec<BuiltinKey>,
-    /// Fact keys with mixed types across sources: (key, type_breakdown_string).
-    pub mixed_type_warnings: Vec<(String, String)>,
     /// Root breakdown: (root_path, count) sorted by path.
     pub root_breakdown: Vec<(String, usize)>,
     /// Sources in plan with no archived copy.
@@ -195,9 +194,24 @@ pub fn plan_generate(
     let source_ids: Vec<i64> = lock_entries.iter().map(|s| s.id).collect();
     let all_facts = repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
 
-    // 9. Compute full coverage facts and mixed-type warnings
-    let (full_coverage_facts, mixed_type_warnings) =
-        compute_full_coverage_facts(&lock_entries, &all_facts);
+    // 9. The stored keys every entry has a value for, each typed from all of the key's facts
+    // rather than from this cluster's values.
+    let covered = full_coverage_keys(&lock_entries, &all_facts);
+    let covered_keys: Vec<&str> = covered.iter().map(|(key, _)| key.as_str()).collect();
+    let mut types = repo::fact::key_types(conn, &covered_keys)?;
+    let full_coverage_facts = covered
+        .into_iter()
+        // A key whose facts were all removed between the two reads has no type, and no
+        // longer covers anything: it is left out.
+        .filter_map(|(key, coarsest)| {
+            types.remove(&key).map(|types| FullCoverageFact {
+                description: get_fact_description(&key),
+                types,
+                coarsest,
+                key,
+            })
+        })
+        .collect();
     let lock_ids: HashSet<i64> = lock_entries.iter().map(|e| e.id).collect();
     let full_coverage_builtins =
         full_coverage_builtins(hashed_sources.iter().filter(|s| lock_ids.contains(&s.id)));
@@ -233,7 +247,6 @@ pub fn plan_generate(
         archived,
         full_coverage_facts,
         full_coverage_builtins,
-        mixed_type_warnings,
         root_breakdown,
         not_archived_count,
         excluded_count: selection.excluded_count,
@@ -257,13 +270,22 @@ impl ClusterGeneratePlan {
             archived: vec![],
             full_coverage_facts: vec![],
             full_coverage_builtins: vec![],
-            mixed_type_warnings: vec![],
             root_breakdown: vec![],
             not_archived_count: 0,
             excluded_count: 0,
             unhashed_count: 0,
             query_read_an_instant: false,
         }
+    }
+
+    /// The full-coverage keys whose facts hold more than one type — keys a pattern cannot
+    /// use until they are converted — in key order.
+    pub fn mixed_keys(&self) -> Vec<&str> {
+        self.full_coverage_facts
+            .iter()
+            .filter(|fact| fact.types.is_mixed())
+            .map(|fact| fact.key.as_str())
+            .collect()
     }
 }
 
@@ -764,26 +786,18 @@ fn find_source_duplicates(entries: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
         .collect()
 }
 
-/// Track types seen for a fact key.
+/// How many entries hold a value for a key, and for a time key the coarsest grain below a
+/// second any of those values was written at, with how many were written at exactly that
+/// grain. Fractions are finer than seconds and never noted.
 #[derive(Default)]
-struct FactTypeTracker {
+struct KeyCoverage {
     count: usize,
-    text_count: usize,
-    num_count: usize,
-    time_count: usize,
-    /// The coarsest grain below a second any of its times was written at, and how many
-    /// were written at exactly that grain. Fractions are finer than seconds and never noted.
     coarsest: Option<(Precision, usize)>,
 }
 
-impl FactTypeTracker {
+impl KeyCoverage {
     fn add(&mut self, value: &FactValue) {
         self.count += 1;
-        match value.kind() {
-            FactType::Text | FactType::Path => self.text_count += 1,
-            FactType::Num => self.num_count += 1,
-            FactType::Time => self.time_count += 1,
-        }
         if let FactValue::Time(time) = value {
             let grain = time.precision();
             if grain < Precision::Second {
@@ -795,110 +809,48 @@ impl FactTypeTracker {
             }
         }
     }
-
-    fn has_mixed_types(&self) -> bool {
-        let type_count = (self.text_count > 0) as usize
-            + (self.num_count > 0) as usize
-            + (self.time_count > 0) as usize;
-        type_count > 1
-    }
-
-    fn dominant_type(&self) -> FactType {
-        if self.time_count >= self.text_count && self.time_count >= self.num_count {
-            FactType::Time
-        } else if self.num_count >= self.text_count {
-            FactType::Num
-        } else {
-            FactType::Text
-        }
-    }
-
-    fn type_breakdown(&self) -> String {
-        let mut parts = Vec::new();
-        if self.time_count > 0 {
-            parts.push(format!("{} time", self.time_count));
-        }
-        if self.text_count > 0 {
-            parts.push(format!("{} text", self.text_count));
-        }
-        if self.num_count > 0 {
-            parts.push(format!("{} num", self.num_count));
-        }
-        parts.join(", ")
-    }
 }
 
 /// A fact every selected source carries, as the manifest's facts comment lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FullCoverageFact {
     pub key: String,
-    /// The kind most of its values are.
-    pub kind: FactType,
+    /// The key's types, read from all of its facts — never from this cluster's values.
+    pub types: KeyTypes,
     pub description: String,
     /// For a time key, the coarsest grain below a second any value was written at and how
     /// many values were — what a pattern's finer modifier finds no value in.
     pub coarsest: Option<(Precision, usize)>,
 }
-/// A mixed-type warning: (key, type breakdown).
-type MixedTypeWarning = (String, String);
 
-/// Compute facts with 100% coverage and mixed-type warnings.
-///
-/// Returns (full_coverage_facts, mixed_type_warnings).
-fn compute_full_coverage_facts(
+/// The stored keys every entry has a value for, in key order, each with its coarsest grain.
+/// An entry's value for a key is its one value — the content's fact over the source's own — so
+/// the grain noted is the grain of a value a pattern reads.
+fn full_coverage_keys(
     entries: &[LockEntry],
     all_facts: &HashMap<i64, Vec<FactEntry>>,
-) -> (Vec<FullCoverageFact>, Vec<MixedTypeWarning>) {
+) -> Vec<(String, Option<(Precision, usize)>)> {
     if entries.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
 
-    let source_count = entries.len();
-
-    // Count facts by key across all sources, tracking type consistency
-    let mut fact_counts: HashMap<String, FactTypeTracker> = HashMap::new();
-    let mut seen_keys: HashSet<String> = HashSet::new();
-
+    let mut coverage: HashMap<&str, KeyCoverage> = HashMap::new();
     for entry in entries {
-        if let Some(facts) = all_facts.get(&entry.id) {
-            for fact in facts {
-                // Track uniqueness per source
-                let seen_key = format!("{}:{}", entry.id, fact.key);
-                if !seen_keys.contains(&seen_key) {
-                    fact_counts
-                        .entry(fact.key.clone())
-                        .or_default()
-                        .add(&fact.value);
-                    seen_keys.insert(seen_key);
-                }
-            }
+        let Some(facts) = all_facts.get(&entry.id) else {
+            continue;
+        };
+        for (key, value) in source_values(facts) {
+            coverage.entry(key).or_default().add(value);
         }
     }
 
-    // Collect mixed-type warnings for 100% coverage facts
-    let mut mixed_type_warnings: Vec<MixedTypeWarning> = Vec::new();
-    for (key, tracker) in &fact_counts {
-        if tracker.count == source_count && tracker.has_mixed_types() {
-            mixed_type_warnings.push((key.clone(), tracker.type_breakdown()));
-        }
-    }
-    mixed_type_warnings.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Filter to only 100% coverage facts
-    let mut full_coverage: Vec<FullCoverageFact> = fact_counts
+    let mut covered: Vec<(String, Option<(Precision, usize)>)> = coverage
         .into_iter()
-        .filter(|(_, tracker)| tracker.count == source_count)
-        .map(|(key, tracker)| FullCoverageFact {
-            description: get_fact_description(&key),
-            kind: tracker.dominant_type(),
-            coarsest: tracker.coarsest,
-            key,
-        })
+        .filter(|(_, seen)| seen.count == entries.len())
+        .map(|(key, seen)| (key.to_string(), seen.coarsest))
         .collect();
-
-    full_coverage.sort_by(|a, b| a.key.cmp(&b.key));
-
-    (full_coverage, mixed_type_warnings)
+    covered.sort_by(|a, b| a.0.cmp(&b.0));
+    covered
 }
 
 /// The default-listed built-ins every source has a value for, counted from the resolver's
@@ -1055,10 +1007,16 @@ fn generate_fact_help(
             help.push_str(&format!(
                 "#   {:18} {:6}{}{}\n",
                 fact.key,
-                fact.kind.as_str(),
+                fact.types.word(),
                 desc_part,
                 coarse_part
             ));
+            // A key holding two types is offered with its way out, where the pattern is edited.
+            if fact.types.is_mixed() {
+                for line in mixed_type_way_out(&[fact.key.as_str()]) {
+                    help.push_str(&format!("#     {line}\n"));
+                }
+            }
         }
         help.push_str("#\n");
     }
@@ -1425,6 +1383,153 @@ mod tests {
         assert_eq!(plan.full_coverage_facts[0].key, "content.Make");
     }
 
+    /// The facts comment reads each source's one value: a key held on the source and on its
+    /// content counts the content's, an empty file's as well. Both values read are written to
+    /// the year and the two passed over to the second, so two values are known only to the
+    /// year — none if the rows were swapped, one if the empty file read its own.
+    #[test]
+    fn the_coverage_comment_reads_one_value_per_source() {
+        use crate::core::domain::time::reading::read_time;
+        use crate::core::repo::fact::{fact_value_params, FACT_VALUE_COLUMNS};
+        use crate::core::testing::insert_source_with_size;
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "shared", false);
+        let held = insert_source(&conn, root, "a.jpg", Some(obj));
+        let empty_obj = insert_object(&conn, "empty", false);
+        let empty = insert_source_with_size(&conn, root, "e.txt", Some(empty_obj), 0);
+        let time = |conn: &Connection, on: &str, id: i64, text: &str| {
+            let value = FactValue::Time(read_time(text).unwrap());
+            let params = fact_value_params(&value).unwrap();
+            // A fact on a source records the source's revision; one on content records none.
+            let basis = if on == "source" { "0" } else { "NULL" };
+            conn.execute(
+                &format!(
+                    "INSERT INTO facts (entity_type, entity_id, key, observed_at, observed_basis_rev, {FACT_VALUE_COLUMNS})
+                     VALUES ('{on}', {id}, 'content.When', 0, {basis}, ?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                ),
+                rusqlite::params_from_iter(params.iter()),
+            )
+            .unwrap();
+        };
+        time(&conn, "source", held, "2024-06-15T10:00:00");
+        time(&conn, "object", obj, "2024");
+        time(&conn, "source", empty, "2024-06-15T10:00:00");
+        time(&conn, "object", empty_obj, "2024");
+
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        let when = plan
+            .full_coverage_facts
+            .iter()
+            .find(|fact| fact.key == "content.When")
+            .unwrap();
+        assert_eq!(when.coarsest, Some((Precision::Year, 2)));
+    }
+
+    /// `/photos/in` holds two sources whose `content.Width` is a number and whose
+    /// `content.Height` is a number; `/photos/out` holds one whose `content.Width` is text.
+    /// Selected under `/photos/in`, `content.Width` holds one type in the selection and two
+    /// in the key.
+    fn second_type_outside_the_selection() -> (Connection, ClusterGenerateParams) {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let mut inside = Vec::new();
+        for (i, name) in ["in/a.jpg", "in/b.jpg"].iter().enumerate() {
+            let obj = insert_object(&conn, &format!("hash{i}"), false);
+            inside.push(insert_source(&conn, root, name, Some(obj)));
+        }
+        let outside = insert_source(&conn, root, "out/c.jpg", None);
+        for id in &inside {
+            for key in ["content.Width", "content.Height"] {
+                conn.execute(
+                    "INSERT INTO facts (entity_type, entity_id, key, value_num, observed_at, observed_basis_rev)
+                     VALUES ('source', ?1, ?2, 4000, 0, 0)",
+                    rusqlite::params![id, key],
+                )
+                .unwrap();
+            }
+        }
+        insert_fact(&conn, outside, "content.Width", "wide");
+        let mut params = default_params();
+        params.scopes = vec![ScopeMatch::UnderDirectory("/photos/in".to_string())];
+        (conn, params)
+    }
+
+    /// The facts comment's type is the key's, read from all its facts: a key whose second
+    /// type sits outside the selection prints `mixed`, followed by its way out; a key of one
+    /// type prints that type's word.
+    #[test]
+    fn the_coverage_comment_states_the_key_type_not_the_scoped_type() {
+        let (mut conn, params) = second_type_outside_the_selection();
+        let plan = plan_generate(&mut conn, &params).unwrap();
+        assert_eq!(plan.mixed_keys(), vec!["content.Width"]);
+
+        let help = generate_fact_help(2, &[], &plan.full_coverage_facts, false);
+        let lines: Vec<&str> = help.lines().collect();
+        let height = lines
+            .iter()
+            .position(|l| l.contains("content.Height"))
+            .unwrap();
+        assert_eq!(lines[height], "#   content.Height     number");
+        let width = lines
+            .iter()
+            .position(|l| l.contains("content.Width"))
+            .unwrap();
+        assert_eq!(
+            lines[width..width + 3],
+            [
+                "#   content.Width      mixed ",
+                "#     To inspect it and learn how to convert it to one type:",
+                "#       `canon facts convert content.Width`",
+            ]
+        );
+        assert!(!help.contains(" num "), "{help}");
+    }
+
+    /// The refresh writes the same comment: the mixed key with its way out, and the plan the
+    /// refresh's warning reads names it (the warning's lines are the interface's, pinned there).
+    #[test]
+    fn cluster_refresh_writes_the_mixed_key_comment_and_plans_its_warning() {
+        let (mut conn, params) = second_type_outside_the_selection();
+        let mut plan = plan_generate(&mut conn, &params).unwrap();
+        assert_eq!(plan.mixed_keys(), vec!["content.Width"]);
+
+        let old_content = "\
+# === Notes ===\n\
+[meta]\n\
+version = 2\n\
+query = []\n\
+generated_at = \"2026-01-01T00:00:00Z\"\n\
+lock_hash = \"old\"\n\
+\n\
+[output]\n\
+pattern = \"{filename}\"\n\
+archive_root_id = 1\n\
+base_dir = \"output\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let refresh = ExecuteRefreshParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: dir.path().join("cluster.toml"),
+            old_manifest_content: old_content.to_string(),
+            scope: ScopeResolution::from_outcomes(vec![]),
+            roots: vec![],
+            config: toml::from_str(old_content).unwrap(),
+            zone: parse_zone_name("UTC").unwrap(),
+        };
+        execute_refresh(&mut plan, &refresh).unwrap();
+
+        let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
+        assert!(
+            manifest.contains(
+                "#   content.Width      mixed \n\
+                 #     To inspect it and learn how to convert it to one type:\n\
+                 #       `canon facts convert content.Width`\n"
+            ),
+            "{manifest}"
+        );
+    }
+
     #[test]
     fn test_plan_generate_partial_coverage_excluded() {
         let mut conn = setup_test_db();
@@ -1614,7 +1719,6 @@ mod tests {
             archived,
             full_coverage_facts: vec![],
             full_coverage_builtins: vec![],
-            mixed_type_warnings: vec![],
             root_breakdown,
             not_archived_count,
             excluded_count,

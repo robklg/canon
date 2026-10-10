@@ -5,6 +5,7 @@
 use anyhow::Result;
 
 use crate::core::domain::decision::DecisionStatus;
+use crate::core::domain::fact::FactType;
 use crate::core::domain::format_count;
 use crate::core::ops::decision::{
     DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
@@ -69,7 +70,7 @@ pub fn plan_delete(
     source_ids: &[i64],
     key: &str,
     entity_type: &str,
-    value_type: Option<&str>,
+    value_type: Option<FactType>,
 ) -> Result<DeletePlan> {
     let (fact_count, entity_count) =
         facts_repo::count_by_criteria(conn, source_ids, key, entity_type, value_type)?;
@@ -115,7 +116,7 @@ pub fn execute_delete(
     source_ids: &[i64],
     key: &str,
     entity_type: &str,
-    value_type: Option<&str>,
+    value_type: Option<FactType>,
     plan: &DeletePlan,
     decision: Option<&DecisionParams>,
 ) -> Result<DeleteResult> {
@@ -164,7 +165,7 @@ fn delete_body(
     source_ids: &[i64],
     key: &str,
     entity_type: &str,
-    value_type: Option<&str>,
+    value_type: Option<FactType>,
     plan: &DeletePlan,
 ) -> Result<String> {
     facts_repo::delete_by_criteria(conn, source_ids, key, entity_type, value_type)?;

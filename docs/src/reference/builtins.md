@@ -6,15 +6,15 @@ These facts are automatically available for all sources without enrichment.
 
 | Fact | Type | Description |
 |------|------|-------------|
-| `source.id` | num | Database ID (hidden*) |
+| `source.id` | number | Database ID (hidden*) |
 | `source.ext` | text | File extension (no dot) |
-| `source.size` | num | File size in bytes |
+| `source.size` | number | File size in bytes |
 | `source.mtime` | time | Modification timestamp |
 | `source.path` | path | Full absolute path |
 | `source.root` | path | Root directory path (hidden) |
 | `source.rel_path` | path | Path relative to root (hidden) |
-| `source.device` | num | Device ID (hidden) |
-| `source.inode` | num | Inode number (hidden) |
+| `source.device` | number | Device ID (hidden) |
+| `source.inode` | number | Inode number (hidden) |
 
 ## Content Facts
 

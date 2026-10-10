@@ -58,6 +58,11 @@ pub use domain::value::{
     fact_value_to_display, get_builtin_value, resolve_fact_value, SourceAttributes,
 };
 
+// A source's one value for a stored key: the rule applied to a source's facts
+// already in hand, and the fetch that applies it to a batch.
+pub use domain::value::source_values;
+pub use ops::value::fetch_source_values;
+
 // The key vocabulary: what a key may name, and what a written one parsed to —
 // plus the two spellings of the pattern-only keys, which a manifest writes
 // down.
@@ -89,18 +94,3 @@ pub use domain::transform::{apply_chain, Modified, Modifier, ModifierCategory};
 
 #[allow(unused_imports)]
 pub use domain::transform::{ModifierCall, PathAccessor};
-
-// ---------------------------------------------------------------------------
-// Reaching past the front door
-//
-// One point read that answers a single question about a single key, exposed
-// because a caller outside still asks it directly rather than through the
-// language. It is the facility's one leak of its own storage, and it closes
-// when that caller is rewritten to ask the language instead.
-//
-// Fully qualified on purpose: a front door reads as interface code, and a
-// bare `repo::` there would name the shared repository layer rather than this
-// facility's own stratum.
-// ---------------------------------------------------------------------------
-
-pub use crate::expr::repo::get_fact_value;

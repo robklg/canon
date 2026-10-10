@@ -12,3 +12,8 @@ pub use cli::{
     delete_facts, prune_excluded_facts, prune_orphaned_objects, prune_stale, run, show_aliases,
     DeleteOptions,
 };
+
+// No production caller: the source-value law's verifier (source_value_law_tests.rs) reads the
+// report through it, as it reads every surface that takes a source's value for a key.
+#[allow(unused_imports)]
+pub use ops::report::compute_distribution;

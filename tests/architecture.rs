@@ -44,9 +44,14 @@ enum Layer {
     Testing,
 }
 
-/// Paths that classify as `Layer::Testing`: the shared fixtures, and the
-/// contentless law's canary at the crate root.
-const TESTING_PATHS: &[&str] = &["core/testing/", "contentless_law_tests.rs"];
+/// Paths that classify as `Layer::Testing`: the shared fixtures, and the two
+/// law tests at the crate root that read across every surface of their law —
+/// the contentless law's canary and the source-value law's verifier.
+const TESTING_PATHS: &[&str] = &[
+    "core/testing/",
+    "contentless_law_tests.rs",
+    "source_value_law_tests.rs",
+];
 
 /// Stratum front-door module names inside a subsystem. For the
 /// sibling-boundary rule these are never "declared surface": a sibling
@@ -979,6 +984,10 @@ fn scan_file(
     }
 }
 
+/// The crate-root modules the upward-dependency rule guards: every flat file
+/// `classify_layer` reads as interface. A flat file it reads as testing (the
+/// law tests) is not an interface module, so one law test may read another's
+/// helpers; `main` is the entry, not a module anything imports.
 fn interface_module_names(src_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     let mut entries: Vec<PathBuf> = fs::read_dir(src_root)
@@ -989,7 +998,7 @@ fn interface_module_names(src_root: &Path) -> Vec<String> {
     for path in entries {
         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem != "main" {
+                if stem != "main" && classify_layer(&format!("{stem}.rs")) == Layer::Interface {
                     names.push(stem.to_string());
                 }
             }
@@ -1187,15 +1196,13 @@ fn architecture_rules_hold() {
 /// site appearing somewhere new. This is the pin against that.
 ///
 /// **The exemptions are not oversights, and unifying them would be a false
-/// equality.** Three sites outside the facility match the same bytes and each
+/// equality.** Two sites outside the facility match the same bytes and each
 /// serves a different verb:
 ///
 /// - `facts/domain.rs` — *reserving an import namespace*: it refuses
 ///   `source.*` on the way **in**. Same bytes, opposite direction.
 /// - `facts/ops/maintain.rs` — *protecting facts from deletion*: a different
 ///   set (`source.*` **and** `policy.*`) answering a different question.
-/// - `worklist/ops.rs` — *routing an entity lookup*: source table vs object
-///   table. A dispatch switch, not a claim about what supplies a key.
 ///
 /// Convergent spelling without convergent meaning. A matcher that flagged
 /// these would be asserting the very equality the design rejects, so they are
@@ -1219,8 +1226,6 @@ fn the_context_supplied_set_is_spelled_only_inside_expr() {
         ("src/facts/domain.rs", 1),
         // protecting facts from deletion
         ("src/facts/ops/maintain.rs", 1),
-        // routing an entity lookup
-        ("src/worklist/ops.rs", 1),
     ];
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
@@ -3555,6 +3560,19 @@ fn f(door: Door) -> usize {
         assert_eq!(classify_layer("core/testing/mod.rs"), Layer::Testing);
         assert_eq!(classify_layer("core/testing/helpers.rs"), Layer::Testing);
         assert_eq!(classify_layer("contentless_law_tests.rs"), Layer::Testing);
+        assert_eq!(classify_layer("source_value_law_tests.rs"), Layer::Testing);
+    }
+
+    #[test]
+    fn the_upward_rule_guards_the_interface_files_and_not_the_law_tests() {
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let names = interface_module_names(&src_root);
+        for interface in ["ceremony", "scope", "progress", "ledger", "expr"] {
+            assert!(names.iter().any(|n| n == interface), "{interface}");
+        }
+        for testing in ["contentless_law_tests", "source_value_law_tests", "main"] {
+            assert!(!names.iter().any(|n| n == testing), "{testing}");
+        }
     }
 
     #[test]
@@ -3938,6 +3956,8 @@ mod source {
                 "get_builtin_value",
                 "fact_value_to_display",
                 "SourceAttributes",
+                "source_values",
+                "fetch_source_values",
                 "ParsedFactKey",
                 "BuiltinKey",
                 "BuiltinKeyCategory",
@@ -3952,12 +3972,10 @@ mod source {
                 // named by nothing today.
                 "PathAccessor",
                 "ModifierCall",
-                // The one point read still reached past the language.
-                "get_fact_value",
             ],
         ),
         ("ls", &["run", "show_duplicates"]),
-        ("worklist", &["run"]),
+        ("worklist", &["run", "build_entries"]),
         ("coverage", &["run", "compute_per_root"]),
         ("compare", &["run", "CompareOptions", "run_compare"]),
         (
@@ -4108,6 +4126,8 @@ mod source {
                 "prune_orphaned_objects",
                 "prune_excluded_facts",
                 "show_aliases",
+                // Read by the source-value law's verifier.
+                "compute_distribution",
             ],
         ),
         // The command surface, the transfer mode main's dispatch selects, and

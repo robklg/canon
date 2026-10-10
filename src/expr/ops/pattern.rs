@@ -17,8 +17,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::core::domain::fact::FactEntry;
-use crate::core::repo::fact::batch_fetch_key_for_sources;
 use crate::expr::domain::pattern::{is_context_supplied, PatternFacts};
+use crate::expr::ops::value::fetch_source_values;
 
 /// Fetch the stored facts a pattern needs, for a batch of sources.
 ///
@@ -27,6 +27,9 @@ use crate::expr::domain::pattern::{is_context_supplied, PatternFacts};
 /// dropped here and never reach the database: fetching them would be pointless,
 /// and a stored row landing in the map under one of their names would win over
 /// the computed value and move where files land.
+///
+/// Each source carries its one value per key (`fetch_source_values`), so a
+/// pattern places a source by the same value a filter selected it on.
 ///
 /// Keys are deduplicated first. A pattern naming one key twice —
 /// `{source.mtime|year}/{source.mtime|month}` — reaches this function with two
@@ -54,7 +57,7 @@ pub fn prefetch_pattern_facts(
     }
 
     for key in wanted {
-        for (source_id, entry) in batch_fetch_key_for_sources(conn, source_ids, key)? {
+        for (source_id, entry) in fetch_source_values(conn, source_ids, key)? {
             if let Some(entry) = entry {
                 facts.entry(source_id).or_default().push(entry);
             }
@@ -217,7 +220,7 @@ mod tests {
     /// Totality, not a guard. Neither this nor `no_sources_fetches_nothing`
     /// can fail against the context-supplied filter — deleting the matching
     /// half of the early return leaves both green, because
-    /// `batch_fetch_key_for_sources` already answers an empty id list with an
+    /// `fetch_source_values` already answers an empty id list with an
     /// empty map and an empty key loop already produces nothing. What they
     /// pin is that an empty ask is *answered* rather than refused or panicked,
     /// which is a real claim about a function three commands call with

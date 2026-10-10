@@ -740,7 +740,7 @@ fn warn_if_written_file_blocks_placement(
     }
 }
 
-/// Display plan warnings (archived files, mixed types) to stderr.
+/// Display plan warnings (archived files, keys of mixed type) to stderr.
 fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) {
     if !plan.archived.is_empty() {
         eprintln!(
@@ -758,14 +758,20 @@ fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) 
         eprintln!("Use --allow archived to include them");
     }
 
-    if !plan.mixed_type_warnings.is_empty() {
-        eprintln!("Warning: some facts have inconsistent types across sources:");
-        for (key, breakdown) in &plan.mixed_type_warnings {
-            eprintln!("  {key}: {breakdown}");
-        }
-        eprintln!("  Type-specific modifiers (|year, |month, etc.) may fail on mismatched values.");
-        eprintln!("  To fix: delete outliers with 'canon facts delete <key> --on object --value-type <minority-type>'");
+    for line in mixed_key_lines(plan) {
+        eprintln!("{line}");
     }
+}
+
+/// The statement naming the full-coverage keys that hold two types, and the way out — empty
+/// when there are none.
+fn mixed_key_lines(plan: &ClusterGeneratePlan) -> Vec<String> {
+    use crate::core::domain::fact::{mixed_type_statement, mixed_type_way_out};
+
+    let mixed = plan.mixed_keys();
+    let mut lines = mixed_type_statement(&mixed);
+    lines.extend(mixed_type_way_out(&mixed));
+    lines
 }
 
 /// The step that moves this manifest forward, or nothing when there is none.
@@ -1417,6 +1423,67 @@ mod tests {
     use super::*;
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
     use std::path::PathBuf;
+
+    use crate::archive::ops::generate::FullCoverageFact;
+    use crate::core::domain::fact::{FactType, KeyTypes};
+
+    /// A plan whose full-coverage keys hold the given types, counted.
+    fn plan_with_keys(keys: &[(&str, &[(FactType, u64)])]) -> ClusterGeneratePlan {
+        let mut plan = ClusterGeneratePlan::empty();
+        plan.full_coverage_facts = keys
+            .iter()
+            .map(|(key, counts)| FullCoverageFact {
+                key: key.to_string(),
+                types: KeyTypes::from_counts(counts.iter().copied()).unwrap(),
+                description: String::new(),
+                coarsest: None,
+            })
+            .collect();
+        plan
+    }
+
+    /// Generate and refresh name a full-coverage key of mixed type through the two-type
+    /// statement and its way out — one key named, several counted, a key with a space quoted
+    /// so the command runs as printed — and say nothing when every key holds one type. No
+    /// remedy deletes facts, no type is called a minority, and no type word is printed.
+    #[test]
+    fn cluster_generate_names_a_mixed_key_through_the_statement() {
+        use FactType::{Num, Text};
+        let one = plan_with_keys(&[
+            ("content.Height", &[(Num, 4)]),
+            ("content.Width", &[(Num, 3), (Text, 1)]),
+        ]);
+        assert_eq!(
+            mixed_key_lines(&one),
+            [
+                "content.Width is of mixed type, so filters and patterns cannot use its values:",
+                "only values of one type can be compared or formatted correctly.",
+                "To inspect it and learn how to convert it to one type:",
+                "  `canon facts convert content.Width`",
+            ]
+        );
+
+        let two = plan_with_keys(&[
+            ("content.File Size", &[(Num, 2), (Text, 2)]),
+            ("content.Width", &[(Num, 3), (Text, 1)]),
+        ]);
+        assert_eq!(
+            mixed_key_lines(&two),
+            [
+                "2 keys are of mixed type, so filters and patterns cannot use their values:",
+                "only values of one type can be compared or formatted correctly.",
+                "To inspect each and learn how to convert to one type:",
+                "  `canon facts convert 'content.File Size'`",
+                "  `canon facts convert content.Width`",
+            ]
+        );
+        let all = mixed_key_lines(&two).join("\n");
+        for gone in ["facts delete", "minority", "num"] {
+            assert!(!all.contains(gone), "{gone:?} in {all}");
+        }
+
+        assert!(mixed_key_lines(&plan_with_keys(&[("content.Height", &[(Num, 4)])])).is_empty());
+    }
 
     /// A manifest as generation leaves it: commented shape, Notes, TOML body.
     fn manifest_text(query: &str) -> String {

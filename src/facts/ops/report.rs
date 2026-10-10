@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::core::domain::fact::FactEntry;
-use crate::core::domain::fact::{FactType, FactValue};
+use crate::core::domain::fact::{FactValue, KeyTypes};
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::{
-    apply_chain, fact_value_to_display, get_builtin_value, resolve_fact_value, BuiltinKey,
-    BuiltinKeyCategory, BuiltinKeyVisibility, Modified, ParsedFactKey, SourceAttributes,
+    apply_chain, fact_value_to_display, fetch_source_values, get_builtin_value, resolve_fact_value,
+    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, Modified, ParsedFactKey,
+    SourceAttributes,
 };
 use crate::facts::repo as facts_repo;
 
@@ -44,7 +45,9 @@ pub struct KeyInfo {
     pub key: String,
     pub count: i64,
     pub category: BuiltinKeyCategory,
-    pub fact_type: FactType,
+    /// The key's type, read from all its facts wherever they sit — never from the sources
+    /// counted here. A built-in's is its own.
+    pub types: KeyTypes,
 }
 
 /// Result of enumerating all available fact keys.
@@ -198,7 +201,8 @@ fn aggregate_and_sort(
 /// Combines builtin keys (filtered by visibility + show_hidden) with stored fact
 /// keys from the database. A built-in counts the sources the resolver gives a value
 /// for — every source, but for a save time Canon cannot read — so the listing agrees
-/// with the key's own `(no value)` line and with `K?`.
+/// with the key's own `(no value)` line and with `K?`. Each key's type is the key's own,
+/// from all its facts: a key holding two types lists as mixed, whatever the scope holds.
 pub fn compute_all_keys(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -237,18 +241,24 @@ pub fn compute_all_keys(
             key: name.to_string(),
             count: count as i64,
             category: builtin.category(),
-            fact_type: builtin.fact_type(),
+            types: KeyTypes::of(builtin.fact_type()),
         });
     }
 
-    // Add stored facts from database
+    // Add stored facts from database: the count is the scope's, the type the key's. A key
+    // whose facts were all removed between the two reads has no type, and is not listed.
     let stored = facts_repo::count_fact_keys(conn, source_ids)?;
-    for (key, count, fact_type) in stored {
+    let listed: Vec<&str> = stored.iter().map(|(key, _)| key.as_str()).collect();
+    let mut types = repo::fact::key_types(conn, &listed)?;
+    for (key, count) in stored {
+        let Some(types) = types.remove(&key) else {
+            continue;
+        };
         keys.push(KeyInfo {
             key,
             count: count as i64,
             category: BuiltinKeyCategory::Stored,
-            fact_type,
+            types,
         });
     }
 
@@ -348,7 +358,7 @@ fn compute_stored_distribution(
     limit: usize,
     zone: &UserZone,
 ) -> Result<DistributionResult> {
-    let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, &key.base_key)?;
+    let fact_map = fetch_source_values(conn, source_ids, &key.base_key)?;
 
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_value: i64 = 0;
@@ -378,7 +388,7 @@ fn compute_transformed_distribution(
     limit: usize,
     zone: &UserZone,
 ) -> Result<DistributionResult> {
-    let fact_map = repo::fact::batch_fetch_key_for_sources(conn, source_ids, &key.base_key)?;
+    let fact_map = fetch_source_values(conn, source_ids, &key.base_key)?;
 
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_value: i64 = 0;
@@ -463,7 +473,7 @@ pub fn compute_grouped_distribution(
     } else {
         let mut merged: HashMap<i64, HashMap<String, FactEntry>> = HashMap::new();
         for key in &stored_keys {
-            let key_facts = repo::fact::batch_fetch_key_for_sources(conn, source_ids, key)?;
+            let key_facts = fetch_source_values(conn, source_ids, key)?;
             for (source_id, entry_opt) in key_facts {
                 if let Some(entry) = entry_opt {
                     merged
@@ -592,6 +602,7 @@ fn is_root_grouping_key(key: &ParsedFactKey) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::fact::FactType;
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
 
     /// Insert a source fact with a time value.
@@ -637,6 +648,61 @@ mod tests {
         assert_eq!(make_key.category, BuiltinKeyCategory::Stored);
 
         assert_eq!(result.total_sources, 2);
+    }
+
+    /// Store a number fact on a source.
+    fn insert_num_fact(conn: &Connection, source_id: i64, key: &str, value: f64) {
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_num, observed_at, observed_basis_rev)
+             VALUES ('source', ?1, ?2, ?3, 0, 0)",
+            rusqlite::params![source_id, key, value],
+        )
+        .unwrap();
+    }
+
+    fn listed<'a>(result: &'a AllKeysResult, key: &str) -> &'a KeyInfo {
+        result.keys.iter().find(|k| k.key == key).unwrap()
+    }
+
+    /// The Type column reads the key, not the scope: a key holding text on a file outside
+    /// the scope and a number inside it lists as mixed, while its count stays the scope's.
+    #[test]
+    fn the_listing_states_the_key_type_not_the_scoped_type() {
+        let mut conn = setup_test_db();
+        let here = insert_root(&conn, "/photos", "source", false);
+        let elsewhere = insert_root(&conn, "/other", "source", false);
+        let inside = insert_source(&conn, here, "a.jpg", None);
+        let outside = insert_source(&conn, elsewhere, "b.jpg", None);
+        insert_num_fact(&conn, inside, "content.Width", 4000.0);
+        crate::core::testing::insert_fact(&conn, outside, "content.Width", "wide");
+        insert_num_fact(&conn, inside, "content.Height", 3000.0);
+
+        let result = compute_all_keys(&mut conn, &[inside], false).unwrap();
+        let width = listed(&result, "content.Width");
+        assert_eq!(width.types.word(), "mixed");
+        assert_eq!(width.count, 1);
+        assert_eq!(listed(&result, "content.Height").types.word(), "number");
+    }
+
+    /// Each stored key lists with the type its facts hold, and a built-in with its own.
+    #[test]
+    fn the_listing_types_each_key_from_key_types() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let s1 = insert_source(&conn, root, "a.jpg", None);
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        insert_num_fact(&conn, s1, "content.Width", 4000.0);
+        insert_time_fact(&conn, s1, "content.DateTimeOriginal", 1704067200);
+
+        let result = compute_all_keys(&mut conn, &[s1], false).unwrap();
+        for (key, want) in [
+            ("content.Make", FactType::Text),
+            ("content.Width", FactType::Num),
+            ("content.DateTimeOriginal", FactType::Time),
+            ("source.size", FactType::Num),
+        ] {
+            assert_eq!(listed(&result, key).types.single(), Some(want), "{key}");
+        }
     }
 
     // =========================================================================
@@ -975,6 +1041,53 @@ mod tests {
         assert_eq!(png_group.total_count, 1);
 
         assert_eq!(result.sources_with_value, 3);
+    }
+
+    /// A source holding a key itself and on its content counts once, under the content's
+    /// value, through a modifier and as either key of a grouping.
+    #[test]
+    fn a_key_held_twice_reports_the_one_value_through_a_modifier_and_a_grouping() {
+        use crate::core::testing::{insert_fact, insert_object_fact};
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "h1", false);
+        let s = insert_source(&conn, root, "a.jpg", Some(obj));
+        insert_fact(&conn, s, "content.Make", "Nikon");
+        insert_object_fact(&conn, obj, "content.Make", "Canon");
+        insert_fact(&conn, s, "content.Model", "D850");
+        insert_object_fact(&conn, obj, "content.Model", "R5");
+        let zone = UserZone::utc();
+        let key = |k: &str| ParsedFactKey::parse(k).unwrap();
+
+        let lowered =
+            compute_distribution(&mut conn, &[s], &key("content.Make|lowercase"), 100, &zone)
+                .unwrap();
+        let values: Vec<(String, i64)> = lowered
+            .entries
+            .into_iter()
+            .map(|e| (e.value, e.count))
+            .collect();
+        assert_eq!(values, [("canon".to_string(), 1)]);
+
+        let grouped = compute_grouped_distribution(
+            &mut conn,
+            &[s],
+            &key("content.Make"),
+            &[key("content.Model")],
+            0,
+            &zone,
+        )
+        .unwrap();
+        let rows: Vec<(String, Vec<String>, i64)> = grouped
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.sub_groups
+                    .iter()
+                    .map(move |e| (g.main_value.clone(), e.group_values.clone(), e.count))
+            })
+            .collect();
+        assert_eq!(rows, [("Canon".to_string(), vec!["R5".to_string()], 1)]);
     }
 
     #[test]

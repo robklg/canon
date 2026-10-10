@@ -17,19 +17,18 @@
 //!
 //! ```ignore
 //! use crate::core::domain::fact::{FactEntry, FactValue, FactType};
-//! use crate::core::repo;
 //!
-//! // Fetch a specific fact key for sources
-//! let facts = repo::fact::batch_fetch_key_for_sources(conn, &source_ids, "content.Make")?;
-//!
-//! // Check each source's fact value
-//! for (source_id, entry) in &facts {
-//!     if let Some(fact) = entry {
-//!         println!("{}: {:?}", source_id, fact.value);
+//! // Every fact each source carries, on the source and on its content. A source's one
+//! // value for a key is picked from these elsewhere; here they are rows.
+//! let facts = crate::core::repo::fact::batch_fetch_for_sources(conn, &source_ids)?;
+//! for (source_id, entries) in &facts {
+//!     for fact in entries {
+//!         println!("{}: {} on source: {}", source_id, fact.key, fact.is_on_source());
 //!     }
 //! }
 //! ```
 
+use super::format::shell_quote;
 use super::time::value::TimeValue;
 
 /// A value's kind, without the value: text, number, time, or a derived path. The one
@@ -43,14 +42,131 @@ pub enum FactType {
 }
 
 impl FactType {
+    /// The type's one printed word.
     pub fn as_str(&self) -> &'static str {
         match self {
             FactType::Text => "text",
-            FactType::Num => "num",
+            FactType::Num => "number",
             FactType::Time => "time",
             FactType::Path => "path",
         }
     }
+
+    /// A stored type read from a word a user typed: the printed words, and quietly the
+    /// older spellings `num` and `datetime`, which are accepted and never printed. Never
+    /// `path` — a path is derived, so no stored fact holds one.
+    pub fn parse_word(word: &str) -> Option<FactType> {
+        match word {
+            "text" => Some(FactType::Text),
+            "number" | "num" => Some(FactType::Num),
+            "time" | "datetime" => Some(FactType::Time),
+            _ => None,
+        }
+    }
+}
+
+/// The types a key's facts hold, with how many facts hold each — read from every fact
+/// of the key, wherever it sits (`core::repo::fact::key_types`). One entry is the key's
+/// type; two or more is a key of mixed type, which only data older than typed import
+/// can hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyTypes {
+    /// Non-zero counts in a fixed order (text, number, time, path). A built-in holds no
+    /// facts, so its one entry counts nothing.
+    counts: Vec<(FactType, u64)>,
+}
+
+impl KeyTypes {
+    /// A built-in's type: one type, no facts counted.
+    pub fn of(t: FactType) -> Self {
+        KeyTypes {
+            counts: vec![(t, 0)],
+        }
+    }
+
+    /// The types from per-type fact counts; `None` where no count is above zero, because
+    /// a key with no facts has no type.
+    pub fn from_counts(counts: impl IntoIterator<Item = (FactType, u64)>) -> Option<Self> {
+        let order = |t: FactType| match t {
+            FactType::Text => 0,
+            FactType::Num => 1,
+            FactType::Time => 2,
+            FactType::Path => 3,
+        };
+        let mut summed: Vec<(FactType, u64)> = Vec::new();
+        for (t, n) in counts {
+            match summed.iter_mut().find(|(seen, _)| *seen == t) {
+                Some((_, total)) => *total += n,
+                None => summed.push((t, n)),
+            }
+        }
+        summed.retain(|&(_, n)| n > 0);
+        summed.sort_by_key(|&(t, _)| order(t));
+        (!summed.is_empty()).then_some(KeyTypes { counts: summed })
+    }
+
+    /// The key's one type, or `None` for a key of mixed type.
+    pub fn single(&self) -> Option<FactType> {
+        match self.counts.as_slice() {
+            [(t, _)] => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Whether the key's facts hold more than one type.
+    pub fn is_mixed(&self) -> bool {
+        self.single().is_none()
+    }
+
+    /// The word the key's type prints as: its type's word, or `mixed`.
+    pub fn word(&self) -> &'static str {
+        self.single().map_or("mixed", |t| t.as_str())
+    }
+
+    /// Each type the key's facts hold and how many hold it.
+    #[allow(dead_code)] // read only by tests so far
+    pub fn counts(&self) -> &[(FactType, u64)] {
+        &self.counts
+    }
+}
+
+/// The statement that keys are of mixed type — what is wrong and what it costs. One key is
+/// named, quoted where the shell needs it; several are counted. Spoken here once for every
+/// surface that names such a key, because those surfaces sit in three subsystems and two
+/// layers; empty for no keys.
+pub fn mixed_type_statement(keys: &[&str]) -> Vec<String> {
+    let first = match keys {
+        [] => return Vec::new(),
+        [key] => format!(
+            "{} is of mixed type, so filters and patterns cannot use its values:",
+            shell_quote(key)
+        ),
+        keys => format!(
+            "{} keys are of mixed type, so filters and patterns cannot use their values:",
+            super::format::format_count(keys.len())
+        ),
+    };
+    vec![
+        first,
+        "only values of one type can be compared or formatted correctly.".to_string(),
+    ]
+}
+
+/// The way out of a mixed type: a header, then one command per key, each key quoted where
+/// the shell needs it so the command runs as printed; empty for no keys. The commands are
+/// indented under the header and backticked, as every printed command is.
+pub fn mixed_type_way_out(keys: &[&str]) -> Vec<String> {
+    let header = match keys {
+        [] => return Vec::new(),
+        [_] => "To inspect it and learn how to convert it to one type:",
+        _ => "To inspect each and learn how to convert to one type:",
+    };
+    std::iter::once(header.to_string())
+        .chain(
+            keys.iter()
+                .map(|key| format!("  `canon facts convert {}`", shell_quote(key))),
+        )
+        .collect()
 }
 
 impl std::fmt::Display for FactType {
@@ -100,21 +216,21 @@ pub struct FactEntry {
     pub key: String,
     /// The typed fact value
     pub value: FactValue,
-    // Nothing reads the two fields below today. They are kept because the
-    // fetch that produces these entries unions two SELECTs — facts stored on
-    // the source and facts stored on its object — and these are the only
-    // thing in the result that tells the two apart. Dropping them would make
-    // the union's halves unrecoverable, which is the opposite of what the
-    // union is for.
-    #[allow(dead_code)]
-    /// Where this fact is stored: "source" or "object"
+    /// Where this fact is stored: "source" or "object"; read through `is_on_source`.
     pub entity_type: String,
+    // Nothing reads the id today; it is kept beside the side it names, so an entry says
+    // exactly which row it came from.
     #[allow(dead_code)]
     /// The entity ID (source_id or object_id depending on entity_type)
     pub entity_id: i64,
 }
 
 impl FactEntry {
+    /// Whether the fact is held on the source itself rather than on its content.
+    pub fn is_on_source(&self) -> bool {
+        self.entity_type == "source"
+    }
+
     /// Create a new FactEntry.
     ///
     /// This is a simple constructor for convenience in tests and repository code.
@@ -198,6 +314,87 @@ mod tests {
             FactValue::Path(p) => assert_eq!(p, "/photos/2024/image.jpg"),
             _ => panic!("Expected Path variant"),
         }
+    }
+
+    // =========================================================================
+    // The type words, a key's types, and the two-type statement
+    // =========================================================================
+
+    #[test]
+    fn parse_word_reads_the_type_words_and_their_quiet_spellings() {
+        for t in [FactType::Text, FactType::Num, FactType::Time] {
+            assert_eq!(FactType::parse_word(t.as_str()), Some(t), "{t}");
+        }
+        assert_eq!(FactType::Num.as_str(), "number");
+        assert_eq!(FactType::parse_word("num"), Some(FactType::Num));
+        assert_eq!(FactType::parse_word("datetime"), Some(FactType::Time));
+        for refused in ["path", "Number", "integer", ""] {
+            assert_eq!(FactType::parse_word(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn key_types_name_one_type_or_mixed() {
+        let one = KeyTypes::from_counts([(FactType::Num, 3), (FactType::Text, 0)]).unwrap();
+        assert_eq!(one.single(), Some(FactType::Num));
+        assert_eq!(one.word(), "number");
+        assert_eq!(one.counts(), &[(FactType::Num, 3)]);
+
+        let two = KeyTypes::from_counts([(FactType::Time, 1), (FactType::Text, 2)]).unwrap();
+        assert_eq!(two.single(), None);
+        assert!(two.is_mixed() && !one.is_mixed());
+        assert_eq!(two.word(), "mixed");
+        assert_eq!(two.counts(), &[(FactType::Text, 2), (FactType::Time, 1)]);
+
+        assert_eq!(KeyTypes::from_counts([(FactType::Text, 0)]), None);
+        assert_eq!(KeyTypes::of(FactType::Path).word(), "path");
+    }
+
+    /// The statement and the way out, word for word, for one
+    /// key (named) and for several (counted).
+    #[test]
+    fn the_two_type_statement_reads_as_decided() {
+        let one = ["content.CreateDate"];
+        assert_eq!(
+            mixed_type_statement(&one),
+            [
+                "content.CreateDate is of mixed type, so filters and patterns cannot use its values:",
+                "only values of one type can be compared or formatted correctly.",
+            ]
+        );
+        assert_eq!(
+            mixed_type_way_out(&one),
+            [
+                "To inspect it and learn how to convert it to one type:",
+                "  `canon facts convert content.CreateDate`",
+            ]
+        );
+
+        let two = ["content.CreateDate", "content.File Size"];
+        assert_eq!(
+            mixed_type_statement(&two),
+            [
+                "2 keys are of mixed type, so filters and patterns cannot use their values:",
+                "only values of one type can be compared or formatted correctly.",
+            ]
+        );
+        assert_eq!(
+            mixed_type_way_out(&two),
+            [
+                "To inspect each and learn how to convert to one type:",
+                "  `canon facts convert content.CreateDate`",
+                "  `canon facts convert 'content.File Size'`",
+            ]
+        );
+
+        // A key the shell would split is quoted by the owner, in the statement and the command.
+        assert_eq!(
+            mixed_type_statement(&["content.File Size"])[0],
+            "'content.File Size' is of mixed type, so filters and patterns cannot use its values:"
+        );
+
+        assert!(mixed_type_statement(&[]).is_empty());
+        assert!(mixed_type_way_out(&[]).is_empty());
     }
 
     // =========================================================================
