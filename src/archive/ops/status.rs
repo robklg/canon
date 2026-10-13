@@ -225,7 +225,7 @@ pub struct ManifestStatus {
     /// where it has none — or why it cannot be settled (`settle_manifest_zone`, the refresh's
     /// own reading). Read only for what the report says about a refresh.
     pub manifest_zone: Result<ManifestZone, ZoneRefusal>,
-    /// Every recorded query line that does not parse, with its parse error — the lines
+    /// Every cause the recorded query cannot run for, with the clause it names — what
     /// `cluster refresh` refuses on (`parse_recorded_query`, its own reading).
     pub query_causes: Vec<(String, String)>,
     /// How many lock entries have no destination computed, because the lock records no zone
@@ -272,7 +272,7 @@ impl ManifestStatus {
             scope_kept_nothing: self.scope_kept_nothing,
             scope_confirms_nothing: self.scope_confirms_nothing,
             zone_refusal: self.manifest_zone.as_ref().err().map(ZoneRefusal::kind),
-            query_unparseable: !self.query_causes.is_empty(),
+            query_refused: !self.query_causes.is_empty(),
         }
     }
 
@@ -285,7 +285,7 @@ impl ManifestStatus {
     /// which of its refusals turns it away.
     ///
     /// **Its own, which are none of apply's.** The scope's two are the ones
-    /// below; the manifest's zone and an unparseable query line join them. A refresh re-queries from
+    /// below; the manifest's zone and a query that cannot run join them. A refresh re-queries from
     /// the recorded scope and rewrites the manifest and its lock — files that
     /// live where the user put them, never inside the archive root — so a
     /// parked **scope line** closes it, and neither a parked lock entry nor a
@@ -329,10 +329,10 @@ impl ManifestStatus {
 /// This is a read-only diagnostic: no DB writes, no file operations.
 /// Needs `&mut Connection` because fact fetching uses temp tables.
 ///
-/// Destinations are placed on **the lock's zone**, never `machine`'s: `machine` is read only
+/// Destinations are worked out in **the lock's time zone**, never `machine`'s: `machine` is read only
 /// for what a refresh here would record where the manifest has no zone line. A lock with no
 /// zone this machine can read — no header, no zone, or a zone this machine's data does not
-/// know — gets no destination at all: it records no clock, and placing it on any other would
+/// know — gets no destination at all: it records no clock, and working them out in any other would
 /// show a destination no run would use.
 pub fn compute_manifest_status(
     conn: &mut Connection,
@@ -402,7 +402,9 @@ pub fn compute_manifest_status(
         };
     let lock_entry_count = lock_entries.len();
     let manifest_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
-    let (_, query_causes) = parse_recorded_query(&config.meta.query);
+    let query_causes = parse_recorded_query(conn, &config.meta.query)?
+        .err()
+        .unwrap_or_default();
 
     // 3. Fetch roots, build root_paths map
     let roots = repo::root::fetch_all(conn)?;
@@ -432,7 +434,7 @@ pub fn compute_manifest_status(
     // scope line contributing nothing is part of that state.
     let scope = resolve_recorded_scope(conn, &config.meta.scope, &roots)?;
 
-    // Each entry with the clock it is placed on: the lock's zone, or — where the lock records
+    // Each entry with the time zone its destination is worked out in: the lock's, or — where the lock records
     // none this machine can read — no entry at all, and every one of them unplaced.
     let placed: Vec<(&LockEntry, &UserZone)> = match &lock_zone {
         Some(LockZone::Recorded(zone)) => lock_entries.iter().map(|e| (e, zone.clock())).collect(),
@@ -593,6 +595,7 @@ mod tests {
     use crate::core::testing::{
         insert_object, insert_root, insert_source_with_size, setup_test_db,
     };
+    use crate::expr::BoundFilters;
 
     use super::super::generate::{
         execute_generate, plan_generate, ClusterGenerateParams, ExecuteGenerateParams,
@@ -604,7 +607,7 @@ mod tests {
     fn default_params() -> ClusterGenerateParams {
         ClusterGenerateParams {
             scopes: vec![],
-            filters: vec![],
+            filters: BoundFilters::none(),
             allow_archived: false,
             allow_duplicates: false,
             clock: UserZone::utc(),
@@ -896,11 +899,11 @@ mod tests {
         assert!(status.pattern_gaps.fact_not_carried);
     }
 
-    /// **The report places on the lock's zone, whatever the machine's** — the same
+    /// **The report works out destinations in the lock's time zone, whatever the machine's** — the same
     /// destination `apply` computes: 23:30 UTC on New Year's Eve 2023 is 2024 in Amsterdam
     /// (the lock's zone) and still 2023 in New York (the machine's).
     #[test]
-    fn status_places_on_the_locks_zone_whatever_the_machines() {
+    fn status_reads_times_in_the_locks_zone_whatever_the_machines() {
         use crate::core::domain::time::zone::with_test_zone;
         let (mut conn, dir, manifest, _archive) = status_fixture_in(&["a.jpg"], "Europe/Amsterdam");
         set_lock_mtime(dir.path(), "a.jpg", 1704065400);
@@ -1314,10 +1317,10 @@ mod tests {
             .is_empty());
     }
 
-    /// **An unparseable query is named as what stops the refresh, beside the zone's cause**,
-    /// read by the refresh's own parse — so the report names no rebuild the query turns away.
+    /// **A query that cannot run is named as what stops the refresh, beside the zone's cause**,
+    /// read by the refresh's own binding — so the report names no rebuild the query turns away.
     #[test]
-    fn status_names_an_unparseable_query_as_what_stops_the_refresh() {
+    fn status_names_a_refused_query_as_what_stops_the_refresh() {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
         rewrite_lock_zone(dir.path(), None);
         let text = std::fs::read_to_string(&manifest).unwrap();

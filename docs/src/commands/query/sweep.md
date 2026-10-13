@@ -88,7 +88,7 @@ A source root with few [unresolved](../../concepts/resolution.md) sources left t
     → canon roots retire path:/Volumes/oldmac --dry-run
 ```
 
-The count is the same remainder the [retirement](../roots/retire.md) readiness review measures: sources on the root that are neither archived, nor covered, nor excluded, nor empty. It is a fact about the root and not a verdict about it; the review the handoff names is what judges whether the root is ready, and `--dry-run` reports that verdict rather than acting on it. A zero remainder reads `no unresolved sources remain`.
+The count is the same remainder the [retirement](../roots/retire.md) readiness review measures: sources on the root that are neither archived, nor covered, nor excluded, nor empty. It is a fact about the root and not a verdict about it; the review the handoff names is what judges whether the root is ready, and `--dry-run` reports that verdict rather than acting on it. A zero remainder shows `no unresolved sources remain`.
 
 The figure is an upper bound (`up to`), not a total. Places on one root can be each other's evidence: two folders holding copies of each other both report those bytes, and only one of them can be let go, so what acting would actually resolve is never more than the figure shown.
 
@@ -118,7 +118,7 @@ visible.
 Where places could group either way, the parent claims them: a hub groups places by the
 counterpart they share, a parent groups them by the one decision that covers them. Places under
 different roots never group together, whatever they hold in common. The parent may be a root's own
-top, when the places sit directly on it; the entry then reads as a bare root path and hands off to
+top, when the places sit directly on it; the entry then shows as a bare root path and hands off to
 `canon survey` at that root.
 
 A parent whose members account for less than 60% of it forms no entry, and its places compete
@@ -189,7 +189,7 @@ Places on a [suspended](../roots/roots.md#suspending-roots) root are not ranked,
 
 Places **on** the root stand there; places **with copies on** it stand elsewhere and rest their claim on content behind the closed door.  Each cause carries its own figure, and each is an upper bound: parked places can be each other's evidence, so what unsuspending would actually resolve is never more than the figure shown. Whether the suspended root is a source or an archive root makes no difference. Above three suspended roots the lines collapse to one, counting roots rather than naming them, with `canon roots list --suspended` as the way back.
 
-Suspended roots stay in the computation: their copies still count as gain rather than residual, so a folder duplicated entirely inside a suspended root does not read as unique. What changes is position, not existence. `--all` does not reveal these places; `canon roots unsuspend` brings them back, and inspecting one parked place is `canon survey <path>`.
+Suspended roots stay in the computation: their copies still count as gain rather than residual, so a folder duplicated entirely inside a suspended root does not show as unique. What changes is position, not existence. `--all` does not reveal these places; `canon roots unsuspend` brings them back, and inspecting one parked place is `canon survey <path>`.
 
 The below-floor footer count includes places that are not ranked, so `--all` reveals fewer entries than that count names.
 

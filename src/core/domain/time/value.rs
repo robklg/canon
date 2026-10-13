@@ -220,10 +220,16 @@ impl TimeValue {
                 start: truncate(zone.to_clock(at), precision),
                 precision,
             },
-            Repr::Clock { at, precision } => ClockSpan {
-                start: at,
-                precision,
-            },
+            Repr::Clock { at, precision } => ClockSpan::as_written(at, precision),
+        }
+    }
+
+    /// A clock reading's span, `None` for an instant, which only the user's zone can turn into
+    /// local time.
+    fn as_written(&self) -> Option<ClockSpan> {
+        match self.0 {
+            Repr::Clock { at, precision } => Some(ClockSpan::as_written(at, precision)),
+            Repr::Instant { .. } => None,
         }
     }
 
@@ -233,6 +239,13 @@ impl TimeValue {
     /// ([`ClockSpan::printed`]), read through the frame rule.
     pub fn printed(&self, zone: &UserZone) -> String {
         self.on_clock(zone).printed()
+    }
+
+    /// A typed clock reading named back as it was asked ([`ClockSpan::printed_as_asked`]: a
+    /// fraction's digits kept), which needs no clock; `None` for an instant, which only the
+    /// user's clock can print. For a value a person typed, never a stored one.
+    pub fn printed_clock_reading_as_asked(&self) -> Option<String> {
+        self.as_written().map(|span| span.printed_as_asked())
     }
 
     /// The one ISO 8601 spelling of what is stored: its form, its precision and its offset —
@@ -303,10 +316,9 @@ impl TimeValue {
         })
     }
 
-    // AUDIT: today's `value_time` number is also what `--where` compares a time by, until binding
-    // reads the span instead and this reading leaves the comparison. Storage keeps the encoding.
     /// The stored number in `value_time`: an instant's UTC seconds; a clock reading counted
-    /// as if it were UTC; fractions cut to the second below.
+    /// as if it were UTC; fractions cut to the second below. Storage's encoding only: no
+    /// comparison reads it.
     pub fn legacy_epoch_number(&self) -> i64 {
         match self.0 {
             Repr::Instant { at, .. } => floor_seconds(at.as_second(), at.subsec_nanosecond()),
@@ -373,6 +385,29 @@ fn fraction_digits(nanos: i32) -> String {
     }
 }
 
+/// The rows of the whole-period table ([`ClockSpan::satisfies`]): what a comparison asks of a
+/// value's whole period against a typed one. A value coarser than the typed period is in none
+/// of `<`, `=` and `>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodOp {
+    /// `=` — lies inside the period.
+    Inside,
+    /// `>=` — starts at or after the period's start.
+    StartsAtOrAfterStart,
+    /// `>` — starts at or after the period's end.
+    StartsAtOrAfterEnd,
+    /// `<=` — ends by the period's end.
+    EndsByEnd,
+    /// `<` — ends by the period's start.
+    EndsByStart,
+}
+
+/// The day a time of day is read on: a clock reading on this day, so the whole-period table
+/// compares times of day as it compares every other time. Any day serves because nothing reads
+/// it back: the modifier table lets only the hour, minute and second be read off a time of day,
+/// and it is never printed.
+pub const REFERENCE_DAY: civil::Date = civil::date(2000, 1, 1);
+
 /// A value's period on the user's clock: where it starts, and its grain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockSpan {
@@ -381,14 +416,23 @@ pub struct ClockSpan {
 }
 
 impl ClockSpan {
+    /// The frame rule's clock-reading arm: a clock reading's span is the reading as written,
+    /// on any clock.
+    fn as_written(at: DateTime, precision: Precision) -> ClockSpan {
+        ClockSpan {
+            start: at,
+            precision,
+        }
+    }
+
     pub fn start(&self) -> DateTime {
         self.start
     }
 
     /// One grain after the start, computed on the clock reading itself (no clock-change
-    /// arithmetic); the start itself for a fraction, which is a point. At the top of year
-    /// 9999 the next grain is past the last clock reading jiff holds, and the end is that
-    /// last reading.
+    /// arithmetic). A fraction is a point one nanosecond long, so no value can both end by
+    /// its start and start at or after its end. At the top of year 9999 the next grain is
+    /// past the last clock reading jiff holds, and the end is that last reading.
     pub fn end(&self) -> DateTime {
         let grain = match self.precision {
             Precision::Year => 1.year(),
@@ -396,7 +440,7 @@ impl ClockSpan {
             Precision::Day => 1.day(),
             Precision::Minute => 1.minute(),
             Precision::Second => 1.second(),
-            Precision::Fraction => return self.start,
+            Precision::Fraction => 1.nanosecond(),
         };
         self.start.checked_add(grain).unwrap_or(DateTime::MAX)
     }
@@ -405,16 +449,17 @@ impl ClockSpan {
         self.precision
     }
 
-    /// Whether this whole period lies inside `period` — what `=` means against a typed
-    /// period. Clock readings only: no instant is computed.
-    pub fn lies_inside(&self, period: &ClockSpan) -> bool {
-        self.start >= period.start && self.end() <= period.end()
-    }
-
-    /// Whether this period starts at or after `period`'s start — what `>=` means against a
-    /// typed period.
-    pub fn starts_at_or_after(&self, period: &ClockSpan) -> bool {
-        self.start >= period.start
+    /// **The whole-period table**: whether this whole period satisfies `op` against
+    /// `period`. Every comparison of times — a typed period in a filter, the trail's `--on`
+    /// and `--since` — reads this one table, on clock readings only: no instant is computed.
+    pub fn satisfies(&self, op: PeriodOp, period: &ClockSpan) -> bool {
+        match op {
+            PeriodOp::Inside => self.start >= period.start && self.end() <= period.end(),
+            PeriodOp::StartsAtOrAfterStart => self.start >= period.start,
+            PeriodOp::StartsAtOrAfterEnd => self.start >= period.end(),
+            PeriodOp::EndsByEnd => self.end() <= period.end(),
+            PeriodOp::EndsByStart => self.end() <= period.start,
+        }
     }
 
     /// The one printed spelling of a time: `2024`, `2024-06`, `2024-06-15`,
@@ -440,7 +485,7 @@ impl ClockSpan {
             Precision::Month => return format!("{:04}-{:02}", s.year(), s.month()),
             _ => format!("{:04}-{:02}-{:02}", s.year(), s.month(), s.day()),
         };
-        match self.printed_time(fraction) {
+        match self.time_spelled(fraction) {
             Some(time) => format!("{date} {time}"),
             None => date,
         }
@@ -449,11 +494,17 @@ impl ClockSpan {
     /// The time of day alone, as asked: `14:30`, `14:30:05`, `14:30:05.45`; `None` for a
     /// period of a day or longer.
     pub fn printed_time_as_asked(&self) -> Option<String> {
-        self.printed_time(true)
+        self.time_spelled(true)
+    }
+
+    /// The time of day alone, as [`printed`](Self::printed) writes it: `14:30`, `14:30:05`, a
+    /// fraction to the second, truncated; `None` for a period of a day or longer.
+    pub fn printed_time(&self) -> Option<String> {
+        self.time_spelled(false)
     }
 
     /// The time of day at the period's grain; with `fraction`, a fraction's digits are kept.
-    fn printed_time(&self, fraction: bool) -> Option<String> {
+    fn time_spelled(&self, fraction: bool) -> Option<String> {
         let s = self.start;
         let (h, m, sec) = (s.hour(), s.minute(), s.second());
         match self.precision {
@@ -522,39 +573,248 @@ mod tests {
         read_time(text).unwrap().on_clock(&ams())
     }
 
-    /// The trail's period reading is the whole-period table's first two rows: `=P` holds when
-    /// the whole value lies inside the period, `>=P` when it starts at or after the period's
-    /// start. Both read clock readings only.
+    /// Every comparison operator of the whole-period table: `=P` lies
+    /// inside P, `>=P` starts at or after P's start, `>P` starts at or after P's end, `<=P`
+    /// ends by P's end, `<P` ends by P's start.
+    fn holds(value: &ClockSpan, op: &str, period: &ClockSpan) -> bool {
+        let op = match op {
+            "=" => PeriodOp::Inside,
+            ">=" => PeriodOp::StartsAtOrAfterStart,
+            ">" => PeriodOp::StartsAtOrAfterEnd,
+            "<=" => PeriodOp::EndsByEnd,
+            "<" => PeriodOp::EndsByStart,
+            other => panic!("not an operator: {other}"),
+        };
+        value.satisfies(op, period)
+    }
+
+    /// Which of `<`, `=`, `>` a value's whole period satisfies against a period.
+    fn sides(value: &ClockSpan, period: &ClockSpan) -> [bool; 3] {
+        [
+            holds(value, "<", period),
+            holds(value, "=", period),
+            holds(value, ">", period),
+        ]
+    }
+
+    /// The whole-period table, every operator at every grain, read as stated: each row's
+    /// expected answer is written out, never computed.
     #[test]
     fn clock_span_comparisons_follow_the_whole_period_table() {
-        let second = span("2024-06-15 14:30:05");
-        for period in ["2024-06-15 14:30", "2024-06-15", "2024-06", "2024"] {
-            assert!(second.lies_inside(&span(period)), "{period}");
+        // (value, operator, typed period, selected?)
+        let rows = [
+            // A second against each coarser grain, every operator.
+            ("2024-06-15 14:30:05", "=", "2024-06-15 14:30", true),
+            ("2024-06-15 14:30:05", "=", "2024-06-15", true),
+            ("2024-06-15 14:30:05", "=", "2024-06", true),
+            ("2024-06-15 14:30:05", "=", "2024", true),
+            ("2024-06-15 14:30:05", "=", "2024-06-15 14:30:05", true),
+            ("2024-06-15 14:30:05", "=", "2024-06-15 14:31", false),
+            ("2024-06-15 14:30:05", ">=", "2024-06-15", true),
+            ("2024-06-15 14:30:05", ">=", "2024-06-16", false),
+            ("2024-06-15 14:30:05", ">", "2024-06-15", false),
+            ("2024-06-15 14:30:05", ">", "2024-06-14", true),
+            ("2024-06-15 14:30:05", ">", "2024-05", true),
+            ("2024-06-15 14:30:05", ">", "2024-06", false),
+            ("2024-06-15 14:30:05", "<=", "2024-06", true),
+            ("2024-06-15 14:30:05", "<=", "2024-05", false),
+            ("2024-06-15 14:30:05", "<", "2024-06", false),
+            ("2024-06-15 14:30:05", "<", "2024-07", true),
+            ("2024-06-15 14:30:05", "<", "2025", true),
+            ("2024-06-15 14:30:05", "<", "2024", false),
+            ("2024-06-15 14:30:05", ">=", "2024-06-15 14:30:05", true),
+            ("2024-06-15 14:30:05", ">", "2024-06-15 14:30:05", false),
+            ("2024-06-15 14:30:05", ">", "2024-06-15 14:30:04", true),
+            ("2024-06-15 14:30:05", "<=", "2024-06-15 14:30:05", true),
+            ("2024-06-15 14:30:05", "<", "2024-06-15 14:30:05", false),
+            ("2024-06-15 14:30:05", "<", "2024-06-15 14:30:06", true),
+            // The edges of a minute: one second past its end, one before its start.
+            ("2024-06-15 14:31:00", "=", "2024-06-15 14:30", false),
+            ("2024-06-15 14:31:00", ">", "2024-06-15 14:30", true),
+            ("2024-06-15 14:29:59", "=", "2024-06-15 14:30", false),
+            ("2024-06-15 14:29:59", "<", "2024-06-15 14:30", true),
+            ("2024-06-15 14:30:00", ">=", "2024-06-15 14:30", true),
+            ("2024-06-15 14:30:00", "<", "2024-06-15 14:30", false),
+            // Whole periods: a month inside itself and its year, a month not inside a day.
+            ("2024-06", "=", "2024-06", true),
+            ("2024-06", "=", "2024", true),
+            ("2024-06", "<=", "2024-06", true),
+            ("2024-06", "<", "2024-07", true),
+            ("2024-06", ">", "2024-05", true),
+            ("2024-06", "=", "2024-06-15", false),
+            // A value coarser than the typed period: in none of `<`, `=`, `>`, and so in
+            // neither `<=` nor `>=` past the parts it shares.
+            ("2024", "<", "2024-06", false),
+            ("2024", "=", "2024-06", false),
+            ("2024", ">", "2024-06", false),
+            ("2024", "<=", "2024-06", false),
+            ("2024", ">=", "2024-06", false),
+            ("2024", ">=", "2024-01", true),
+            ("2024", "<=", "2024-12", true),
+            ("2024-06-15", "=", "2024-06-15 14:30", false),
+            ("2024-06-15", "<", "2024-06-15 14:30", false),
+            ("2024-06-15", ">", "2024-06-15 14:30", false),
+            // A typed fraction is a point one nanosecond long: `=` is the same instant.
+            (
+                "2024-06-15 14:30:05.45",
+                "=",
+                "2024-06-15 14:30:05.45",
+                true,
+            ),
+            (
+                "2024-06-15 14:30:05.453",
+                "=",
+                "2024-06-15 14:30:05.45",
+                false,
+            ),
+            (
+                "2024-06-15 14:30:05.453",
+                ">",
+                "2024-06-15 14:30:05.45",
+                true,
+            ),
+            (
+                "2024-06-15 14:30:05.449",
+                "<",
+                "2024-06-15 14:30:05.45",
+                true,
+            ),
+            (
+                "2024-06-15 14:30:05.45",
+                ">",
+                "2024-06-15 14:30:05.45",
+                false,
+            ),
+            (
+                "2024-06-15 14:30:05.45",
+                "<",
+                "2024-06-15 14:30:05.45",
+                false,
+            ),
+            (
+                "2024-06-15 14:30:05.45",
+                ">=",
+                "2024-06-15 14:30:05.45",
+                true,
+            ),
+            (
+                "2024-06-15 14:30:05.45",
+                "<=",
+                "2024-06-15 14:30:05.45",
+                true,
+            ),
+            ("2024-06-15 14:30:05.45", "=", "2024-06-15 14:30:05", true),
+            ("2024-06-15 14:30:06", ">", "2024-06-15 14:30:05.45", true),
+            // A second against a point inside it is coarser: none of the three.
+            ("2024-06-15 14:30:05", "<", "2024-06-15 14:30:05.45", false),
+            ("2024-06-15 14:30:05", "=", "2024-06-15 14:30:05.45", false),
+            ("2024-06-15 14:30:05", ">", "2024-06-15 14:30:05.45", false),
+            // The last periods of 9999 end at the last reading jiff holds and still compare.
+            ("9999-12-31 23:59:59", "=", "9999", true),
+            ("9999-12-31 23:59:59", "=", "9999-12-31", true),
+            ("9999-12-31 23:59:59", ">=", "9999-12-31", true),
+        ];
+        for (value, op, period, expected) in rows {
+            assert_eq!(
+                holds(&span(value), op, &span(period)),
+                expected,
+                "{value} {op} {period}"
+            );
         }
-        // One tick past the end of the minute lies outside it.
-        assert!(!span("2024-06-15 14:31:00").lies_inside(&span("2024-06-15 14:30")));
-        assert!(!span("2024-06-15 14:29:59").lies_inside(&span("2024-06-15 14:30")));
-        // A whole period inside itself; a longer one is not inside a shorter one.
-        assert!(span("2024-06").lies_inside(&span("2024-06")));
-        assert!(!span("2024-06").lies_inside(&span("2024-06-15")));
+    }
 
-        let minute = span("2024-06-15 14:30");
-        assert!(span("2024-06-15 14:30:00").starts_at_or_after(&minute));
-        assert!(span("2025-01-01 00:00:00").starts_at_or_after(&minute));
-        assert!(!span("2024-06-15 14:29:59").starts_at_or_after(&minute));
+    /// Calendar grains nest, so a value at the typed grain or finer satisfies exactly one of
+    /// `<`, `=`, `>`, and `<=`/`>=` are each the union of two of them. A coarser value that
+    /// holds the period satisfies none of the three (written as a text prefix of the period,
+    /// since the spellings nest as the grains do); a coarser value wholly before or after it,
+    /// exactly one.
+    #[test]
+    fn the_period_table_splits_every_finer_value_three_ways() {
+        let periods = [
+            "2024",
+            "2024-06",
+            "2024-06-15",
+            "2024-06-15 14:30",
+            "2024-06-15 14:30:05",
+            "2024-06-15 14:30:05.5",
+        ];
+        let values = [
+            "2023",
+            "2024",
+            "2025",
+            "2024-05",
+            "2024-06",
+            "2024-07",
+            "2024-06-14",
+            "2024-06-15",
+            "2024-06-16",
+            "2024-06-15 14:29",
+            "2024-06-15 14:30",
+            "2024-06-15 14:31",
+            "2024-06-15 14:30:04",
+            "2024-06-15 14:30:05",
+            "2024-06-15 14:30:06",
+            "2024-06-15 14:30:05.4",
+            "2024-06-15 14:30:05.5",
+            "2024-06-15 14:30:05.6",
+        ];
+        for p in periods {
+            let period = span(p);
+            for v in values {
+                let value = span(v);
+                let [lt, eq, gt] = sides(&value, &period);
+                let count = [lt, eq, gt].iter().filter(|b| **b).count();
+                let holds_the_period = value.precision() < period.precision() && p.starts_with(v);
+                if holds_the_period {
+                    assert_eq!(count, 0, "coarser {v} against {p}");
+                } else {
+                    assert_eq!(count, 1, "{v} against {p}");
+                }
+                if value.precision() >= period.precision() {
+                    assert_eq!(holds(&value, "<=", &period), lt || eq, "{v} <= {p}");
+                    assert_eq!(holds(&value, ">=", &period), gt || eq, "{v} >= {p}");
+                }
+            }
+        }
+    }
 
-        // A fraction is a point: no second lies inside it, and the first second at or after
-        // it is the next whole one.
-        let point = span("2024-06-15 14:30:05.45");
-        assert!(!second.lies_inside(&point));
-        assert!(!second.starts_at_or_after(&point));
-        assert!(span("2024-06-15 14:30:06").starts_at_or_after(&point));
+    /// The 23- and 25-hour days in Amsterdam: every instant of the repeated hour lies inside
+    /// its day and its minute on the user's clock; an instant after the skipped hour lies
+    /// after a clock reading written in it.
+    #[test]
+    fn the_period_table_reads_the_23_and_25_hour_days_on_the_users_clock() {
+        let zone = ams();
+        let on = |text: &str| read_time(text).unwrap().on_clock(&zone);
+        let first = save_time("2024-10-27T00:30:00Z").on_clock(&zone);
+        let second = save_time("2024-10-27T01:30:00Z").on_clock(&zone);
+        let day_start = save_time("2024-10-26T22:00:00Z").on_clock(&zone);
+        let day_end = save_time("2024-10-27T22:59:59Z").on_clock(&zone);
+        for moment in [&first, &second, &day_start, &day_end] {
+            assert!(holds(moment, "=", &on("2024-10-27")));
+        }
+        for moment in [&first, &second] {
+            assert!(holds(moment, "=", &on("2024-10-27 02:30")));
+            assert!(holds(moment, ">", &on("2024-10-27 02:29")));
+            assert!(holds(moment, "<", &on("2024-10-27 02:31")));
+        }
+        assert!(holds(
+            &save_time("2024-10-26T21:59:59Z").on_clock(&zone),
+            "<",
+            &on("2024-10-27")
+        ));
+        assert!(holds(
+            &save_time("2024-10-27T23:00:00Z").on_clock(&zone),
+            ">",
+            &on("2024-10-27")
+        ));
 
-        // The last periods of 9999 end at the last reading jiff holds and still compare.
-        let last = span("9999-12-31 23:59:59");
-        assert!(last.lies_inside(&span("9999")));
-        assert!(last.lies_inside(&span("9999-12-31")));
-        assert!(last.starts_at_or_after(&span("9999-12-31")));
+        let after_skip = save_time("2024-03-31T01:30:00Z").on_clock(&zone);
+        assert!(holds(&after_skip, "=", &on("2024-03-31")));
+        assert!(holds(&after_skip, "=", &on("2024-03-31 03:30")));
+        assert!(holds(&after_skip, ">", &on("2024-03-31 02:30")));
+        let in_skip = on("2024-03-31 02:30:00");
+        assert!(holds(&in_skip, "=", &on("2024-03-31 02:30")));
+        assert!(holds(&in_skip, "<", &on("2024-03-31 03:00")));
     }
 
     #[test]
@@ -592,6 +852,29 @@ mod tests {
         );
     }
 
+    /// A typed clock reading is named back as asked with no clock — its fraction kept, as the
+    /// span on any clock prints it as asked; an instant has no spelling without the user's
+    /// clock.
+    #[test]
+    fn a_typed_clock_reading_is_named_back_as_asked_without_a_clock() {
+        use crate::core::domain::time::reading::read_time;
+        for (text, asked) in [
+            ("2024:07:23", "2024-07-23"),
+            ("2024-06-15T14:30:05.25", "2024-06-15 14:30:05.25"),
+            ("2024:06:15 14:30", "2024-06-15 14:30"),
+        ] {
+            let tv = read_time(text).unwrap();
+            assert_eq!(
+                tv.printed_clock_reading_as_asked().as_deref(),
+                Some(asked),
+                "{text}"
+            );
+            assert_eq!(tv.on_clock(&ams()).printed_as_asked(), asked, "{text}");
+        }
+        let instant = read_time("2024-06-15T14:30+02:00").unwrap();
+        assert_eq!(instant.printed_clock_reading_as_asked(), None);
+    }
+
     #[test]
     fn a_span_is_one_grain_long_and_a_fraction_is_a_point() {
         let zone = ams();
@@ -612,7 +895,7 @@ mod tests {
             (
                 "2024-06-15 14:30:05.45",
                 "2024-06-15T14:30:05.45",
-                "2024-06-15T14:30:05.45",
+                "2024-06-15T14:30:05.450000001",
             ),
         ];
         for (text, start, end) in cases {
@@ -630,7 +913,7 @@ mod tests {
 
     #[test]
     fn an_instant_reads_in_the_users_zone_and_is_cut_to_its_grain() {
-        // A minute value read in a zone whose offset carries seconds (Amsterdam's local mean
+        // A minute value read in a zone whose offset has seconds (Amsterdam's local mean
         // time before 1937, +00:19:32) still spans a whole minute.
         let value = read_time("1930-06-01T12:00Z").unwrap();
         let span = value.on_clock(&ams());

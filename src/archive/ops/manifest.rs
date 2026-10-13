@@ -15,10 +15,11 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use rusqlite::Connection;
 
 use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
 use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, ZoneNameError};
-use crate::expr::{Filter, Pattern, Unmeasured};
+use crate::expr::{read_filters, BoundFilters, FilterRefused, Pattern, Unmeasured};
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
 /// This prevents race conditions when opening the file in an editor
@@ -63,24 +64,24 @@ pub(super) fn write_lock_file(
     Ok(())
 }
 
-/// The manifest's recorded query, parsed once for a run: the lines that parse, and every line
-/// that does not with its parse error, in the order the lines stand. `cluster refresh` refuses
-/// on them, all in one run; `cluster status` names them as what would stop that refresh.
-///
-/// **Parse failures only.** A line that parses can still be refused later, inside the
-/// selection — an unknown fact key, an unknown modifier — and neither is collected here, so a
-/// report can still offer a refresh one of those turns away. Collecting them needs each clause
-/// read against its key before anything runs, which nothing does yet.
-pub fn parse_recorded_query(lines: &[String]) -> (Vec<Filter>, Vec<(String, String)>) {
-    let mut filters = Vec::new();
-    let mut unparsed = Vec::new();
-    for line in lines {
-        match Filter::parse(line) {
-            Ok(filter) => filters.push(filter),
-            Err(e) => unparsed.push((line.clone(), format!("{e:#}"))),
-        }
+/// The manifest's recorded query, read and bound once for a run as `--where` is: the bound
+/// filters, or — where any line cannot run — every cause with the clause it names, in the
+/// order they stand. The two are exclusive, so a refused query can never be selected on.
+/// `cluster refresh` refuses on the causes, all in one run; `cluster status` names them as what
+/// would stop that refresh. Every cause reading and binding refuse the recorded text for is
+/// collected here, before anything runs; the text is read as written, so an `@name` in it is
+/// not expanded.
+pub fn parse_recorded_query(
+    conn: &Connection,
+    lines: &[String],
+) -> Result<std::result::Result<BoundFilters, Vec<(String, String)>>> {
+    match read_filters(conn, lines) {
+        Ok(bound) => Ok(Ok(bound)),
+        Err(error) => match error.downcast::<FilterRefused>() {
+            Ok(refused) => Ok(Err(refused.entries())),
+            Err(other) => Err(other),
+        },
     }
-    (filters, unparsed)
 }
 
 /// Read and parse a manifest TOML config file.

@@ -75,8 +75,4 @@ impl FactCache {
     pub fn get_object_id(&self, source_id: i64) -> Option<i64> {
         self.source_objects.get(&source_id).copied()
     }
-
-    pub fn has_key(&self, key: &str) -> bool {
-        self.prefetched_keys.contains(key)
-    }
 }

@@ -20,8 +20,8 @@
 //! The form is decided by the offset alone, as RFC 3339 writes it. The shape decides the
 //! precision (whether seconds were written is something only the text can say); jiff decides
 //! validity, the instant and the offset, reading the text in the RFC 3339 shape this module
-//! writes it into. A number read as a time is a year, and only a whole number from 1900 to 2100
-//! ([`read_year_number`]); a number is never read as seconds since 1970.
+//! writes it into. A number used as a time is a year, and only a whole number from 1900 to 2100
+//! ([`read_year_number`]); a number never means seconds since 1970.
 //!
 //! Two callers: import now, and the conversion of a key to time later.
 
@@ -29,7 +29,7 @@ use jiff::civil;
 use jiff::fmt::temporal::{Pieces, PiecesOffset};
 use jiff::tz::Offset;
 
-use super::value::{Precision, TimeValue, TimeValueError};
+use super::value::{Precision, TimeValue, TimeValueError, REFERENCE_DAY};
 
 /// The list's forms as a person is shown them — one per grain a date is usually asked at —
 /// so a refusal that names the forms shows the ones this list reads, never a copy written
@@ -54,15 +54,15 @@ impl std::fmt::Display for TimeReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             TimeReadError::NotInList => {
-                "not written in a form Canon reads as a time (a date such as 2024-06-15, \
+                "not written in a form Canon recognizes as a time (a date such as 2024-06-15, \
                  2024:06:15, 2024-06 or 2024, optionally a time such as 14:30:05 and an \
-                 offset such as +02:00 or Z — see \"How Canon reads a time\" in the facts \
+                 offset such as +02:00 or Z — see \"How Canon interprets a time\" in the facts \
                  documentation)"
             }
             TimeReadError::ImpossibleDate => "not a date or time that exists",
             TimeReadError::OffsetOnDateAlone => "an offset needs a time of day to belong to",
             TimeReadError::YearOutOfRange => {
-                "a number read as a time must be a whole year from 1900 to 2100"
+                "a number is a time only when it is a whole year from 1900 to 2100"
             }
             TimeReadError::OutOfRange => super::value::EDGE_OF_THE_YEARS,
         })
@@ -75,6 +75,52 @@ impl std::error::Error for TimeReadError {}
 pub fn read_time(text: &str) -> Result<TimeValue, TimeReadError> {
     let shape = match_shape(text.as_bytes())?;
     build(&shape)
+}
+
+/// Read text as a time of day: `HH:MM` (minute), `HH:MM:SS` (second), `HH:MM:SS.` and 1–9
+/// digits (fraction) — a clock reading on [`REFERENCE_DAY`] at the precision written, so the
+/// whole-period table compares times of day as it compares every other time. Two digits each;
+/// an hour past 23 or a minute or second past 59 does not exist.
+pub fn read_time_of_day(text: &str) -> Result<TimeValue, TimeReadError> {
+    let bytes = text.as_bytes();
+    let mut c = Cursor { bytes, at: 0 };
+    let not_in_list = TimeReadError::NotInList;
+    let hh = c.digits::<2>().ok_or(not_in_list)?;
+    if !c.eat(b':') {
+        return Err(not_in_list);
+    }
+    let mm = c.digits::<2>().ok_or(not_in_list)?;
+    let mut ss = None;
+    let mut nanos = 0;
+    let mut precision = Precision::Minute;
+    if c.eat(b':') {
+        ss = Some(c.digits::<2>().ok_or(not_in_list)?);
+        precision = Precision::Second;
+        if c.eat(b'.') {
+            let start = c.at;
+            while c.peek().is_some_and(|b| b.is_ascii_digit()) {
+                c.at += 1;
+            }
+            let digits = bytes.get(start..c.at).unwrap_or_default();
+            if !(1..=9).contains(&digits.len()) {
+                return Err(not_in_list);
+            }
+            nanos = digits
+                .iter()
+                .chain(std::iter::repeat_n(&b'0', 9 - digits.len()))
+                .fold(0i32, |acc, d| acc * 10 + i32::from(d - b'0'));
+            precision = Precision::Fraction;
+        }
+    }
+    if !c.done() {
+        return Err(not_in_list);
+    }
+    let (h, m, sec) = (number(&hh), number(&mm), ss.map_or(0, |s| number(&s)));
+    if h > 23 || m > 59 || sec > 59 {
+        return Err(TimeReadError::ImpossibleDate);
+    }
+    let at = REFERENCE_DAY.at(h as i8, m as i8, sec as i8, nanos);
+    TimeValue::clock(at, precision).map_err(value_error)
 }
 
 /// Read a number given the time hint: a whole year from 1900 to 2100 (`2019.0` counts), a clock
@@ -371,6 +417,49 @@ fn value_error(e: TimeValueError) -> TimeReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_of_day_reads_on_the_reference_day_at_the_precision_written() {
+        let day = REFERENCE_DAY;
+        let cases = [
+            ("14:30", day.at(14, 30, 0, 0), Precision::Minute),
+            ("00:00", day.at(0, 0, 0, 0), Precision::Minute),
+            ("23:59:59", day.at(23, 59, 59, 0), Precision::Second),
+            ("14:30:05", day.at(14, 30, 5, 0), Precision::Second),
+            (
+                "14:30:05.45",
+                day.at(14, 30, 5, 450_000_000),
+                Precision::Fraction,
+            ),
+            (
+                "14:30:05.000000001",
+                day.at(14, 30, 5, 1),
+                Precision::Fraction,
+            ),
+        ];
+        for (text, at, precision) in cases {
+            let value = read_time_of_day(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(value, TimeValue::clock(at, precision).unwrap(), "{text}");
+        }
+        let refused = [
+            ("24:00", TimeReadError::ImpossibleDate),
+            ("14:60", TimeReadError::ImpossibleDate),
+            ("14:30:60", TimeReadError::ImpossibleDate),
+            ("1:30", TimeReadError::NotInList),
+            ("14", TimeReadError::NotInList),
+            ("14:3", TimeReadError::NotInList),
+            ("14:30:", TimeReadError::NotInList),
+            ("14:30:05.", TimeReadError::NotInList),
+            ("14:30:05.1234567890", TimeReadError::NotInList),
+            ("14:30 ", TimeReadError::NotInList),
+            ("14:30Z", TimeReadError::NotInList),
+            ("14.30", TimeReadError::NotInList),
+            ("", TimeReadError::NotInList),
+        ];
+        for (text, error) in refused {
+            assert_eq!(read_time_of_day(text), Err(error), "{text:?}");
+        }
+    }
     use crate::core::domain::time::value::TimeForm;
 
     fn read(text: &str) -> TimeValue {
@@ -627,9 +716,9 @@ mod tests {
     fn the_refusal_sentences_read_as_written() {
         assert_eq!(
             TimeReadError::NotInList.to_string(),
-            "not written in a form Canon reads as a time (a date such as 2024-06-15, \
+            "not written in a form Canon recognizes as a time (a date such as 2024-06-15, \
              2024:06:15, 2024-06 or 2024, optionally a time such as 14:30:05 and an \
-             offset such as +02:00 or Z — see \"How Canon reads a time\" in the facts \
+             offset such as +02:00 or Z — see \"How Canon interprets a time\" in the facts \
              documentation)"
         );
         assert_eq!(

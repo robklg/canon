@@ -177,7 +177,7 @@ pub(super) fn print_human(
         TrailView::Days(days) => {
             if days.is_empty() {
                 println!();
-                println!("No decisions {}.", time_label.unwrap_or("in range"));
+                println!("No decisions {}.", time_label.unwrap_or("in that span"));
             }
             // Long mode sizes no columns: an entry is as tall as it needs
             // to be, so there is nothing to measure and nothing to explain.
@@ -1874,10 +1874,10 @@ pub(super) fn day_heading(day: &DayGroup) -> String {
 /// date as one moment at UTC midnight.
 pub(super) fn read_times_on_line(zone: Option<&str>) -> String {
     match zone {
-        Some(zone) => format!("  read times on: {zone}"),
-        None => "  read times on: UTC (recorded before Canon kept the zone; then a bare number \
-                 against a time was seconds since 1970, and a typed date one moment at UTC \
-                 midnight)"
+        Some(zone) => format!("  time zone: {zone}"),
+        None => "  time zone: UTC (recorded before Canon kept the zone; then a bare number \
+                 against a time was seconds since 1970, and a typed date meant midnight \
+                 UTC)"
             .to_string(),
     }
 }
@@ -2008,11 +2008,11 @@ mod tests {
     fn show_prints_read_times_on_after_command() {
         assert_eq!(
             read_times_on_line(Some("America/New_York")),
-            "  read times on: America/New_York"
+            "  time zone: America/New_York"
         );
         assert_eq!(
             read_times_on_line(Some("UTC (this machine's time zone is unknown)")),
-            "  read times on: UTC (this machine's time zone is unknown)"
+            "  time zone: UTC (this machine's time zone is unknown)"
         );
     }
 
@@ -2021,8 +2021,8 @@ mod tests {
     fn show_explains_a_decision_recorded_before_the_zone() {
         assert_eq!(
             read_times_on_line(None),
-            "  read times on: UTC (recorded before Canon kept the zone; then a bare number against \
-             a time was seconds since 1970, and a typed date one moment at UTC midnight)"
+            "  time zone: UTC (recorded before Canon kept the zone; then a bare number against \
+             a time was seconds since 1970, and a typed date meant midnight UTC)"
         );
     }
 

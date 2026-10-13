@@ -10,6 +10,7 @@ use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeItemData, ExcludeSetObjectsParams,
     ExcludeSetParams, ReceiptDestination,
 };
+use crate::expr::BoundFilters;
 
 /// A destination that places a receipt — the ordinary case, with no gap.
 pub(super) fn placed(placement: &ReceiptPlacement) -> ReceiptDestination {
@@ -28,7 +29,7 @@ pub(super) fn placed(placement: &ReceiptPlacement) -> ReceiptDestination {
 pub(super) fn make_set_params(scopes: Vec<ScopeMatch>) -> ExcludeSetParams {
     ExcludeSetParams {
         scopes,
-        filters: vec![],
+        filters: BoundFilters::none(),
         clock: UserZone::utc(),
     }
 }
@@ -36,7 +37,7 @@ pub(super) fn make_set_params(scopes: Vec<ScopeMatch>) -> ExcludeSetParams {
 pub(super) fn make_clear_params(scopes: Vec<ScopeMatch>) -> ExcludeClearParams {
     ExcludeClearParams {
         scopes,
-        filters: vec![],
+        filters: BoundFilters::none(),
         clock: UserZone::utc(),
     }
 }
@@ -60,7 +61,7 @@ pub(super) fn make_duplicates_params(
 ) -> ExcludeDuplicatesParams {
     ExcludeDuplicatesParams {
         scopes,
-        filters: vec![],
+        filters: BoundFilters::none(),
         prefer_prefix: prefer_prefix.to_string(),
         clock: UserZone::utc(),
     }
@@ -69,7 +70,7 @@ pub(super) fn make_duplicates_params(
 pub(super) fn make_set_objects_params(scopes: Vec<ScopeMatch>) -> ExcludeSetObjectsParams {
     ExcludeSetObjectsParams {
         scopes,
-        filters: vec![],
+        filters: BoundFilters::none(),
         clock: UserZone::utc(),
     }
 }

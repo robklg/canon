@@ -64,7 +64,7 @@ trail.
 
 **Act lines** carry the transition word, the counts, the destination you chose (`→`),
 the decision id, and your reason. The transitions are `archived`, `excluded`, and
-`deleted`; a deletion a scan observed is marked `scan-observed`, so it never reads as
+`deleted`; a deletion a scan observed is marked `scan-observed`, so it never looks like
 your act. Repeated decisions at one place aggregate, though acts that went to
 different destinations never merge.
 
@@ -117,8 +117,8 @@ no handoffs, and a beginning and a last page around it.
 ## Edge cases
 
 - `#63 — no reason given` is a real recorded decision that had no `--reason`
-  attached. The id renders so the line reads as a decision without a reason rather
-  than as a missing decision.
+  attached. The id renders so the line shows a decision without a reason rather
+  than a missing decision.
 - `N excluded (no recorded decision)` is the opposite gap: excluded content whose
   deciding record is absent, either excluded before provenance existed or with
   recording off.
@@ -139,7 +139,7 @@ no handoffs, and a beginning and a last page around it.
 
 - The target is a **source** root — an archive root's places are served by
   [`canon trail`](../query/trail.md) and its composition card.
-- A suspended or unreachable root reads fine — the story as last observed, stated
+- A suspended or unreachable root works fine — the story as last observed, stated
   in the header.
 - Where content is covered only by archive copies on
   [suspended](roots.md#suspending-roots) roots, the location carries `(suspended)`

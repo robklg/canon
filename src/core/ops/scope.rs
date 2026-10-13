@@ -1331,7 +1331,7 @@ mod tests {
             .to_string();
         assert_eq!(
             err,
-            "/archive suspended — refused · canon roots unsuspend path:/archive"
+            "/archive suspended — rejected · canon roots unsuspend path:/archive"
         );
     }
 

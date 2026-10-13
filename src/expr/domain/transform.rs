@@ -10,7 +10,9 @@ use anyhow::{bail, Result};
 use jiff::civil::Weekday;
 
 use crate::core::domain::fact::FactValue;
-use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
+use crate::core::domain::number::{read_number, spelled};
+use crate::core::domain::time::reading::read_time;
+use crate::core::domain::time::value::{Precision, TimeForm, TimeValue, REFERENCE_DAY};
 use crate::core::domain::time::zone::UserZone;
 
 /// A modifier with optional arguments
@@ -32,19 +34,19 @@ pub enum PathAccessor {
     },
 }
 
-/// Modifier category for grouping
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Modifier category for grouping, in the order lists of modifiers name them.
+#[derive(Debug, Clone, Copy, PartialEq, strum::EnumIter)]
 pub enum ModifierCategory {
     Time,
-    String,
     Numeric,
+    String,
 }
 
 /// Modifiers that transform values
 #[derive(Debug, Clone, Copy, PartialEq, strum::IntoStaticStr, strum::EnumIter)]
 #[strum(serialize_all = "lowercase")]
 pub enum Modifier {
-    // Time modifiers (for time-type facts)
+    // Time modifiers (for times, and text read as one)
     Year,
     Month,
     Day,
@@ -69,9 +71,21 @@ pub enum Modifier {
     Capitalize, // capitalize first letter, lowercase rest
     // Numeric modifiers
     Bucket, // magnitude-based or threshold-based ranges
+    Number, // text read as a number; a number is itself
 }
 
 impl Modifier {
+    /// **Whether the modifier reads a time of day** (`|time`'s result): its hour, minute and
+    /// second, or itself. A time of day is read on a reference day, so every other time
+    /// modifier would read a date nobody wrote. The one rule the binding table and the chain
+    /// both read.
+    pub(super) const fn reads_a_time_of_day(&self) -> bool {
+        matches!(
+            self,
+            Modifier::Hour | Modifier::Minute | Modifier::Second | Modifier::Time
+        )
+    }
+
     /// Get the category of this modifier
     pub const fn category(&self) -> ModifierCategory {
         match self {
@@ -94,7 +108,7 @@ impl Modifier {
             | Modifier::Lowercase
             | Modifier::Uppercase
             | Modifier::Capitalize => ModifierCategory::String,
-            Modifier::Bucket => ModifierCategory::Numeric,
+            Modifier::Bucket | Modifier::Number => ModifierCategory::Numeric,
         }
     }
 }
@@ -122,8 +136,7 @@ pub fn parse_modifier(s: &str) -> Result<ModifierCall> {
             args_str
                 .split(',')
                 .map(|a| {
-                    a.trim()
-                        .parse::<f64>()
+                    read_number(a.trim())
                         .map_err(|_| anyhow::anyhow!("Invalid modifier argument: '{}'", a.trim()))
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -151,8 +164,9 @@ pub fn parse_modifier(s: &str) -> Result<ModifierCall> {
     )
 }
 
-/// Apply a path accessor to a value
-pub fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Result<FactValue> {
+/// Apply a path accessor to a value: a path, or text read as one. An accessor that finds no
+/// segment — an index or a slice bound past the end — gives no value.
+fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Result<Modified> {
     let path_str = match value {
         FactValue::Path(p) => p,
         FactValue::Text(t) => t,
@@ -165,60 +179,38 @@ pub fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> 
 
     let segments: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
     let len = segments.len() as i32;
+    let no_segment = Ok(Modified::NoValue(NoValueCause::NoSegment));
+    let found = |value: FactValue| Ok(Modified::Value(value));
 
     match accessor {
         PathAccessor::Index(idx) => {
             let actual_idx = normalize_index(*idx, len);
             if actual_idx < 0 || actual_idx >= len {
-                bail!(
-                    "Index {} out of bounds for path '{}' with {} segment{}",
-                    idx,
-                    path_str,
-                    len,
-                    if len == 1 { "" } else { "s" }
-                );
+                return no_segment;
             }
-            Ok(FactValue::Text(segments[actual_idx as usize].to_string()))
+            found(FactValue::Text(segments[actual_idx as usize].to_string()))
         }
         PathAccessor::Slice { start, end } => {
+            let out_of_bounds = |bound: &Option<i32>| {
+                bound.is_some_and(|b| {
+                    let normalized = normalize_index(b, len);
+                    normalized < 0 || normalized > len
+                })
+            };
+            if out_of_bounds(start) || out_of_bounds(end) {
+                return no_segment;
+            }
             let start_idx = start.map(|s| normalize_index(s, len)).unwrap_or(0);
             let end_idx = end.map(|e| normalize_index(e, len)).unwrap_or(len);
-
-            // Check bounds for explicit indices
-            if let Some(s) = start {
-                let normalized = normalize_index(*s, len);
-                if normalized < 0 || normalized > len {
-                    bail!(
-                        "Slice start {} out of bounds for path '{}' with {} segment{}",
-                        s,
-                        path_str,
-                        len,
-                        if len == 1 { "" } else { "s" }
-                    );
-                }
-            }
-            if let Some(e) = end {
-                let normalized = normalize_index(*e, len);
-                if normalized < 0 || normalized > len {
-                    bail!(
-                        "Slice end {} out of bounds for path '{}' with {} segment{}",
-                        e,
-                        path_str,
-                        len,
-                        if len == 1 { "" } else { "s" }
-                    );
-                }
-            }
-
             let start_idx = start_idx.max(0) as usize;
             let end_idx = end_idx.max(0) as usize;
 
             if start_idx >= end_idx || start_idx >= segments.len() {
-                return Ok(FactValue::Path(String::new()));
+                return found(FactValue::Path(String::new()));
             }
 
             let sliced: Vec<&str> = segments[start_idx..end_idx.min(segments.len())].to_vec();
-            Ok(FactValue::Path(sliced.join("/")))
+            found(FactValue::Path(sliced.join("/")))
         }
     }
 }
@@ -252,6 +244,12 @@ pub enum NoValueCause {
         modifier: Modifier,
         precision: Precision,
     },
+    /// Text given to a time modifier that is not a time (`|year` on `misc`).
+    NotATime { modifier: Modifier },
+    /// Text given to `|number` that is not a number.
+    NotANumber,
+    /// An accessor found no segment: an index or a slice bound past the end.
+    NoSegment,
 }
 
 impl std::fmt::Display for NoValueCause {
@@ -260,25 +258,47 @@ impl std::fmt::Display for NoValueCause {
             NoValueCause::TooCoarse { precision, .. } => {
                 write!(f, "the time is known only to the {}", precision.word())
             }
+            NoValueCause::NotATime { .. } => f.write_str("the text is not a time"),
+            NoValueCause::NotANumber => f.write_str("the text is not a number"),
+            NoValueCause::NoSegment => f.write_str("the path has no such segment"),
         }
     }
 }
 
-/// Apply a modifier to a value
+/// Apply one modifier to a value. `produced_by` is the modifier that gave the value, if one
+/// did: a text modifier after another modifier reads that modifier's printed form
+/// ([`rendered`]), and one given a stored number or time directly refuses it — the user
+/// says which printed form they mean (`|number`, `|datetime`).
 ///
 /// The `for_display` parameter controls formatting context:
 /// - `true`: Human-readable format (e.g., `<60`, `>600`)
 /// - `false`: Path-safe format (e.g., `-Inf-60`, `600-Inf`)
 ///
-/// A time modifier reads the value on the user's clock (`zone`), through the frame rule.
-pub fn apply_modifier(
+/// A time modifier reads a time on the user's clock (`zone`), through the frame rule, and
+/// text through the one time reading; text that is not a time has no value.
+fn apply_modifier(
     value: &FactValue,
+    produced_by: Option<Modifier>,
     call: &ModifierCall,
     key: &str,
     for_display: bool,
     zone: &UserZone,
 ) -> Result<Modified> {
+    let name: &'static str = call.modifier.into();
     let text = |s: String| Ok(Modified::Value(FactValue::Text(s)));
+    // The text a string modifier works on.
+    let text_in = || -> Result<String> {
+        match (produced_by, value) {
+            (Some(producer), _) => Ok(rendered(Some(producer), value, zone)),
+            (None, FactValue::Text(s) | FactValue::Path(s)) => Ok(s.clone()),
+            (None, FactValue::Num(_) | FactValue::Time(_)) => bail!(
+                "String modifier '{}' requires a text or path value, but '{}' is {}.",
+                name,
+                key,
+                value_type_name(value)
+            ),
+        }
+    };
     match call.modifier {
         // Time modifiers
         Modifier::Year
@@ -294,43 +314,48 @@ pub fn apply_modifier(
         | Modifier::Week
         | Modifier::Weekday
         | Modifier::Quarter => {
+            // A time of day has no date to read.
+            if produced_by == Some(Modifier::Time) && !call.modifier.reads_a_time_of_day() {
+                bail!("Time modifier '{name}' needs a date, and a time of day (|time) has none.");
+            }
             let tv = match value {
                 FactValue::Time(tv) => *tv,
-                // AUDIT: a number given to a time modifier is read as seconds since 1970, until
-                // time modifiers on a number are refused by name.
-                FactValue::Num(n) => TimeValue::from_epoch_secs(*n as i64)
-                    .map_err(|_| anyhow::anyhow!("Invalid timestamp: {n}"))?,
-                _ => {
-                    let name: &'static str = call.modifier.into();
-                    bail!(
-                        "Time modifier '{}' requires a time-type fact, but '{}' is {}.",
-                        name,
-                        key,
-                        value_type_name(value)
-                    )
-                }
+                FactValue::Text(t) => match read_time(t) {
+                    Ok(tv) => tv,
+                    Err(_) => {
+                        return Ok(Modified::NoValue(NoValueCause::NotATime {
+                            modifier: call.modifier,
+                        }))
+                    }
+                },
+                FactValue::Num(_) | FactValue::Path(_) => bail!(
+                    "Time modifier '{}' requires a time or text value, but '{}' is {}.",
+                    name,
+                    key,
+                    value_type_name(value)
+                ),
             };
-            Ok(apply_time_modifier(&tv, call.modifier, zone))
+            apply_time_modifier(&tv, call.modifier, zone)
         }
 
         // String modifiers
         Modifier::Stem => {
-            let s = fact_value_to_string(value, zone);
+            let s = text_in()?;
             let path = std::path::Path::new(&s);
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&s);
             text(stem.to_string())
         }
         Modifier::Ext => {
-            let s = fact_value_to_string(value, zone);
+            let s = text_in()?;
             let path = std::path::Path::new(&s);
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             text(ext.to_string())
         }
-        Modifier::Short => text(fact_value_to_string(value, zone).chars().take(8).collect()),
-        Modifier::Lowercase => text(fact_value_to_string(value, zone).to_lowercase()),
-        Modifier::Uppercase => text(fact_value_to_string(value, zone).to_uppercase()),
+        Modifier::Short => text(text_in()?.chars().take(8).collect()),
+        Modifier::Lowercase => text(text_in()?.to_lowercase()),
+        Modifier::Uppercase => text(text_in()?.to_uppercase()),
         Modifier::Capitalize => {
-            let s = fact_value_to_string(value, zone);
+            let s = text_in()?;
             let mut chars = s.chars();
             text(match chars.next() {
                 Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
@@ -355,11 +380,26 @@ pub fn apply_modifier(
                 text(format_threshold_bucket(n, &call.args, for_display))
             }
         }
+        Modifier::Number => match value {
+            FactValue::Num(n) => Ok(Modified::Value(FactValue::Num(*n))),
+            FactValue::Text(t) => Ok(match read_number(t) {
+                Ok(n) => Modified::Value(FactValue::Num(n)),
+                Err(_) => Modified::NoValue(NoValueCause::NotANumber),
+            }),
+            FactValue::Time(_) | FactValue::Path(_) => bail!(
+                "Modifier 'number' requires a text or number value, but '{}' is {}.",
+                key,
+                value_type_name(value)
+            ),
+        },
     }
 }
 
 /// Apply an accessor, then a modifier chain, the way every reader of a key does. The chain
-/// stops at the first no-value: nothing follows a value that is not there.
+/// stops at the first no-value: nothing follows a value that is not there. It carries the
+/// modifier that gave the current value, so a text modifier reads that modifier's printed
+/// form; a reader printing the chain's result prints it through [`rendered`] with the
+/// chain's last modifier.
 pub fn apply_chain(
     value: FactValue,
     accessor: Option<&PathAccessor>,
@@ -369,24 +409,86 @@ pub fn apply_chain(
     zone: &UserZone,
 ) -> Result<Modified> {
     let mut value = match accessor {
-        Some(acc) => apply_accessor(&value, acc, key)?,
+        Some(acc) => match apply_accessor(&value, acc, key)? {
+            Modified::Value(found) => found,
+            none @ Modified::NoValue(_) => return Ok(none),
+        },
         None => value,
     };
+    let mut produced_by = None;
     for call in modifiers {
-        match apply_modifier(&value, call, key, for_display, zone)? {
-            Modified::Value(next) => value = next,
+        match apply_modifier(&value, produced_by, call, key, for_display, zone)? {
+            Modified::Value(next) => {
+                value = next;
+                produced_by = Some(call.modifier);
+            }
             none @ Modified::NoValue(_) => return Ok(none),
         }
     }
     Ok(Modified::Value(value))
 }
 
-/// Which half of the language reads a value: the asking half (filters) or the shaping half
-/// (patterns).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Half {
-    Filter,
-    Pattern,
+/// **The one printed form of a value**, given the modifier that produced it (`last`; `None`
+/// for a value no modifier gave). A number part prints as Canon has always placed it —
+/// `|year` `2024`, `|month`/`|day`/`|hour`/`|minute`/`|second`/`|week` two digits,
+/// `|weekday` `Monday`, `|quarter` `Q3`; `|time` the time of day at the value's grain, to
+/// the second; every other value its own spelling: a number through the one number spelling,
+/// a time through the frame rule's printed form (`|date` `2024-07-23`, `|yearmonth`
+/// `2024-07`, `|datetime` `2024-07-23 14:30:45`), text and paths as they are. Patterns place
+/// this, `facts` reports it, and a text modifier after a modifier reads it.
+pub fn rendered(last: Option<Modifier>, value: &FactValue, zone: &UserZone) -> String {
+    let part = |spell: &dyn Fn(i64) -> String| match value {
+        FactValue::Num(n) => spell(*n as i64),
+        other => printed_plain(other, zone),
+    };
+    let Some(modifier) = last else {
+        return printed_plain(value, zone);
+    };
+    match modifier {
+        Modifier::Year => part(&|n| format!("{n:04}")),
+        Modifier::Month
+        | Modifier::Day
+        | Modifier::Hour
+        | Modifier::Minute
+        | Modifier::Second
+        | Modifier::Week => part(&|n| format!("{n:02}")),
+        Modifier::Weekday => part(
+            &|n| match i8::try_from(n).map(Weekday::from_monday_one_offset) {
+                Ok(Ok(day)) => weekday_name(day).to_string(),
+                _ => spelled(n as f64),
+            },
+        ),
+        Modifier::Quarter => part(&|n| format!("Q{n}")),
+        Modifier::Time => match value {
+            FactValue::Time(tv) => tv
+                .on_clock(zone)
+                .printed_time()
+                .unwrap_or_else(|| tv.printed(zone)),
+            other => printed_plain(other, zone),
+        },
+        Modifier::Date
+        | Modifier::YearMonth
+        | Modifier::DateTime
+        | Modifier::Number
+        | Modifier::Bucket
+        | Modifier::Stem
+        | Modifier::Ext
+        | Modifier::Short
+        | Modifier::Lowercase
+        | Modifier::Uppercase
+        | Modifier::Capitalize => printed_plain(value, zone),
+    }
+}
+
+/// A value's own spelling: text and paths as they are, a number through the one number
+/// spelling, a time through the frame rule's printed form on the user's clock.
+fn printed_plain(value: &FactValue, zone: &UserZone) -> String {
+    match value {
+        FactValue::Text(s) => s.clone(),
+        FactValue::Path(p) => p.clone(),
+        FactValue::Num(n) => spelled(*n),
+        FactValue::Time(tv) => tv.printed(zone),
+    }
 }
 
 /// **Whether evaluating `value` through an accessor and `modifiers` reads an instant on the
@@ -394,34 +496,28 @@ pub(crate) enum Half {
 /// statements about the zone a manifest's run used.
 ///
 /// An instant is a time whose form is not a clock reading, every save time among them; a
-/// clock reading reads as written on any clock, so it never counts. The first transform is
-/// the only one that sees the time — whatever follows reads the text it gave. An accessor
-/// refuses a time, and `|bucket` refuses one; neither reads a clock. A number under a time
-/// modifier is read as seconds since 1970 (the `// AUDIT:` in [`apply_modifier`]), an
-/// instant.
-///
-/// The halves differ in one case: a pattern prints a bare time on the clock, while a filter
-/// compares a bare time by the stored number and never uses the clock — the window before
-/// typed dates bind to spans, under the existing `// AUDIT:` in `domain/filter.rs`. So a
-/// filter reads an instant only through a modifier.
+/// clock reading reads as written on any clock, so it never counts. A stored instant reads
+/// the clock compared or printed bare, and through a time modifier; text reads one when a
+/// time modifier reads it as an instant. The first transform is the only one that sees the
+/// stored value — a time modifier's result is already a clock reading, and whatever follows
+/// reads that. An accessor refuses a time, and `|bucket`, `|number` and the text modifiers
+/// refuse one; none of them reads a clock. A number never reads one.
 pub(crate) fn reads_an_instant(
     value: &FactValue,
     accessor: Option<&PathAccessor>,
     modifiers: &[ModifierCall],
-    half: Half,
 ) -> bool {
     if accessor.is_some() {
         return false;
     }
     let first = modifiers.first().map(|call| call.modifier);
+    let time_modifier = first.is_some_and(|m| m.category() == ModifierCategory::Time);
     match value {
-        FactValue::Time(tv) if tv.form() != TimeForm::Clock => match first {
-            Some(Modifier::Bucket) => false,
-            Some(_) => true,
-            None => half == Half::Pattern,
-        },
-        FactValue::Num(_) => first.is_some_and(|m| m.category() == ModifierCategory::Time),
-        FactValue::Time(_) | FactValue::Text(_) | FactValue::Path(_) => false,
+        FactValue::Time(tv) => tv.form() != TimeForm::Clock && (first.is_none() || time_modifier),
+        FactValue::Text(t) => {
+            time_modifier && read_time(t).is_ok_and(|tv| tv.form() != TimeForm::Clock)
+        }
+        FactValue::Num(_) | FactValue::Path(_) => false,
     }
 }
 
@@ -432,15 +528,15 @@ pub(crate) fn reads_an_instant(
 pub(crate) struct InstantRecord(std::cell::Cell<bool>);
 
 impl InstantRecord {
-    /// Note one evaluation, through the rule.
+    /// Note one evaluation, through the rule. Once the run has read an instant, nothing
+    /// further changes the answer, so the rule is not asked again.
     pub(crate) fn note(
         &self,
         value: &FactValue,
         accessor: Option<&PathAccessor>,
         modifiers: &[ModifierCall],
-        half: Half,
     ) {
-        if reads_an_instant(value, accessor, modifiers, half) {
+        if !self.0.get() && reads_an_instant(value, accessor, modifiers) {
             self.0.set(true);
         }
     }
@@ -466,48 +562,54 @@ fn precision_needed(modifier: Modifier) -> Precision {
         | Modifier::Lowercase
         | Modifier::Uppercase
         | Modifier::Capitalize
-        | Modifier::Bucket => unreachable!("not a time modifier"),
+        | Modifier::Bucket
+        | Modifier::Number => unreachable!("not a time modifier"),
     }
 }
 
-/// A time modifier, read off the value's span on the user's clock. No output carries an
-/// offset.
-fn apply_time_modifier(tv: &TimeValue, modifier: Modifier, zone: &UserZone) -> Modified {
+/// A time modifier, read off the value's span on the user's clock. A number part is a whole
+/// number (`|weekday` 1–7 from Monday, `|quarter` 1–4, `|week` the ISO week); every other
+/// result is a clock reading of what was read — `|date` at day grain, `|yearmonth` at month
+/// grain, `|datetime` at the value's own, `|time` on the reference day at the value's own —
+/// so no result has an offset or reads a clock again.
+fn apply_time_modifier(tv: &TimeValue, modifier: Modifier, zone: &UserZone) -> Result<Modified> {
     let span = tv.on_clock(zone);
     if span.precision() < precision_needed(modifier) {
-        return Modified::NoValue(NoValueCause::TooCoarse {
+        return Ok(Modified::NoValue(NoValueCause::TooCoarse {
             modifier,
             precision: span.precision(),
-        });
+        }));
     }
     let s = span.start();
-    let result = match modifier {
-        Modifier::Year => format!("{:04}", s.year()),
-        Modifier::Month => format!("{:02}", s.month()),
-        Modifier::Day => format!("{:02}", s.day()),
-        Modifier::Hour => format!("{:02}", s.hour()),
-        Modifier::Minute => format!("{:02}", s.minute()),
-        Modifier::Second => format!("{:02}", s.second()),
-        Modifier::Date => format!("{:04}-{:02}-{:02}", s.year(), s.month(), s.day()),
-        // At the value's own grain: `14:30` for a minute, `14:30:05` finer.
-        Modifier::Time => match span.precision() {
-            Precision::Minute => format!("{:02}:{:02}", s.hour(), s.minute()),
-            _ => format!("{:02}:{:02}:{:02}", s.hour(), s.minute(), s.second()),
-        },
-        Modifier::DateTime => tv.printed(zone),
-        Modifier::YearMonth => format!("{:04}-{:02}", s.year(), s.month()),
-        Modifier::Week => format!("{:02}", s.date().iso_week_date().week()), // ISO week number
-        Modifier::Weekday => weekday_name(s.weekday()).to_string(),
-        Modifier::Quarter => format!("Q{}", (s.month() - 1) / 3 + 1),
+    let part = |n: i64| Ok(Modified::Value(FactValue::Num(n as f64)));
+    let clock = |at: jiff::civil::DateTime, precision: Precision| -> Result<Modified> {
+        Ok(Modified::Value(FactValue::Time(TimeValue::clock(
+            at, precision,
+        )?)))
+    };
+    match modifier {
+        Modifier::Year => part(s.year().into()),
+        Modifier::Month => part(s.month().into()),
+        Modifier::Day => part(s.day().into()),
+        Modifier::Hour => part(s.hour().into()),
+        Modifier::Minute => part(s.minute().into()),
+        Modifier::Second => part(s.second().into()),
+        Modifier::Week => part(s.date().iso_week_date().week().into()), // ISO week number
+        Modifier::Weekday => part(s.weekday().to_monday_one_offset().into()),
+        Modifier::Quarter => part(((s.month() - 1) / 3 + 1).into()),
+        Modifier::Date => clock(s.date().at(0, 0, 0, 0), Precision::Day),
+        Modifier::YearMonth => clock(s.date().first_of_month().at(0, 0, 0, 0), Precision::Month),
+        Modifier::DateTime => clock(s, span.precision()),
+        Modifier::Time => clock(REFERENCE_DAY.to_datetime(s.time()), span.precision()),
         Modifier::Stem
         | Modifier::Ext
         | Modifier::Short
         | Modifier::Lowercase
         | Modifier::Uppercase
         | Modifier::Capitalize
-        | Modifier::Bucket => unreachable!("not a time modifier"),
-    };
-    Modified::Value(FactValue::Text(result))
+        | Modifier::Bucket
+        | Modifier::Number => unreachable!("not a time modifier"),
+    }
 }
 
 fn weekday_name(day: Weekday) -> &'static str {
@@ -572,13 +674,45 @@ fn format_threshold_bucket(n: f64, thresholds: &[f64], for_display: bool) -> Str
     }
 }
 
-/// Format a user-specified threshold value (preserves exact value, no SI suffixes)
-fn format_threshold_num(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v}")
+/// Every label `|bucket(a,b,…)` gives as `facts` and filters print it — read off the bucket
+/// function itself, one number below the first threshold and one at each threshold, so the
+/// list cannot drift from what a value is put in.
+pub(super) fn threshold_bucket_labels(thresholds: &[f64]) -> Vec<String> {
+    let mut labels: Vec<String> = std::iter::once(f64::NEG_INFINITY)
+        .chain(thresholds.iter().copied())
+        .map(|n| format_threshold_bucket(n, thresholds, true))
+        .collect();
+    labels.dedup();
+    labels
+}
+
+/// Whether `label` is one plain `|bucket` gives: its lower edge read back through the bucket
+/// function gives the same label.
+pub(super) fn is_magnitude_bucket_label(label: &str) -> bool {
+    if label == "0" {
+        return true;
     }
+    let (sign, unsigned) = match label.strip_prefix('-') {
+        Some(rest) => (-1.0, rest),
+        None => (1.0, label),
+    };
+    let Some((lower, _)) = unsigned.split_once('-') else {
+        return false;
+    };
+    let (digits, scale) = match lower.char_indices().last() {
+        Some((at, 'K')) => (lower.get(..at), 1e3),
+        Some((at, 'M')) => (lower.get(..at), 1e6),
+        Some((at, 'G')) => (lower.get(..at), 1e9),
+        _ => (Some(lower), 1.0),
+    };
+    digits
+        .and_then(|d| read_number(d).ok())
+        .is_some_and(|n| n > 0.0 && format_magnitude_bucket(sign * n * scale) == label)
+}
+
+/// Format a user-specified threshold value: the one number spelling, no SI suffixes.
+fn format_threshold_num(v: f64) -> String {
+    spelled(v)
 }
 
 /// Format number with SI suffixes for bucket labels
@@ -599,22 +733,6 @@ fn format_bucket_num(v: f64) -> String {
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string()
-    }
-}
-
-/// Convert a FactValue to string: a time is its printed form on the user's clock.
-pub(super) fn fact_value_to_string(value: &FactValue, zone: &UserZone) -> String {
-    match value {
-        FactValue::Text(s) => s.clone(),
-        FactValue::Path(p) => p.clone(),
-        FactValue::Num(n) => {
-            if n.fract() == 0.0 {
-                format!("{}", *n as i64)
-            } else {
-                format!("{n}")
-            }
-        }
-        FactValue::Time(tv) => tv.printed(zone),
     }
 }
 
@@ -649,13 +767,27 @@ mod tests {
         }
     }
 
-    /// The modifier's output as text, or `None` for no value.
+    /// The modifier's output in its printed form, or `None` for no value.
     fn modified(value: &FactValue, modifier: Modifier, zone: &UserZone) -> Option<String> {
-        match apply_modifier(value, &call(modifier), "k", true, zone).unwrap() {
-            Modified::Value(FactValue::Text(t)) => Some(t),
-            Modified::Value(other) => panic!("not text: {other:?}"),
+        match apply_modifier(value, None, &call(modifier), "k", true, zone).unwrap() {
+            Modified::Value(v) => Some(rendered(Some(modifier), &v, zone)),
             Modified::NoValue(_) => None,
         }
+    }
+
+    /// A chain's output in its printed form, or `None` for no value.
+    fn chained(
+        value: &FactValue,
+        modifiers: &[Modifier],
+        zone: &UserZone,
+    ) -> Result<Option<String>> {
+        let calls: Vec<ModifierCall> = modifiers.iter().map(|m| call(*m)).collect();
+        Ok(
+            match apply_chain(value.clone(), None, &calls, "k", true, zone)? {
+                Modified::Value(v) => Some(rendered(modifiers.last().copied(), &v, zone)),
+                Modified::NoValue(_) => None,
+            },
+        )
     }
 
     const TIME_MODIFIERS: [Modifier; 13] = [
@@ -675,7 +807,7 @@ mod tests {
     ];
 
     /// A save time at 23:30 UTC on New Year's Eve is 00:30 on 1 January in Amsterdam: every
-    /// time modifier reads the user's clock, and none carries an offset.
+    /// time modifier reads the user's clock, and none has an offset.
     #[test]
     fn every_time_modifier_reads_a_save_time_on_the_users_clock() {
         // 2023-12-31T23:30:00Z
@@ -757,7 +889,8 @@ mod tests {
             let tv = read_time(written).unwrap();
             let value = FactValue::Time(tv);
             for modifier in TIME_MODIFIERS {
-                let got = apply_modifier(&value, &call(modifier), "k", true, &amsterdam()).unwrap();
+                let got =
+                    apply_modifier(&value, None, &call(modifier), "k", true, &amsterdam()).unwrap();
                 if tv.precision() >= needs(modifier) {
                     assert!(matches!(got, Modified::Value(_)), "{written} {modifier:?}");
                 } else {
@@ -770,6 +903,7 @@ mod tests {
                             assert_eq!(precision, tv.precision());
                         }
                         Modified::Value(v) => panic!("{written} {modifier:?} gave {v:?}"),
+                        Modified::NoValue(other) => panic!("{written} {modifier:?}: {other}"),
                     }
                 }
             }
@@ -809,20 +943,308 @@ mod tests {
         );
     }
 
+    /// Every time modifier gives a typed value — a number part a whole number, the others a
+    /// clock reading — and each has one printed form, the one Canon has always placed.
     #[test]
-    fn a_time_modifier_on_text_is_refused() {
-        let err = apply_modifier(
-            &FactValue::Text("x".into()),
-            &call(Modifier::Year),
-            "content.Make",
+    fn every_modifier_gives_a_typed_value_with_one_printed_form() {
+        let zone = amsterdam();
+        let reading = FactValue::Time(read_time("2024-07-23 14:30:45").unwrap());
+        let clock = |text: &str| FactValue::Time(read_time(text).unwrap());
+        let cases = [
+            (Modifier::Year, FactValue::Num(2024.0), "2024"),
+            (Modifier::Month, FactValue::Num(7.0), "07"),
+            (Modifier::Day, FactValue::Num(23.0), "23"),
+            (Modifier::Hour, FactValue::Num(14.0), "14"),
+            (Modifier::Minute, FactValue::Num(30.0), "30"),
+            (Modifier::Second, FactValue::Num(45.0), "45"),
+            (Modifier::Week, FactValue::Num(30.0), "30"),
+            (Modifier::Weekday, FactValue::Num(2.0), "Tuesday"),
+            (Modifier::Quarter, FactValue::Num(3.0), "Q3"),
+            (Modifier::Date, clock("2024-07-23"), "2024-07-23"),
+            (Modifier::YearMonth, clock("2024-07"), "2024-07"),
+            (
+                Modifier::DateTime,
+                clock("2024-07-23 14:30:45"),
+                "2024-07-23 14:30:45",
+            ),
+            (Modifier::Time, clock("2000-01-01 14:30:45"), "14:30:45"),
+        ];
+        for (modifier, typed, printed) in cases {
+            match apply_modifier(&reading, None, &call(modifier), "k", true, &zone).unwrap() {
+                Modified::Value(v) => {
+                    assert_eq!(format!("{v:?}"), format!("{typed:?}"), "{modifier:?}");
+                    assert_eq!(rendered(Some(modifier), &v, &zone), printed, "{modifier:?}");
+                }
+                Modified::NoValue(cause) => panic!("{modifier:?}: {cause}"),
+            }
+        }
+        // A part below ten prints with its leading zero, a weekday as its word.
+        let early = FactValue::Time(read_time("2024-01-05 04:03:02").unwrap());
+        for (modifier, printed) in [
+            (Modifier::Month, "01"),
+            (Modifier::Day, "05"),
+            (Modifier::Hour, "04"),
+            (Modifier::Minute, "03"),
+            (Modifier::Second, "02"),
+            (Modifier::Week, "01"),
+            (Modifier::Weekday, "Friday"),
+            (Modifier::Quarter, "Q1"),
+        ] {
+            assert_eq!(modified(&early, modifier, &zone).as_deref(), Some(printed));
+        }
+        // `|weekday` counts from Monday 1 to Sunday 7.
+        for (day, n) in [("2024-07-22", 1.0), ("2024-07-28", 7.0)] {
+            let v = apply_modifier(
+                &clock(day),
+                None,
+                &call(Modifier::Weekday),
+                "k",
+                true,
+                &zone,
+            );
+            assert!(matches!(v.unwrap(), Modified::Value(FactValue::Num(got)) if got == n));
+        }
+    }
+
+    /// The modifiers that read a time off a save time read it on the user's clock, and what
+    /// they give is a clock reading: it reads as written on any clock afterwards.
+    #[test]
+    fn a_time_modifiers_result_is_a_clock_reading_of_the_users_clock() {
+        // 2023-12-31T23:30:00Z: 00:30 on New Year's Day in Amsterdam.
+        let saved = FactValue::Time(TimeValue::from_epoch_secs(1704065400).unwrap());
+        for (modifier, printed) in [
+            (Modifier::Date, "2024-01-01"),
+            (Modifier::YearMonth, "2024-01"),
+            (Modifier::DateTime, "2024-01-01 00:30:00"),
+            (Modifier::Time, "00:30:00"),
+        ] {
+            let Modified::Value(FactValue::Time(tv)) =
+                apply_modifier(&saved, None, &call(modifier), "k", true, &amsterdam()).unwrap()
+            else {
+                panic!("{modifier:?} gave no time");
+            };
+            assert_eq!(tv.form(), TimeForm::Clock, "{modifier:?}");
+            for zone in [amsterdam(), UserZone::for_test("America/New_York")] {
+                assert_eq!(
+                    rendered(Some(modifier), &FactValue::Time(tv), &zone),
+                    printed
+                );
+            }
+        }
+    }
+
+    /// `|number` reads text through the one number reading — no value where it does not
+    /// read — and gives a number as itself.
+    #[test]
+    fn number_reads_text_as_a_number_and_a_number_as_itself() {
+        let zone = amsterdam();
+        let number = |value: FactValue| {
+            apply_modifier(&value, None, &call(Modifier::Number), "k", true, &zone)
+        };
+        for (text, n) in [
+            ("07", 7.0),
+            ("0500", 500.0),
+            ("-2.5", -2.5),
+            ("1e3", 1000.0),
+        ] {
+            assert!(
+                matches!(number(FactValue::Text(text.into())).unwrap(), Modified::Value(FactValue::Num(got)) if got == n),
+                "{text}"
+            );
+        }
+        for text in ["misc", "", " 5", "+5", "inf"] {
+            assert!(
+                matches!(
+                    number(FactValue::Text(text.into())).unwrap(),
+                    Modified::NoValue(NoValueCause::NotANumber)
+                ),
+                "{text:?}"
+            );
+        }
+        assert!(matches!(
+            number(FactValue::Num(5.5)).unwrap(),
+            Modified::Value(FactValue::Num(n)) if n == 5.5
+        ));
+        assert!(number(FactValue::Time(read_time("2024").unwrap())).is_err());
+        assert!(number(FactValue::Path("a/b".into())).is_err());
+        assert_eq!(
+            rendered(Some(Modifier::Number), &FactValue::Num(500.0), &zone),
+            "500"
+        );
+    }
+
+    /// A time modifier reads text through the one time reading — EXIF's spelling among
+    /// them — and text it cannot read as a time has no value.
+    #[test]
+    fn a_time_modifier_reads_text_as_a_time() {
+        let zone = amsterdam();
+        let exif = FactValue::Text("2024:06:15 14:30:05".into());
+        assert_eq!(
+            modified(&exif, Modifier::Year, &zone).as_deref(),
+            Some("2024")
+        );
+        assert_eq!(
+            modified(&exif, Modifier::Month, &zone).as_deref(),
+            Some("06")
+        );
+        assert_eq!(
+            modified(&exif, Modifier::DateTime, &zone).as_deref(),
+            Some("2024-06-15 14:30:05")
+        );
+        // Read as a time first, so a coarse text is too coarse like any coarse time.
+        let year = FactValue::Text("2024".into());
+        assert!(matches!(
+            apply_modifier(&year, None, &call(Modifier::Month), "k", true, &zone).unwrap(),
+            Modified::NoValue(NoValueCause::TooCoarse { .. })
+        ));
+        for text in ["misc", "", "Monday"] {
+            assert!(
+                matches!(
+                    apply_modifier(
+                        &FactValue::Text(text.into()),
+                        None,
+                        &call(Modifier::Year),
+                        "k",
+                        true,
+                        &zone
+                    )
+                    .unwrap(),
+                    Modified::NoValue(NoValueCause::NotATime {
+                        modifier: Modifier::Year
+                    })
+                ),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A number never means seconds since 1970: a time modifier refuses it, and a path.
+    #[test]
+    fn a_time_modifier_on_a_number_or_a_path_is_refused() {
+        for value in [
+            FactValue::Num(1_718_452_800.0),
+            FactValue::Path("a/b".into()),
+        ] {
+            let err = apply_modifier(
+                &value,
+                None,
+                &call(Modifier::Year),
+                "content.X",
+                true,
+                &amsterdam(),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().starts_with(
+                    "Time modifier 'year' requires a time or text value, but 'content.X' is"
+                ),
+                "{err}"
+            );
+        }
+    }
+
+    /// A time of day carries no date: after `|time` only the hour, minute and second are
+    /// read, and a date-reading modifier is refused rather than reading the reference day.
+    #[test]
+    fn a_time_of_day_gives_no_date() {
+        let saved = FactValue::Time(TimeValue::from_epoch_secs(1_718_409_600 + 52_245).unwrap());
+        let utc = UserZone::utc();
+        assert_eq!(
+            chained(&saved, &[Modifier::Time, Modifier::Hour], &utc).unwrap(),
+            Some("14".into())
+        );
+        for date_part in [
+            Modifier::Year,
+            Modifier::Weekday,
+            Modifier::Date,
+            Modifier::DateTime,
+        ] {
+            assert!(
+                chained(&saved, &[Modifier::Time, date_part], &utc).is_err(),
+                "{date_part:?}"
+            );
+        }
+    }
+
+    /// An accessor that finds no segment gives no value, never an error.
+    #[test]
+    fn an_accessor_that_finds_no_segment_gives_no_value() {
+        let path = FactValue::Text("a/b/c".into());
+        let misses = [
+            PathAccessor::Index(3),
+            PathAccessor::Index(-4),
+            PathAccessor::Slice {
+                start: Some(5),
+                end: None,
+            },
+            PathAccessor::Slice {
+                start: None,
+                end: Some(-5),
+            },
+        ];
+        for accessor in misses {
+            assert!(
+                matches!(
+                    apply_chain(path.clone(), Some(&accessor), &[], "k", true, &amsterdam())
+                        .unwrap(),
+                    Modified::NoValue(NoValueCause::NoSegment)
+                ),
+                "{accessor:?}"
+            );
+        }
+        let last = apply_chain(
+            path,
+            Some(&PathAccessor::Index(-1)),
+            &[],
+            "k",
             true,
             &amsterdam(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Time modifier 'year' requires a time-type fact, but 'content.Make' is text."
         );
+        assert!(matches!(last.unwrap(), Modified::Value(FactValue::Text(t)) if t == "c"));
+    }
+
+    /// A text modifier after another modifier reads that modifier's printed form; one given a
+    /// stored number or time directly is refused — the user says which printed form they
+    /// mean, `|number` and `|datetime` included.
+    #[test]
+    fn a_text_modifier_after_a_modifier_reads_its_printed_form() {
+        let zone = amsterdam();
+        let reading = FactValue::Time(read_time("2024-07-22 14:30:45").unwrap());
+        let cases: [(&[Modifier], &str); 7] = [
+            (&[Modifier::Weekday, Modifier::Lowercase], "monday"),
+            (&[Modifier::Quarter, Modifier::Lowercase], "q3"),
+            (&[Modifier::Date, Modifier::Uppercase], "2024-07-22"),
+            (&[Modifier::Month, Modifier::Short], "07"),
+            (&[Modifier::Weekday, Modifier::Uppercase], "MONDAY"),
+            (
+                &[Modifier::DateTime, Modifier::Lowercase],
+                "2024-07-22 14:30:45",
+            ),
+            (&[Modifier::Time, Modifier::Short], "14:30:45"),
+        ];
+        for (chain, printed) in cases {
+            assert_eq!(
+                chained(&reading, chain, &zone).unwrap().as_deref(),
+                Some(printed),
+                "{chain:?}"
+            );
+        }
+        let fnumber = FactValue::Num(2.8);
+        assert_eq!(
+            chained(&fnumber, &[Modifier::Number, Modifier::Lowercase], &zone)
+                .unwrap()
+                .as_deref(),
+            Some("2.8")
+        );
+        for (value, modifier) in [
+            (fnumber.clone(), Modifier::Lowercase),
+            (fnumber, Modifier::Stem),
+            (reading.clone(), Modifier::Lowercase),
+            (reading, Modifier::Short),
+        ] {
+            let err = chained(&value, &[modifier], &zone).unwrap_err();
+            assert!(err.to_string().starts_with("String modifier"), "{err}");
+        }
     }
 
     #[test]
@@ -900,52 +1322,78 @@ mod tests {
         assert_eq!(format_bucket_num(0.123), "0.123");
     }
 
-    /// The rule's edges: only the first transform sees the time; an accessor and `|bucket`
-    /// refuse one; a number under a time modifier is an instant; a clock reading never is.
+    /// The rule's edges: a stored instant reads the clock compared or printed bare and
+    /// through a time modifier; text reads one only where a time modifier reads it as an
+    /// instant; an accessor, `|bucket`, `|number` and the text modifiers refuse a time; a clock
+    /// reading and a number never read one.
     #[test]
     fn the_instant_rule_reads_only_what_reads_a_clock() {
-        let call = |m: Modifier| ModifierCall {
-            modifier: m,
-            args: vec![],
-        };
+        let calls = |ms: &[Modifier]| ms.iter().map(|m| call(*m)).collect::<Vec<_>>();
         let instant = FactValue::Time(TimeValue::from_epoch_secs(1_718_452_800).unwrap());
         let clock = FactValue::Time(read_time("2024-06-15 14:30:05").unwrap());
-        let year = [call(Modifier::Year)];
-        let lower = [call(Modifier::Lowercase)];
-        let bucket = [call(Modifier::Bucket)];
         let index = PathAccessor::Index(0);
+        let reads = |value: &FactValue, ms: &[Modifier]| reads_an_instant(value, None, &calls(ms));
 
-        for half in [Half::Filter, Half::Pattern] {
-            assert!(reads_an_instant(&instant, None, &year, half));
-            assert!(
-                reads_an_instant(&instant, None, &lower, half),
-                "printed, then cased"
-            );
-            assert!(!reads_an_instant(&instant, None, &bucket, half));
-            assert!(!reads_an_instant(&instant, Some(&index), &year, half));
-            assert!(!reads_an_instant(&clock, None, &year, half));
-            assert!(!reads_an_instant(&clock, None, &[], half));
-            assert!(reads_an_instant(&FactValue::Num(1.0e9), None, &year, half));
-            assert!(!reads_an_instant(
-                &FactValue::Num(1.0e9),
-                None,
-                &lower,
-                half
-            ));
-            assert!(!reads_an_instant(
-                &FactValue::Text("2024".into()),
-                None,
-                &year,
-                half
-            ));
+        assert!(reads(&instant, &[]), "compared or printed bare");
+        assert!(reads(&instant, &[Modifier::Year]));
+        assert!(reads(&instant, &[Modifier::Date, Modifier::Lowercase]));
+        for refusing in [Modifier::Bucket, Modifier::Number, Modifier::Lowercase] {
+            assert!(!reads(&instant, &[refusing]), "{refusing:?}");
         }
+        assert!(!reads_an_instant(
+            &instant,
+            Some(&index),
+            &calls(&[Modifier::Year])
+        ));
+        assert!(!reads(&clock, &[]));
+        assert!(!reads(&clock, &[Modifier::Year]));
+
+        let text = |t: &str| FactValue::Text(t.into());
+        assert!(reads(&text("2024-06-15T14:30:05Z"), &[Modifier::Year]));
+        assert!(reads(&text("2024-06-15T14:30:05-00:00"), &[Modifier::Date]));
         assert!(
-            reads_an_instant(&instant, None, &[], Half::Pattern),
-            "printed bare"
+            !reads(&text("2024-06-15T14:30:05Z"), &[]),
+            "text compared as text"
         );
         assert!(
-            !reads_an_instant(&instant, None, &[], Half::Filter),
-            "the stored number"
+            !reads(&text("2024:06:15 14:30:05"), &[Modifier::Year]),
+            "a clock reading"
+        );
+        assert!(!reads(&text("misc"), &[Modifier::Year]));
+        assert!(!reads(&FactValue::Num(1.0e9), &[Modifier::Year]));
+        assert!(!reads(&FactValue::Num(1.0e9), &[]));
+    }
+
+    // =========================================================================
+    // rendered with no modifier: a value's own spelling
+    // =========================================================================
+
+    #[test]
+    fn display_integer_num() {
+        assert_eq!(
+            rendered(None, &FactValue::Num(42.0), &UserZone::utc()),
+            "42"
+        );
+    }
+
+    #[test]
+    fn display_float_num() {
+        assert_eq!(
+            rendered(None, &FactValue::Num(12.375), &UserZone::utc()),
+            "12.375"
+        );
+    }
+
+    #[test]
+    fn display_time() {
+        // 2024-06-15 12:00:00 UTC
+        assert_eq!(
+            rendered(
+                None,
+                &FactValue::Time(TimeValue::from_epoch_secs(1718452800).unwrap()),
+                &UserZone::utc()
+            ),
+            "2024-06-15 12:00:00"
         );
     }
 }

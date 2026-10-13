@@ -172,7 +172,7 @@ When no path argument is given, `canon note` uses the current working directory,
 
 ## Notes at a suspended location
 
-Reading is unaffected: the view, the listings and the [trail](../query/trail.md) read at a [suspended](../roots/roots.md#suspending-roots) location, with the pause stated once. Adding or clearing a note there is refused by name, with the way back.
+Reading is unaffected: the view, the listings and the [trail](../query/trail.md) work at a [suspended](../roots/roots.md#suspending-roots) location, with the pause stated once. Adding or clearing a note there is rejected by name, with the way back.
 
 ## The directional model
 

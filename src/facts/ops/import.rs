@@ -339,7 +339,7 @@ impl Refusal {
     fn warning(&self, key: &str, at: &str) -> String {
         match self {
             Refusal::Time { value, why } => {
-                format!("cannot read {value} as a time for '{key}' in {at}: {why}")
+                format!("{value} is not a time for '{key}' in {at}: {why}")
             }
             Refusal::Other(e) => format!("{e} for '{key}' in {at}"),
         }
@@ -1025,7 +1025,7 @@ mod tests {
         for (i, (written, why)) in cases.iter().enumerate() {
             let key = format!("content.bad{i}");
             let expected =
-                format!("cannot read {written} as a time for '{key}' in /photos/photo.jpg: {why}");
+                format!("{written} is not a time for '{key}' in /photos/photo.jpg: {why}");
             assert!(
                 outcome.warnings.contains(&expected),
                 "{expected}\n{:?}",

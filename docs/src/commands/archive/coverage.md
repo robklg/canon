@@ -88,6 +88,6 @@ Overall:
   unarchived
 - **Archived**: Sources whose content exists in an archive root. The
   percentage names its denominator (`of N with content`), so a fully-covered
-  selection reads 100% even when it contains empty files; the remainder is
+  selection shows 100% even when it contains empty files; the remainder is
   always exactly `Unarchived`
 - With `--archive`: Shows "In this archive" vs "Not in archive" for that specific archive

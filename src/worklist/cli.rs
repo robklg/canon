@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
-use crate::expr::Filter;
+use crate::expr::read_filters;
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 pub fn run(
@@ -15,13 +15,10 @@ pub fn run(
     unique_content: bool,
     emit_keys: &[String],
 ) -> Result<()> {
-    // Parse filters upfront
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
-
     let conn = db.conn_mut();
+
+    // Read and bind the filters before anything is selected.
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all(scope_prefixes);
 

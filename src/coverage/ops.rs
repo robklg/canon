@@ -11,7 +11,7 @@ use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::repo::{self, Connection};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
-use crate::expr::{Filter, UsedStatus};
+use crate::expr::{BoundFilters, UsedStatus};
 
 use crate::core::domain::resolution::ParkedEvidence;
 use crate::core::domain::root::ParkedRoot;
@@ -217,7 +217,7 @@ pub fn compute_stats(
 pub fn compute_scoped(
     conn: &mut Connection,
     scopes: &[ScopeMatch],
-    filters: &[Filter],
+    filters: &BoundFilters,
     archive_root_id: Option<i64>,
     include: &IncludeSet,
     zone: &UserZone,
@@ -225,7 +225,7 @@ pub fn compute_scoped(
     let params = SelectionParams {
         scopes: scopes.to_vec(),
         include: include.clone(),
-        filters: filters.to_vec(),
+        filters: filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: zone.clone(),
     };
@@ -241,7 +241,7 @@ pub fn compute_scoped(
 /// Compute per-root breakdown plus overall totals.
 pub fn compute_per_root(
     conn: &mut Connection,
-    filters: &[Filter],
+    filters: &BoundFilters,
     archive_root_id: Option<i64>,
     include: &IncludeSet,
     zone: &UserZone,
@@ -261,7 +261,7 @@ pub fn compute_per_root(
     let params = SelectionParams {
         scopes: vec![],
         include: include.clone(),
-        filters: filters.to_vec(),
+        filters: filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: zone.clone(),
     };
@@ -421,7 +421,7 @@ mod tests {
 
         let (per_root, overall, _, _) = compute_per_root(
             &mut conn,
-            &[],
+            &BoundFilters::none(),
             None,
             &IncludeSet::default(),
             &UserZone::utc(),

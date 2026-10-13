@@ -13,13 +13,14 @@ The `content.` prefix is optional when querying. For example, `Make=Apple` is eq
 
 ## Values
 
-Facts can hold three value types:
+Facts can hold three value types, and the built-in path keys a fourth:
 
 | Type | Examples | Notes |
 |------|----------|-------|
-| Text | `"Apple"`, `"image/jpeg"` | Strings; quote if contains spaces |
-| Number | `1024`, `3.14`, `-5` | Integers or decimals |
-| Time | `2024-07-23 14:30:45`, `2024-07`, `2024` | Printed on your clock at the precision it was written; enable time modifiers. See [How Canon reads a time](../concepts/facts.md#how-canon-reads-a-time) |
+| Text | `Apple`, `image/jpeg`, `"2019"` | Compared in character order. A value that looks like a number or a time is quoted to be text ([Filters](filter.md#values-and-types)) |
+| Number | `1024`, `3.14`, `-5`, `1e6` | Compared as numbers |
+| Time | `2024-07-23 14:30:45`, `2024-07`, `2024` | Printed in your local time at the precision it was written; compared as spans of time. See [How Canon interprets a time](../concepts/facts.md#how-canon-interprets-a-time) |
+| Path | `source.rel_path` | Built-in keys only; compared as text, read in segments with [accessors](#path-accessors) |
 
 ## Modifiers
 
@@ -27,29 +28,33 @@ Transform values using `|` syntax:
 
 ### Time Modifiers
 
-For time values (like `source.mtime` or EXIF dates). Each reads the time on [your clock](../concepts/facts.md#how-canon-shows-a-time), and no output carries an offset. The examples read the time `2024-07-23 14:30:45`:
+For time values (like `source.mtime` or EXIF dates), and for text written as a time. Each works in [your local time](../concepts/facts.md#how-canon-shows-a-time), and no output has an offset. A modifier gives a number or a time, which is how a filter compares it; the Prints column is how `facts` and a pattern show it. The examples use the time `2024-07-23 14:30:45`:
 
-| Modifier | Output | Example | Needs a time known to the |
-|----------|--------|---------|---------------------------|
-| `year` | 4-digit year | `2024` | year |
-| `month` | 2-digit month | `07` | month |
-| `day` | 2-digit day | `23` | day |
-| `hour` | 2-digit hour (24h) | `14` | minute |
-| `minute` | 2-digit minute | `30` | minute |
-| `second` | 2-digit second | `45` | second |
-| `date` | Date | `2024-07-23` | day |
-| `time` | Time of day, at the time's own precision | `14:30:45` | minute |
-| `datetime` | The time as Canon prints it, at its own precision | `2024-07-23 14:30:45` | year |
-| `yearmonth` | Year-month | `2024-07` | month |
-| `week` | ISO week number, 2 digits | `30` | day |
-| `weekday` | Day of the week, in English | `Tuesday` | day |
-| `quarter` | Quarter | `Q3` | month |
+| Modifier | Gives | Prints | In a filter | Needs a time known to the |
+|----------|-------|--------|-------------|---------------------------|
+| `year` | A number | `2024` | `\|year=2024` | year |
+| `month` | A number, 1–12 | `07` | `\|month=7` or `07` | month |
+| `day` | A number, 1–31 | `23` | `\|day=23` | day |
+| `hour` | A number, 0–23 | `14` | `\|hour>=14` | minute |
+| `minute` | A number, 0–59 | `30` | `\|minute=30` | minute |
+| `second` | A number, 0–59 | `45` | `\|second=45` | second |
+| `date` | A day | `2024-07-23` | `\|date=2024-07-23` | day |
+| `time` | A time of day, at the time's own precision | `14:30:45` | `\|time>=18:00` | minute |
+| `datetime` | The time, at its own precision | `2024-07-23 14:30:45` | `\|datetime="2024-07-23 14:30"` | year |
+| `yearmonth` | A month | `2024-07` | `\|yearmonth=2024-07` | month |
+| `week` | A number, the ISO week 1–53 | `30` | `\|week=30` | day |
+| `weekday` | A number, 1–7 from Monday | `Tuesday` | `\|weekday=2` or `Tuesday` | day |
+| `quarter` | A number, 1–4 | `Q3` | `\|quarter=3` or `Q3` | month |
+
+A number outside a modifier's range, such as `|month=13`, gives an error, and so does a name in another case (`|weekday=tuesday`; for that, see [Chaining](expr.md#chaining)). A time of day has no date, so after `|time` only `|hour`, `|minute`, `|second` and the text modifiers work on it.
 
 A time written coarser than a modifier needs has no value for it: `|month` on a time known only to `2024` has none, and neither has `|hour` on a time known only to `2024-07-23`. A time is never padded to a precision nobody wrote. Where there is no value, [`canon facts`](../commands/query/facts.md) counts the source under `(no value)`, `--where 'content.DateTimeOriginal|month?'` leaves it out, and `--where 'NOT content.DateTimeOriginal|month?'` selects it ([Filters](filter.md)).
 
 `|datetime` and `|time` give a time at its own precision: `|datetime` prints exactly what Canon prints for the bare time (`2024-07`, `2024-07-23 14:30`), and `|time` prints `14:30` for a time known to the minute and `14:30:45` for one known to the second or finer.
 
 ### String Modifiers
+
+These work on text and paths, and on the printed form of another modifier's result ([Chaining](expr.md#chaining)). Directly on a number or a time key they give an error.
 
 | Modifier | Description | Example |
 |----------|-------------|---------|
@@ -62,12 +67,13 @@ A time written coarser than a modifier needs has no value for it: `|month` on a 
 
 ### Numeric Modifiers
 
-| Modifier | Description |
-|----------|-------------|
-| `bucket` | Group into ranges (1-10, 10-100, etc.) |
-| `bucket(a,b,c)` | Custom ranges (<a, a-b, b-c, >c) |
+| Modifier | Takes | Gives |
+|----------|-------|-------|
+| `number` | Text, as a number; a number, as itself | A number. Text that is not a number has no value |
+| `bucket` | A number | A range label (1-10, 10-100, etc.) |
+| `bucket(a,b,c)` | A number | A range label (<a, a-b, b-c, >c) |
 
-Example: `source.size|bucket` groups file sizes into human-readable ranges.
+Example: `content.numtext|number>=10` compares text such as `9` and `10` as numbers, and `source.size|bucket` groups file sizes into human-readable ranges. A bucket's label is compared with `=`, `!=` and `IN`, typed as Canon prints it (`source.size|bucket(1e6)=">1000000"`); ordering a label gives an error.
 
 ## Path Accessors
 

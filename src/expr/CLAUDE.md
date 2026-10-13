@@ -10,8 +10,9 @@ engine consumes finished results — it never re-derives a rule. When a rule loo
 needs restating somewhere else, that is the signal something belongs in this facility.
 
 **Modules**: `domain/key`, `domain/transform`, `domain/pattern`, `domain/vantage`,
-`domain/filter`, `domain/cache`, `domain/value`, `domain/alias`, `ops/filter`,
-`ops/pattern`, `ops/selection`, `ops/alias`, `ops/value`, `repo`.
+`domain/filter`, `domain/bind`, `domain/print`, `domain/cache`, `domain/value`,
+`domain/alias`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
+`ops/value`, `repo`.
 
 ## Strata
 
@@ -20,12 +21,15 @@ how a written key is read. `transform` holds the modifiers and path accessors a 
 put through. `pattern` parses and evaluates the shaping half, and `vantage` owns the one rule
 that half cannot answer per source — see The scope vantage below. `filter` is the asking
 half: the `--where` grammar, its syntax tree, the comparisons it reduces to, and the glob
-matcher. `cache` is the shape a prefetched fact takes on its way to a comparison — it sits in
-domain, not ops, because putting a return type in the layer above the function that returns it
-is a repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` rewrites
+matcher. `bind` reads each clause's value as its key's type — the modifier table, the
+bare-value classes, the refusal and its ways out — and `print` is the printing rule. `cache`
+is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
+because putting a return type in the layer above the function that returns it is a
+repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` rewrites
 the `@name` shorthands a filter may be written with.
 
-**`ops/`** — the language applied. `filter` runs parsed filters against real rows, against a
+**`ops/`** — the language applied. `bind` reads the stored keys' types and binds a filter or
+a report's keys, or refuses them. `filter` runs bound filters against real rows, against a
 prefetched cache rather than a query per source. `pattern` is the shaping half's one trip to
 storage — the prefetch that reads a pattern's stored facts, and the place the context-supplied
 law is applied rather than merely stated. `selection` is the set of sources an operation
@@ -35,31 +39,83 @@ outside world: the rewriting rules are a domain concern, reading the file they r
 this one. `value` reads a stored key's one value for a batch of sources.
 
 **`repo.rs`** — what the language needs read out of the database before it can be evaluated:
-`prefetch_facts` and `prefetch_status_data` fill the cache, `is_known_key` answers whether a key
-is known, `fetch_source_row` reads one source's row, and
+`prefetch_facts` and `prefetch_status_data` fill the cache, `fetch_source_row` reads one source's
+row, and
 `fetch_key_rows` reads a key's rows per source, on the source and on its content.
 
 ## The front door
 
-`src/expr.rs` re-exports the whole of the facility from outside, in two groups it names.
-The surface is pinned exactly — `subsystem_barrels_seal_to_their_pinned_surfaces`
+`src/expr.rs` re-exports the whole of the facility from outside: the items the rest of the
+engine writes down. The surface is pinned exactly — `subsystem_barrels_seal_to_their_pinned_surfaces`
 (`tests/architecture.rs`) — so changing it means editing the pin in the same commit.
 Everything else is private, and the strata are private modules: how the facility divides
-itself is its own business, and rearranging it must not be visible to any caller.
-
-- **Named externally** — what the rest of the engine actually writes down.
-- **Completing the surface** — `PathAccessor` and `ModifierCall`, the *parameter* types of
-  `apply_chain`, carried while nothing names them because the
-  constraint is structural: a caller that factors out a helper taking one must be able to name
-  it. Return types are absent under the parameter-type rule — inference always lets a caller
-  leave one unnamed, so carrying it would record demand that does not exist. The
-  `#[allow(unused_imports)]` sits on the re-export statement rather than on the file, so a
-  re-export that goes dead for any other reason still says so.
+itself is its own business, and rearranging it must not be visible to any caller. No item is
+carried only as a parameter type today; under the parameter-type rule one would join when an
+exported item takes a type nothing outside names, and return types never do.
 
 **Every inbound reach is at the front door.** Nothing outside names `expr::domain::…` or
 `expr::ops::…`, and nothing inside reaches a sibling subsystem's internals in either
 direction. A sibling may not bind the facility's own name (`use crate::expr;`) — the boundary
 checks cannot see through a bare `expr::` prefix.
+
+## Binding
+
+**The binding law**: between parse and evaluation every `--where` clause reads its value once,
+as its key's type, and a value that cannot mean anything for the key is refused by name before
+anything is selected — never a silent false that `NOT` turns into every row. Owner
+`ops/bind.rs` (`read_filters`), over the pure `domain/bind.rs`. `apply_filters` takes only
+`BoundFilters`, which only `read_filters` makes, so an unbound filter cannot run; `read_report`
+reads a `facts` report's `--key`, `--group-by` and `--where` the same way. A key's type is read
+from all its rows (`core::repo::fact::key_types`), so parking, scope and presence never move it.
+**Text is text**: against a text key, a bare value shaped like a number or a time is refused, and
+quoted it is text; against a number or time key, a quoted value means the same as a bare one.
+Pins: `a_value_that_cannot_mean_anything_is_refused_before_selection` (the verifier),
+`every_negated_operator_selects_what_its_not_form_selects` (`!=` is `NOT =`, a source with no
+value included) and `a_type_that_changes_mid_run_refuses_the_run`.
+
+**A key's type changing while a run reads it** is checked one way, `domain/bind.rs::check_read_as`,
+by the filter and by a `facts` report: a key is read as its one type, as having no facts, or as
+any type where no value is compared or read through a chain (a bare `?`, a bare report key), and
+a value that is not what the key was read as stops the run as an answer. A report key carries it
+as `ParsedFactKey`'s `read_as`. Pinned on the filter by `a_type_that_changes_mid_run_refuses_the_run`
+and `a_key_that_gains_its_first_facts_mid_run_refuses_the_run`, on the report by
+`a_type_that_changes_mid_report_refuses_the_report`.
+
+What a modifier reads and gives is one table, `result_of`, read by binding and agreeing with the
+chain. Every cause is collected into one `FilterRefused`, its causes matched with no `_` arm: each
+entry names the clause as written in the expanded filter, and its ways out rewrite only what
+they change. **A way out makes what it rewrites bind**: a way out is one value, `Way` — what it
+does and what it rewrites to — and every one that rewrites is bound before it is shown, a
+filter's as a clause, a report's as a key, and dropped if it would be refused again
+(`keep_ways_that_bind`). Pinned at the filter by `every_way_out_binds_the_whole_clause`, at the
+report by `a_report_key_is_read_and_checked_like_a_filter_key`. **Held by discipline**: a builder
+offers a rewrite through `Way::to`, never as hint text, and a new caller of `bind_key` calls the
+check. The conversion pointer rewrites nothing and is gated where it is built. A cause about what a key is — two types, or a
+type that changed, or a key that gained its first facts, while the run read it — is an answer and prints without `Error:`
+(`FilterRefused::is_answer`); every other cause is input Canon cannot read. Evaluation compares
+text by code point, numbers with a tolerance, times through the time noun's period table, a
+modifier's part as a whole number, a bucket's label by equality.
+
+**Where it does not apply**: a pattern, which reads its keys through `parse_key_and_accessor`
+and meets a wrong-type modifier as a gap when `apply` evaluates it; a manifest's recorded query
+is bound like `--where`, read as written with no aliases, its causes joining a refresh's list
+without their ways out. It holds what expansion produced, so it is read as expanded text: an
+`@name` where a key belongs is named as an alias by the tokenizer, which also meets one left
+inside an alias's own value, and inside a value an `@` is text. The alias name has one
+spelling, `domain/alias.rs::alias_name_at`.
+
+## The printing rule
+
+`domain/print.rs` writes a value or a key so that, typed into `--where`, it reads back as
+itself: bare where the reader reads the bare text back the same, double-quoted otherwise. The
+writer asks the reader — the tokenizer, alias expansion's `@` test and the binder's bare-value
+class — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
+printable one- and two-character value checked against the reader). A refusal's clauses and
+ways out print through it. So does the statement that keys hold two types and its way out
+(`mixed_type_statement`, `mixed_type_way_out`), which `facts`' listing, `cluster`'s summary and
+a manifest's comments read: the key prints through the rule, and its `canon facts convert`
+command is quoted again for the shell. **Where it does not apply**: a `facts` row and a pattern's
+folder name print text as it is, number- or time-shaped text bare.
 
 ## The scope vantage
 
@@ -228,17 +284,26 @@ read from the facts table.
 Times read through the frame rule on the clock the facility is handed — `SelectionParams.clock`,
 `EvalContext`'s `clock`, the display and report functions' `zone` — never the machine's; a
 manifest's run is handed the zone the manifest or its lock records. A modifier answers `Modified`: a value, or
-`NoValueCause::TooCoarse` where the time is coarser than the modifier reads. Every reader treats
-no value as a missing fact, `?` included; a pattern refuses with `PatternNoValue`, a typed cause
-the archive composes its remedy from, never its sentence. Two older readings stay under
-`// AUDIT:`: a typed `--where` date is a UTC instant (`domain/filter.rs`), and a number given to a
-time modifier is epoch seconds (`domain/transform.rs`).
+no value and its `NoValueCause` (too coarse, text reading as no time or number, no segment),
+which every reader treats as a missing fact, `?` included; a pattern refuses a too-coarse
+time with `PatternNoValue`, a typed cause the archive's remedy reads, never its sentence. A typed
+`--where` time is translated to that zone's local time once per run.
+
+A modifier's result is typed — a number part a number; `|date`, `|yearmonth` and `|datetime` a
+time with no offset; `|time` a time of day, which has no date — and printed one way,
+`domain/transform.rs::rendered`, which patterns place, `facts` reports and a later text modifier
+reads.
+
+**A time of day has no date.** `|time` gives a reading on a reference day, so only `|hour`,
+`|minute`, `|second` and `|time` may read it (`Modifier::reads_a_time_of_day`, one rule):
+binding refuses the rest and the chain errors on them, so no pattern places a date read off
+that day (`the_table_and_the_chain_agree_on_a_time_of_day`). A text modifier after `|time`
+reads its printed form, so `|time|lowercase|year` reads text and has no value.
 
 **A run says whether it read an instant on the clock** (`Selection.read_an_instant`,
-`EvalContext::read_an_instant`), decided by one rule, `domain/transform.rs::reads_an_instant`:
-an instant (a save time included) through a time modifier, or printed bare in a pattern; never
-a clock reading, an accessor or `|bucket`. The filter half skips a bare instant while a plain
-comparison still compares the stored number. Pinned by
+`EvalContext::read_an_instant`), by one rule, `domain/transform.rs::reads_an_instant`: an
+instant compared or printed bare or through a time modifier, text a time modifier reads as one,
+and a typed time with an offset; never a clock reading, a number, an accessor or a modifier refusing a time. Pinned by
 `the_instant_rule_reads_only_what_reads_a_clock`; a facility answer, with no roster row.
 
 ## Mechanics

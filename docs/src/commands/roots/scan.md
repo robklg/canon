@@ -91,9 +91,9 @@ Warning: skipping /Volumes/Photos/2024/img_0042.jpg: No such file or directory (
   If it is gone for good, record it with: canon scan --missing /Volumes/Photos/2024/img_0042.jpg
 ```
 
-The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, over content Canon has indexed, and where the storage those records name is the storage answering at the root now. That last check is what withholds the pointer over an unmounted volume: a mount point is still a folder — it is there, it is readable, and it is empty — so everything under it reads as gone at every depth, and whether the path exists cannot tell that apart from a deletion. Such a path gets the warning alone. The check is made against the root's own storage, so if you keep a separate drive mounted *inside* a scanned folder, the pointer stays absent for content deleted on that drive even while it is attached — the warning is still shown, and `--missing` still works when you run it yourself. `--missing` works at file grain with the same recording as a folder, described below.
+The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, over content Canon has indexed, and where the storage those records name is the storage answering at the root now. That last check is what withholds the pointer over an unmounted volume: a mount point is still a folder — it is there, it is readable, and it is empty — so everything under it looks gone at every depth, and whether the path exists cannot tell that apart from a deletion. Such a path gets the warning alone. The check is made against the root's own storage, so if you keep a separate drive mounted *inside* a scanned folder, the pointer stays absent for content deleted on that drive even while it is attached — the warning is still shown, and `--missing` still works when you run it yourself. `--missing` works at file grain with the same recording as a folder, described below.
 
-A root is a folder, so `--add` and `--candidates` refuse a file argument and name the directory to use instead. It is also a folder you chose: `/` is refused, because every path would lie inside it and no scope could then mean less than everything.
+A root is a folder, so `--add` and `--candidates` reject a file argument and name the directory to use instead. It is also a folder you chose: `/` is rejected, because every path would lie inside it and no scope could then mean less than everything.
 
 **Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still considers those files present. Re-scanning the parent would let Canon discover they're gone, but that can be expensive when the parent holds many other files. Use `--missing` to tell Canon directly that a path no longer exists:
 
@@ -144,7 +144,7 @@ Scanned 31892 files: 27753 new (27751 hardlink companions of already-indexed fil
 
 The first scan after upgrading reports this once, for every companion path in the library, and the counts can be large. The scan is otherwise ordinary: it can be interrupted and re-run, and the next scan reports nothing.
 
-**Unverified moves.** Checking whether a file moved means checking whether its old path is gone from the storage that recorded it. Two things make that check impossible: the root holding the old path cannot be read at all, or its directory is readable but its storage is not currently mounted, so everything under it would read as gone whether it is or not. Either way the summary says so rather than assuming an answer:
+**Unverified moves.** Checking whether a file moved means checking whether its old path is gone from the storage that recorded it. Two things make that check impossible: the root holding the old path cannot be read at all, or its directory is readable but its storage is not currently mounted, so everything under it would look gone whether it is or not. Either way the summary says so rather than assuming an answer:
 
 ```
 Scanned 12 files: 3 new, 0 updated, 0 moved, 9 unchanged, 0 missing, 2 possible moves could not be verified

@@ -79,20 +79,21 @@ Destination current contents (/Volumes/Archive/sorted):
 
 **The lock's time zone:**
 
-Apply places every file on the time zone the lock records, never this machine's: the zone the
+Apply uses the time zone the lock records for every time, never this machine's: the zone the
 manifest recorded when [`cluster refresh`](cluster.md) or `cluster generate` built the lock (see
 [The manifest's time zone](cluster.md#the-manifests-time-zone)). `--dry-run` names it, and so does
-the confirmation summary when the pattern reads a time on a clock:
+the confirmation summary when the pattern uses a time that depends on the time zone (a time
+with an offset, or a file's save time):
 
 ```
 Pattern: {source.mtime|year}/{filename}
 Time zone: Europe/Amsterdam (from the lock)
 ```
 
-Two machines place a file the same way when their time zone data agree for that zone. `apply
+Two machines put a file in the same folder when their time zone data agree for that zone. `apply
 --dry-run` on the machine that applies shows the destinations the run will use.
 
-A lock built before lock files recorded the time zone is refused before apply plans, and no
+A lock built before lock files recorded the time zone is rejected with an error before apply plans, and no
 decision row is written:
 
 ```
@@ -100,7 +101,7 @@ Error: This lock file was built before lock files recorded the time zone.
 Nothing was moved. Rebuild it: canon cluster refresh manifest.toml
 ```
 
-A lock naming a zone this machine's time zone data does not know is refused the same way, with
+A lock naming a zone this machine's time zone data does not know is rejected the same way, with
 three ways out:
 
 ```
@@ -112,7 +113,7 @@ Error: This machine's time zone data does not know Europe/Kyiv, the zone the loc
 
 **No lock file beside the manifest:**
 
-Apply carries out a lock file, so a manifest without one refuses before it plans. There are two
+Apply carries out a lock file, so a manifest without one stops with an error before apply plans. There are two
 ways to arrive here and they take opposite remedies, told apart by the `lock_hash` the manifest
 records. A lock file that has gone while the manifest still names its hash is rebuilt:
 
@@ -131,33 +132,33 @@ Edit the query or scope in the manifest, then canon cluster refresh manifest.tom
 ```
 
 A lock file that exists but cannot be read — empty, or with a line that does not parse — is a
-different answer and says so. [`cluster status`](cluster.md) states either absence and reads on,
-since its job is to say what state the manifest is in; it refuses on an unreadable lock like
+different answer and says so. [`cluster status`](cluster.md) states either absence and continues,
+since its job is to say what state the manifest is in; it rejects an unreadable lock, as
 apply does.
 
 **A lock file built before lock files recorded the scopes they were built from:**
 
 Apply carries out a lock file. The scopes a lock was built from are recorded in it when the
-manifest is generated or refreshed, with each entry's path measured from them; apply reads
+manifest is generated or refreshed, with each entry's path measured from them; apply uses
 those and never `meta.scope`. A lock written by an earlier version of Canon carries neither,
-so apply refuses before it plans and transfers nothing:
+so apply stops with an error before it plans and transfers nothing:
 
 ```
 Error: This lock file was built before lock files recorded the scopes they were built from.
 Nothing was moved. Rebuild it: canon cluster refresh manifest.toml
 ```
 
-The refusal does not depend on whether the pattern reads `{scope.rel_path}`: the decision
+The error does not depend on whether the pattern uses `{scope.rel_path}`: the decision
 record names the scope either way. No decision row is written. Run
 [`cluster refresh`](cluster.md) and apply again.
 
 **Editing the manifest after the lock was written:**
 
 - Editing `output.pattern` takes effect on the next apply.
-- Editing `meta.zone` takes effect on the next [`cluster refresh`](cluster.md). Apply reads the
-  lock's zone.
+- Editing `meta.zone` takes effect on the next [`cluster refresh`](cluster.md). Apply uses the
+  lock's time zone.
 - Editing `meta.scope` takes effect on the next [`cluster refresh`](cluster.md), like the
-  filters beside it. Apply reads the scope from the lock, so an edited `meta.scope` changes
+  filters beside it. Apply takes the scope from the lock, so an edited `meta.scope` changes
   neither where files land nor what the decision record names until the lock is rebuilt.
 
 A scope path that no longer names a known root, or that names a place Canon has no sources
@@ -180,13 +181,13 @@ Use {source.rel_path} to keep each file's own folders, or add paths to meta.scop
 Error: Aborting due to pattern expansion failures
 ```
 
-Apply prints this whatever `meta.scope` says now, because it reads the lock and not the scope.
+Apply prints this whatever `meta.scope` says now, because it uses the lock and not the scope.
 While the manifest records no scope, a refresh does not help — there is nothing to measure from
 — and `cluster status` ends with the same two lines. Once a path with sources is in `meta.scope`,
 the refresh is what measures the lock, and `cluster status` names it instead.
 
-A pattern reading a file's save time that Canon cannot read, one at the edge of the years
-0000–9999 or beyond ([Save times](../../concepts/facts.md#save-times)), refuses for that cause:
+A pattern using a file's save time that Canon cannot read, one at the edge of the years
+0000–9999 or beyond ([Save times](../../concepts/facts.md#save-times)), stops with an error for that cause:
 
 ```
 Error: 1 sources failed pattern expansion:
@@ -199,13 +200,13 @@ Error: Aborting due to pattern expansion failures
 
 A pattern naming a fact some sources do not carry ends with the fact pair instead, `Adjust the
 pattern in your manifest, or import the facts it names.`; a run that meets both prints both pairs,
-unless the pattern also needs a scope the lock lacks, where the scope pair prints alone. A modifier that reads a finer part than a time carries gets a pair naming the key and modifier that failed, as the query entry that leaves such sources out:
+unless the pattern also needs a scope the lock lacks, where the scope pair prints alone. A modifier that asks for a finer part than a time carries gets a pair naming the key and modifier that failed, as the query entry that leaves such sources out:
 
 ```
 Error: 1 sources failed pattern expansion:
   /photos/2016/IMG_0004.jpg: content.DateTimeOriginal|month has no value: the time is known only to the year
 
-A time known only to a coarser grain than the pattern reads gives the pattern no value.
+A time known only to a coarser grain than the pattern uses gives the pattern no value.
 Use a coarser modifier in the pattern, which takes effect at the next apply; or add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, then refresh.
 Error: Aborting due to pattern expansion failures
 ```
@@ -228,7 +229,7 @@ Verifying 1,234 sources against the lock file (reading file heads)...
   100% (1234/1234)
 ```
 
-The two passes before the transfer loop stay separate: an unreadable source is refused
+The two passes before the transfer loop stay separate: an unreadable source is rejected
 before any file's content is read. `--dry-run` returns after planning, so it never runs
 them.
 
@@ -271,20 +272,20 @@ Use `--root` to apply only a subset of sources from the manifest. Useful for sta
 - `--root id:N` - Filter by root ID (shown in manifest as `root_id`)
 - `--root path:/path` - Filter by root path (must match exactly)
 
-**Suspended roots refuse first**, at either end and before the summary and the
-confirmation, so `--dry-run` and `--yes` both meet the refusal and nothing is
+**A suspended root stops the run first**, at either end and before the summary and the
+confirmation, so `--dry-run` and `--yes` stop there too and nothing is
 written:
 
 The origin end, counting the sources this run would have carried from there:
 
 ```
-/path/to/photos suspended — refused: origin of 12 sources · canon roots unsuspend path:/path/to/photos
+/path/to/photos suspended — rejected: origin of 12 sources · canon roots unsuspend path:/path/to/photos
 ```
 
 Or the destination:
 
 ```
-/path/to/archive suspended — refused: destination · canon roots unsuspend path:/path/to/archive
+/path/to/archive suspended — rejected: destination · canon roots unsuspend path:/path/to/archive
 ```
 
 One or the other, never both: the run stops at the first door it meets, and it
@@ -297,10 +298,10 @@ left. At the destination end no rebuild helps — the files are going there eith
 way.
 
 **Pre-flight checks** (mandatory). These run once the lock file has been read: a lock
-built before lock files recorded the scopes they were built from, or the time zone, refuses
+built before lock files recorded the scopes they were built from, or the time zone, is rejected
 before any of them.
 
-1. **Blocked destination directories** - If a file stands where a destination directory has to go, apply refuses the whole run before transferring anything, naming the file and the destinations it blocks. This check also runs with `--resume`: a file in the way is not evidence of an earlier run's progress. Move or rename the file, or edit the pattern.
+1. **Blocked destination directories** - If a file stands where a destination directory has to go, apply rejects the whole run before transferring anything, naming the file and the destinations it blocks. This check also runs with `--resume`: a file in the way is not evidence of an earlier run's progress. Move or rename the file, or edit the pattern.
 
 2. **Destination collisions** - If multiple sources would map to the same destination path (e.g., using `{filename}` when sources have duplicate names), apply aborts with an error showing which files conflict.
 
@@ -312,7 +313,7 @@ before any of them.
 
 6. **Excluded sources** - Blocks if any sources in the manifest are marked as excluded.
 
-7. **Stale sources** - If a source changed since the manifest was generated, apply refuses before transferring anything and names what changed. When the refusal names the stale files in full, it hands them back as the command to re-observe just those:
+7. **Stale sources** - If a source changed since the manifest was generated, apply stops with an error before transferring anything and names what changed. When the error names the stale files in full, it hands them back as the command to re-observe just those:
 
    ```
    Error: 2 sources have changed since manifest was generated:
@@ -327,7 +328,7 @@ before any of them.
    Error: Aborting due to stale sources in manifest
    ```
 
-   Save times print on the lock's zone, named on the line. Where the two print the same, in the repeated hour when clocks go back, the line adds the difference, `(+3,600 s)`, and a save time Canon cannot read prints `(unreadable)`.
+   Save times print in the lock's time zone, named on the line. Where the two print the same, in the repeated hour when clocks go back, the line adds the difference, `(+3,600 s)`, and a save time Canon cannot read prints `(unreadable)`.
 
    Past ten stale files the listing truncates and the whole-root remedy is offered alone. The same two lines answer both staleness conditions: when only the lock is behind, `cluster refresh` does the work and the scan finds nothing to do; when the files changed on disk since the last scan, the scan is what brings the database current for the refresh to read. A stale file that was deleted meanwhile is skipped by `canon scan` with a warning; assert the deletion with [`canon scan --missing`](../roots/scan.md) and refresh, and it leaves the lock.
 

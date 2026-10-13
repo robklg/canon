@@ -226,7 +226,7 @@ pub fn compute_show(conn: &Connection, id: i64, cwd: Option<&str>) -> Result<Opt
         Some(if decision.command_line.contains("--no-receipt") {
             "no receipt (--no-receipt)".to_string()
         } else if decision.status == DecisionStatus::Refused.as_str() {
-            "no receipt (the run refused)".to_string()
+            "no receipt (the run was refused)".to_string()
         } else if nothing_transferred {
             "no receipt (nothing transferred)".to_string()
         } else {

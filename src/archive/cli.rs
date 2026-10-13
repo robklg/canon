@@ -52,7 +52,7 @@ enum RefreshStanding {
     Runs,
     /// It would be turned away by a cause the report states with its way back:
     /// a closed door the recorded scope names, the manifest's zone, or a query
-    /// line that does not parse.
+    /// that cannot run.
     WayBackStated,
     /// It would be turned away by the source-existence policy's terminal
     /// rule: the recorded scope kept nothing.
@@ -377,7 +377,7 @@ fn generate_machine_zone_refusal(unrecordable: &Unrecordable) -> String {
 /// What `cluster generate` says about the zone it recorded.
 fn zone_recorded_statement(zone: &RecordedZone) -> String {
     format!(
-        "Times are read on {}; the manifest's zone line records it.",
+        "Time zone: {}, recorded in the manifest's zone line.",
         zone.name()
     )
 }
@@ -456,7 +456,7 @@ fn adjust_pattern_remedy(gaps: &PatternGaps) -> Vec<String> {
     }
     if !gaps.too_coarse.is_empty() {
         lines.push(
-            "A time known only to a coarser grain than the pattern reads gives the pattern no value."
+            "A time known only to a coarser grain than the pattern uses gives the pattern no value."
                 .to_string(),
         );
         lines.push(coarse_way_out(gaps));
@@ -519,7 +519,7 @@ fn coarse_value_counts(gaps: &PatternGaps) -> Vec<String> {
 fn statement_pass_failed(error: &anyhow::Error) -> String {
     format!(
         "Warning: the lock was written, but reading it back failed, so nothing is said about \
-         whether its pattern reads a time or about its coarse values: {error:#}"
+         whether its pattern uses a time that depends on the time zone or about its coarse values: {error:#}"
     )
 }
 
@@ -539,8 +539,8 @@ fn zone_change_statement(old: &RecordedZone, new: &RecordedZone, instant_read: b
     let (old, new) = (old.name(), new.name());
     if instant_read {
         format!(
-            "Time zone changed from {old} to {new}: times in the query and in folder names are \
-             now read on {new}, which can change which sources a time query selects and which \
+            "Time zone changed from {old} to {new}: times in the query and in folder names \
+             are now in {new}, which can change which sources a time query selects and which \
              folder a file goes to"
         )
     } else {
@@ -552,7 +552,7 @@ fn zone_change_statement(old: &RecordedZone, new: &RecordedZone, instant_read: b
 /// keeps another.
 fn manifest_clock_statement(zone: &RecordedZone, machine: &UserZone) -> String {
     format!(
-        "times read on {}, as the manifest records (this machine: {})",
+        "times are in {}, as the manifest records (this machine: {})",
         zone.name(),
         machine.label()
     )
@@ -606,7 +606,7 @@ fn status_zone_refusal_lead(refusal: &ZoneRefusal) -> String {
 /// The clause under the lock's zone where the manifest's line names another zone.
 fn manifest_zone_differs(zone: &RecordedZone, manifest: &Path) -> String {
     format!(
-        "the manifest's zone line reads {}; {} brings the lock up to date",
+        "the manifest's zone line says {}; {} brings the lock up to date",
         zone.name(),
         refresh_command(manifest, false)
     )
@@ -621,11 +621,12 @@ fn manifest_zone_line_deleted(zone: &RecordedZone, manifest: &Path) -> String {
     )
 }
 
-/// A recorded query line that does not parse, as `cluster refresh` refuses on it and `cluster
-/// status` names it: the line, its parse error, and the way back.
-fn query_line_refusal(line: &str, error: &str, manifest: &Path) -> String {
+/// A part of the recorded query that cannot run, as `cluster refresh` refuses on it and
+/// `cluster status` names it: the clause as written (or the whole line where it does not
+/// parse), what is wrong, and the way back. The clause is shown as typed, never re-quoted.
+fn query_line_refusal(clause: &str, error: &str, manifest: &Path) -> String {
     format!(
-        "the query line \"{line}\" cannot be read: {error} — `{}` to fix the query and select \
+        "the recorded query cannot run: {clause}: {error} — `{}` to fix the query and select \
          again",
         refresh_command(manifest, true)
     )
@@ -634,7 +635,7 @@ fn query_line_refusal(line: &str, error: &str, manifest: &Path) -> String {
 /// What stops a refresh — the manifest's zone or a query line — in the refresh's own words, as
 /// a report states it: the act it turns away named first, as the door lines do.
 fn refresh_would_refuse(cause: &str) -> String {
-    format!("cluster refresh would refuse: {cause}")
+    format!("cluster refresh would be rejected: {cause}")
 }
 
 /// `cluster status`'s summary where it placed no entry, because the lock records no zone this
@@ -762,7 +763,7 @@ mod tests {
             unreadable_save_time: _,
             too_coarse: _,
             fact_not_carried: _,
-            placed_an_instant: _,
+            used_an_instant: _,
         } = PatternGaps::default();
         for alone in [
             PatternGaps::for_lock(true),
@@ -804,7 +805,7 @@ mod tests {
         assert_eq!(
             adjust_pattern_remedy(&coarse(&["content.DateTimeOriginal|month"])),
             [
-                "A time known only to a coarser grain than the pattern reads gives the pattern no value.",
+                "A time known only to a coarser grain than the pattern uses gives the pattern no value.",
                 "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.DateTimeOriginal|month?\" to the manifest's query to leave such files out, then refresh.",
             ]
         );

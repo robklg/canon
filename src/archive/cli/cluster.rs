@@ -29,7 +29,7 @@ use crate::core::ops::scope::{
     classify_all, no_sources_known, resolve_archive_path, resolve_recorded_scope,
 };
 use crate::core::repo::{self, Connection, Db};
-use crate::expr::Filter;
+use crate::expr::read_filters;
 
 pub struct GenerateOptions {
     pub force: bool,
@@ -64,7 +64,7 @@ pub fn generate(
 
     // The zone the manifest will record, and the clock the query reads on: this machine's,
     // where it can be written down. Refused before anything is selected or written — a
-    // manifest that could not say which clock it was made on would place on a different
+    // manifest that could not say which clock it was made on would read times in a different
     // one at its next refresh.
     let zone = machine
         .recordable()
@@ -83,10 +83,7 @@ pub fn generate(
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(&all_roots, dest)?;
 
-    let parsed_filters: Vec<Filter> = expanded_filters
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let parsed_filters = read_filters(conn, expanded_filters)?;
 
     // The scope this run settles on, through the very code a manifest's own
     // scope goes through: generate, refresh and apply resolve scope through
@@ -377,11 +374,15 @@ fn refresh_with_editor(
 
     // Every other cause a refresh refuses on is collected before any is
     // answered, so one run reports them all: the manifest's zone, settled from
-    // its line or this machine's, and every query line that will not parse.
+    // its line or this machine's, and every cause reading and binding refuse the query for.
     // Nothing reads the zone or the query before this point, and nothing is
     // written until every cause is clear.
     let settled_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
-    let (parsed_filters, query_causes) = parse_recorded_query(&config.meta.query);
+    let recorded_query = parse_recorded_query(conn, &config.meta.query)?;
+    let query_causes: &[(String, String)] = match &recorded_query {
+        Ok(_) => &[],
+        Err(causes) => causes,
+    };
     let mut causes: Vec<String> = Vec::new();
     if let Err(refusal) = &settled_zone {
         causes.push(super::zone_refusal(refusal));
@@ -440,6 +441,10 @@ fn refresh_with_editor(
         }
     };
     let zone = manifest_zone.zone().clone();
+    // A query that cannot run was refused above with every cause; it is never selected on.
+    let Ok(parsed_filters) = recorded_query else {
+        bail!("the recorded query cannot run");
+    };
 
     // The old lock's zone, read before anything is written — tolerantly: a lock
     // that is gone, headerless, zoneless or unreadable gives no comparison and
@@ -657,7 +662,7 @@ fn refresh_zone_statements(
     gaps: Option<&PatternGaps>,
 ) -> Vec<String> {
     let zone = manifest_zone.zone();
-    let instant_read = query_read_an_instant || gaps.is_some_and(|g| g.placed_an_instant);
+    let instant_read = query_read_an_instant || gaps.is_some_and(|g| g.used_an_instant);
     let mut lines = Vec::new();
     if let ManifestZone::FromMachine(recorded) = manifest_zone {
         lines.push(super::zone_line_recorded_statement(recorded));
@@ -725,7 +730,7 @@ fn placement_warning(
         )
     };
     Some(format!(
-        "{situation}\n  Apply will refuse until one of them moves: write the manifest \
+        "{situation}\n  Apply will stop with an error until one of them moves: write the manifest \
          elsewhere (-o/-O), or edit the pattern."
     ))
 }
@@ -766,7 +771,7 @@ fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) 
 /// The statement naming the full-coverage keys that hold two types, and the way out — empty
 /// when there are none.
 fn mixed_key_lines(plan: &ClusterGeneratePlan) -> Vec<String> {
-    use crate::core::domain::fact::{mixed_type_statement, mixed_type_way_out};
+    use crate::expr::{mixed_type_statement, mixed_type_way_out};
 
     let mixed = plan.mixed_keys();
     let mut lines = mixed_type_statement(&mixed);
@@ -912,7 +917,7 @@ fn lock_line(lock: LockStanding, entry_count: usize) -> String {
 /// the manifest's own line says a refresh would do about it.
 ///
 /// Composed rather than printed so which sentence each pairing gets is a value a test can
-/// read. The lock's zone leads, because it is what the destinations above were placed on;
+/// read. The lock's zone leads, because it is what the destinations above were worked out in;
 /// where the lock records none this machine can read, the manifest's leads and the lock's
 /// state stands on the `Lock:` line or, for a zone this machine does not know, here with its
 /// ways out. Every comparison is between parsed zones (`RecordedZone::same_zone`).
@@ -1095,8 +1100,8 @@ fn parked_doors(scope: &ScopeResolution) -> Vec<String> {
 ///
 /// A report performs nothing, so `set aside` and `refused` are both false of
 /// it: what a reader needs, having just had a next step withheld, is *which
-/// act* is blocked. The verb slot carries that (`apply would refuse`,
-/// `cluster refresh would refuse`), and the two acts meet different doors —
+/// act* is blocked. The verb slot carries that (`apply would be rejected`,
+/// `cluster refresh would be rejected`), and the two acts meet different doors —
 /// the recorded scope is refresh's, the lock's origins and the destination are
 /// apply's.
 ///
@@ -1473,7 +1478,7 @@ mod tests {
                 "2 keys are of mixed type, so filters and patterns cannot use their values:",
                 "only values of one type can be compared or formatted correctly.",
                 "To inspect each and learn how to convert to one type:",
-                "  `canon facts convert 'content.File Size'`",
+                r#"  `canon facts convert '"content.File Size"'`"#,
                 "  `canon facts convert content.Width`",
             ]
         );
@@ -2801,7 +2806,7 @@ mod tests {
 
         assert_eq!(
             doors,
-            vec!["/photos suspended — refused · canon roots unsuspend path:/photos".to_string()]
+            vec!["/photos suspended — rejected · canon roots unsuspend path:/photos".to_string()]
         );
         assert!(
             !scope.kept_nothing(),
@@ -2865,7 +2870,7 @@ mod tests {
         assert_eq!(
             manifest_door_lines(&status),
             vec![
-                "/photos suspended — cluster refresh and apply would refuse · \
+                "/photos suspended — cluster refresh and apply would be rejected · \
                   canon roots unsuspend path:/photos"
                     .to_string()
             ]
@@ -2893,10 +2898,10 @@ mod tests {
         assert_eq!(
             manifest_door_lines(&status),
             vec![
-                "/arc suspended — apply would refuse: destination · \
+                "/arc suspended — apply would be rejected: destination · \
                  canon roots unsuspend path:/arc"
                     .to_string(),
-                "/photos suspended — apply would refuse: origin of 12 sources · \
+                "/photos suspended — apply would be rejected: origin of 12 sources · \
                  canon roots unsuspend path:/photos"
                     .to_string(),
             ]
@@ -2927,7 +2932,7 @@ mod tests {
         let mut lines = said.lines();
         assert_eq!(
             lines.next().unwrap(),
-            "/photos suspended — refused · canon roots unsuspend path:/photos"
+            "/photos suspended — rejected · canon roots unsuspend path:/photos"
         );
         assert!(
             lines.next().unwrap().starts_with("no known root at"),
@@ -3236,7 +3241,7 @@ mod tests {
                 .expect("the manifest is the directory its own pattern needs");
         assert!(warning.contains("example.org"), "got: {warning}");
         assert!(
-            warning.contains("Apply will refuse"),
+            warning.contains("Apply will stop with an error"),
             "the warning says what happens next: {warning}"
         );
     }
@@ -3335,7 +3340,7 @@ mod tests {
             zone_lines(&status, manifest),
             [
                 "Time zone: Europe/Amsterdam (the lock's)",
-                "  the manifest's zone line reads America/New_York; canon cluster refresh /m/c.toml brings the lock up to date",
+                "  the manifest's zone line says America/New_York; canon cluster refresh /m/c.toml brings the lock up to date",
             ]
         );
 
@@ -3352,7 +3357,7 @@ mod tests {
         ));
         assert!(
             zone_lines(&status, manifest)[1].starts_with(
-                "  cluster refresh would refuse: this machine's time zone data does not know \"Europe/Amsterdm\""
+                "  cluster refresh would be rejected: this machine's time zone data does not know \"Europe/Amsterdm\""
             ),
             "{:?}",
             zone_lines(&status, manifest)
@@ -3435,7 +3440,7 @@ mod tests {
         );
         assert_eq!(
             lines[5],
-            "  the manifest's zone line reads Europe/Kiev; canon cluster refresh /m/c.toml brings the lock up to date"
+            "  the manifest's zone line says Europe/Kiev; canon cluster refresh /m/c.toml brings the lock up to date"
         );
     }
 
@@ -3545,8 +3550,50 @@ mod tests {
         assert_eq!(lock_header_zone(&lock).as_deref(), Some("Europe/Amsterdam"));
     }
 
+    /// **An `@name` where a key belongs is named as an alias**, which a manifest's query takes
+    /// none of — never as a stray character. Inside a value an `@` is text, as it is after
+    /// expansion: the manifest records what expansion produced, so a generated line holding one
+    /// (an alias `retina = "source.rel_path ~ *@2x*"`, recorded expanded) still runs.
+    #[test]
+    fn refresh_names_an_alias_in_the_recorded_query() {
+        for line in ["@img AND source.ext = jpg", "source.ext = jpg AND @img"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut db, manifest, _lock) =
+                new_year_setup(dir.path(), line, Some("Europe/Amsterdam"));
+            let before = fs::read_to_string(&manifest).unwrap();
+            let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
+            assert!(
+                err.contains(&format!(
+                    "the recorded query cannot run: {line}: '@img' is an alias, and aliases are \
+                     not expanded here; write the filter it stands for"
+                )),
+                "{err}"
+            );
+            assert!(!err.contains("Unexpected character"), "{err}");
+            assert_eq!(fs::read_to_string(&manifest).unwrap(), before, "{line}");
+        }
+
+        for line in [
+            "(source.rel_path ~ *@2x*)",
+            "source.ext = @img",
+            "source.ext = \"@img\"",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut db, manifest, _lock) =
+                new_year_setup(dir.path(), line, Some("Europe/Amsterdam"));
+            let err = run_refresh(&mut db, &manifest, None)
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default();
+            assert!(
+                !err.contains("cannot run") && !err.contains("is an alias"),
+                "{line}: {err}"
+            );
+        }
+    }
+
     /// **Every refusal cause is reported in one run**: an unreadable zone line, then the query
-    /// line that will not parse — the order `cluster status` states them in — then the abort
+    /// that cannot run — the order `cluster status` states them in — then the abort
     /// once; and neither file is touched.
     #[test]
     fn refresh_reports_every_refusal_cause_in_one_run() {
@@ -3561,7 +3608,7 @@ mod tests {
             .find("this machine's time zone data does not know \"Europe/Amsterdm\"")
             .unwrap_or_else(|| panic!("{err}"));
         let query_at = err
-            .find("the query line \"source.ext = (\" cannot be read")
+            .find("the recorded query cannot run: source.ext = (")
             .unwrap_or_else(|| panic!("the query's own cause is reported too: {err}"));
         let aborted_at = err
             .find("Refresh aborted")
@@ -3633,10 +3680,11 @@ mod tests {
         let new_york = UserZone::for_test("America/New_York");
         let recorded = ManifestZone::Recorded(amsterdam.clone());
         let placed = PatternGaps {
-            placed_an_instant: true,
+            used_an_instant: true,
             ..Default::default()
         };
-        let line = "times read on Europe/Amsterdam, as the manifest records (this machine: America/New_York)";
+        let line =
+            "times are in Europe/Amsterdam, as the manifest records (this machine: America/New_York)";
 
         let query = refresh_zone_statements(
             &recorded,
@@ -3687,8 +3735,8 @@ mod tests {
         assert_eq!(
             query_read,
             [
-                "Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now read on America/New_York, which can change which sources a time query selects and which folder a file goes to",
-                "times read on America/New_York, as the manifest records (this machine: Europe/Amsterdam)",
+                "Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now in America/New_York, which can change which sources a time query selects and which folder a file goes to",
+                "times are in America/New_York, as the manifest records (this machine: Europe/Amsterdam)",
             ]
         );
         let unknown = refresh_zone_statements(&recorded, Some(&amsterdam), &machine, false, None);
@@ -3716,7 +3764,7 @@ mod tests {
         );
         assert_eq!(
             full,
-            ["Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now read on America/New_York, which can change which sources a time query selects and which folder a file goes to"]
+            ["Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now in America/New_York, which can change which sources a time query selects and which folder a file goes to"]
         );
         let quiet = refresh_zone_statements(
             &recorded,
@@ -3866,11 +3914,11 @@ mod tests {
         )
     }
 
-    /// **A lock placed nowhere asserts no counts**: its summary names the unplaced entries and
+    /// **A lock with no time zone asserts no counts**: its summary names the unplaced entries and
     /// that their source files were not checked, never "0 source files missing" over files
     /// nobody looked at.
     #[test]
-    fn a_lock_placed_nowhere_asserts_no_counts() {
+    fn a_lock_with_no_time_zone_asserts_no_counts() {
         let mut status = status_with(
             0,
             0,
@@ -3890,11 +3938,11 @@ mod tests {
         assert!(summary_line(&status).contains("source files missing"));
     }
 
-    /// **A lock placed nowhere still gets its next step, the rebuild**: nothing was found
+    /// **A lock with no time zone still gets its next step, the rebuild**: nothing was found
     /// wrong in it, only left unchecked, so the gate that withholds a step over lost or
     /// wrong-sized files does not withhold this one — for either header that leaves no zone.
     #[test]
-    fn a_lock_placed_nowhere_names_the_rebuild() {
+    fn a_lock_with_no_time_zone_names_the_rebuild() {
         for header in [
             LockHeaderStanding::PredatesZone,
             LockHeaderStanding::ZoneNotKnownHere,
@@ -3972,7 +4020,7 @@ mod tests {
         ));
         status.query_causes = vec![(
             "source.ext = (".to_string(),
-            "Expected value, got LParen".to_string(),
+            "Expected a value, got '('".to_string(),
         )];
         let text = String::from_utf8(state_lines(&status, Path::new("/m/c.toml"))).unwrap();
         let door = text.find("suspended").unwrap_or_else(|| panic!("{text}"));
@@ -3985,7 +4033,7 @@ mod tests {
         assert!(door < zone && zone < query, "{text}");
         assert!(
             text.contains(
-                "cluster refresh would refuse: the query line \"source.ext = (\" cannot be read: Expected value, got LParen — `canon cluster refresh --edit /m/c.toml` to fix the query and select again"
+                "cluster refresh would be rejected: the recorded query cannot run: source.ext = (: Expected a value, got '(' — `canon cluster refresh --edit /m/c.toml` to fix the query and select again"
             ),
             "{text}"
         );

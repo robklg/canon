@@ -44,7 +44,7 @@ defaults to `expr::select_sources()` from the start.
 
 ## The archive-scope statement
 
-**A scope lying entirely inside archive roots is stated, not surveyed.** Survey reads
+**A scope lying entirely inside archive roots is stated, not surveyed.** Survey works on
 source-side selections, so such a scope has no selection at all, and the ordinary empty result
 would report an emptiness that is an artifact of the frame rather than a fact about the place.
 `run_survey` partitions incoming prefixes by containing-root **role**

@@ -178,7 +178,7 @@ impl ParkedRoot {
     pub fn door_line(&self, verb: DoorVerb, what: &str) -> String {
         // The place asked about is the root itself: the sentence already
         // names it at the door and again in the way back, so a third naming
-        // in the `<what>` slot degenerates into `/r suspended — refused: /r ·
+        // in the `<what>` slot degenerates into `/r suspended — rejected: /r ·
         // canon roots unsuspend path:/r`. The slot is dropped, here in the
         // one spelling, so every door that reaches a root top reads the same.
         if what == self.root_path {
@@ -342,7 +342,7 @@ impl DoorVerb {
     pub fn label(self) -> &'static str {
         match self {
             DoorVerb::SetAside => "set aside",
-            DoorVerb::Refused => "refused",
+            DoorVerb::Refused => "rejected",
             DoorVerb::WouldRefuse(act) => act.label(),
         }
     }
@@ -374,9 +374,9 @@ impl RefusedAct {
     /// The conditional phrase that fills the verb slot.
     pub fn label(self) -> &'static str {
         match self {
-            RefusedAct::Apply => "apply would refuse",
-            RefusedAct::Refresh => "cluster refresh would refuse",
-            RefusedAct::RefreshAndApply => "cluster refresh and apply would refuse",
+            RefusedAct::Apply => "apply would be rejected",
+            RefusedAct::Refresh => "cluster refresh would be rejected",
+            RefusedAct::RefreshAndApply => "cluster refresh and apply would be rejected",
         }
     }
 
@@ -932,7 +932,7 @@ mod tests {
         };
         let at_root = root.door_line(DoorVerb::Refused, "/vol/photos");
         assert_eq!(
-            at_root, "/vol/photos suspended — refused · canon roots unsuspend path:/vol/photos",
+            at_root, "/vol/photos suspended — rejected · canon roots unsuspend path:/vol/photos",
             "the `<what>` slot is dropped when the place is the root itself"
         );
         assert_eq!(
@@ -942,7 +942,7 @@ mod tests {
         );
         let below = root.door_line(DoorVerb::Refused, "/vol/photos/2019");
         assert!(
-            below.contains("— refused: /vol/photos/2019 ·"),
+            below.contains("— rejected: /vol/photos/2019 ·"),
             "a place below the root keeps the slot: {below}"
         );
     }

@@ -13,9 +13,8 @@ use crate::core::domain::fact::{FactValue, KeyTypes};
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::{
-    apply_chain, fact_value_to_display, fetch_source_values, get_builtin_value, resolve_fact_value,
-    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, Modified, ParsedFactKey,
-    SourceAttributes,
+    fetch_source_values, get_builtin_value, rendered, resolve_fact_value, BuiltinKey,
+    BuiltinKeyCategory, BuiltinKeyVisibility, Modified, ParsedFactKey, SourceAttributes,
 };
 use crate::facts::repo as facts_repo;
 
@@ -34,8 +33,6 @@ pub struct DistributionResult {
     pub entries: Vec<DistributionEntry>,
     pub sources_with_value: i64,
     pub total_sources: usize,
-    /// Number of values skipped due to type mismatch during transform.
-    pub skipped_type_mismatch: i64,
     /// Total distinct values found (before truncation to limit).
     pub total_distinct_values: usize,
 }
@@ -160,17 +157,17 @@ fn default_grouping(builtin: BuiltinKey, value: FactValue, zone: &UserZone) -> S
                 }
                 .to_string()
             } else {
-                fact_value_to_display(&value, zone)
+                rendered(None, &value, zone)
             }
         }
         BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
             if let FactValue::Time(tv) = value {
                 format!("{:04}", tv.on_clock(zone).start().year())
             } else {
-                fact_value_to_display(&value, zone)
+                rendered(None, &value, zone)
             }
         }
-        _ => fact_value_to_display(&value, zone),
+        _ => rendered(None, &value, zone),
     }
 }
 
@@ -292,7 +289,6 @@ pub fn compute_distribution(
             entries: Vec::new(),
             sources_with_value: 0,
             total_sources,
-            skipped_type_mismatch: 0,
             total_distinct_values: 0,
         });
     }
@@ -344,7 +340,6 @@ fn compute_builtin_distribution(
         entries,
         sources_with_value,
         total_sources,
-        skipped_type_mismatch: 0,
         total_distinct_values,
     })
 }
@@ -365,7 +360,7 @@ fn compute_stored_distribution(
 
     for entry in fact_map.values().flatten() {
         sources_with_value += 1;
-        let display_val = fact_value_to_display(&entry.value, zone);
+        let display_val = rendered(None, &entry.value, zone);
         *counts.entry(display_val).or_insert(0) += 1;
     }
 
@@ -374,7 +369,6 @@ fn compute_stored_distribution(
         entries,
         sources_with_value,
         total_sources,
-        skipped_type_mismatch: 0,
         total_distinct_values,
     })
 }
@@ -392,31 +386,19 @@ fn compute_transformed_distribution(
 
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut sources_with_value: i64 = 0;
-    let mut skipped_type_mismatch: i64 = 0;
 
     for entry in fact_map.values().flatten() {
         // Accessor then modifiers through the facility's one chain. A modifier that gives no
-        // value leaves the source among those without one; a step that cannot apply counts
-        // the source as holding a value of the wrong type.
-        match apply_chain(
-            entry.value.clone(),
-            key.accessor.as_ref(),
-            &key.modifiers,
-            &key.raw,
-            true,
-            zone,
-        ) {
-            Ok(Modified::Value(value)) => {
+        // value leaves the source among those without one. A value of another type than the
+        // key was read for stops the report as that answer; any other failing step is a
+        // defect, since `read_report` refuses a modifier that cannot apply, and is raised.
+        match key.report_value(entry.value.clone(), zone)? {
+            Modified::Value(value) => {
                 sources_with_value += 1;
-                *counts
-                    .entry(fact_value_to_display(&value, zone))
-                    .or_insert(0) += 1;
+                let last = key.modifiers.last().map(|call| call.modifier);
+                *counts.entry(rendered(last, &value, zone)).or_insert(0) += 1;
             }
-            Ok(Modified::NoValue(_)) => {}
-            Err(_) => {
-                sources_with_value += 1;
-                skipped_type_mismatch += 1;
-            }
+            Modified::NoValue(_) => {}
         }
     }
 
@@ -425,7 +407,6 @@ fn compute_transformed_distribution(
         entries,
         sources_with_value,
         total_sources,
-        skipped_type_mismatch,
         total_distinct_values,
     })
 }
@@ -526,11 +507,8 @@ pub fn compute_grouped_distribution(
         let mut root_path_for_display: Option<String> = None;
 
         for gk in grouping_keys {
-            let gk_value = match resolve_fact_value(source, gk, stored_facts, zone) {
-                Ok(Some(v)) => v,
-                Ok(None) => "(no value)".to_string(),
-                Err(_) => "(transform error)".to_string(),
-            };
+            let gk_value = resolve_fact_value(source, gk, stored_facts, zone)?
+                .unwrap_or_else(|| "(no value)".to_string());
 
             // Track root info when grouping by root key
             if is_root_grouping_key(gk) {
@@ -900,6 +878,82 @@ mod tests {
         assert_eq!(count_of("source.ext"), 2);
     }
 
+    /// A text modifier after a modifier reads that modifier's printed form, in a report as
+    /// in a filter and a pattern: `|weekday|lowercase` reports `monday`.
+    #[test]
+    fn a_text_modifier_after_a_modifier_reports_its_printed_form() {
+        use crate::core::testing::insert_source_with_metadata;
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        // 1718582400 is Monday 17 June 2024, 00:00 UTC.
+        let s1 = insert_source_with_metadata(&conn, root_id, "a.jpg", None, 1000, 1718582400);
+        let key = ParsedFactKey::parse("source.mtime|weekday|lowercase").unwrap();
+        let result = compute_distribution(&mut conn, &[s1], &key, 0, &UserZone::utc()).unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].value, "monday");
+    }
+
+    /// A report key's type that changes between reading the key and counting stops the report
+    /// as an answer, never a modifier failing, on the plain and the grouped report alike — the
+    /// same answer a filter gives.
+    #[test]
+    fn a_type_that_changes_mid_report_refuses_the_report() {
+        use crate::core::testing::insert_fact;
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", None);
+        let s2 = insert_source(&conn, root_id, "b.jpg", None);
+        insert_fact(&conn, s1, "content.Make", "Canon");
+        insert_fact(&conn, s2, "content.Make", "Nikon");
+        let read = crate::expr::read_report(
+            &conn,
+            Some("Make|lowercase"),
+            &["Make|uppercase".into()],
+            &[],
+        )
+        .unwrap();
+        let (key, group) = (read.key.unwrap(), read.grouping);
+        // The key's type changes after it was read.
+        conn.execute(
+            "UPDATE facts SET value_text = NULL, value_num = 5 WHERE entity_id = ?",
+            [s2],
+        )
+        .unwrap();
+        let plain = compute_distribution(&mut conn, &[s1, s2], &key, 0, &UserZone::utc());
+        let bare = ParsedFactKey::parse("source.ext").unwrap();
+        let grouped =
+            compute_grouped_distribution(&mut conn, &[s1, s2], &bare, &group, 0, &UserZone::utc());
+        // A key with no facts when it was read, which gains a time its modifier cannot take.
+        let absent = crate::expr::read_report(&conn, Some("New|number"), &[], &[])
+            .unwrap()
+            .key
+            .unwrap();
+        crate::core::testing::insert_time_fact(&conn, s1, "content.New", "2024-06-15");
+        let gained = compute_distribution(&mut conn, &[s1, s2], &absent, 0, &UserZone::utc());
+        for err in [plain.err(), grouped.err()] {
+            let err = err.expect("a changed type must stop the report");
+            let refused = err
+                .downcast_ref::<crate::expr::FilterRefused>()
+                .unwrap_or_else(|| panic!("{err}"));
+            assert!(refused.is_answer());
+            assert_eq!(
+                refused.to_string(),
+                "content.Make's type changed while this ran; run it again."
+            );
+        }
+        let Err(err) = gained else {
+            panic!("a key gaining facts mid-report must stop it");
+        };
+        let refused = err
+            .downcast_ref::<crate::expr::FilterRefused>()
+            .unwrap_or_else(|| panic!("{err}"));
+        assert!(refused.is_answer(), "{refused}");
+        assert_eq!(
+            refused.to_string(),
+            "content.New gained facts while this ran; run it again."
+        );
+    }
+
     /// A modifier finer than the value was written gives no value, and the report does
     /// not count that source as having one.
     #[test]
@@ -924,7 +978,6 @@ mod tests {
         let result =
             compute_distribution(&mut conn, &[s1, s2], &month, 0, &UserZone::utc()).unwrap();
         assert_eq!(result.sources_with_value, 1);
-        assert_eq!(result.skipped_type_mismatch, 0);
         assert_eq!(result.entries.len(), 1);
 
         let year = ParsedFactKey::parse("content.DateTimeOriginal|year").unwrap();

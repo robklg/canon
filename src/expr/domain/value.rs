@@ -14,10 +14,9 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use crate::expr::resolve_fact_value;
-//! use crate::expr::ParsedFactKey;
+//! use crate::expr::{read_report, resolve_fact_value};
 //!
-//! let key = ParsedFactKey::parse("source.mtime|year")?;
+//! let key = read_report(conn, Some("source.mtime|year"), &[], &[])?.key.unwrap();
 //! let value = resolve_fact_value(&source, &key, &stored_facts, &zone)?;
 //! // value is Some("2024") or None if fact doesn't exist
 //! ```
@@ -107,7 +106,9 @@ impl From<&Source> for SourceAttributes {
 ///
 /// # Errors
 ///
-/// Returns an error if a transform cannot be applied (e.g., `|year` on a text value).
+/// A [`crate::expr::FilterRefused`] answer where a stored value is not what the key was read
+/// as — its type changed while the report ran ([`ParsedFactKey::check_type`]). Otherwise a
+/// transform that fails is a defect `read_report` should have refused, and is raised as one.
 pub fn resolve_fact_value(
     source: &Source,
     key: &ParsedFactKey,
@@ -124,22 +125,20 @@ pub fn resolve_fact_value(
         Some(builtin) if builtin.is_computed() => {
             get_builtin_value(&SourceAttributes::from(source), builtin)
         }
-        _ => stored_facts.get(&key.base_key).map(|e| e.value.clone()),
+        _ => match stored_facts.get(&key.base_key) {
+            Some(entry) => {
+                key.check_type(&entry.value)?;
+                Some(entry.value.clone())
+            }
+            None => None,
+        },
     };
 
-    // 2. Apply transforms if value exists
+    // 2. Apply transforms if value exists. The key was read through `read_report`, which
+    // refuses a modifier its type cannot take, so a transform failing here is a defect and is
+    // raised — as the filter raises one.
     match raw_value {
-        Some(value) => {
-            // A transform that cannot be applied — `|year` on a text value —
-            // is an error here and a plain non-match when the same key
-            // appears in `--where`. The two surfaces mean different things by
-            // failure: a report was asked for this key by name and would
-            // otherwise print a blank where the user expected a value, while
-            // a filter is asking a question whose honest answer is "no".
-            // Deliberate, and not to be unified without first deciding which
-            // of the two meanings wins.
-            apply_transforms(value, key, zone)
-        }
+        Some(value) => apply_transforms(value, key, zone),
         None => Ok(None),
     }
 }
@@ -212,31 +211,14 @@ fn apply_transforms(
             true,
             zone,
         )? {
-            Modified::Value(v) => Some(fact_value_to_display(&v, zone)),
+            Modified::Value(v) => Some(transform::rendered(
+                key.modifiers.last().map(|call| call.modifier),
+                &v,
+                zone,
+            )),
             Modified::NoValue(_) => None,
         },
     )
-}
-
-/// Convert a FactValue to a display string.
-///
-/// This handles formatting for human-readable output:
-/// - Numbers: integers shown without decimal, floats shown with decimals
-/// - Times: the printed form on the user's clock, at the value's precision
-/// - Text/Path: shown as-is
-pub fn fact_value_to_display(value: &FactValue, zone: &UserZone) -> String {
-    match value {
-        FactValue::Text(t) => t.clone(),
-        FactValue::Path(p) => p.clone(),
-        FactValue::Num(n) => {
-            if n.fract() == 0.0 {
-                format!("{}", *n as i64)
-            } else {
-                format!("{n}")
-            }
-        }
-        FactValue::Time(tv) => tv.printed(zone),
-    }
 }
 
 /// A source's value for a key: its content's fact, and its own only where the content has
@@ -607,11 +589,17 @@ mod tests {
     #[test]
     fn resolve_transform_type_mismatch() {
         let source = make_source();
-        // Trying to apply |year to a text value should fail
+        // A time modifier refuses a number: it never means seconds since 1970.
+        let key = ParsedFactKey::parse("source.size|year").unwrap();
+        let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a time or text value"));
+        // It reads text as a time, and text that does not read as one has no value.
         let key = ParsedFactKey::parse("source.ext|year").unwrap();
         let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("time-type"));
+        assert_eq!(result.unwrap(), None);
     }
 
     // =========================================================================
@@ -681,38 +669,6 @@ mod tests {
         assert_eq!(
             resolve_fact_value(&source, &short, &stored, &UserZone::utc()).unwrap(),
             Some("abcdef12".to_string())
-        );
-    }
-
-    // =========================================================================
-    // fact_value_to_display tests
-    // =========================================================================
-
-    #[test]
-    fn display_integer_num() {
-        assert_eq!(
-            fact_value_to_display(&FactValue::Num(42.0), &UserZone::utc()),
-            "42"
-        );
-    }
-
-    #[test]
-    fn display_float_num() {
-        assert_eq!(
-            fact_value_to_display(&FactValue::Num(12.375), &UserZone::utc()),
-            "12.375"
-        );
-    }
-
-    #[test]
-    fn display_time() {
-        // 2024-06-15 12:00:00 UTC
-        assert_eq!(
-            fact_value_to_display(
-                &FactValue::Time(TimeValue::from_epoch_secs(1718452800).unwrap()),
-                &UserZone::utc()
-            ),
-            "2024-06-15 12:00:00"
         );
     }
 }

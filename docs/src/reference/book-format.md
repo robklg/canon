@@ -39,7 +39,7 @@ words to Canon's own:
 
 It also states the time zone the book's dates are in. The dates written as text, in
 the README itself, `story.md`, `timeline.md` and `notes.md`, and the date in the book
-folder's name are on the clock of the person who bound the book; the times in
+folder's name are in the time zone of the person who bound the book; the times in
 `inventory.jsonl` and `meta.toml` are in UTC:
 
 ```
@@ -68,7 +68,7 @@ The page runs in a fixed order:
 
 The tally's lines can sum past its total, because a file copied to the archive and
 later dismissed here belongs to two of them. Where that happens the story states by
-how much, so the tally reads as overlapping registers rather than as a partition.
+how much, so the reader can see that the lines overlap rather than split the total.
 
 The story names itself **one telling of the record**. Another telling could be drawn
 from the facts beside it; this is the one written at the retirement.
@@ -160,8 +160,8 @@ The machine-readable half, `version = 1`:
   to `covered`), an ungathered ledger, and so on. An empty list asserts that nothing
   this book should hold is missing from it.
 - `zone` — the time zone the book's prose dates and folder name are in, the same text
-  the retirement decision records ([the time zone a decision reads times
-  on](../concepts/decisions.md#the-time-zone-a-decision-reads-times-on)). Absent in
+  the retirement decision records ([the time zone a decision
+  uses](../concepts/decisions.md#the-time-zone-a-decision-uses)). Absent in
   books bound before it was added; such books verify unchanged.
 - `[identity]` — path, role, comment, suspension, `first_indexed` (when the earliest
   surviving row was first indexed — row evidence, honest on roots older than
@@ -179,7 +179,7 @@ The machine-readable half, `version = 1`:
 - `[posture]` — `scan_verified` or `on_faith` (with the reason: suspended,
   unreachable, or never scanned) and the last scan time.
 - `[counts]` — entry totals per fate (including `contentless`, added within
-  version 1; absent in earlier books, read as zero). These are the verification
+  version 1; absent in earlier books, counted as zero). These are the verification
   anchor: Canon's structural check recounts the inventory and compares against
   them before any removal proceeds.
 - `[ledger]` — whether the drive-local ledger was gathered, and how many files.
@@ -194,6 +194,6 @@ The machine-readable half, `version = 1`:
 ## Versioning
 
 `version` in `meta.toml` identifies the format. This page describes version 1. Fields
-may be added within a version; existing fields keep their meaning. A future Canon
-refuses to *verify* a book of a newer version than it knows. The book itself stays
+may be added within a version; existing fields keep their meaning. Verifying a book
+of a newer version than Canon knows fails with an error. The book itself stays
 readable either way.

@@ -14,7 +14,7 @@ use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
-use crate::expr::{apply_filters, Filter, UsedStatus};
+use crate::expr::{apply_filters, BoundFilters, UsedStatus};
 use crate::survey::domain::analysis::{
     classify_location, count_only_here, discover_scopes_by_root, find_unique_object_ids,
     LocationKind, ScopeLocation,
@@ -153,7 +153,7 @@ pub struct LocationResult {
 pub fn compute_survey(
     conn: &mut Connection,
     scope_prefixes: &[String],
-    filters: &[Filter],
+    filters: &BoundFilters,
     params: &SurveyParams,
     all_sources: &[Source],
     other_paths: &[String],

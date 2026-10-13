@@ -827,7 +827,7 @@ mod tests {
         let err = run_scan(&db, &[PathBuf::from("/photos/vacation")], true).unwrap_err();
         let line = err.to_string();
         assert!(
-            line.starts_with("/photos suspended — refused:"),
+            line.starts_with("/photos suspended — rejected:"),
             "the one grammar: {line}"
         );
         assert!(

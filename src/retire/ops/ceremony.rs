@@ -135,7 +135,7 @@ struct IdentityProbePath {
 fn read_book_root_path(dir: &Path) -> Result<String> {
     let refusal = || {
         format!(
-            "A directory stands at {} but cannot be identified as a book — refusing to replace what cannot be identified; move it aside and re-run",
+            "A directory stands at {} but cannot be identified as a book — Canon will not replace what it cannot identify; move it aside and re-run",
             dir.display()
         )
     };

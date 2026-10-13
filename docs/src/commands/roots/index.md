@@ -8,7 +8,7 @@ Adding new roots, or scanning existing is performed through the [scan](scan.md) 
 
 Managing roots, such as suspending or listing them is done with [canon roots](roots.md).
 
-[`canon roots story`](story.md) reads a root's resolution story between triage
+[`canon roots story`](story.md) shows a root's resolution story between triage
 passes: where you acted and why, and what no decision ever touched. When you judge it
 resolved, [`canon roots retire`](retire.md) binds that story into a book and releases
 the root from the index.

@@ -788,17 +788,17 @@ struct SampleDestination {
 #[derive(Default)]
 struct Samples {
     destinations: Vec<SampleDestination>,
-    placed_an_instant: bool,
+    used_an_instant: bool,
 }
 
 const SAMPLE_COUNT: usize = 5;
 
-/// The confirmation's zone line: said where the pattern places an instant, the only case in
-/// which the lock's zone decides where a file goes — a clock reading places the same on any
-/// clock. The dry run says it always.
+/// The confirmation's zone line: said where the pattern uses an instant, the only case in
+/// which the lock's zone decides where a file goes — a clock reading gives the same folder in
+/// any time zone. The dry run says it always.
 fn summary_zone_line(samples: &Samples, lock_zone: &RecordedZone) -> Option<String> {
     samples
-        .placed_an_instant
+        .used_an_instant
         .then(|| super::lock_zone_line(lock_zone))
 }
 
@@ -840,7 +840,7 @@ fn compute_sample_destinations(
             lock_zone.clock(),
         );
         if let Ok(expansion) = &result {
-            samples.placed_an_instant |= expansion.placed_an_instant;
+            samples.used_an_instant |= expansion.used_an_instant;
         }
         if i < SAMPLE_COUNT {
             samples.destinations.push(match result {
@@ -1195,6 +1195,7 @@ impl plan::PlanProgress for CliTransferProgress {
 mod tests {
     use super::*;
     use crate::core::domain::time::zone::{parse_zone_name, UserZone};
+    use crate::expr::BoundFilters;
 
     /// The confirmation's sample destinations read the lock's zone whatever the machine's, as
     /// the placement they preview does: a file saved at 2023-12-31 23:30 UTC is already 2024
@@ -1239,17 +1240,17 @@ mod tests {
         });
         assert_eq!(samples.destinations.len(), 1);
         assert_eq!(samples.destinations[0].dest_path, "/archive/2024/a.jpg");
-        assert!(samples.placed_an_instant, "a save time is an instant");
+        assert!(samples.used_an_instant, "a save time is an instant");
     }
 
-    /// **The confirmation names the zone only where the pattern places an instant**; the dry
+    /// **The confirmation names the zone only where the pattern uses an instant**; the dry
     /// run names it always, in the same words.
     #[test]
-    fn the_confirmation_names_the_zone_only_when_an_instant_is_placed() {
+    fn the_confirmation_names_the_zone_only_when_an_instant_is_used() {
         let zone = parse_zone_name("Europe/Amsterdam").unwrap();
         let placing = Samples {
             destinations: vec![],
-            placed_an_instant: true,
+            used_an_instant: true,
         };
         assert_eq!(
             summary_zone_line(&placing, &zone).as_deref(),
@@ -1603,7 +1604,7 @@ mod tests {
             &mut conn,
             &ClusterGenerateParams {
                 scopes,
-                filters: vec![],
+                filters: BoundFilters::none(),
                 allow_archived: false,
                 allow_duplicates: false,
                 clock: UserZone::utc(),

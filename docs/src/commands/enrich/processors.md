@@ -159,13 +159,13 @@ The `enriched?` predicate does not serve as a gate: it is true as soon as a sour
 
 ## Type Hints
 
-The stored type of a fact determines what operations work on it: times enable the time modifiers, numbers enable numeric comparisons and `|bucket`, text enables string matching and string modifiers. If your processor outputs dates as strings, or numbers as quoted strings, add type hints; without them, queries like `--where 'DateTimeOriginal|year=2024'` or `--where 'width>1000'` won't work.
+The stored type of a fact determines how a filter compares it: times as spans of time, numbers as numbers, text in character order. If your processor outputs dates as strings, or numbers as quoted strings, add type hints; without them, `--where 'width>1000'` gives an error against the text key, and a date or number question has to be asked through a modifier (`width|number>1000`, `DateTimeOriginal|year=2024`).
 
 See [import-facts](import-facts.md#type-hints) for the hint format and full details.
 
 ### Writing Times
 
-Write each time in the form that says what it is. Canon reads exactly what it is given ([How Canon reads a time](../../concepts/facts.md#how-canon-reads-a-time)), so a timestamp's correctness is the processor's job: the right offset, a clock that was set right, local time never labelled as UTC.
+Write each time in the form that says what it is. Canon takes exactly what it is given ([How Canon interprets a time](../../concepts/facts.md#how-canon-interprets-a-time)), so a timestamp's correctness is the processor's job: the right offset, a clock that was set right, local time never labelled as UTC.
 
 ```json
 {"source_id":123,"basis_rev":0,"facts":{
@@ -180,10 +180,10 @@ Write each time in the form that says what it is. Canon reads exactly what it is
 |---|---|
 | `2024-06-15T14:30:05+02:00` | The offset of the clock that took the time is known. Where that offset is UTC, write `Z` or `+00:00` |
 | `2024-06-15T12:30:05-00:00` | Only the UTC instant is known, as in a field the format defines as UTC, which much video metadata is |
-| `2024:06:15 14:30:05` | A clock reading with no offset, as most EXIF dates are |
+| `2024:06:15 14:30:05` | A time with no offset, as most EXIF dates are |
 | `2024-06-15` | Only the date is known; `2024-06` and `2024` likewise for a month or a year |
 
-On your clock, `2024-06-15T14:30:05+02:00` and `2024:06:15 14:30:05` can print alike, but the true form still matters. A clock reading is taken to be your clock: a camera that wrote no offset, with its clock set to local time on a trip, sits hours away from phone photos of the same moment that wrote theirs. A processor that knows the place, from GPS or otherwise, puts them on one timeline by writing the offset. And Canon keeps the form it is given: [`worklist --emit`](worklist.md#emitting-existing-facts) hands each time to the next processor in the form it was written.
+In your local time, `2024-06-15T14:30:05+02:00` and `2024:06:15 14:30:05` can print alike, but the true form still matters. A time with no offset is assumed to be in your time zone: a camera that wrote no offset, with its clock set to local time on a trip, sits hours away from phone photos of the same moment that wrote theirs. A processor that knows the place, from GPS or otherwise, puts them on one timeline by writing the offset. And Canon keeps the form it is given: [`worklist --emit`](worklist.md#emitting-existing-facts) hands each time to the next processor in the form it was written.
 
 ## Tagging Files with Finder Tags (macOS)
 

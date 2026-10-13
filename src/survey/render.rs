@@ -27,7 +27,7 @@ const DEFAULT_LOCATION_CAP: usize = 10;
 const NOTE_DISPLAY_CAP: usize = 5;
 
 /// Survey's frame, in the one sentence every statement about it uses.
-const FRAME: &str = "Survey reads source-side selections; archive content is its outward\n\
+const FRAME: &str = "Survey works on source-side selections; archive content is its outward\n\
                      side, always visible";
 
 /// The whole asked-for scope lies inside the archive: state the frame and

@@ -16,9 +16,9 @@ rebuildably and proves it**, **lends the hands** that touch disk, **conjugates**
 through one grammar, and **defends its own laws**.
 
 **The bidirectional rule.** Core never tells — no narration, no voice; its outputs are facts
-and typed results, and the voice belongs to the tellers. Two sentences are the stated
-exceptions, each described below beside the nouns it speaks of, with why it is here: the
-closed door's and a mixed key's. And tellers never warrant — a
+and typed results, and the voice belongs to the tellers. One sentence is the stated
+exception, described below beside the nouns it speaks of, with why it is here: the closed
+door's. And tellers never warrant — a
 subsystem that re-derives a claim core already makes has made a second claim, and two
 mechanics for one claim are a safety defect waiting to disagree with themselves. Every
 boundary question here resolves against this law first.
@@ -59,10 +59,15 @@ padded — and `FactValue::Time` carries it. Its owners:
 - **The frame rule** (`TimeValue::on_clock`): every time reads on the user's clock — an instant
   through the zone, a clock reading as written, never a clock reading turned into an instant;
   `printed` is the one form shown, `iso_text` the stored form written out. Verifier
-  `the_frame_rule_reads_both_clock_change_hours_on_the_users_clock`. It gives a `ClockSpan`,
-  which owns the printing (`printed`; `printed_as_asked` keeps a typed fraction) and the
-  comparisons, `lies_inside` and `starts_at_or_after`: they read only spans, so nothing
-  converts a clock reading to an instant. `clock_secs_as_if_utc` counts a reading as if UTC
+  `a_printed_value_typed_back_selects_exactly_what_prints_the_same` (in the facility, where a
+  typed time is compared); the span is pinned here through both clock-change hours. It gives
+  a `ClockSpan`, which owns the printing (`printed`; `printed_as_asked` keeps a typed
+  fraction) and the comparisons, one whole-period table (`satisfies`), read by `--where` and
+  the trail alike: a value is selected when its whole period satisfies the operator, a value
+  coarser than the typed period is in none of `<`, `=`, `>`, and a fraction is a point one
+  nanosecond long. It reads only spans, so nothing converts a clock reading to an instant. A
+  time of day (`reading::read_time_of_day`) is a clock reading on `REFERENCE_DAY`, so the one
+  table compares it too. `clock_secs_as_if_utc` counts a reading as if UTC
   for storage's encoding (its inverse is `repo::fact`'s read) and a speed path's bounds,
   never a comparison or a selection.
 - **The user's-zone owner** (`zone::UserZone::machine`): reads `TZ` and the system zone once;
@@ -93,6 +98,14 @@ records, never the machine's.
 precision), read and written only through `repo::fact`'s conversion pair (`fact_value_params`,
 `fact_value_at`): `value_time` alone is no epoch second for a clock reading.
 
+**A number is one noun, read and written one way** (`domain::number`): `read_number` is the
+one reading of text as a number — Canon's grammar, no `inf`, no leading `+`, no hexadecimal,
+nothing too large to hold — and `spelled` the one writing, the shortest plain decimal that reads
+back as the same number, never an exponent. Pinned beside it, every spelling read back;
+recognised here, with no roster row. **Not reached**: `facts/ops/import.rs`'s duration hint,
+which still reads its own numbers; `worklist --emit`, which writes a JSON number; and plain
+`|bucket`'s range labels (`expr/domain/transform.rs`), which keep their own short form.
+
 **Text is cut by characters, never by byte index**, because a cut inside a multi-byte
 character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies
 `clippy::string_slice`; a slice whose index is a known boundary carries an `#[expect]` on its
@@ -114,7 +127,7 @@ from a suspended `Root`, via `Root::parked`, so a live root cannot be spoken of 
 `ParkedRoot::door_line(verb, what)`, `<root> suspended — <verb>: <what> · <way back>`, with
 `pause_line` for the verbless form a remembering view states. `DoorVerb`'s third arm,
 `WouldRefuse(RefusedAct)`, is for a **report about acts it does not perform**: it names the act
-the door turns away, in the conditional, because `set aside` and `refused` are both false of a
+the door turns away, in the conditional, because `set aside` and `rejected` are both false of a
 report and a withheld next step owes its reader the act that is blocked. Reach is `cluster
 status`. **The sentence is composed here
 rather than in the interface because its consumers are not all in one layer**: an operation
@@ -128,15 +141,6 @@ without an `Error:` prefix.
 
 These are here because the Feature-First Structure ADR names them as the spine, not because
 two consumers were counted. The membership criteria below apply to everything else.
-
-`domain::fact` holds the second sentence: the
-statement that a key is of mixed type and its way out (`mixed_type_statement`,
-`mixed_type_way_out`), which quote each key themselves so a printed command runs. It speaks of
-the key's type (`KeyTypes`, beside it), and its consumers sit in two subsystems and two layers:
-`facts`' listing and `cluster`'s stderr print it, and `archive/ops/generate.rs` writes the way
-out into a manifest, an artifact. No subsystem's operations stratum can serve both, because
-`facts` reaches no sibling and no sibling reaches it. **Where it does not apply**: the listing's
-columns and the type words, which stay with whoever prints them.
 
 ### It warrants — `domain::{resolution, fate, extraction}`
 
@@ -682,8 +686,8 @@ Three questions, in order:
 
 1. **Does it warrant, or does it tell?** Anything that narrates — composes a sentence, chooses
    a voice, decides what the user reads — is a teller's, however many tellers want it. Core
-   hands out facts and typed results. The closed door's sentence and the mixed-key
-   statement are the exceptions, each here because its consumers sit in more than one layer.
+   hands out facts and typed results. The closed door's sentence is the exception, here
+   because its consumers sit in more than one layer.
 2. **Is it substrate, or one subsystem's finished output?** A sibling's computed result
    consumed wholesale is an ordinary product dependency, not shared ground.
 3. **Is it consumed by ≥2 subsystems, or named as spine by the Feature-First Structure ADR?**

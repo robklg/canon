@@ -11,7 +11,7 @@ use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::receipt::ReceiptPlacement;
-use crate::expr::Filter;
+use crate::expr::BoundFilters;
 
 /// Where an exclusion's receipt lands — or why it lands nowhere.
 ///
@@ -97,7 +97,7 @@ pub struct DuplicateGroupData {
 /// Parameters for planning a source exclusion set operation.
 pub struct ExcludeSetParams {
     pub scopes: Vec<ScopeMatch>,
-    pub filters: Vec<Filter>,
+    pub filters: BoundFilters,
     /// The user's clock, which every time in a filter is read on.
     pub clock: UserZone,
 }
@@ -125,7 +125,7 @@ impl ExcludeSetPlan {
 /// Parameters for planning a source exclusion clear operation.
 pub struct ExcludeClearParams {
     pub scopes: Vec<ScopeMatch>,
-    pub filters: Vec<Filter>,
+    pub filters: BoundFilters,
     /// The user's clock, which every time in a filter is read on.
     pub clock: UserZone,
 }
@@ -150,7 +150,7 @@ impl ExcludeClearPlan {
 /// Parameters for planning a duplicate exclusion operation.
 pub struct ExcludeDuplicatesParams {
     pub scopes: Vec<ScopeMatch>,
-    pub filters: Vec<Filter>,
+    pub filters: BoundFilters,
     pub prefer_prefix: String,
     /// The user's clock, which every time in a filter is read on.
     pub clock: UserZone,
@@ -198,7 +198,7 @@ impl ExcludeDuplicatesPlan {
 /// Parameters for planning an object exclusion operation.
 pub struct ExcludeSetObjectsParams {
     pub scopes: Vec<ScopeMatch>,
-    pub filters: Vec<Filter>,
+    pub filters: BoundFilters,
     /// The user's clock, which every time in a filter is read on.
     pub clock: UserZone,
 }

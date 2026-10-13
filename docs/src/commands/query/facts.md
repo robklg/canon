@@ -66,7 +66,7 @@ Facts: /mnt/old-drive/photos
 No sources match the given filters.
 ```
 
-A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, is set aside and stated instead of counted; when that is the whole scope, nothing is reported and the exit code is 1. `facts delete` refuses there by name.
+A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, is set aside and stated instead of counted; when that is the whole scope, nothing is reported and the exit code is 1. `facts delete` is rejected there by name.
 
 Example output:
 ```
@@ -97,7 +97,7 @@ Type is the key's type, determined from all of its facts: `text`, `number`, `tim
 only values of one type can be compared or formatted correctly.
 To inspect each and learn how to convert to one type:
   `canon facts convert content.CreateDate`
-  `canon facts convert 'content.File Size'`
+  `canon facts convert '"content.File Size"'`
 ```
 
 Example grouped output (`--by-root`):
@@ -113,7 +113,7 @@ png (total: 8,200, 23.6%)
   id:3  ...laptop-import/media            3,200   39.0%
 ```
 
-A time prints on [your clock](../../concepts/facts.md#how-canon-shows-a-time), at the precision it was written. Times that print the same are one row, however they were written. On a clock set to `Europe/Amsterdam`, a capture time written `2023-12-31T20:00:00-00:00` and one written `2023:12:31 21:00:00` share a row, and one written only as `2024` prints as a year:
+A time prints in [your local time](../../concepts/facts.md#how-canon-shows-a-time), at the precision it was written. Times that print the same are one row, however they were written. In the time zone `Europe/Amsterdam`, a capture time written `2023-12-31T20:00:00-00:00` and one written `2023:12:31 21:00:00` share a row, and one written only as `2024` prints as a year:
 
 ```
 Facts: all roots
@@ -126,7 +126,7 @@ content.DateTimeOriginal                      Count   Coverage
 2024-01-01 03:00:00                               1      25.0%
 ```
 
-A modifier that reads a finer part than a time carries counts that source under `(no value)`:
+A modifier that asks for a finer part than a time carries counts that source under `(no value)`:
 
 ```
 Facts: all roots
@@ -139,6 +139,16 @@ DateTimeOriginal|month                        Count   Coverage
 (no value)                                        1      25.0%
 ```
 
-`--key source.mtime` groups save times by year on your clock. A save time at the edge of the years 0000–9999 or beyond has no value: it is counted under `(no value)` there, and left out of the `source.mtime` count in the overview ([Save times](../../concepts/facts.md#save-times)).
+A key or modifier Canon cannot use as written is rejected before anything is counted, every cause in `--key`, `--group-by` and `--where` at once. Each names a rewritten key where one works (`source.size|lowercase` names `source.size|number|lowercase`), and otherwise the modifiers that do apply to the key's type:
+
+```
+Error: cannot use the key as written
+  source.size|year: |year works on times or text; source.size holds numbers.
+    Modifiers for numbers: |bucket, |number
+```
+
+A modifier on a key whose facts hold two types is rejected the same way, without `Error:`, since that is an answer about the key; the bare key still reports both types' rows.
+
+`--key source.mtime` groups save times by year in your local time. A save time at the edge of the years 0000–9999 or beyond has no value: it is counted under `(no value)` there, and left out of the `source.mtime` count in the overview ([Save times](../../concepts/facts.md#save-times)).
 
 See also: [`facts delete`](../maintain/facts-delete.md) for removing incorrect metadata, [`prune`](../maintain/prune.md) for cleaning up stale or orphaned data.

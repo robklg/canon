@@ -182,7 +182,7 @@ fn plan_bind_refuses_an_unidentifiable_directory() {
         &UserZone::utc(),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("refusing to replace"), "{err:#}");
+    assert!(err.to_string().contains("will not replace"), "{err:#}");
 }
 
 /// The backstop for the world moving between the entry gate and the bind: a

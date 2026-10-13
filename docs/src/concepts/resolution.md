@@ -45,7 +45,7 @@ no blockers were found and leaves the verdict to you.
 ## Where this vocabulary appears
 
 [`canon coverage`](../commands/archive/coverage.md) counts covered content,
-[`canon survey`](../commands/query/survey.md) reads a location's archive overlap,
+[`canon survey`](../commands/query/survey.md) shows a location's archive overlap,
 [`canon roots story`](../commands/roots/story.md) maps a root's standings by place,
 and the [retirement review](../commands/roots/retire.md) states them as counts
 before a root is released.

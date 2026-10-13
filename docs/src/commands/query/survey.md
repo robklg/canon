@@ -62,7 +62,7 @@ canon survey --global
 
 A scope on a [suspended](../roots/roots.md#suspending-roots) root is stated rather than surveyed: the pause and the way back, nothing listed, exit code 1. A scope naming a suspended path beside a live one narrows to the live one and says what it set aside.
 
-`--other` names a location the question rests on, so a suspended one refuses the whole ask rather than answering about a smaller world.
+`--other` names a location the question rests on, so if it is suspended, the whole ask is rejected rather than answered about a smaller world.
 
 A suspended `--archive` is measured against, and the header says so:
 
@@ -82,7 +82,7 @@ A location with any copy on a live root is not marked: nothing there needs openi
 
 ## Surveying an archive location
 
-Survey reads source-side selections. Archive content is its outward side,
+Survey works on source-side selections. Archive content is its outward side,
 always visible in the archive sections, so an archive location has no
 selection of its own to survey. A scope that lies entirely inside archive
 roots is stated rather than surveyed, and the command exits non-zero:
@@ -90,7 +90,7 @@ roots is stated rather than surveyed, and the command exits non-zero:
 ```
 Survey: /archive/media/2014-holiday
 This place is inside the archive root /archive.
-Survey reads source-side selections; archive content is its outward
+Survey works on source-side selections; archive content is its outward
 side, always visible — nothing here has a source-side selection to survey.
 For what stands here and where it came from: canon trail
 For a listing of what's here: canon ls
@@ -103,7 +103,7 @@ asked for under it, and the frame is still stated once:
 Survey: /archive/media, /archive2/old
 inside archive root /archive: /archive/media
 inside archive root /archive2: /archive2/old
-Survey reads source-side selections; archive content is its outward
+Survey works on source-side selections; archive content is its outward
 side, always visible — nothing here has a source-side selection to survey.
 For what stands here and where it came from: canon trail
 For a listing of what's here: canon ls
@@ -111,7 +111,7 @@ For a listing of what's here: canon ls
 
 Under `-0` with a machine-rendering detail view the statement goes to stderr,
 leaving the requested stream on stdout empty; the non-zero exit still carries
-the refusal.
+the rejection.
 
 This is decided from the roles of the containing roots, not from an empty
 result: a source-side scope that genuinely selects nothing still shows the
@@ -126,15 +126,15 @@ however many roots the places fall under:
 Survey: /mnt/old-drive/exports
 set aside — inside archive root /archive: /archive/media
 set aside — inside archive root /archive2: /archive2/old
-(survey reads source-side selections; archive content is its outward side, always visible; for these places see canon trail or canon ls)
+(survey works on source-side selections; archive content is its outward side, always visible; for these places see canon trail or canon ls)
   517 sources here (0 unhashed, 517 hashed)
 ```
 
-`--include archived` is refused for the same reason:
+`--include archived` gives an error for the same reason:
 
 ```
 Error: --include archived is not valid for survey.
-Survey reads source-side selections; archive content is its outward
+Survey works on source-side selections; archive content is its outward
 side, always visible.
 For what stands in an archive location: canon trail
 For a listing of what's there: canon ls
@@ -219,7 +219,7 @@ The summary works without any `--where` filters. Filters narrow what you're look
 # Only the images
 canon survey /mnt/old-drive/exports --where "@image"
 
-# Content from a specific period
+# Content from one year
 canon survey /mnt/old-drive/exports --where "source.mtime|year=2019"
 ```
 
@@ -363,7 +363,7 @@ canon survey /mnt/old-drive/photos \
 ```
 
 Differences from default mode:
-- Header reads "Comparing with:" instead of "Related locations:"
+- The header shows "Comparing with:" instead of "Related locations:"
 - Locations are displayed in user-specified order (not sorted)
 - In `--detail complement`, mirrors are shown with a note rather than omitted
 

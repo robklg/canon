@@ -16,7 +16,7 @@ use crate::archive::domain::{
     extract_notes_raw, LockEntry, LockHeader, LockScope, ManifestConfig, ManifestMeta,
     ManifestOptions, ManifestOutput, CURRENT_LOCK_VERSION, CURRENT_MANIFEST_VERSION,
 };
-use crate::core::domain::fact::{mixed_type_way_out, FactValue, KeyTypes};
+use crate::core::domain::fact::{FactValue, KeyTypes};
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
@@ -27,10 +27,10 @@ use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::{RecordedZone, UserZone};
 use crate::core::domain::FactEntry;
 use crate::core::repo::{self, Connection};
-use crate::expr::Filter;
+use crate::expr::BoundFilters;
 use crate::expr::{
-    get_builtin_value, source_values, BuiltinKey, ScopeVantage, SourceAttributes, OBJECT_HASH,
-    SCOPE_REL_PATH,
+    get_builtin_value, mixed_type_way_out, source_values, BuiltinKey, ScopeVantage,
+    SourceAttributes, OBJECT_HASH, SCOPE_REL_PATH,
 };
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
@@ -44,7 +44,7 @@ use super::pattern::{evaluate_pattern, PatternGaps};
 /// Parameters for planning a cluster generation.
 pub struct ClusterGenerateParams {
     pub scopes: Vec<ScopeMatch>,
-    pub filters: Vec<Filter>,
+    pub filters: BoundFilters,
     pub allow_archived: bool,
     pub allow_duplicates: bool,
     /// The clock the query reads times on: the manifest's zone, never the machine's.
@@ -329,8 +329,8 @@ pub(super) fn measure_entries(entries: &mut [LockEntry], scope: &ScopeResolution
 /// The header a run writes: what it settled, as against what the manifest
 /// declares. Confirmed scopes only — a set-aside or unrooted line contributes
 /// nothing to a destination and must contribute nothing to the record either.
-/// The zone is the one the run read on, so `apply` places on the clock the
-/// selection was made on.
+/// The zone is the one the run read times in, so `apply` reads them in the zone the
+/// selection was made in.
 fn lock_header(scope: &ScopeResolution, zone: &RecordedZone) -> LockHeader {
     LockHeader {
         lock_version: CURRENT_LOCK_VERSION,
@@ -598,7 +598,7 @@ pub fn execute_refresh(
 
 /// What the pattern meets over the lock a refresh has just written, read on the zone the
 /// run settled: the causes of every entry that will not expand — the too-coarse ones
-/// counted — and whether any entry that does places an instant on the clock.
+/// counted — and whether any entry that does uses an instant.
 ///
 /// It reads the lock back from disk, through the reader `apply` and `cluster status` use,
 /// so the three see one lock and ask it the same questions (`LockFile::unmeasured_reason`,
@@ -737,7 +737,7 @@ fn assemble_manifest(
 ) -> Result<String> {
     let header = "# Canon manifest — edit pattern and Notes freely.\n\
                   # To change the query, edit it here then run: canon cluster refresh <manifest>\n\
-                  # zone: the time zone dates are read in, for the query and for folder names.\n\
+                  # zone: the time zone for times in the query and in folder names.\n\
                   # Edit it, or delete it to take this machine's, then run: canon cluster refresh <manifest>\n\
                   # Other fields are managed by Canon — do not edit.\n\
                   #\n";
@@ -1021,24 +1021,24 @@ fn generate_fact_help(
         help.push_str("#\n");
     }
 
-    // Modifiers reference
-    let time_mods: Vec<_> = Modifier::iter()
-        .filter(|m| m.category() == ModifierCategory::Time)
-        .map(|m| {
-            let name: &'static str = m.into();
-            format!("|{name}")
-        })
-        .collect();
-    let string_mods: Vec<_> = Modifier::iter()
-        .filter(|m| m.category() == ModifierCategory::String)
-        .map(|m| {
-            let name: &'static str = m.into();
-            format!("|{name}")
-        })
-        .collect();
+    // Modifiers reference: every category, so the manifest's own list of what a pattern can
+    // use names every modifier.
     help.push_str("# Modifiers:\n");
-    help.push_str(&format!("#   Time: {}\n", time_mods.join(" ")));
-    help.push_str(&format!("#   String: {}\n", string_mods.join(" ")));
+    for category in ModifierCategory::iter() {
+        let label = match category {
+            ModifierCategory::Time => "Time",
+            ModifierCategory::String => "String",
+            ModifierCategory::Numeric => "Numeric",
+        };
+        let names: Vec<String> = Modifier::iter()
+            .filter(|m| m.category() == category)
+            .map(|m| {
+                let name: &'static str = m.into();
+                format!("|{name}")
+            })
+            .collect();
+        help.push_str(&format!("#   {label}: {}\n", names.join(" ")));
+    }
     help.push_str("#   Path: [0] [-1] [1:3] etc.\n");
     help.push_str("#\n");
 
@@ -1085,7 +1085,7 @@ mod tests {
     fn default_params() -> ClusterGenerateParams {
         ClusterGenerateParams {
             scopes: vec![],
-            filters: vec![],
+            filters: BoundFilters::none(),
             allow_archived: false,
             allow_duplicates: false,
             clock: UserZone::utc(),
@@ -1456,6 +1456,40 @@ mod tests {
         (conn, params)
     }
 
+    /// A manifest's list of what a pattern can use names every modifier, each once, on its
+    /// category's line.
+    #[test]
+    fn the_manifest_names_every_modifier() {
+        use crate::expr::{Modifier, ModifierCategory};
+        use strum::IntoEnumIterator;
+        let help = generate_fact_help(1, &[], &[], false);
+        let block: String = help
+            .lines()
+            .skip_while(|l| *l != "# Modifiers:")
+            .take_while(|l| !l.starts_with("#   Path:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for modifier in Modifier::iter() {
+            let name: &'static str = modifier.into();
+            let spelled = format!("|{name}");
+            let found = block
+                .split_whitespace()
+                .filter(|word| *word == spelled)
+                .count();
+            assert_eq!(found, 1, "{spelled} in:\n{block}");
+            let label = match modifier.category() {
+                ModifierCategory::Time => "#   Time:",
+                ModifierCategory::Numeric => "#   Numeric:",
+                ModifierCategory::String => "#   String:",
+            };
+            let line = block
+                .lines()
+                .find(|l| l.split_whitespace().any(|w| w == spelled))
+                .unwrap();
+            assert!(line.starts_with(label), "{spelled} on: {line}");
+        }
+    }
+
     /// The facts comment's type is the key's, read from all its facts: a key whose second
     /// type sits outside the selection prints `mixed`, followed by its way out; a key of one
     /// type prints that type's word.
@@ -1596,7 +1630,6 @@ base_dir = \"output\"\n";
     fn generate_selects_on_the_recorded_zone() {
         use crate::core::domain::time::zone::{with_test_zone, UserZone};
         use crate::core::testing::insert_source_with_metadata;
-        use crate::expr::Filter;
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
@@ -1605,7 +1638,7 @@ base_dir = \"output\"\n";
 
         let plan = |conn: &mut Connection, filter: &str| {
             let params = ClusterGenerateParams {
-                filters: vec![Filter::parse(filter).unwrap()],
+                filters: crate::expr::read_filters(conn, &[filter.to_string()]).unwrap(),
                 clock: recorded.clock().clone(),
                 ..default_params()
             };

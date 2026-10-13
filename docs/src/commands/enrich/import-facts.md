@@ -35,7 +35,7 @@ The special key `hash.sha256` creates or links an object, enabling deduplication
 
 Canon stores facts as text, numbers, or times; the stored type determines which operations work on a fact (see [Value Types](../../concepts/facts.md#value-types) for the mapping).
 
-If a date like `"2024:07:23 11:06:32"` is stored as text instead of a time, queries like `--where 'DateTimeOriginal|year=2024'` won't work: the modifier expects a time.
+If a date like `"2024:07:23 11:06:32"` is stored as text instead of a time, it compares as text: `--where 'DateTimeOriginal=2024'` gives an error against a text key, and only a time modifier treats it as a time (`--where 'DateTimeOriginal|year=2024'`).
 
 ### Providing Type Hints
 
@@ -51,13 +51,13 @@ Wrap values in an object with `value` and `type`:
 
 | Type | Parses | Stored As |
 |------|--------|-----------|
-| `datetime` | A string in a form Canon reads as a time; a whole year from 1900 to 2100 as a JSON number | A time, in the form and at the precision it was written |
+| `datetime` | A string in a form Canon accepts as a time; a whole year from 1900 to 2100 as a JSON number | A time, in the form and at the precision it was written |
 | `duration` | `"1:23:45"`, `"5:30"`, or seconds as number | Seconds (number) |
 | *(none)* | Strings as text, numbers as numbers | As-is |
 
 ### Common Pitfalls
 
-**Dates as strings:** EXIF dates from tools like `exiftool` come as strings (`"2024:07:23 11:06:32"`). Without a type hint, they're stored as text and time modifiers won't work. Always use `"type": "datetime"` for date fields.
+**Dates as strings:** EXIF dates from tools like `exiftool` come as strings (`"2024:07:23 11:06:32"`). Without a type hint, they're stored as text: a filter compares them as text, and only a time modifier treats them as times. Always use `"type": "datetime"` for date fields.
 
 **Mixed types:** A fact key must have a consistent type across all sources. You cannot store `DateTimeOriginal` as text for some files and as a time for others. If you initially imported facts with the wrong type and need to re-import with the correct type, first delete the existing entries:
 
@@ -71,39 +71,39 @@ Each previews by default; add `--yes` to delete. Then re-run your processor with
 
 ## Times
 
-### How a time is read
+### How a time is interpreted
 
-A value hinted `"type": "datetime"` is read as follows; [How Canon reads a time](../../concepts/facts.md#how-canon-reads-a-time) lists every form.
+A value hinted `"type": "datetime"` is interpreted as follows; [How Canon interprets a time](../../concepts/facts.md#how-canon-interprets-a-time) lists every form.
 
-- **A string** is read by its UTC offset, as RFC 3339 writes it. An offset is kept as given; `Z` and `+00:00` are UTC; `-00:00` is a UTC instant whose local offset is unknown; a time without an offset is a clock reading, taken to be your clock. A date, month or year written alone is a clock reading at that precision.
+- **A string** is interpreted by its UTC offset, as RFC 3339 writes it. An offset is kept as given; `Z` and `+00:00` are UTC; `-00:00` is a UTC instant whose local offset is unknown; a time without an offset is assumed to be in your time zone. A date, month or year written alone is a time with no offset, at that precision.
 - **Precision** is what was written: a year, a month, a day, a minute or a second, with fractions of a second kept.
-- **A JSON number** is read only as a whole year from 1900 to 2100 (`2019`, or `2019.0`), a clock reading at year precision. A number is never read as seconds since 1970.
+- **A JSON number** is accepted only as a whole year from 1900 to 2100 (`2019`, or `2019.0`), a time with no offset, at year precision. A number never means seconds since 1970.
 
-One key may hold every form at once: instants with various offsets, instants without, and clock readings at any precision are all times.
+One key may hold every form at once: instants with various offsets, instants whose local offset is unknown, and times with no offset at any precision are all times.
 
 A time that cannot be read is skipped, counted under `skipped (type mismatch)`, and named:
 
 ```
-Warning: cannot read 1704067200 as a time for 'content.DateTimeOriginal' in /photos/IMG_0042.jpg: a number read as a time must be a whole year from 1900 to 2100
-Warning: cannot read "2024-06-15+02:00" as a time for 'content.DateTimeOriginal' in /photos/IMG_0043.jpg: an offset needs a time of day to belong to
+Warning: 1704067200 is not a time for 'content.DateTimeOriginal' in /photos/IMG_0042.jpg: a number is a time only when it is a whole year from 1900 to 2100
+Warning: "2024-06-15+02:00" is not a time for 'content.DateTimeOriginal' in /photos/IMG_0043.jpg: an offset needs a time of day to belong to
 ```
 
-Every time is shown on [your clock](../../concepts/facts.md#how-canon-shows-a-time).
+Every time is shown in [your local time](../../concepts/facts.md#how-canon-shows-a-time).
 
 ### Times imported by an earlier version of Canon
 
-A time fact imported by an earlier version of Canon is a clock reading, to the second. Two gaps stay until its key is re-imported:
+A time fact imported by an earlier version of Canon is a time with no offset, to the second. Two gaps stay until its key is re-imported:
 
-- **A value imported with an offset** (`Z` and `-00:00` included) prints its UTC clock time rather than the time on your clock. Canon cannot tell such a value from a true clock reading, so it cannot find these values for you.
+- **A value imported with an offset** (`Z` and `-00:00` included) prints its time in UTC rather than in your local time. Canon cannot tell such a value from a true time with no offset, so it cannot find these values for you.
 - **A key imported as bare dates, months or years** shows times to the second: `2024-01-01 00:00:00` where a re-imported value shows `2024`.
 
-The shipped `scripts/exif-worklist.sh` writes four time keys: `content.media.capture_datetime` (from `SubSecDateTimeOriginal`, which usually carries an offset, or from a video's QuickTime dates), `content.media.create_datetime`, `content.media.modify_datetime` (including `SubSecModifyDate` and `MediaModifyDate`), and `content.geo.datetime` (from `GPSDateTime`). QuickTime and GPS dates hold only a UTC instant, so the script writes them with `-00:00`; an earlier script wrote a video's dates with the offset of the computer it ran on, and GPS dates with `Z`. A library enriched with the script by an earlier version of Canon holds values imported with an offset under these keys, so the remedy below concerns them.
+The shipped `scripts/exif-worklist.sh` writes four time keys: `content.media.capture_datetime` (from `SubSecDateTimeOriginal`, which usually has an offset, or from a video's QuickTime dates), `content.media.create_datetime`, `content.media.modify_datetime` (including `SubSecModifyDate` and `MediaModifyDate`), and `content.geo.datetime` (from `GPSDateTime`). QuickTime and GPS dates hold only a UTC instant, so the script writes them with `-00:00`; an earlier script wrote a video's dates with the offset of the computer it ran on, and GPS dates with `Z`. A library enriched with the script by an earlier version of Canon holds values imported with an offset under these keys, so the remedy below concerns them.
 
 ### Re-importing a key
 
 The remedy is a re-import of the whole key. Import replaces a source's or a content's existing value for a key, so no delete is needed first: every value the enrichment tool can read again is overwritten with its true form.
 
-Re-import the whole key, never part of it: a key partly re-imported holds the same instant read two ways, and can put it on two different days. The cost is a re-read of every file holding the key, the archive included, which may be large or slow.
+Re-import the whole key, never part of it: a key partly re-imported holds the same instant in two forms, and can put it on two different days. The cost is a re-read of every file holding the key, the archive included, which may be large or slow.
 
 1. **Re-read every file on an open root that holds the key.** For the shipped script:
 

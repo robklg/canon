@@ -16,7 +16,7 @@ use crate::core::ops::scope::{
     classify_all, refuse_parked_locations, resolve_path, validate_sources_exist,
 };
 use crate::core::repo::{self, Connection};
-use crate::expr::Filter;
+use crate::expr::{read_filters, BoundFilters};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 /// Result of comparing two locations by content.
@@ -49,10 +49,7 @@ pub fn run_compare(
     include: &IncludeSet,
     zone: &UserZone,
 ) -> Result<CompareRun> {
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let all_roots = repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
@@ -134,7 +131,7 @@ type ScopeContentMap = (
 fn select_and_build_map(
     conn: &mut Connection,
     scope_prefix: &str,
-    filters: &[Filter],
+    filters: &BoundFilters,
     include: &IncludeSet,
     zone: &UserZone,
 ) -> Result<ScopeContentMap> {
@@ -142,7 +139,7 @@ fn select_and_build_map(
     let params = SelectionParams {
         scopes,
         include: include.clone(),
-        filters: filters.to_vec(),
+        filters: filters.clone(),
         role_policy: RolePolicy::AnyRole,
         clock: zone.clone(),
     };

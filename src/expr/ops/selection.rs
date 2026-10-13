@@ -19,7 +19,8 @@ use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
-use crate::expr::domain::filter::{Filter, UsedStatus};
+use crate::expr::domain::filter::UsedStatus;
+use crate::expr::ops::bind::BoundFilters;
 use crate::expr::ops::filter::apply_filters;
 
 /// How to handle root role filtering during source selection.
@@ -43,7 +44,7 @@ pub struct SelectionParams {
     /// Visibility: whether to include excluded and/or archived sources.
     pub include: IncludeSet,
     /// `--where` filter expressions. Empty means no additional filtering.
-    pub filters: Vec<Filter>,
+    pub filters: BoundFilters,
     /// Role filtering strategy.
     pub role_policy: RolePolicy,
     /// The user's clock, which every time in a filter is read on.
@@ -164,7 +165,7 @@ mod tests {
         SelectionParams {
             scopes: vec![],
             include: IncludeSet::default(),
-            filters: vec![],
+            filters: BoundFilters::none(),
             role_policy,
             clock: UserZone::utc(),
         }
@@ -369,7 +370,7 @@ mod tests {
         let big_id = insert_source_with_size(&conn, root, "big.jpg", None, 10_000);
 
         let mut params = make_params(RolePolicy::SourceUnlessIncluded);
-        params.filters = vec![Filter::parse("source.size > 5000").unwrap()];
+        params.filters = crate::expr::ops::bind::bound(&conn, "source.size > 5000");
         let sel = select_sources(&mut conn, &params).unwrap();
         assert_eq!(sel.sources.len(), 1);
         assert_eq!(sel.sources[0].id, big_id);
@@ -430,14 +431,14 @@ mod tests {
 
         // With status predicate in filter
         let mut params = make_params(RolePolicy::SourceUnlessIncluded);
-        params.filters = vec![Filter::parse("hashed?").unwrap()];
+        params.filters = crate::expr::ops::bind::bound(&conn, "hashed?");
         let sel = select_sources(&mut conn, &params).unwrap();
         assert!(sel.used_status.hashed);
         assert!(!sel.used_status.archived);
 
         // Without status predicates
         let mut params = make_params(RolePolicy::SourceUnlessIncluded);
-        params.filters = vec![Filter::parse("source.size > 50").unwrap()];
+        params.filters = crate::expr::ops::bind::bound(&conn, "source.size > 50");
         let sel = select_sources(&mut conn, &params).unwrap();
         assert!(!sel.used_status.hashed);
         assert!(!sel.used_status.archived);

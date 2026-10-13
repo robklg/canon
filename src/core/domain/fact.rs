@@ -28,7 +28,6 @@
 //! }
 //! ```
 
-use super::format::shell_quote;
 use super::time::value::TimeValue;
 
 /// A value's kind, without the value: text, number, time, or a derived path. The one
@@ -128,45 +127,6 @@ impl KeyTypes {
     pub fn counts(&self) -> &[(FactType, u64)] {
         &self.counts
     }
-}
-
-/// The statement that keys are of mixed type — what is wrong and what it costs. One key is
-/// named, quoted where the shell needs it; several are counted. Spoken here once for every
-/// surface that names such a key, because those surfaces sit in three subsystems and two
-/// layers; empty for no keys.
-pub fn mixed_type_statement(keys: &[&str]) -> Vec<String> {
-    let first = match keys {
-        [] => return Vec::new(),
-        [key] => format!(
-            "{} is of mixed type, so filters and patterns cannot use its values:",
-            shell_quote(key)
-        ),
-        keys => format!(
-            "{} keys are of mixed type, so filters and patterns cannot use their values:",
-            super::format::format_count(keys.len())
-        ),
-    };
-    vec![
-        first,
-        "only values of one type can be compared or formatted correctly.".to_string(),
-    ]
-}
-
-/// The way out of a mixed type: a header, then one command per key, each key quoted where
-/// the shell needs it so the command runs as printed; empty for no keys. The commands are
-/// indented under the header and backticked, as every printed command is.
-pub fn mixed_type_way_out(keys: &[&str]) -> Vec<String> {
-    let header = match keys {
-        [] => return Vec::new(),
-        [_] => "To inspect it and learn how to convert it to one type:",
-        _ => "To inspect each and learn how to convert to one type:",
-    };
-    std::iter::once(header.to_string())
-        .chain(
-            keys.iter()
-                .map(|key| format!("  `canon facts convert {}`", shell_quote(key))),
-        )
-        .collect()
 }
 
 impl std::fmt::Display for FactType {
@@ -348,53 +308,6 @@ mod tests {
 
         assert_eq!(KeyTypes::from_counts([(FactType::Text, 0)]), None);
         assert_eq!(KeyTypes::of(FactType::Path).word(), "path");
-    }
-
-    /// The statement and the way out, word for word, for one
-    /// key (named) and for several (counted).
-    #[test]
-    fn the_two_type_statement_reads_as_decided() {
-        let one = ["content.CreateDate"];
-        assert_eq!(
-            mixed_type_statement(&one),
-            [
-                "content.CreateDate is of mixed type, so filters and patterns cannot use its values:",
-                "only values of one type can be compared or formatted correctly.",
-            ]
-        );
-        assert_eq!(
-            mixed_type_way_out(&one),
-            [
-                "To inspect it and learn how to convert it to one type:",
-                "  `canon facts convert content.CreateDate`",
-            ]
-        );
-
-        let two = ["content.CreateDate", "content.File Size"];
-        assert_eq!(
-            mixed_type_statement(&two),
-            [
-                "2 keys are of mixed type, so filters and patterns cannot use their values:",
-                "only values of one type can be compared or formatted correctly.",
-            ]
-        );
-        assert_eq!(
-            mixed_type_way_out(&two),
-            [
-                "To inspect each and learn how to convert to one type:",
-                "  `canon facts convert content.CreateDate`",
-                "  `canon facts convert 'content.File Size'`",
-            ]
-        );
-
-        // A key the shell would split is quoted by the owner, in the statement and the command.
-        assert_eq!(
-            mixed_type_statement(&["content.File Size"])[0],
-            "'content.File Size' is of mixed type, so filters and patterns cannot use its values:"
-        );
-
-        assert!(mixed_type_statement(&[]).is_empty());
-        assert!(mixed_type_way_out(&[]).is_empty());
     }
 
     // =========================================================================

@@ -9,8 +9,10 @@
 
 use anyhow::{bail, Result};
 
-use super::transform::{parse_modifier, ModifierCall, PathAccessor};
-use crate::core::domain::fact::FactType;
+use super::bind::{check_read_as, ReadAs, Refused};
+use super::transform::{apply_chain, Modified, ModifierCall, PathAccessor};
+use crate::core::domain::fact::{FactType, FactValue};
+use crate::core::domain::time::zone::UserZone;
 
 // ============================================================================
 // The pattern-only key
@@ -334,27 +336,22 @@ impl BuiltinKey {
     }
 }
 
-/// Check if a key is a built-in (recognized without checking facts table)
-pub fn is_builtin_key(key: &str) -> bool {
-    BuiltinKey::from_str(key).is_some()
-}
-
 // ============================================================================
 // ParsedFactKey
 // ============================================================================
 
 /// A parsed fact key with optional accessor and modifiers.
 ///
-/// Wraps the result of `parse_key_with_modifiers()` into a reusable struct.
-/// Used when the same parsed key needs to be applied to multiple sources,
-/// such as in grouped distribution or manifest generation.
+/// What `expr::read_report` gives a report for each key: the key as written, read through the one key
+/// reader (`filter::WrittenKey::read`) and checked against its type, then applied to every
+/// source a distribution or a grouping counts.
 ///
 /// ## Example
 ///
 /// ```ignore
-/// use crate::expr::ParsedFactKey;
+/// use crate::expr::read_report;
 ///
-/// let key = ParsedFactKey::parse("source.mtime|year")?;
+/// let key = read_report(conn, Some("source.mtime|year"), &[], &[])?.key.unwrap();
 /// assert_eq!(key.base_key, "source.mtime");
 /// assert!(key.has_transforms());
 /// ```
@@ -368,6 +365,9 @@ pub struct ParsedFactKey {
     pub accessor: Option<PathAccessor>,
     /// Modifiers to apply (e.g., [Year])
     pub modifiers: Vec<ModifierCall>,
+    /// What a value read through this key's chain may be, as the key stood when the report
+    /// read it.
+    pub(in crate::expr) read_as: ReadAs,
 }
 
 impl ParsedFactKey {
@@ -377,14 +377,38 @@ impl ParsedFactKey {
     /// (e.g., "Make" becomes "content.Make"). Built-in keys (source.*, filename, etc.)
     /// are not modified, except the hash aliases, which read as the stored
     /// content hash (`BuiltinKey::reading`).
+    #[cfg(test)]
     pub fn parse(key: &str) -> Result<Self> {
-        let (base_key, accessor, modifiers) = parse_key_with_modifiers(key)?;
+        let read = super::filter::WrittenKey::read(key)?;
         Ok(Self {
             raw: key.to_string(),
-            base_key,
-            accessor,
-            modifiers,
+            base_key: read.base,
+            accessor: read.accessor,
+            modifiers: read.modifiers,
+            read_as: ReadAs::Any,
         })
+    }
+
+    /// A stored value through this key's accessor and modifiers, as a report counts it. The
+    /// value's type is checked first ([`Self::check_type`]), so a key whose type changed while
+    /// the report ran stops it as that answer, never as a modifier failing.
+    pub fn report_value(&self, value: FactValue, zone: &UserZone) -> Result<Modified> {
+        self.check_type(&value)?;
+        apply_chain(
+            value,
+            self.accessor.as_ref(),
+            &self.modifiers,
+            &self.raw,
+            true,
+            zone,
+        )
+    }
+
+    /// Whether a stored value is what the key was read as ([`check_read_as`]): a key with an
+    /// accessor or modifiers was read as its one type, or as having no facts; a bare key reads
+    /// every value it meets, of whatever type.
+    pub(in crate::expr) fn check_type(&self, value: &FactValue) -> Result<()> {
+        check_read_as(self.read_as, &self.base_key, value, Refused::Key)
     }
 
     /// Check if this key has transforms (accessor or modifiers).
@@ -427,7 +451,7 @@ pub fn parse_key_and_accessor(s: &str) -> Result<(String, Option<PathAccessor>)>
 }
 
 /// Parse accessor content: `-1`, `2`, `1:3`, `-3:-1`, `:3`, `1:`
-fn parse_accessor(s: &str) -> Result<PathAccessor> {
+pub(super) fn parse_accessor(s: &str) -> Result<PathAccessor> {
     if s.contains(':') {
         // Slice
         let parts: Vec<&str> = s.splitn(2, ':').collect();
@@ -493,75 +517,11 @@ pub fn normalize_fact_key(key: &str) -> String {
 /// (`BuiltinKey::reading`), and any other key is normalized. The one place
 /// both key readers below take the alias from, so the filter's text form and
 /// the parsed form cannot disagree.
-fn read_base_key(key: &str) -> (String, Option<&'static str>) {
+pub(super) fn read_base_key(key: &str) -> (String, Option<&'static str>) {
     match BuiltinKey::from_str(key).and_then(|k| k.reading()) {
         Some((stored, leading_modifier)) => (stored.to_string(), leading_modifier),
         None => (normalize_fact_key(key), None),
     }
-}
-
-/// Normalize a full key string that may contain accessors and modifiers.
-/// E.g., "Make|year" becomes "content.Make|year", but "source.mtime|year" stays unchanged.
-pub fn normalize_key_string(key: &str) -> String {
-    // Split off modifiers first
-    let parts: Vec<&str> = key.split('|').collect();
-    let key_part = parts[0];
-
-    // Split off accessor if present (e.g., "key[-1]" -> "key", "[-1]")
-    #[expect(clippy::string_slice, reason = "a `find` position")]
-    let (base_part, accessor_part) = if let Some(bracket_pos) = key_part.find('[') {
-        (&key_part[..bracket_pos], &key_part[bracket_pos..])
-    } else {
-        (key_part, "")
-    };
-
-    // Normalize the base part
-    let (normalized_base, leading_modifier) = read_base_key(base_part);
-
-    // Reconstruct with accessor and modifiers
-    let mut result = normalized_base;
-    result.push_str(accessor_part);
-    if let Some(modifier) = leading_modifier {
-        result.push('|');
-        result.push_str(modifier);
-    }
-    for modifier in &parts[1..] {
-        result.push('|');
-        result.push_str(modifier);
-    }
-    result
-}
-
-/// Parse a key string that may contain accessors and modifiers: "source.rel_path[-1]|stem"
-/// Returns (base_key, accessor, modifiers)
-///
-/// Keys without a kept prefix are normalized to `content.*` (e.g., "Make" becomes "content.Make").
-/// Built-in keys (source.*, filename, etc.) are not modified, except the hash
-/// aliases, which read as the stored content hash (`BuiltinKey::reading`).
-pub fn parse_key_with_modifiers(
-    key: &str,
-) -> Result<(String, Option<PathAccessor>, Vec<ModifierCall>)> {
-    // Split by | first to separate modifiers
-    let parts: Vec<&str> = key.split('|').collect();
-    let key_part = parts[0];
-
-    // Parse accessor from the key part
-    let (base_key, accessor) = parse_key_and_accessor(key_part)?;
-
-    // Normalize the base key (add content. prefix if needed)
-    let (normalized_key, leading_modifier) = read_base_key(&base_key);
-
-    // Parse modifiers
-    let mut modifiers = Vec::new();
-    if let Some(modifier) = leading_modifier {
-        modifiers.push(parse_modifier(modifier)?);
-    }
-    for mod_str in &parts[1..] {
-        let modifier_call = parse_modifier(mod_str.trim())?;
-        modifiers.push(modifier_call);
-    }
-
-    Ok((normalized_key, accessor, modifiers))
 }
 
 // ============================================================================
@@ -584,11 +544,10 @@ mod tests {
         assert_eq!(KNOWN_PREFIXES, &["source.", "content."]);
     }
 
-    /// The filter reads a key twice — `normalize_key_string` at parse, then
-    /// `parse_key_with_modifiers` at evaluation — so a reading must survive
-    /// being applied to its own output. It does only because a target has no
-    /// reading of its own; a doubled `short` would hide, since cutting a cut
-    /// hash changes nothing, so the modifier count is what is asserted.
+    /// A reading turns an alias into its stored key once, through the one key reader
+    /// (`WrittenKey::read`) that `--where`, `--key` and `--group-by` share. It holds because a target has no reading of its own; a doubled `short` would
+    /// hide, since cutting a cut hash changes nothing, so the modifier count is what is
+    /// asserted.
     #[test]
     fn a_reading_is_applied_once_however_often_the_key_is_read() {
         use strum::IntoEnumIterator;
@@ -602,9 +561,13 @@ mod tests {
                 BuiltinKey::from_str(target).is_some_and(|t| t.reading().is_none()),
                 "{name} reads as {target}, which has a reading of its own"
             );
-            let twice = parse_key_with_modifiers(&normalize_key_string(name)).unwrap();
-            assert_eq!(twice.0, target, "{name}");
-            assert_eq!(twice.2.len(), usize::from(leading.is_some()), "{name}");
+            let filter = super::super::filter::WrittenKey::read(name).unwrap();
+            assert_eq!(filter.base, target, "{name}");
+            assert_eq!(
+                filter.modifiers.len(),
+                usize::from(leading.is_some()),
+                "{name}"
+            );
         }
     }
 
@@ -619,7 +582,7 @@ mod tests {
         assert_eq!(key.base_key, "source.ext");
         assert!(key.accessor.is_none());
         assert!(key.modifiers.is_empty());
-        assert!(is_builtin_key(&key.base_key));
+        assert!(BuiltinKey::from_str(&key.base_key).is_some());
         assert!(!key.has_transforms());
     }
 
@@ -630,7 +593,7 @@ mod tests {
         assert_eq!(key.base_key, "source.rel_path");
         assert!(matches!(key.accessor, Some(PathAccessor::Index(-1))));
         assert!(key.modifiers.is_empty());
-        assert!(is_builtin_key(&key.base_key));
+        assert!(BuiltinKey::from_str(&key.base_key).is_some());
         assert!(key.has_transforms());
     }
 
@@ -642,7 +605,7 @@ mod tests {
         assert!(key.accessor.is_none());
         assert_eq!(key.modifiers.len(), 1);
         assert_eq!(key.modifiers[0].modifier, Modifier::Year);
-        assert!(is_builtin_key(&key.base_key));
+        assert!(BuiltinKey::from_str(&key.base_key).is_some());
         assert!(key.has_transforms());
     }
 
@@ -654,7 +617,7 @@ mod tests {
         assert!(matches!(key.accessor, Some(PathAccessor::Index(-1))));
         assert_eq!(key.modifiers.len(), 1);
         assert_eq!(key.modifiers[0].modifier, Modifier::Stem);
-        assert!(is_builtin_key(&key.base_key));
+        assert!(BuiltinKey::from_str(&key.base_key).is_some());
         assert!(key.has_transforms());
     }
 
@@ -664,7 +627,7 @@ mod tests {
         let key = ParsedFactKey::parse("Make").unwrap();
         assert_eq!(key.raw, "Make");
         assert_eq!(key.base_key, "content.Make");
-        assert!(!is_builtin_key(&key.base_key));
+        assert!(BuiltinKey::from_str(&key.base_key).is_none());
         assert!(!key.has_transforms());
     }
 
@@ -676,7 +639,7 @@ mod tests {
         assert!(key.accessor.is_none());
         assert_eq!(key.modifiers.len(), 1);
         assert_eq!(key.modifiers[0].modifier, Modifier::YearMonth);
-        assert!(!is_builtin_key(&key.base_key));
+        assert!(BuiltinKey::from_str(&key.base_key).is_none());
         assert!(key.has_transforms());
     }
 

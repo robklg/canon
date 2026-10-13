@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use crate::core::domain;
 use crate::core::domain::time::zone::UserZone;
-use crate::expr::Filter;
+use crate::expr::read_filters;
 use crate::notes::SurveyNoteContext;
 use crate::survey::ops::compute::{
     compute_survey, group_by_archive_root, ArchiveScopeStatement, SurveyOutcome, SurveyParams,
@@ -72,14 +72,11 @@ pub fn run_survey(
     params: &SurveyParams,
     zone: &UserZone,
 ) -> Result<SurveyRun> {
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let all_roots = crate::core::repo::root::fetch_all(conn)?;
 
-    // Survey reads source-side selections, so the roles of the containing
+    // Survey works on source-side selections, so the roles of the containing
     // roots decide what it can be asked here — before any selection exists,
     // and never from a count. A scope entirely inside archives has no
     // question to answer; a mixed scope narrows and says what it set aside.

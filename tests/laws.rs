@@ -791,12 +791,12 @@ const LAWS: &[Law] = &[
     Law {
         // Every time is read on the user's clock, one way: an instant through the zone, a
         // clock reading as written, never a clock reading turned into an instant. The
-        // verifier pins the span through both clock-change hours; the comparison-level
-        // claim joins it when `--where` binds typed dates to spans (the trail's period
-        // comparisons are pinned beside the span, in `value.rs` and the trail).
+        // verifier holds the rule's promise end to end: a printed time typed back into
+        // `--where` selects exactly what prints the same, through both clock-change hours.
+        // The span itself is pinned beside its owner, the period table beside `satisfies`.
         name: "frame rule",
         owner: "core/domain/time/value.rs",
-        verifier: "the_frame_rule_reads_both_clock_change_hours_on_the_users_clock",
+        verifier: "a_printed_value_typed_back_selects_exactly_what_prints_the_same",
         reach: Reach::Canon,
         authority: Authority::Distilled,
         record: "2026-09-26",
@@ -832,6 +832,29 @@ const LAWS: &[Law] = &[
         reach: Reach::Unit("core"),
         authority: Authority::Recognised,
         record: "2026-10-05",
+    },
+    Law {
+        // Between parse and evaluation every `--where` clause reads its value once, as its
+        // key's type, and a value that cannot mean anything for the key is refused by name
+        // before anything is selected. Evaluation takes only bound filters, so an unbound one
+        // cannot run; `facts` reads its report keys through the same binding.
+        name: "binding",
+        owner: "expr/ops/bind.rs",
+        verifier: "a_value_that_cannot_mean_anything_is_refused_before_selection",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Distilled,
+        record: "2026-09-26",
+    },
+    Law {
+        // A value or key Canon prints reads back, typed into `--where`, as itself: the
+        // writer asks the reader — the tokenizer, alias expansion and the binder — and keeps
+        // no character list of its own.
+        name: "printing rule",
+        owner: "expr/domain/print.rs",
+        verifier: "every_printed_value_reads_back_as_itself",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Recognised,
+        record: "2026-10-11",
     },
 ];
 

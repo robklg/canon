@@ -13,7 +13,7 @@ use crate::core::domain::IncludeSet;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
-use crate::expr::Filter;
+use crate::expr::{read_filters, read_report};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 use crate::expr::{BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey};
 use crate::facts::ops::maintain::{
@@ -56,22 +56,17 @@ pub fn run(
         bail!("--group-by requires --key to be specified");
     }
 
-    // Build grouping keys list
-    let mut grouping_keys: Vec<ParsedFactKey> = Vec::new();
-    if by_root {
-        grouping_keys.push(ParsedFactKey::parse("source.root")?);
-    }
-    for key in group_by {
-        grouping_keys.push(ParsedFactKey::parse(key)?);
-    }
-
     let conn = db.conn_mut();
 
-    // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    // Read every key named and every filter before anything is selected, so every cause —
+    // a wrong-type modifier, a value a key cannot read — is refused up front, together.
+    let grouping: Vec<String> = by_root
+        .then(|| "source.root".to_string())
+        .into_iter()
+        .chain(group_by.iter().cloned())
+        .collect();
+    let reading = read_report(conn, key_arg, &grouping, filter_strs)?;
+    let (main_key, grouping_keys, filters) = (reading.key, reading.grouping, reading.filters);
 
     let scopes = classify_all(scope_prefixes);
     let params = SelectionParams {
@@ -133,9 +128,7 @@ pub fn run(
         }
     }
 
-    if let Some(fact_key) = key_arg {
-        let main_key = ParsedFactKey::parse(fact_key)?;
-
+    if let (Some(fact_key), Some(main_key)) = (key_arg, main_key) {
         if !grouping_keys.is_empty() {
             let result = compute_grouped_distribution(
                 conn,
@@ -289,7 +282,7 @@ fn key_row(key_info: &KeyInfo, total_sources: usize) -> String {
 /// The lines under the listing that name its keys of mixed type: the statement, then the
 /// way out, one command per key; none when no listed key is mixed.
 fn mixed_key_lines(result: &AllKeysResult) -> Vec<String> {
-    use crate::core::domain::fact::{mixed_type_statement, mixed_type_way_out};
+    use crate::expr::{mixed_type_statement, mixed_type_way_out};
 
     let mixed: Vec<&str> = result
         .keys
@@ -369,14 +362,6 @@ fn display_distribution(result: &DistributionResult, display_key: &str, key: &Pa
             "Showing {} of {} values (use --limit 0 for all)",
             result.entries.len(),
             result.total_distinct_values
-        );
-    }
-
-    // Warn about skipped values due to type mismatch
-    if result.skipped_type_mismatch > 0 {
-        eprintln!(
-            "Warning: skipped {} values with incompatible type for transform",
-            result.skipped_type_mismatch
         );
     }
 }
@@ -535,10 +520,7 @@ pub fn delete_facts(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all(scope_prefixes);
 
@@ -856,10 +838,10 @@ mod tests {
         assert_eq!(
             mixed_key_lines(&result),
             vec![
-                "'content.File Size' is of mixed type, so filters and patterns cannot use its values:",
+                r#""content.File Size" is of mixed type, so filters and patterns cannot use its values:"#,
                 "only values of one type can be compared or formatted correctly.",
                 "To inspect it and learn how to convert it to one type:",
-                "  `canon facts convert 'content.File Size'`",
+                r#"  `canon facts convert '"content.File Size"'`"#,
             ]
         );
     }
@@ -884,7 +866,7 @@ mod tests {
                 "only values of one type can be compared or formatted correctly.",
                 "To inspect each and learn how to convert to one type:",
                 "  `canon facts convert content.CreateDate`",
-                "  `canon facts convert 'content.File Size'`",
+                r#"  `canon facts convert '"content.File Size"'`"#,
             ]
         );
     }

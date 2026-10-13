@@ -1194,7 +1194,7 @@ mod tests {
     /// Eve 2023 is 1 January 2024 in Amsterdam (the lock's zone) and still 2023 in New York
     /// (the machine's) and in UTC, so `{source.mtime|year}` places it under `2024`.
     #[test]
-    fn apply_places_on_the_locks_zone_whatever_the_machines() {
+    fn apply_reads_times_in_the_locks_zone_whatever_the_machines() {
         use crate::core::domain::time::zone::{with_test_zone, UserZone};
         let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);

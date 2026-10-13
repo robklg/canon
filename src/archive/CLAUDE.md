@@ -237,8 +237,8 @@ source stands now, and a lock is a snapshot of where it stood.
   selection; the census compares the lock's bytes across a refused refresh
   (`a_refresh_through_a_parked_root_leaves_the_lock_standing`).
 - **`cluster status` states** every door it reaches **in the conditional, naming the act each one
-  turns away** (`apply would refuse`, `cluster refresh would refuse`). A report performs nothing,
-  so `set aside` and `refused` are both false of it, and a reader whose next step has just been
+  turns away** (`apply would be rejected`, `cluster refresh would be rejected`). A report performs nothing,
+  so `set aside` and `rejected` are both false of it, and a reader whose next step has just been
   withheld needs the act that is blocked. A root reached more than one way is stated **once**, with
   both acts in the verb and `<what>` by precedence place > destination > origin — the dedupe is
   honest only because the verb carries what it drops (`cli/cluster.rs::manifest_door_lines`).
@@ -306,10 +306,11 @@ the report invited the one command that refuses, in four separate ways.
   states (absent, hash, header and its zone), the pattern's, and the two ends' doors stop `apply`;
   the recorded scope's door, the source-existence policy's terminal rule and the manifest's zone
   (a line this machine cannot read, or no line on a machine whose zone cannot be written down)
-  and a query line that does not parse stop `cluster refresh` — read through the refresh's own
-  `settle_manifest_zone` and `ops/manifest.rs::parse_recorded_query`, so the report names no rebuild
-  those turn away. **Not reached**: a query line that parses but names an unknown key or modifier,
-  refused only inside the selection, which neither command collects. A lock's header is one `LockHeaderStanding`, so a lock with no header
+  and a query line that cannot run stop `cluster refresh` — read through the refresh's own
+  `settle_manifest_zone` and `ops/manifest.rs::parse_recorded_query`, which binds the query as
+  `--where` is bound, so every cause reading and binding refuse the recorded text for is
+  collected before anything is selected, and the report names no rebuild those turn away.
+  A lock's header is one `LockHeaderStanding`, so a lock with no header
   raises its older row and never a zone row; both zone-of-the-lock rows are cleared by a refresh
   that runs, which writes a zone it read on this machine, and both zone-of-the-manifest rows owe
   no way back of their own — the report states them in the refresh's words.
@@ -335,8 +336,7 @@ the report invited the one command that refuses, in four separate ways.
   rather than assuming it away) and the derivation's
   (`an_absent_lock_is_a_state_the_read_states`, over a real manifest whose pattern cannot expand
   and whose lock was removed).
-- **A rebuild is named where it would run and would clear every obstacle in the apply's way**
-  (short of the unknown key or modifier above). One
+- **A rebuild is named where it would run and would clear every obstacle in the apply's way**. One
   row answers conditionally: a pattern that will not expand is cleared only where the lock predates
   the measurement *and* the recorded scope confirms something to measure from — otherwise the
   rebuild changes the stated reason and nothing else
@@ -465,13 +465,12 @@ the report invited the one command that refuses, in four separate ways.
   machine's zone in the manifest's editable `zone` line and the lock's header, refusing a zone
   with no name to record; `cluster refresh` settles the line (`domain.rs::settle_manifest_zone`,
   which `cluster status` reads too), selects on it and writes it into both files; `apply` and
-  `cluster status` place on the lock's zone (`ops/manifest.rs::LockFile::zone`), never the
+  `cluster status` read times in the lock's zone (`ops/manifest.rs::LockFile::zone`), never the
   machine's. An unreadable line is one refusal among a refresh's collected causes, never a parse
   error. A lock with no zone this machine reads is refused by `apply` before the plan and the
   decision row, and `cluster status` computes no destination and states no counts for it — a lock
-  recording no clock is placed on none, and a zero nobody measured is not said. Zones compare parsed, never as text (`RecordedZone::same_zone`). Pinned by
-  `apply_places_on_the_locks_zone_whatever_the_machines` and its siblings at each reader. **Not
-  reached**: a typed date in a manifest's query, which still compares the stored number.
+  recording no time zone gets no destinations, and a zero nobody measured is not said. Zones compare parsed, never as text (`RecordedZone::same_zone`). Pinned by
+  `apply_reads_times_in_the_locks_zone_whatever_the_machines` and its siblings at each reader.
 - **Lock-file test machinery shared across strata lives beside the format it writes**:
   `ops/manifest.rs::fixtures`, a `#[cfg(test)]` module, serves the tests of `ops/status.rs` and
   `cli/apply.rs`, which stay in-file with the code they exercise. The root's externalized `tests/`

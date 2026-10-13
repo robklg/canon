@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(
             named,
             vec![
-                "/mnt/d1 suspended — refused: /mnt/d1/photos · canon roots unsuspend path:/mnt/d1"
+                "/mnt/d1 suspended — rejected: /mnt/d1/photos · canon roots unsuspend path:/mnt/d1"
             ]
         );
 
@@ -465,7 +465,7 @@ mod tests {
         write_closed_door(&mut buf, &door, DoorVerb::Refused);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "/mnt/d1 suspended — refused: /mnt/d1/photos · canon roots unsuspend path:/mnt/d1\nno sources known at /live/2012 — skipped\n"
+            "/mnt/d1 suspended — rejected: /mnt/d1/photos · canon roots unsuspend path:/mnt/d1\nno sources known at /live/2012 — skipped\n"
         );
     }
 
@@ -481,7 +481,7 @@ mod tests {
             line,
             "/mnt/d1 suspended · canon roots unsuspend path:/mnt/d1"
         );
-        assert!(!line.contains("set aside") && !line.contains("refused"));
+        assert!(!line.contains("set aside") && !line.contains("rejected"));
         assert_eq!(parked_pause(&[]), None, "nothing parked, nothing to say");
 
         // Every door is named: reading behind two and stating one would leave

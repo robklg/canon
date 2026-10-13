@@ -15,7 +15,9 @@ use jiff::ToSpan;
 use crate::core::domain::decision::Decision;
 use crate::core::domain::fate::{decision_family, fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::time::reading::{read_time, TimeReadError};
-use crate::core::domain::time::value::{clock_secs_as_if_utc, ClockSpan, Precision, TimeValue};
+use crate::core::domain::time::value::{
+    clock_secs_as_if_utc, ClockSpan, PeriodOp, Precision, TimeValue,
+};
 use crate::core::domain::time::zone::UserZone;
 use crate::notes::Note;
 
@@ -141,8 +143,8 @@ pub fn parse_when(input: &str, today: Date) -> Result<ParsedWhen, TimeReadError>
 }
 
 /// The time lens: its kind and its period, read once on the user's clock through the frame
-/// rule. Selection compares each time's span with the period ([`ClockSpan::lies_inside`] for
-/// `--on`, [`ClockSpan::starts_at_or_after`] for `--since`) — clock readings only, so the
+/// rule. Selection compares each time's span with the period through the whole-period table
+/// ([`ClockSpan::satisfies`]: `=` for `--on`, `>=` for `--since`) — clock readings only, so the
 /// repeated hour and the skipped one are right by construction.
 #[derive(Debug, Clone, Copy)]
 pub struct TimeLens {
@@ -173,11 +175,12 @@ impl TimeLens {
             return false;
         };
         let span = value.on_clock(zone);
-        if self.since {
-            span.starts_at_or_after(&self.period)
+        let op = if self.since {
+            PeriodOp::StartsAtOrAfterStart
         } else {
-            span.lies_inside(&self.period)
-        }
+            PeriodOp::Inside
+        };
+        span.satisfies(op, &self.period)
     }
 
     /// The database fetch's bounds `[start, end)` in seconds since 1970 — a speed path, never

@@ -1,4 +1,4 @@
-//! Times read on the user's clock, through the built binary.
+//! Times in the user's time zone, through the built binary.
 //!
 //! One temp canon home: a file whose save time is 23:30 UTC on New Year's Eve 2023, and
 //! seven files each carrying one written form of a time under the key `Taken`. The
@@ -272,7 +272,7 @@ fn the_save_time_reads_on_the_users_clock() {
     }
 }
 
-/// A `TZ` Canon cannot read is named once on stderr, and times are read in UTC.
+/// A `TZ` Canon cannot read is named once on stderr, and times are shown and compared in UTC.
 #[test]
 fn a_zone_canon_cannot_read_is_named_and_utc_is_read() {
     let home = Home::new();
@@ -283,7 +283,7 @@ fn a_zone_canon_cannot_read_is_named_and_utc_is_read() {
     );
     assert_eq!(
         run.stderr,
-        "TZ=Europe/Amsterdm is not a time zone Canon can read; times are read in UTC\n"
+        "TZ=Europe/Amsterdm is not a time zone Canon can read; times are shown and compared in UTC\n"
     );
     assert!(
         run.stdout.lines().any(|line| line.starts_with("2023 ")),
@@ -348,7 +348,7 @@ impl Home {
         ]);
         let made = self.run(tz, &args, None);
         assert!(
-            made.stdout.contains(&format!("Times are read on {tz}")),
+            made.stdout.contains(&format!("Time zone: {tz}, recorded")),
             "{}{}",
             made.stdout,
             made.stderr
@@ -373,12 +373,12 @@ impl Home {
     }
 }
 
-/// **The New Year places on the manifest's zone on any machine.** A manifest recorded in
+/// **The New Year is read in the manifest's time zone on any machine.** A manifest recorded in
 /// Amsterdam, refreshed and applied in New York, places the file saved at 23:30 UTC on New
 /// Year's Eve 2023 under 2024 — Amsterdam's year — and says which clock it read. With the
 /// zone line edited to New York and refreshed, the same file places under 2023.
 #[test]
-fn the_new_year_places_on_the_manifests_zone_on_any_machine() {
+fn the_new_year_is_read_in_the_manifests_zone_on_any_machine() {
     for (zone_line, year) in [(None, "2024"), (Some("America/New_York"), "2023")] {
         let home = Home::new();
         let manifest = home.manifest_made_in("Europe/Amsterdam");
@@ -390,7 +390,7 @@ fn the_new_year_places_on_the_manifests_zone_on_any_machine() {
         match zone_line {
             None => assert!(
                 refreshed.stdout.contains(
-                    "times read on Europe/Amsterdam, as the manifest records (this machine: America/New_York)"
+                    "times are in Europe/Amsterdam, as the manifest records (this machine: America/New_York)"
                 ),
                 "{}",
                 refreshed.stdout
@@ -459,7 +459,7 @@ fn an_old_lock_is_refused_in_friendly_words() {
 }
 
 /// **A manifest command prints no unknown-zone notice**: it reads the manifest's recorded
-/// zone, so "times are read in UTC" would be false there — on a machine whose `TZ` Canon
+/// zone, so "times are shown and compared in UTC" would be false there — on a machine whose `TZ` Canon
 /// cannot read, `cluster refresh` and `cluster status` say nothing of it.
 #[test]
 fn manifest_commands_print_no_unknown_zone_notice() {
@@ -471,19 +471,19 @@ fn manifest_commands_print_no_unknown_zone_notice() {
     ] {
         let run = home.run("Europe/Amsterdm", &args, None);
         assert!(
-            !run.stderr.contains("times are read in UTC"),
+            !run.stderr.contains("times are shown and compared in UTC"),
             "{args:?}: {}",
             run.stderr
         );
     }
 }
 
-/// **Camera dates place on the manifest's zone too**, the other half of the New Year check: an
+/// **Camera dates are read in the manifest's time zone too**, the other half of the New Year check: an
 /// instant written with `-05:00` and one written in UTC are 1 January 2024 in Amsterdam, and a
-/// clock reading with no zone places as written — on a New York machine, from a manifest
+/// clock reading with no offset is used as written — on a New York machine, from a manifest
 /// recording Amsterdam.
 #[test]
-fn a_camera_date_places_on_the_manifests_zone_and_a_clock_reading_as_written() {
+fn a_camera_date_is_read_in_the_manifests_zone_and_a_clock_reading_as_written() {
     let home = Home::new();
     let manifest = home.manifest_over(
         "Europe/Amsterdam",
@@ -552,21 +552,21 @@ impl Home {
         ids
     }
 
-    /// `trail show <id>`'s `read times on:` value, checked to sit on the line after `command:`.
+    /// `trail show <id>`'s `time zone:` value, checked to sit on the line after `command:`.
     fn shown_zone(&self, id: i64) -> String {
         let run = self.run("UTC", &["trail", "show", &id.to_string()], None);
         let lines: Vec<&str> = run.stdout.lines().collect();
         let at = lines
             .iter()
-            .position(|l| l.starts_with("  read times on: "))
-            .unwrap_or_else(|| panic!("no read times on line:\n{}", run.stdout));
+            .position(|l| l.starts_with("  time zone: "))
+            .unwrap_or_else(|| panic!("no time zone line:\n{}", run.stdout));
         assert!(
             at > 0 && lines[at - 1].starts_with("  command:"),
-            "read times on: must follow command:\n{}",
+            "time zone: must follow command:\n{}",
             run.stdout
         );
         lines[at]
-            .strip_prefix("  read times on: ")
+            .strip_prefix("  time zone: ")
             .expect("found by its prefix")
             .to_string()
     }

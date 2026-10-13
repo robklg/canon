@@ -342,7 +342,7 @@ fn an_act_standing_in_a_parked_root_is_refused_and_writes_nothing() {
         let run = fx.run_in(&here, &argv);
         assert_eq!(run.code, 1, "{argv:?} must be refused");
         let spoken = format!("{}{}", run.stdout, run.stderr);
-        assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+        assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
         assert!(!spoken.contains("Error:"), "{argv:?}: {spoken}");
     }
 
@@ -364,7 +364,7 @@ fn an_act_standing_in_a_parked_root_is_refused_and_writes_nothing() {
     assert_door_line(
         run.stdout.lines().next().unwrap_or_default(),
         &root,
-        "refused",
+        "rejected",
     );
     assert!(!fx.path("m.toml").exists(), "no manifest is written");
 
@@ -493,7 +493,7 @@ fn the_roots_door_names_a_parked_root_rather_than_calling_it_absent() {
     let rm = fx.run(&["roots", "rm", &format!("path:{root}"), "--yes"]);
     assert_eq!(rm.code, 1);
     let spoken = format!("{}{}", rm.stdout, rm.stderr);
-    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
     assert!(!spoken.contains("No root for path"), "{spoken}");
 
     let comment = fx.run(&["roots", "comment", &format!("path:{root}"), "a label"]);
@@ -537,7 +537,7 @@ fn a_load_bearing_location_behind_a_door_refuses_the_whole_ask() {
         let run = fx.run(&argv);
         assert_eq!(run.code, 1, "{argv:?}");
         let spoken = format!("{}{}", run.stdout, run.stderr);
-        assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+        assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
         assert!(!spoken.contains("Error:"), "{argv:?}: {spoken}");
         assert!(
             !spoken.contains("0 of"),
@@ -656,7 +656,7 @@ fn a_destination_in_a_parked_archive_names_the_door() {
     ]);
     assert_eq!(run.code, 1);
     let spoken = format!("{}{}", run.stdout, run.stderr);
-    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
     assert!(!spoken.contains("not inside any registered"), "{spoken}");
     assert!(!spoken.contains("Error:"), "{spoken}");
     assert!(!fx.path("m.toml").exists());
@@ -860,7 +860,7 @@ fn a_refresh_through_a_parked_root_leaves_the_lock_standing() {
 
     assert_eq!(run.code, 1, "a door refuses: {}{}", run.stdout, run.stderr);
     let spoken = format!("{}{}", run.stdout, run.stderr);
-    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
     assert!(!spoken.contains("Error:"), "{spoken}");
     assert!(
         !spoken.contains("No sources matched"),
@@ -921,7 +921,7 @@ fn a_parked_scope_line_refuses_a_refresh_whose_entries_stand_in_the_open() {
         .filter(|l| l.contains(&format!("{root} suspended")))
         .collect();
     assert_eq!(doors.len(), 1, "one door, one line: {spoken}");
-    assert_door_line(doors[0], &root, "refused");
+    assert_door_line(doors[0], &root, "rejected");
     // Not decorative: `parked_doors` composes place reaches only, so this
     // fails the day a lock cause is wired back into the refresh's door —
     // which is the defect the repair removed.
@@ -1022,7 +1022,7 @@ fn a_refresh_rebuilds_a_lock_without_what_stands_behind_a_door() {
         .lines()
         .find(|l| l.contains("suspended"))
         .unwrap_or_default();
-    assert_door_line(door, &root, "apply would refuse");
+    assert_door_line(door, &root, "apply would be rejected");
     assert!(door.contains("origin of"), "what stands behind it: {door}");
     assert!(!status.stdout.contains("To apply:"), "{}", status.stdout);
     assert!(
@@ -1098,7 +1098,7 @@ fn a_lock_wholly_behind_a_door_is_still_pointed_at_the_rebuild() {
         status
             .stdout
             .lines()
-            .any(|l| l.contains("suspended") && l.contains("apply would refuse")),
+            .any(|l| l.contains("suspended") && l.contains("apply would be rejected")),
         "the door is stated: {}",
         status.stdout
     );
@@ -1151,7 +1151,7 @@ fn apply_refuses_at_either_end_of_a_closed_door() {
                 .lines()
                 .find(|l| l.contains("suspended"))
                 .unwrap_or_default();
-            assert_door_line(door, &root, "refused");
+            assert_door_line(door, &root, "rejected");
             // The `<what>` slot's role vocabulary: how the act reached the
             // root, in the act's own nouns — the destination, or the origin
             // and the sources this run would have carried from it.
@@ -1336,7 +1336,7 @@ fn retire_dry_run_reads_a_parked_root_and_a_real_run_refuses() {
     // them. Asserted on the *first* line, which is what distinguishes the
     // ordering — a door stated last would pass a "somewhere in the output"
     // check under either arrangement.
-    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
     assert!(
         !spoken.contains("Retirement review:"),
         "a refused act shows no review: {spoken}"
@@ -1358,7 +1358,7 @@ fn retire_dry_run_reads_a_parked_root_and_a_real_run_refuses() {
     let both = fx.run(&["roots", "retire", &format!("path:{root}"), "--yes"]);
     assert_eq!(both.code, 1);
     let spoken = format!("{}{}", both.stdout, both.stderr);
-    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "refused");
+    assert_door_line(spoken.lines().next().unwrap_or_default(), &root, "rejected");
     assert!(
         !spoken.contains("needs an archive root"),
         "the shelf's absence is not the answer to a question about this root: {spoken}"
@@ -1500,7 +1500,7 @@ fn an_apply_invitation_stands_where_the_door_is_not_its_own() {
         .unwrap_or_default();
     // Status states the door in the act's own conditional: this one is
     // `cluster refresh`'s, whose re-query reads the recorded scope.
-    assert_door_line(door, &parked, "cluster refresh would refuse");
+    assert_door_line(door, &parked, "cluster refresh would be rejected");
 
     // And the step stands, because this door is not one an apply meets.
     assert!(

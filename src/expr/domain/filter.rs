@@ -8,23 +8,24 @@
 
 use anyhow::{bail, Result};
 
-use super::key::normalize_key_string;
-use crate::core::domain::fact::FactValue;
+use super::key::{parse_accessor, read_base_key};
+use super::transform::{parse_modifier, ModifierCall, PathAccessor};
+use crate::core::domain::time::value::PeriodOp;
 
 // ============================================================================
 // Expression AST
 // ============================================================================
 
+/// The comparison operators. `!=`, `!~` and `NOT IN` have no operator of their own: each
+/// parses as `NOT` of its positive form, so "everything else" means one thing everywhere.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CompareOp {
     Eq,
-    Ne,
     Gt,
     Ge,
     Lt,
     Le,
-    Glob,    // ~
-    NotGlob, // !~
+    Glob, // ~
 }
 
 /// Status predicates — computed boolean state, not stored facts.
@@ -52,25 +53,58 @@ pub const STATUS_KEYWORDS: &[(&str, StatusPredicate)] = &[
     ("enriched", StatusPredicate::Enriched),
 ];
 
-/// Filter expression AST - supports boolean logic
+/// A value as written in a filter: its text, and whether it was quoted. Quoting is what
+/// says a value is text where the bare word could also read as a number or a time.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::expr) struct Literal {
+    pub(in crate::expr) text: String,
+    pub(in crate::expr) quoted: bool,
+    /// The value exactly as typed, quotes included — what a way out keeps of it.
+    pub(in crate::expr) written: String,
+}
+
+/// A key as written: the text typed (`written`), its name part as typed (`written_name`,
+/// quotes included), and what it reads as — the base key (normalized as a bare key is, an
+/// alias read as its stored key), its accessor and its modifiers. The one key reader:
+/// `--where`, `--key` and `--group-by` all read a key through [`WrittenKey::read`].
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::expr) struct WrittenKey {
+    pub(in crate::expr) written: String,
+    pub(in crate::expr) written_name: String,
+    pub(in crate::expr) base: String,
+    pub(in crate::expr) accessor: Option<PathAccessor>,
+    pub(in crate::expr) modifiers: Vec<ModifierCall>,
+}
+
+/// Filter expression AST - supports boolean logic. Each clause keeps its own text as written
+/// (`clause`), so a refusal can show the broken part of the filter the user typed.
 #[derive(Debug, Clone)]
 pub enum Expr {
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Not(Box<Expr>),
     Exists {
-        key: String,
+        key: WrittenKey,
+        clause: String,
     },
     Compare {
-        key: String,
+        key: WrittenKey,
         op: CompareOp,
-        value: String,
+        value: Literal,
+        clause: String,
     },
     In {
-        key: String,
-        values: Vec<String>,
+        key: WrittenKey,
+        values: Vec<Literal>,
+        clause: String,
     },
     Status(StatusPredicate),
+    /// A clause whose key cannot be read (an unknown modifier, a misplaced accessor): parsed
+    /// past, so the clauses around it are still read, and refused by binding as its own cause.
+    Unread {
+        clause: String,
+        error: String,
+    },
 }
 
 /// Result of applying filters, including metadata about which status predicates were used.
@@ -112,24 +146,6 @@ impl UsedStatus {
     }
 }
 
-/// A parsed `--where` expression.
-///
-/// Opaque on purpose. Every consumer parses a string and hands the result
-/// onward; nothing outside the expression facility reads the tree inside —
-/// which is what the field's visibility says in the type. Keeping the
-/// syntax tree behind the newtype means the language can grow — a filter
-/// that remembers the text it was written as, or the name it was saved
-/// under — without touching a caller.
-#[derive(Debug, Clone)]
-pub struct Filter(pub(in crate::expr) Expr);
-
-impl Filter {
-    /// Parse a `--where` expression string.
-    pub fn parse(s: &str) -> Result<Self> {
-        Ok(Filter(Expr::parse(s)?))
-    }
-}
-
 impl Expr {
     /// Parse a filter expression string into an AST
     pub fn parse(s: &str) -> Result<Self> {
@@ -137,13 +153,13 @@ impl Expr {
         if tokens.is_empty() {
             bail!("Empty filter expression");
         }
-        let mut parser = Parser::new(&tokens);
+        let chars: Vec<char> = s.chars().collect();
+        let mut parser = Parser::new(&tokens, &chars);
         let expr = parser.parse_expr()?;
         if parser.pos < tokens.len() {
-            bail!(
-                "Unexpected token after expression: {:?}",
-                tokens[parser.pos]
-            );
+            let token = &tokens[parser.pos];
+            let text: String = chars[token.start..token.end].iter().collect();
+            bail!("Unexpected '{text}' after a complete clause");
         }
         Ok(expr)
     }
@@ -154,7 +170,7 @@ impl Expr {
 // ============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
-enum Token {
+enum Tok {
     LParen,
     RParen,
     And,
@@ -163,9 +179,20 @@ enum Token {
     In,
     Comma,
     Op(CompareOp),
+    /// `!=` or `!~`: `NOT` of the positive operator.
+    NegatedOp(CompareOp),
     Exists, // The '?' suffix
-    Ident(String),
-    Value(String),
+    /// A key, as the text it was written as (quotes, accessor and modifiers included).
+    Key(String),
+    Value(Literal),
+}
+
+/// A token and where it sits in the filter, in characters: `start..end`.
+#[derive(Debug, Clone)]
+struct Token {
+    tok: Tok,
+    start: usize,
+    end: usize,
 }
 
 /// Check if a character is valid in a bare value (after a comparison operator).
@@ -179,22 +206,202 @@ fn is_value_char(c: char) -> bool {
         )
 }
 
+/// Whether a character continues a bare key's name.
+fn is_key_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '/')
+}
+
 /// Check if the token context signals that the next token should be parsed as a value.
 /// This is true after comparison operators, after commas (for IN lists),
 /// and after LParen that follows IN (first value in an IN list).
 fn expects_value(tokens: &[Token]) -> bool {
-    match tokens.last() {
-        Some(Token::Op(_)) | Some(Token::Comma) => true,
+    match tokens.last().map(|t| &t.tok) {
+        Some(Tok::Op(_)) | Some(Tok::NegatedOp(_)) | Some(Tok::Comma) => true,
         // First value in IN list: IN (value, ...)
-        Some(Token::LParen) => tokens.len() >= 2 && matches!(tokens[tokens.len() - 2], Token::In),
+        Some(Tok::LParen) => tokens.len() >= 2 && matches!(tokens[tokens.len() - 2].tok, Tok::In),
+        _ => false,
+    }
+}
+
+/// Read quoted text starting at the opening quote `chars[start]`: inside, a doubled quote of
+/// the same kind is one literal quote, and every other character — a backslash included — is
+/// itself. Returns the text and the index just past the closing quote.
+fn read_quoted(chars: &[char], start: usize) -> Result<(String, usize)> {
+    let quote = chars[start];
+    let mut text = String::new();
+    let mut i = start + 1;
+    loop {
+        match chars.get(i) {
+            None => bail!("Unterminated string"),
+            Some(&c) if c == quote => {
+                if chars.get(i + 1) == Some(&quote) {
+                    text.push(quote);
+                    i += 2;
+                } else {
+                    return Ok((text, i + 1));
+                }
+            }
+            Some(&c) => {
+                text.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Where a key that starts at `chars[start]` ends: a quoted name (either quote mark, an inner
+/// quote doubled) or a bare one, then any accessor (`[…]`) and modifiers (`|name`, and after
+/// `|bucket(` everything to the matching `)`).
+fn key_extent(chars: &[char], start: usize) -> Result<usize> {
+    let mut i = if matches!(chars.get(start), Some('"' | '\'')) {
+        read_quoted(chars, start)?.1
+    } else {
+        let mut i = start;
+        while chars.get(i).is_some_and(|&c| is_key_name_char(c)) {
+            i += 1;
+        }
+        i
+    };
+    loop {
+        match chars.get(i) {
+            Some('[') => {
+                while chars.get(i).is_some_and(|&c| c != ']') {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    bail!("Unclosed '[' in accessor");
+                }
+                i += 1;
+            }
+            Some('|') => {
+                i += 1;
+                while chars
+                    .get(i)
+                    .is_some_and(|&c| c.is_alphanumeric() || c == '_')
+                {
+                    i += 1;
+                }
+                if chars.get(i) == Some(&'(') {
+                    while chars.get(i).is_some_and(|&c| c != ')') {
+                        i += 1;
+                    }
+                    if i >= chars.len() {
+                        bail!("Unclosed '(' in modifier");
+                    }
+                    i += 1;
+                }
+            }
+            _ => return Ok(i),
+        }
+    }
+}
+
+impl WrittenKey {
+    /// Read a key as written: `source.mtime|year`, `content.SourceFile[-1]`,
+    /// `"content.File Size"|bucket(60,300)`. A quoted name keeps every character literal (an
+    /// inner quote doubled); accessor and modifiers follow the closing quote. Quoting changes
+    /// how a key is read, never which key: the name is normalized as a bare one is.
+    pub(in crate::expr) fn read(text: &str) -> Result<WrittenKey> {
+        let chars: Vec<char> = text.chars().collect();
+        let end = key_extent(&chars, 0)?;
+        if end != chars.len() || chars.is_empty() {
+            bail!("Not a key: '{text}'");
+        }
+        let (name, name_end) = if matches!(chars.first(), Some('"' | '\'')) {
+            read_quoted(&chars, 0)?
+        } else {
+            let mut i = 0;
+            while chars.get(i).is_some_and(|&c| is_key_name_char(c)) {
+                i += 1;
+            }
+            (chars[..i].iter().collect(), i)
+        };
+        if name.is_empty() {
+            bail!("Not a key: '{text}'");
+        }
+        let written_name: String = chars[..name_end].iter().collect();
+        let tail: String = chars[name_end..].iter().collect();
+
+        let (accessor_part, modifier_part) = match tail.find('|') {
+            #[expect(clippy::string_slice, reason = "a `find` position")]
+            Some(at) => (&tail[..at], &tail[at..]),
+            None => (tail.as_str(), ""),
+        };
+        let accessor = if accessor_part.is_empty() {
+            None
+        } else {
+            match accessor_part
+                .strip_prefix('[')
+                .and_then(|a| a.strip_suffix(']'))
+            {
+                Some(inner) if !inner.contains('[') && !inner.contains(']') => {
+                    Some(parse_accessor(inner)?)
+                }
+                _ => bail!("An accessor ('[…]') comes once, before any modifier: '{text}'"),
+            }
+        };
+
+        let (base, leading_modifier) = read_base_key(&name);
+        let mut modifiers = Vec::new();
+        if let Some(modifier) = leading_modifier {
+            modifiers.push(parse_modifier(modifier)?);
+        }
+        for written in modifier_part.split('|').skip(1) {
+            if written.contains('[') {
+                bail!("An accessor ('[…]') comes once, before any modifier: '{text}'");
+            }
+            modifiers.push(parse_modifier(written.trim())?);
+        }
+        Ok(WrittenKey {
+            written: text.to_string(),
+            written_name,
+            base,
+            accessor,
+            modifiers,
+        })
+    }
+
+    /// Whether the key reads its base through an accessor or a modifier.
+    pub(in crate::expr) fn has_transforms(&self) -> bool {
+        self.accessor.is_some() || !self.modifiers.is_empty()
+    }
+}
+
+/// Whether `text`, typed bare after `=`, is read back by the tokenizer as one unquoted value
+/// with that same text — the reader's half of the printing rule, asked of the reader itself.
+pub(in crate::expr) fn reads_as_one_bare_value(text: &str) -> bool {
+    match tokenize(&format!("k={text}")).as_deref() {
+        Ok(
+            [_, _, Token {
+                tok: Tok::Value(value),
+                ..
+            }],
+        ) => !value.quoted && value.text == text,
+        _ => false,
+    }
+}
+
+/// Whether `key`, typed bare before `?`, is read back by the tokenizer as one key token with
+/// that same text.
+pub(in crate::expr) fn reads_as_one_bare_key(key: &str) -> bool {
+    match tokenize(&format!("{key}?")).as_deref() {
+        Ok(
+            [Token {
+                tok: Tok::Key(written),
+                ..
+            }, Token {
+                tok: Tok::Exists, ..
+            }],
+        ) => written == key && !key.starts_with(['"', '\'']),
         _ => false,
     }
 }
 
 fn tokenize(s: &str) -> Result<Vec<Token>> {
-    let mut tokens = Vec::new();
+    let mut tokens: Vec<Token> = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
+    let push = |tokens: &mut Vec<Token>, tok, start, end| tokens.push(Token { tok, start, end });
 
     while i < chars.len() {
         // Skip whitespace
@@ -202,171 +409,116 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
             i += 1;
             continue;
         }
+        let start = i;
 
         // Context-aware value parsing: after a comparison operator, comma,
         // or opening paren of an IN list, parse as a value with liberal characters.
         if expects_value(&tokens) {
-            // Quoted strings in value position
             if chars[i] == '"' || chars[i] == '\'' {
-                let quote = chars[i];
-                i += 1;
-                let start = i;
-                while i < chars.len() && chars[i] != quote {
-                    i += 1;
-                }
-                if i >= chars.len() {
-                    bail!("Unterminated string");
-                }
-                let val: String = chars[start..i].iter().collect();
-                tokens.push(Token::Value(val));
-                i += 1; // skip closing quote
+                let (text, end) = read_quoted(&chars, i)?;
+                let written = chars[start..end].iter().collect();
+                push(
+                    &mut tokens,
+                    Tok::Value(Literal {
+                        text,
+                        quoted: true,
+                        written,
+                    }),
+                    start,
+                    end,
+                );
+                i = end;
                 continue;
             }
 
             // LParen in value position starts an IN list — not a value
             if chars[i] == '(' {
-                tokens.push(Token::LParen);
+                push(&mut tokens, Tok::LParen, start, i + 1);
                 i += 1;
                 continue;
             }
 
             // Bare value: read until whitespace or structural character
             if is_value_char(chars[i]) {
-                let start = i;
                 while i < chars.len() && is_value_char(chars[i]) {
                     i += 1;
                 }
-                let val: String = chars[start..i].iter().collect();
-                tokens.push(Token::Value(val));
+                let text: String = chars[start..i].iter().collect();
+                push(
+                    &mut tokens,
+                    Tok::Value(Literal {
+                        written: text.clone(),
+                        text,
+                        quoted: false,
+                    }),
+                    start,
+                    i,
+                );
                 continue;
             }
         }
 
         // Single-char tokens
-        match chars[i] {
-            '(' => {
-                tokens.push(Token::LParen);
-                i += 1;
-                continue;
-            }
-            ')' => {
-                tokens.push(Token::RParen);
-                i += 1;
-                continue;
-            }
-            ',' => {
-                tokens.push(Token::Comma);
-                i += 1;
-                continue;
-            }
-            '?' => {
-                tokens.push(Token::Exists);
-                i += 1;
-                continue;
-            }
-            _ => {}
+        let single = match chars[i] {
+            '(' => Some(Tok::LParen),
+            ')' => Some(Tok::RParen),
+            ',' => Some(Tok::Comma),
+            '?' => Some(Tok::Exists),
+            _ => None,
+        };
+        if let Some(tok) = single {
+            push(&mut tokens, tok, start, i + 1);
+            i += 1;
+            continue;
         }
 
-        // Multi-char operators
-        if i + 1 < chars.len() {
-            let two: String = chars[i..i + 2].iter().collect();
-            match two.as_str() {
-                ">=" => {
-                    tokens.push(Token::Op(CompareOp::Ge));
-                    i += 2;
-                    continue;
-                }
-                "<=" => {
-                    tokens.push(Token::Op(CompareOp::Le));
-                    i += 2;
-                    continue;
-                }
-                "!=" => {
-                    tokens.push(Token::Op(CompareOp::Ne));
-                    i += 2;
-                    continue;
-                }
-                "!~" => {
-                    tokens.push(Token::Op(CompareOp::NotGlob));
-                    i += 2;
-                    continue;
-                }
-                _ => {}
-            }
+        // Two-char operators
+        let two = match (chars[i], chars.get(i + 1)) {
+            ('>', Some('=')) => Some(Tok::Op(CompareOp::Ge)),
+            ('<', Some('=')) => Some(Tok::Op(CompareOp::Le)),
+            ('!', Some('=')) => Some(Tok::NegatedOp(CompareOp::Eq)),
+            ('!', Some('~')) => Some(Tok::NegatedOp(CompareOp::Glob)),
+            _ => None,
+        };
+        if let Some(tok) = two {
+            push(&mut tokens, tok, start, i + 2);
+            i += 2;
+            continue;
         }
 
         // Single-char operators
-        match chars[i] {
-            '>' => {
-                tokens.push(Token::Op(CompareOp::Gt));
-                i += 1;
-                continue;
-            }
-            '<' => {
-                tokens.push(Token::Op(CompareOp::Lt));
-                i += 1;
-                continue;
-            }
-            '=' => {
-                tokens.push(Token::Op(CompareOp::Eq));
-                i += 1;
-                continue;
-            }
-            '~' => {
-                tokens.push(Token::Op(CompareOp::Glob));
-                i += 1;
-                continue;
-            }
-            '!' => {
-                tokens.push(Token::Not);
-                i += 1;
-                continue;
-            }
-            _ => {}
+        let one = match chars[i] {
+            '>' => Some(Tok::Op(CompareOp::Gt)),
+            '<' => Some(Tok::Op(CompareOp::Lt)),
+            '=' => Some(Tok::Op(CompareOp::Eq)),
+            '~' => Some(Tok::Op(CompareOp::Glob)),
+            '!' => Some(Tok::Not),
+            _ => None,
+        };
+        if let Some(tok) = one {
+            push(&mut tokens, tok, start, i + 1);
+            i += 1;
+            continue;
         }
 
-        // Keywords and identifiers
-        // Allow alphanumeric, underscore, dot, pipe, brackets, slash, colon
-        // (for accessors like key[-1], modifiers like key|year)
-        if chars[i].is_alphabetic() || chars[i] == '_' {
-            let start = i;
-            while i < chars.len()
-                && (chars[i].is_alphanumeric()
-                    || chars[i] == '_'
-                    || chars[i] == '.'
-                    || chars[i] == '|'
-                    || chars[i] == '['
-                    || chars[i] == ']'
-                    || chars[i] == ':'
-                    || chars[i] == '/'
-                    || (chars[i] == '-' && i > 0 && chars[i - 1] == '['))
-            {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            // Only check for keywords if word doesn't contain pipe (modifier syntax) or brackets (accessor syntax)
-            if !word.contains('|') && !word.contains('[') {
+        // A key: a bare name, or a quoted one, with any accessor and modifiers; a bare word
+        // with none of them may be a keyword instead.
+        if chars[i].is_alphabetic() || chars[i] == '_' || chars[i] == '"' || chars[i] == '\'' {
+            let end = key_extent(&chars, i)?;
+            let word: String = chars[start..end].iter().collect();
+            i = end;
+            let keyword = if chars[start] == '"' || chars[start] == '\'' {
+                None
+            } else {
                 match word.to_uppercase().as_str() {
-                    "AND" => {
-                        tokens.push(Token::And);
-                        continue;
-                    }
-                    "OR" => {
-                        tokens.push(Token::Or);
-                        continue;
-                    }
-                    "NOT" => {
-                        tokens.push(Token::Not);
-                        continue;
-                    }
-                    "IN" => {
-                        tokens.push(Token::In);
-                        continue;
-                    }
-                    _ => {}
+                    "AND" => Some(Tok::And),
+                    "OR" => Some(Tok::Or),
+                    "NOT" => Some(Tok::Not),
+                    "IN" => Some(Tok::In),
+                    _ => None,
                 }
-            }
-            tokens.push(Token::Ident(word));
+            };
+            push(&mut tokens, keyword.unwrap_or(Tok::Key(word)), start, end);
             continue;
         }
 
@@ -374,7 +526,6 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
         if chars[i].is_ascii_digit()
             || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
         {
-            let start = i;
             if chars[i] == '-' {
                 i += 1;
             }
@@ -387,28 +538,32 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
             {
                 i += 1;
             }
-            let val: String = chars[start..i].iter().collect();
-            tokens.push(Token::Value(val));
+            let text: String = chars[start..i].iter().collect();
+            push(
+                &mut tokens,
+                Tok::Value(Literal {
+                    written: text.clone(),
+                    text,
+                    quoted: false,
+                }),
+                start,
+                i,
+            );
             continue;
         }
 
-        // Quoted strings (outside value position — e.g., in IN lists with explicit quoting)
-        if chars[i] == '"' || chars[i] == '\'' {
-            let quote = chars[i];
-            i += 1;
-            let start = i;
-            while i < chars.len() && chars[i] != quote {
-                i += 1;
+        // An `@name` where a key belongs was never expanded: it comes from a manifest's recorded
+        // query, which holds the query an alias stood for, or from inside an alias's own value,
+        // which expansion's one pass leaves as it is. Inside a value an `@` is text
+        // (`is_value_char`), as it is after expansion.
+        if chars[i] == '@' {
+            if let Some(name) = super::alias::alias_name_at(&chars, i + 1) {
+                bail!(
+                    "'@{name}' is an alias, and aliases are not expanded here; write the filter \
+                     it stands for"
+                );
             }
-            if i >= chars.len() {
-                bail!("Unterminated string");
-            }
-            let val: String = chars[start..i].iter().collect();
-            tokens.push(Token::Value(val));
-            i += 1; // skip closing quote
-            continue;
         }
-
         bail!("Unexpected character: {}", chars[i]);
     }
 
@@ -421,32 +576,71 @@ fn tokenize(s: &str) -> Result<Vec<Token>> {
 
 struct Parser<'a> {
     tokens: &'a [Token],
+    chars: &'a [char],
     pos: usize,
 }
 
+/// A fixed token as it is written in a filter, for a message naming what was expected.
+fn written_form(tok: &Tok) -> &'static str {
+    match tok {
+        Tok::LParen => "'('",
+        Tok::RParen => "')'",
+        Tok::Comma => "','",
+        Tok::And => "'AND'",
+        Tok::Or => "'OR'",
+        Tok::Not => "'NOT'",
+        Tok::In => "'IN'",
+        Tok::Exists => "'?'",
+        Tok::Op(_) | Tok::NegatedOp(_) => "an operator",
+        Tok::Key(_) => "a key",
+        Tok::Value(_) => "a value",
+    }
+}
+
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
-        Parser { tokens, pos: 0 }
+    fn new(tokens: &'a [Token], chars: &'a [char]) -> Self {
+        Parser {
+            tokens,
+            chars,
+            pos: 0,
+        }
     }
 
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
+    fn peek(&self) -> Option<&Tok> {
+        self.tokens.get(self.pos).map(|t| &t.tok)
     }
 
-    fn advance(&mut self) -> Option<&Token> {
-        let tok = self.tokens.get(self.pos);
+    fn advance(&mut self) -> Option<&Tok> {
+        let tok = self.tokens.get(self.pos).map(|t| &t.tok);
         if tok.is_some() {
             self.pos += 1;
         }
         tok
     }
 
-    fn expect(&mut self, expected: &Token) -> Result<()> {
+    fn expect(&mut self, expected: &Tok) -> Result<()> {
         match self.advance() {
             Some(t) if t == expected => Ok(()),
-            Some(t) => bail!("Expected {expected:?}, got {t:?}"),
-            None => bail!("Expected {expected:?}, got end of input"),
+            Some(_) => bail!(
+                "Expected {}, got '{}'",
+                written_form(expected),
+                self.just_read()
+            ),
+            None => bail!("Expected {}, got end of input", written_form(expected)),
         }
+    }
+
+    /// The token just consumed, as it was written in the filter.
+    fn just_read(&self) -> String {
+        let token = &self.tokens[self.pos - 1];
+        self.chars[token.start..token.end].iter().collect()
+    }
+
+    /// The filter's own text from token `first` through the last token consumed.
+    fn clause_from(&self, first: usize) -> String {
+        let start = self.tokens[first].start;
+        let end = self.tokens[self.pos - 1].end;
+        self.chars[start..end].iter().collect()
     }
 
     /// expr := or_expr
@@ -458,7 +652,7 @@ impl<'a> Parser<'a> {
     fn parse_or_expr(&mut self) -> Result<Expr> {
         let mut left = self.parse_and_expr()?;
 
-        while matches!(self.peek(), Some(Token::Or)) {
+        while matches!(self.peek(), Some(Tok::Or)) {
             self.advance(); // consume OR
             let right = self.parse_and_expr()?;
             left = match left {
@@ -477,7 +671,7 @@ impl<'a> Parser<'a> {
     fn parse_and_expr(&mut self) -> Result<Expr> {
         let mut left = self.parse_unary_expr()?;
 
-        while matches!(self.peek(), Some(Token::And)) {
+        while matches!(self.peek(), Some(Tok::And)) {
             self.advance(); // consume AND
             let right = self.parse_unary_expr()?;
             left = match left {
@@ -494,7 +688,7 @@ impl<'a> Parser<'a> {
 
     /// unary_expr := 'NOT' unary_expr | primary
     fn parse_unary_expr(&mut self) -> Result<Expr> {
-        if matches!(self.peek(), Some(Token::Not)) {
+        if matches!(self.peek(), Some(Tok::Not)) {
             self.advance(); // consume NOT
             let expr = self.parse_unary_expr()?;
             return Ok(Expr::Not(Box::new(expr)));
@@ -504,93 +698,199 @@ impl<'a> Parser<'a> {
 
     /// primary := '(' expr ')' | atom
     fn parse_primary(&mut self) -> Result<Expr> {
-        if matches!(self.peek(), Some(Token::LParen)) {
+        if matches!(self.peek(), Some(Tok::LParen)) {
             self.advance(); // consume '('
             let expr = self.parse_expr()?;
-            self.expect(&Token::RParen)?;
+            self.expect(&Tok::RParen)?;
             return Ok(expr);
         }
         self.parse_atom()
     }
 
-    /// atom := status_keyword '?' | ident '?' | ident 'IN' '(' value_list ')' | ident op value
+    /// atom := status_keyword '?' | key '?' | key ['NOT'] 'IN' '(' value_list ')' | key op value
     fn parse_atom(&mut self) -> Result<Expr> {
-        let raw_key = match self.advance() {
-            Some(Token::Ident(k)) => k.clone(),
-            Some(t) => bail!("Expected identifier, got {t:?}"),
-            None => bail!("Expected identifier, got end of input"),
+        let first = self.pos;
+        let written = match self.advance() {
+            Some(Tok::Key(k)) => k.clone(),
+            Some(_) => bail!("Expected a key, got '{}'", self.just_read()),
+            None => bail!("Expected a key, got end of input"),
         };
+        let mut key = WrittenKey::read(&written);
 
-        // Check for status predicate keywords before normalization
-        if let Some((_, predicate)) = STATUS_KEYWORDS.iter().find(|(kw, _)| *kw == raw_key) {
-            if matches!(self.peek(), Some(Token::Exists)) {
+        // A status predicate is named by its bare word; quoting a name never changes which.
+        // Asked anything but `?`, it is that clause's cause, read past like any key that cannot
+        // be read.
+        let status = key
+            .as_ref()
+            .ok()
+            .filter(|k| !k.has_transforms())
+            .and_then(|k| {
+                let name = k.written_name.trim_matches(|c| c == '"' || c == '\'');
+                STATUS_KEYWORDS
+                    .iter()
+                    .find(|(kw, _)| *kw == name)
+                    .map(|(kw, predicate)| (*kw, *predicate))
+            });
+        if let Some((name, predicate)) = status {
+            if matches!(self.peek(), Some(Tok::Exists)) {
                 self.advance();
-                return Ok(Expr::Status(*predicate));
+                if !self.a_value_follows() {
+                    return Ok(Expr::Status(predicate));
+                }
+                key = Err(anyhow::anyhow!(
+                    "'{name}?' is complete on its own; a status word takes no value"
+                ));
             } else {
-                bail!(
-                    "'{}' is a status predicate and only supports the '?' operator",
-                    raw_key
-                );
+                key = Err(anyhow::anyhow!(
+                    "'{name}' is a status predicate and only supports the '?' operator"
+                ));
             }
         }
-
-        // Normalize key (adds content. prefix for non-builtin keys)
-        let key = normalize_key_string(&raw_key);
+        // A key that cannot be read leaves its clause unread, never the filter: the clause is
+        // parsed through to its end, and binding reports it beside every other cause.
+        let read = |key: Result<WrittenKey>,
+                    clause: String,
+                    build: &dyn Fn(WrittenKey, String) -> Expr| {
+            match key {
+                Ok(key) => build(key, clause),
+                Err(error) => Expr::Unread {
+                    clause,
+                    error: error.to_string(),
+                },
+            }
+        };
 
         // Check for existence test: key?
-        if matches!(self.peek(), Some(Token::Exists)) {
+        // `key?` followed by a value is one clause asked two ways: the clause is read through
+        // to its end and reported, never left to stop the parse at the operator.
+        if matches!(self.peek(), Some(Tok::Exists)) {
             self.advance();
-            return Ok(Expr::Exists { key });
+            if !self.a_value_follows() {
+                let clause = self.clause_from(first);
+                return Ok(read(key, clause, &|key, clause| Expr::Exists {
+                    key,
+                    clause,
+                }));
+            }
+            if key.is_ok() {
+                key = Err(anyhow::anyhow!(
+                    "'{written}?' is complete on its own; '?' takes no value"
+                ));
+            }
+        }
+        // A bare value straight after `?` (`archived? 1`, `source.ext? jpg`) has no operator to
+        // read past: the value ends the clause, and the clause carries the cause set above.
+        if self.a_bare_value_follows() && matches!(self.tokens[self.pos - 1].tok, Tok::Exists) {
+            self.advance();
+            let clause = self.clause_from(first);
+            return Ok(read(key, clause, &|key, clause| Expr::Exists {
+                key,
+                clause,
+            }));
         }
 
         // Check for IN: key IN (v1, v2, ...)
-        if matches!(self.peek(), Some(Token::In)) {
+        if matches!(self.peek(), Some(Tok::In)) {
             self.advance(); // consume IN
-            self.expect(&Token::LParen)?;
+            self.expect(&Tok::LParen)?;
             let values = self.parse_value_list()?;
-            self.expect(&Token::RParen)?;
-            return Ok(Expr::In { key, values });
+            self.expect(&Tok::RParen)?;
+            let clause = self.clause_from(first);
+            return Ok(read(key, clause, &|key, clause| Expr::In {
+                key,
+                values: values.clone(),
+                clause,
+            }));
         }
 
-        // Check for NOT IN: key NOT IN (v1, v2, ...)
-        if matches!(self.peek(), Some(Token::Not)) {
+        // Check for NOT IN: key NOT IN (v1, v2, ...) — NOT of the IN.
+        if matches!(self.peek(), Some(Tok::Not)) {
             let saved_pos = self.pos;
             self.advance(); // consume NOT
-            if matches!(self.peek(), Some(Token::In)) {
+            if matches!(self.peek(), Some(Tok::In)) {
                 self.advance(); // consume IN
-                self.expect(&Token::LParen)?;
+                self.expect(&Tok::LParen)?;
                 let values = self.parse_value_list()?;
-                self.expect(&Token::RParen)?;
-                return Ok(Expr::Not(Box::new(Expr::In { key, values })));
+                self.expect(&Tok::RParen)?;
+                let clause = self.clause_from(first);
+                return Ok(read(key, clause, &|key, clause| {
+                    Expr::Not(Box::new(Expr::In {
+                        key,
+                        values: values.clone(),
+                        clause,
+                    }))
+                }));
             }
             // Not followed by IN, restore position
             self.pos = saved_pos;
         }
 
-        // Comparison: key op value
-        let op = match self.advance() {
-            Some(Token::Op(op)) => *op,
-            Some(t) => bail!("Expected operator after '{key}', got {t:?}"),
-            None => bail!("Expected operator after '{key}', got end of input"),
+        // Comparison: key op value; `!=` and `!~` are NOT of the positive comparison.
+        let (op, negated) = match self.advance() {
+            Some(Tok::Op(op)) => (*op, false),
+            Some(Tok::NegatedOp(op)) => (*op, true),
+            Some(_) => bail!(
+                "Expected an operator after '{written}', got '{}'",
+                self.just_read()
+            ),
+            None => bail!("Expected an operator after '{written}', got end of input"),
         };
 
         let value = self.parse_value()?;
-
-        Ok(Expr::Compare { key, op, value })
+        let clause = self.clause_from(first);
+        Ok(read(key, clause, &|key, clause| {
+            let compare = Expr::Compare {
+                key,
+                op,
+                value: value.clone(),
+                clause,
+            };
+            if negated {
+                Expr::Not(Box::new(compare))
+            } else {
+                compare
+            }
+        }))
     }
 
-    fn parse_value(&mut self) -> Result<String> {
-        match self.advance() {
-            Some(Token::Value(v)) => Ok(v.clone()),
-            Some(Token::Ident(v)) => Ok(v.clone()), // Allow unquoted values
-            Some(t) => bail!("Expected value, got {t:?}"),
-            None => bail!("Expected value, got end of input"),
+    /// Whether a comparison follows where the clause should already be complete: an operator,
+    /// `IN`, `NOT IN`, or a bare value.
+    fn a_value_follows(&self) -> bool {
+        match self.peek() {
+            Some(Tok::Op(_) | Tok::NegatedOp(_) | Tok::In) => true,
+            Some(Tok::Not) => {
+                matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::In))
+            }
+            _ => self.a_bare_value_follows(),
         }
     }
 
-    fn parse_value_list(&mut self) -> Result<Vec<String>> {
+    /// Whether one bare value follows and ends the clause: number- or date-shaped text, or a word
+    /// or quoted text (read as a key outside value position) with nothing after it but the end, a
+    /// connective or a closing parenthesis. A word followed by more (`archived? hashed?`,
+    /// `archived? source.ext = jpg`) is a second clause with its connective missing.
+    fn a_bare_value_follows(&self) -> bool {
+        match self.peek() {
+            Some(Tok::Value(_)) => true,
+            Some(Tok::Key(_)) => matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.tok),
+                None | Some(Tok::And | Tok::Or | Tok::RParen)
+            ),
+            _ => false,
+        }
+    }
+
+    fn parse_value(&mut self) -> Result<Literal> {
+        match self.advance() {
+            Some(Tok::Value(v)) => Ok(v.clone()),
+            Some(_) => bail!("Expected a value, got '{}'", self.just_read()),
+            None => bail!("Expected a value, got end of input"),
+        }
+    }
+
+    fn parse_value_list(&mut self) -> Result<Vec<Literal>> {
         let mut values = vec![self.parse_value()?];
-        while matches!(self.peek(), Some(Token::Comma)) {
+        while matches!(self.peek(), Some(Tok::Comma)) {
             self.advance(); // consume comma
             values.push(self.parse_value()?);
         }
@@ -599,95 +899,45 @@ impl<'a> Parser<'a> {
 }
 
 // ============================================================================
-// Expression Walks
-// ============================================================================
-
-/// Extract all keys used in an expression (for prefetching).
-pub fn extract_keys(expr: &Expr, keys: &mut Vec<String>) {
-    match expr {
-        Expr::And(exprs) | Expr::Or(exprs) => {
-            for e in exprs {
-                extract_keys(e, keys);
-            }
-        }
-        Expr::Not(e) => extract_keys(e, keys),
-        Expr::Exists { key } => keys.push(key.clone()),
-        Expr::Compare { key, .. } => keys.push(key.clone()),
-        Expr::In { key, .. } => keys.push(key.clone()),
-        Expr::Status(_) => {}
-    }
-}
-
-/// Extract keys used in comparison/IN expressions (not Exists).
-///
-/// Exists expressions are intentionally excluded — they test for presence,
-/// so unknown keys are a valid "not present" result, not an error.
-pub fn extract_comparable_keys(expr: &Expr, keys: &mut Vec<String>) {
-    match expr {
-        Expr::And(exprs) | Expr::Or(exprs) => {
-            for e in exprs {
-                extract_comparable_keys(e, keys);
-            }
-        }
-        Expr::Not(e) => extract_comparable_keys(e, keys),
-        Expr::Exists { .. } => {} // Existence checks don't need key validation
-        Expr::Compare { key, .. } => keys.push(key.clone()),
-        Expr::In { key, .. } => keys.push(key.clone()),
-        Expr::Status(_) => {}
-    }
-}
-
-/// Detect which status predicates appear in a filter expression tree.
-pub fn detect_status_predicates(exprs: &[Filter]) -> UsedStatus {
-    let mut used = UsedStatus::default();
-    for expr in exprs {
-        detect_status_in_expr(&expr.0, &mut used);
-    }
-    used
-}
-
-fn detect_status_in_expr(expr: &Expr, used: &mut UsedStatus) {
-    match expr {
-        Expr::And(exprs) | Expr::Or(exprs) => {
-            for e in exprs {
-                detect_status_in_expr(e, used);
-            }
-        }
-        Expr::Not(e) => detect_status_in_expr(e, used),
-        Expr::Status(pred) => match pred {
-            StatusPredicate::Archived => used.archived = true,
-            StatusPredicate::Hashed => used.hashed = true,
-            StatusPredicate::Excluded => used.excluded = true,
-            StatusPredicate::Enriched => used.enriched = true,
-        },
-        Expr::Exists { .. } | Expr::Compare { .. } | Expr::In { .. } => {}
-    }
-}
-
-// ============================================================================
 // Value Comparison
 // ============================================================================
 
-pub fn compare_fact_value(fact: &FactValue, op: CompareOp, filter_value: &str) -> bool {
-    match fact {
-        FactValue::Text(t) | FactValue::Path(t) => compare_text(t, op, filter_value),
-        FactValue::Num(n) => compare_numeric(*n, op, filter_value),
-        // AUDIT: a time compares by its stored number until binding compares spans on the user's
-        // clock.
-        FactValue::Time(tv) => compare_numeric(tv.legacy_epoch_number() as f64, op, filter_value),
+/// Compare text by `op`: equality as written, ordering in character order (by Unicode code
+/// point, case-sensitive), `~` a glob.
+pub(in crate::expr) fn compare_text(stored: &str, op: CompareOp, value: &str) -> bool {
+    match op {
+        CompareOp::Eq => stored == value,
+        CompareOp::Gt => stored > value,
+        CompareOp::Ge => stored >= value,
+        CompareOp::Lt => stored < value,
+        CompareOp::Le => stored <= value,
+        CompareOp::Glob => glob_match(stored, value),
     }
 }
 
-fn compare_text(stored: &str, op: CompareOp, filter_value: &str) -> bool {
+/// Compare numbers by `op`; equality keeps a tolerance for numbers that differ only by
+/// rounding. A glob never reaches here: binding refuses it against a number.
+pub(in crate::expr) fn compare_numbers(stored: f64, op: CompareOp, value: f64) -> bool {
     match op {
-        CompareOp::Eq => stored == filter_value,
-        CompareOp::Ne => stored != filter_value,
-        CompareOp::Gt => stored > filter_value,
-        CompareOp::Ge => stored >= filter_value,
-        CompareOp::Lt => stored < filter_value,
-        CompareOp::Le => stored <= filter_value,
-        CompareOp::Glob => glob_match(stored, filter_value),
-        CompareOp::NotGlob => !glob_match(stored, filter_value),
+        CompareOp::Eq => (stored - value).abs() < f64::EPSILON,
+        CompareOp::Gt => stored > value,
+        CompareOp::Ge => stored >= value,
+        CompareOp::Lt => stored < value,
+        CompareOp::Le => stored <= value,
+        CompareOp::Glob => false,
+    }
+}
+
+/// The row of the whole-period table an operator reads; `None` for a glob, which binding
+/// refuses against a time.
+pub(in crate::expr) fn period_op(op: CompareOp) -> Option<PeriodOp> {
+    match op {
+        CompareOp::Eq => Some(PeriodOp::Inside),
+        CompareOp::Ge => Some(PeriodOp::StartsAtOrAfterStart),
+        CompareOp::Gt => Some(PeriodOp::StartsAtOrAfterEnd),
+        CompareOp::Le => Some(PeriodOp::EndsByEnd),
+        CompareOp::Lt => Some(PeriodOp::EndsByStart),
+        CompareOp::Glob => None,
     }
 }
 
@@ -700,7 +950,7 @@ fn compare_text(stored: &str, op: CompareOp, filter_value: &str) -> bool {
 /// - `[!abc]` or `[^abc]` matches any character NOT in the set
 /// - `[a-z]` matches character ranges
 /// - `\*`, `\?`, `\[` for literal matching
-fn glob_match(text: &str, pattern: &str) -> bool {
+pub(in crate::expr) fn glob_match(text: &str, pattern: &str) -> bool {
     let text_chars: Vec<char> = text.chars().collect();
     let pattern_chars: Vec<char> = pattern.chars().collect();
     glob_match_recursive(&text_chars, 0, &pattern_chars, 0)
@@ -832,65 +1082,6 @@ fn parse_char_class(pattern: &[char], start: usize) -> Option<(Vec<char>, usize)
     Some((chars, i + 1)) // +1 to skip the closing ']'
 }
 
-fn compare_numeric(stored: f64, op: CompareOp, filter_value: &str) -> bool {
-    // Glob operators don't make sense for numeric values
-    if matches!(op, CompareOp::Glob | CompareOp::NotGlob) {
-        return false;
-    }
-
-    let filter_num = match parse_filter_value(filter_value) {
-        Some(n) => n,
-        None => return false,
-    };
-
-    match op {
-        CompareOp::Eq => (stored - filter_num).abs() < f64::EPSILON,
-        CompareOp::Ne => (stored - filter_num).abs() >= f64::EPSILON,
-        CompareOp::Gt => stored > filter_num,
-        CompareOp::Ge => stored >= filter_num,
-        CompareOp::Lt => stored < filter_num,
-        CompareOp::Le => stored <= filter_num,
-        CompareOp::Glob | CompareOp::NotGlob => unreachable!(),
-    }
-}
-
-/// Parse a filter value string into a numeric value for comparison: a number as written, a
-/// typed date or time as its seconds since 1970.
-// AUDIT: a date typed in `--where` is read as a UTC instant, until a typed date is read as its
-// key's kind on the user's clock.
-fn parse_filter_value(value: &str) -> Option<f64> {
-    use jiff::civil::{Date, DateTime, Time};
-    use jiff::tz::Offset;
-    use jiff::Timestamp;
-
-    // Try as number first
-    if let Ok(n) = value.parse::<f64>() {
-        return Some(n);
-    }
-
-    let utc_seconds = |at: DateTime| {
-        Offset::UTC
-            .to_timestamp(at)
-            .ok()
-            .map(|ts| ts.as_second() as f64)
-    };
-    // An instant written with its offset
-    if let Ok(ts) = value.parse::<Timestamp>() {
-        return Some(ts.as_second() as f64);
-    }
-    // A date and time with no offset, read as UTC
-    for format in ["%Y-%m-%dT%H:%M:%S", "%Y:%m:%d %H:%M:%S"] {
-        if let Ok(at) = DateTime::strptime(format, value) {
-            return utc_seconds(at);
-        }
-    }
-    // A date alone: its midnight, read as UTC
-    if let Ok(date) = Date::strptime("%Y-%m-%d", value) {
-        return utc_seconds(date.to_datetime(Time::midnight()));
-    }
-
-    None
-}
 // ============================================================================
 // Tests
 // ============================================================================
@@ -898,23 +1089,192 @@ fn parse_filter_value(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ========================================================================
+    // The grammar: quoting, quoted keys, negation, clause text
+    // ========================================================================
 
-    /// Every typed form reads as the same UTC instant it did before the reading moved to
-    /// jiff: midnight UTC on 1 January 2024 is 1704067200.
-    #[test]
-    fn a_typed_date_reads_as_the_utc_instant_it_always_did() {
-        for typed in [
-            "1704067200",
-            "2024-01-01",
-            "2024-01-01T00:00:00",
-            "2024:01:01 00:00:00",
-            "2024-01-01T00:00:00Z",
-            "2024-01-01T01:00:00+01:00",
-        ] {
-            assert_eq!(parse_filter_value(typed), Some(1704067200.0), "{typed}");
+    fn compare_of(text: &str) -> (WrittenKey, CompareOp, Literal, String) {
+        match Expr::parse(text).unwrap() {
+            Expr::Compare {
+                key,
+                op,
+                value,
+                clause,
+            } => (key, op, value, clause),
+            other => panic!("{text}: expected a comparison, got {other:?}"),
         }
-        for not_a_value in ["not a date", "2024-13-01", ""] {
-            assert_eq!(parse_filter_value(not_a_value), None, "{not_a_value:?}");
+    }
+
+    #[test]
+    fn a_doubled_quote_is_one_literal_quote_of_either_kind() {
+        let cases = [
+            (r#"title="say ""hi""""#, r#"say "hi""#),
+            (r#"title='it''s'"#, "it's"),
+            (r#"title="it's""#, "it's"),
+            (r#"title='say "hi"'"#, r#"say "hi""#),
+            (r#"title="""""#, r#"""#),
+            (r#"title=''''"#, "'"),
+        ];
+        for (text, expected) in cases {
+            let (_, _, value, _) = compare_of(text);
+            assert_eq!(value.text, expected, "{text}");
+            assert!(value.quoted, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_backslash_is_an_ordinary_character() {
+        let (_, _, value, _) = compare_of(r#"path="C:\photos\""#);
+        assert_eq!(value.text, r"C:\photos\");
+        let (_, _, value, _) = compare_of(r#"title="a\""#);
+        assert_eq!(value.text, r"a\");
+    }
+
+    #[test]
+    fn a_value_says_whether_it_was_quoted_and_the_empty_text_is_writable() {
+        let (_, _, value, _) = compare_of("size=10");
+        assert_eq!((value.text.as_str(), value.quoted), ("10", false));
+        let (_, _, value, _) = compare_of(r#"size="10""#);
+        assert_eq!((value.text.as_str(), value.quoted), ("10", true));
+        let (_, _, value, _) = compare_of(r#"title="""#);
+        assert_eq!((value.text.as_str(), value.quoted), ("", true));
+        let (_, _, value, _) = compare_of("title=''");
+        assert_eq!((value.text.as_str(), value.quoted), ("", true));
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_a_parse_error() {
+        for text in [
+            r#"title="abc"#,
+            "title='abc",
+            r#""content.File Size>10"#,
+            r#"title="a""b"#,
+        ] {
+            let err = Expr::parse(text).unwrap_err();
+            assert!(err.to_string().contains("Unterminated"), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_key_keeps_every_character_and_takes_accessor_and_modifiers_after_it() {
+        let (key, op, value, _) = compare_of(r#""content.File Size">1000"#);
+        assert_eq!(key.base, "content.File Size");
+        assert_eq!(key.written, r#""content.File Size""#);
+        assert_eq!(key.written_name, r#""content.File Size""#);
+        assert_eq!((op, value.text.as_str()), (CompareOp::Gt, "1000"));
+
+        // Normalized as the bare key is: `content.` added, a built-in kept.
+        assert_eq!(compare_of(r#""File Size"=1"#).0.base, "content.File Size");
+        assert_eq!(compare_of("'source.mtime'=2024").0.base, "source.mtime");
+        assert_eq!(
+            compare_of(r#""Make"=Canon"#).0.base,
+            compare_of("Make=Canon").0.base
+        );
+
+        // An inner quote doubled; `|` and `[` inside the quotes are part of the name.
+        assert_eq!(compare_of(r#""a""b"=1"#).0.base, r#"content.a"b"#);
+        assert_eq!(compare_of(r#""a|b[0]"=1"#).0.base, "content.a|b[0]");
+        assert!(compare_of(r#""a|b[0]"=1"#).0.modifiers.is_empty());
+
+        let (key, _, _, _) = compare_of(r#""content.Source File"[-1]|stem=img"#);
+        assert_eq!(key.base, "content.Source File");
+        assert_eq!(key.accessor, Some(PathAccessor::Index(-1)));
+        assert_eq!(key.modifiers.len(), 1);
+        assert_eq!(key.written_name, r#""content.Source File""#);
+    }
+
+    #[test]
+    fn quoting_a_keyword_makes_it_a_key() {
+        let (key, _, _, _) = compare_of(r#""AND"=1"#);
+        assert_eq!(key.base, "content.AND");
+    }
+
+    #[test]
+    fn a_bucket_with_thresholds_is_a_key() {
+        let (key, op, value, clause) = compare_of("source.size|bucket(60,300)=60-300");
+        assert_eq!(key.base, "source.size");
+        assert_eq!(key.modifiers.len(), 1);
+        assert_eq!(key.modifiers[0].args, vec![60.0, 300.0]);
+        assert_eq!((op, value.text.as_str()), (CompareOp::Eq, "60-300"));
+        assert_eq!(clause, "source.size|bucket(60,300)=60-300");
+        let (key, _, _, _) = compare_of("source.size|bucket(60, 300) = x");
+        assert_eq!(key.modifiers[0].args, vec![60.0, 300.0]);
+        assert!(Expr::parse("source.size|bucket(60,300=1").is_err());
+    }
+
+    #[test]
+    fn the_negated_operators_parse_as_not_of_their_positive_form() {
+        let cases = [("ext!=jpg", CompareOp::Eq), ("ext!~*.jpg", CompareOp::Glob)];
+        for (text, positive) in cases {
+            match Expr::parse(text).unwrap() {
+                Expr::Not(inner) => match *inner {
+                    Expr::Compare { op, clause, .. } => {
+                        assert_eq!(op, positive, "{text}");
+                        assert_eq!(clause, text);
+                    }
+                    other => panic!("{text}: {other:?}"),
+                },
+                other => panic!("{text}: expected NOT, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_clause_keeps_its_own_text_as_written() {
+        fn walk(e: &Expr, out: &mut Vec<String>) {
+            match e {
+                Expr::And(v) | Expr::Or(v) => v.iter().for_each(|e| walk(e, out)),
+                Expr::Not(e) => walk(e, out),
+                Expr::Exists { clause, .. }
+                | Expr::Compare { clause, .. }
+                | Expr::In { clause, .. } => out.push(clause.clone()),
+                Expr::Status(_) | Expr::Unread { .. } => {}
+            }
+        }
+        let expr =
+            Expr::parse("NOT  taken|year = 2024 AND (Make?  OR ext IN ( jpg ,png ))").unwrap();
+        let mut clauses = Vec::new();
+        walk(&expr, &mut clauses);
+        assert_eq!(
+            clauses,
+            vec!["taken|year = 2024", "Make?", "ext IN ( jpg ,png )"]
+        );
+        let (key, _, _, _) = compare_of("taken|year=2024");
+        assert_eq!(key.written, "taken|year");
+        assert_eq!(key.written_name, "taken");
+    }
+
+    #[test]
+    fn an_accessor_comes_once_before_the_modifiers() {
+        for text in ["rel_path|stem[0]=x", "rel_path[0][1]=x"] {
+            match Expr::parse(text).unwrap() {
+                Expr::Unread { clause, error } => {
+                    assert_eq!(clause, text);
+                    assert!(error.contains("comes once"), "{error}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let (key, _, _, _) = compare_of("source.rel_path[1:3]|lowercase=x");
+        assert_eq!(
+            key.accessor,
+            Some(PathAccessor::Slice {
+                start: Some(1),
+                end: Some(3)
+            })
+        );
+    }
+
+    #[test]
+    fn the_key_reader_reads_a_key_alone() {
+        let key = WrittenKey::read(r#""content.File Size"|bucket(60,300)"#).unwrap();
+        assert_eq!(key.base, "content.File Size");
+        assert_eq!(key.modifiers[0].args, vec![60.0, 300.0]);
+        for not_one_key in ["", "a b", "a=1", r#""a"b"#, "a|"] {
+            assert!(
+                WrittenKey::read(not_one_key).is_err(),
+                "{not_one_key:?} is not one key"
+            );
         }
     }
 
@@ -926,10 +1286,10 @@ mod tests {
     fn tokenize_mime_type_with_slash_and_hyphen() {
         let expr = Expr::parse("mime=application/octet-stream").unwrap();
         match expr {
-            Expr::Compare { key, op, value } => {
-                assert_eq!(key, "content.mime"); // normalized by parser
+            Expr::Compare { key, op, value, .. } => {
+                assert_eq!(key.base, "content.mime"); // normalized by parser
                 assert_eq!(op, CompareOp::Eq);
-                assert_eq!(value, "application/octet-stream");
+                assert_eq!(value.text, "application/octet-stream");
             }
             _ => panic!("Expected Compare"),
         }
@@ -939,10 +1299,10 @@ mod tests {
     fn tokenize_glob_with_question_mark() {
         let expr = Expr::parse("ext~jp?g").unwrap();
         match expr {
-            Expr::Compare { key, op, value } => {
-                assert_eq!(key, "ext");
+            Expr::Compare { key, op, value, .. } => {
+                assert_eq!(key.base, "ext");
                 assert_eq!(op, CompareOp::Glob);
-                assert_eq!(value, "jp?g");
+                assert_eq!(value.text, "jp?g");
             }
             _ => panic!("Expected Compare"),
         }
@@ -952,9 +1312,9 @@ mod tests {
     fn tokenize_glob_with_star() {
         let expr = Expr::parse("ext~*.tmp").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Glob);
-                assert_eq!(value, "*.tmp");
+                assert_eq!(value.text, "*.tmp");
             }
             _ => panic!("Expected Compare"),
         }
@@ -964,10 +1324,13 @@ mod tests {
     fn tokenize_not_glob_with_metacharacters() {
         let expr = Expr::parse("ext!~*.bak").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
-                assert_eq!(op, CompareOp::NotGlob);
-                assert_eq!(value, "*.bak");
-            }
+            Expr::Not(inner) => match *inner {
+                Expr::Compare { op, value, .. } => {
+                    assert_eq!(op, CompareOp::Glob);
+                    assert_eq!(value.text, "*.bak");
+                }
+                _ => panic!("Expected NOT of a glob"),
+            },
             _ => panic!("Expected Compare"),
         }
     }
@@ -976,9 +1339,9 @@ mod tests {
     fn tokenize_hyphenated_value() {
         let expr = Expr::parse("tag=my-custom-tag").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Eq);
-                assert_eq!(value, "my-custom-tag");
+                assert_eq!(value.text, "my-custom-tag");
             }
             _ => panic!("Expected Compare"),
         }
@@ -991,7 +1354,7 @@ mod tests {
             Expr::And(parts) => {
                 assert_eq!(parts.len(), 2);
                 match &parts[0] {
-                    Expr::Compare { value, .. } => assert_eq!(value, "image/jpeg"),
+                    Expr::Compare { value, .. } => assert_eq!(value.text, "image/jpeg"),
                     _ => panic!("Expected Compare"),
                 }
             }
@@ -1003,8 +1366,11 @@ mod tests {
     fn tokenize_in_list_with_unquoted_values() {
         let expr = Expr::parse("mime IN (application/octet-stream, image/jpeg)").unwrap();
         match expr {
-            Expr::In { key: _, values } => {
-                assert_eq!(values, vec!["application/octet-stream", "image/jpeg"]);
+            Expr::In { values, .. } => {
+                assert_eq!(
+                    values.iter().map(|v| v.text.as_str()).collect::<Vec<_>>(),
+                    vec!["application/octet-stream", "image/jpeg"]
+                );
             }
             _ => panic!("Expected In"),
         }
@@ -1014,8 +1380,8 @@ mod tests {
     fn tokenize_exists_still_works() {
         let expr = Expr::parse("content.hash.sha256?").unwrap();
         match expr {
-            Expr::Exists { key } => {
-                assert_eq!(key, "content.hash.sha256");
+            Expr::Exists { key, .. } => {
+                assert_eq!(key.base, "content.hash.sha256");
             }
             _ => panic!("Expected Exists"),
         }
@@ -1025,9 +1391,9 @@ mod tests {
     fn tokenize_quoted_value_still_works() {
         let expr = Expr::parse("mime=\"application/octet-stream\"").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Eq);
-                assert_eq!(value, "application/octet-stream");
+                assert_eq!(value.text, "application/octet-stream");
             }
             _ => panic!("Expected Compare"),
         }
@@ -1052,9 +1418,9 @@ mod tests {
     fn tokenize_glob_with_bracket_range() {
         let expr = Expr::parse("ext~[jJ][pP][gG]").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Glob);
-                assert_eq!(value, "[jJ][pP][gG]");
+                assert_eq!(value.text, "[jJ][pP][gG]");
             }
             _ => panic!("Expected Compare"),
         }
@@ -1064,9 +1430,9 @@ mod tests {
     fn tokenize_negative_number_value() {
         let expr = Expr::parse("source.size>-1").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Gt);
-                assert_eq!(value, "-1");
+                assert_eq!(value.text, "-1");
             }
             _ => panic!("Expected Compare"),
         }
@@ -1076,9 +1442,9 @@ mod tests {
     fn tokenize_date_value_with_hyphens() {
         let expr = Expr::parse("source.mtime>2024-01-15").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Gt);
-                assert_eq!(value, "2024-01-15");
+                assert_eq!(value.text, "2024-01-15");
             }
             _ => panic!("Expected Compare"),
         }
@@ -1089,7 +1455,7 @@ mod tests {
         let expr = Expr::parse("NOT content.hash.sha256?").unwrap();
         match expr {
             Expr::Not(inner) => match *inner {
-                Expr::Exists { key } => assert_eq!(key, "content.hash.sha256"),
+                Expr::Exists { key, .. } => assert_eq!(key.base, "content.hash.sha256"),
                 _ => panic!("Expected Exists inside Not"),
             },
             _ => panic!("Expected Not"),
@@ -1100,9 +1466,9 @@ mod tests {
     fn tokenize_simple_value() {
         let expr = Expr::parse("source.ext=jpg").unwrap();
         match expr {
-            Expr::Compare { key: _, op, value } => {
+            Expr::Compare { op, value, .. } => {
                 assert_eq!(op, CompareOp::Eq);
-                assert_eq!(value, "jpg");
+                assert_eq!(value.text, "jpg");
             }
             _ => panic!("Expected Compare"),
         }
@@ -1115,11 +1481,11 @@ mod tests {
             Expr::And(parts) => {
                 assert_eq!(parts.len(), 2);
                 match &parts[0] {
-                    Expr::Compare { value, .. } => assert_eq!(value, "jpg"),
+                    Expr::Compare { value, .. } => assert_eq!(value.text, "jpg"),
                     _ => panic!("Expected Compare"),
                 }
                 match &parts[1] {
-                    Expr::Compare { value, .. } => assert_eq!(value, "image/jpeg"),
+                    Expr::Compare { value, .. } => assert_eq!(value.text, "image/jpeg"),
                     _ => panic!("Expected Compare"),
                 }
             }
@@ -1181,8 +1547,11 @@ mod tests {
 
     #[test]
     fn parse_status_predicate_error_on_compare() {
-        let err = Expr::parse("archived = true").unwrap_err();
-        let msg = err.to_string();
+        // Its own clause's cause, read past so the clauses beside it are still read.
+        let Expr::Unread { clause, error: msg } = Expr::parse("archived = true").unwrap() else {
+            panic!("a status word asked with `=` is its clause's cause");
+        };
+        assert_eq!(clause, "archived = true");
         assert!(
             msg.contains("status predicate") && msg.contains("'?'"),
             "Error should mention status predicate and '?': {msg}"
@@ -1191,8 +1560,9 @@ mod tests {
 
     #[test]
     fn parse_status_predicate_error_on_glob() {
-        let err = Expr::parse("hashed ~ something").unwrap_err();
-        let msg = err.to_string();
+        let Expr::Unread { error: msg, .. } = Expr::parse("hashed ~ something").unwrap() else {
+            panic!("a status word asked with `~` is its clause's cause");
+        };
         assert!(
             msg.contains("status predicate"),
             "Error should mention status predicate: {msg}"
@@ -1204,8 +1574,8 @@ mod tests {
         // "archival" is NOT a status keyword — gets content. prefix
         let expr = Expr::parse("archival?").unwrap();
         match expr {
-            Expr::Exists { key } => {
-                assert_eq!(key, "content.archival");
+            Expr::Exists { key, .. } => {
+                assert_eq!(key.base, "content.archival");
             }
             _ => panic!("Expected Exists"),
         }
@@ -1216,8 +1586,32 @@ mod tests {
         // implicit AND. Accepting the input would filter on the first clause
         // and drop the rest without saying so — the user gets a plausible
         // answer to a question they did not ask.
-        let err = Filter::parse("source.size=1 source.size=2").unwrap_err();
-        assert!(err.to_string().contains("Unexpected token"), "{err}");
+        let err = Expr::parse("source.size=1 source.size=2").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Unexpected 'source.size' after a complete clause"
+        );
+    }
+
+    /// A grammar error names what was written, never the parser's own token names.
+    #[test]
+    fn a_grammar_error_quotes_what_was_written() {
+        for (text, said) in [
+            ("source.ext = (", "Expected a value, got '('"),
+            (
+                "source.ext jpg",
+                "Expected an operator after 'source.ext', got 'jpg'",
+            ),
+            ("= jpg", "Expected a key, got '='"),
+            ("source.ext IN jpg", "Expected '(', got 'jpg'"),
+            (
+                "archived? hashed?",
+                "Unexpected 'hashed' after a complete clause",
+            ),
+        ] {
+            let err = Expr::parse(text).unwrap_err().to_string();
+            assert_eq!(err, said, "{text}");
+        }
     }
 
     #[test]
@@ -1225,9 +1619,15 @@ mod tests {
         let expr = Expr::parse("source.ext NOT IN (jpg, png)").unwrap();
         match expr {
             Expr::Not(inner) => match *inner {
-                Expr::In { key, values } => {
-                    assert_eq!(key, "source.ext");
-                    assert_eq!(values, vec!["jpg", "png"]);
+                Expr::In {
+                    key,
+                    values,
+                    clause,
+                } => {
+                    assert_eq!(key.base, "source.ext");
+                    let texts: Vec<&str> = values.iter().map(|v| v.text.as_str()).collect();
+                    assert_eq!(texts, vec!["jpg", "png"]);
+                    assert_eq!(clause, "source.ext NOT IN (jpg, png)");
                 }
                 other => panic!("expected a membership test inside the negation: {other:?}"),
             },
@@ -1243,7 +1643,10 @@ mod tests {
         // NOT had never been written — turning a malformed expression into a
         // valid one that means the opposite of what it says.
         let err = Expr::parse("source.ext NOT = jpg").unwrap_err();
-        assert!(err.to_string().contains("Expected operator"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "Expected an operator after 'source.ext', got 'NOT'"
+        );
     }
 
     #[test]

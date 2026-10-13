@@ -232,7 +232,7 @@ impl UserZone {
     /// instant, then the same changes of offset at the same instants, through the year
     /// 2200 — by which every zone has long been following its standing rule. Two zones that
     /// agree today but differ in their past (two neighbouring countries before they
-    /// aligned) place a past instant differently, so today's offset is not enough.
+    /// aligned) read a past instant differently, so today's offset is not enough.
     pub fn reads_like(&self, other: &UserZone) -> bool {
         self.tz.to_offset(Timestamp::MIN) == other.tz.to_offset(Timestamp::MIN)
             && offset_changes(&self.tz) == offset_changes(&other.tz)
@@ -336,7 +336,7 @@ pub fn parse_zone_name(text: &str) -> Result<RecordedZone, ZoneNameError> {
 }
 
 /// The one spelling of a fixed offset's name: `+03:00`, `-05:30`, `+05:45:30` where the
-/// offset carries seconds.
+/// offset has seconds.
 fn offset_name(offset: Offset) -> String {
     let total = offset.seconds();
     let sign = if total < 0 { '-' } else { '+' };
@@ -632,7 +632,7 @@ mod tests {
     }
 
     /// **Unnamed system rules that never change offset are that offset too** — the zone-file
-    /// door, with no `TZ` text: a copied `Etc/GMT-3` places as `TZ=UTC-3` does, and a copied
+    /// door, with no `TZ` text: a copied `Etc/GMT-3` reads as `TZ=UTC-3` does, and a copied
     /// zone whose offset once changed stays rules with no name. Rules whose offset never
     /// changes are fixed even where they name a summer time.
     #[test]

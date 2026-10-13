@@ -13,7 +13,7 @@ use crate::core::repo::source::fetch_by_id;
 use crate::core::repo::Connection;
 use crate::core::testing::*;
 use crate::expr::{
-    apply_filters, evaluate, parse_pattern, prefetch_pattern_facts, EvalContext, Filter,
+    apply_filters, evaluate, parse_pattern, prefetch_pattern_facts, read_filters, EvalContext,
     ParsedFactKey,
 };
 
@@ -53,7 +53,7 @@ fn filtered(conn: &mut Connection, ids: &[i64], clause: &str) -> Vec<i64> {
     apply_filters(
         conn,
         ids,
-        &[Filter::parse(clause).unwrap()],
+        &read_filters(conn, &[clause.to_string()]).unwrap(),
         &UserZone::utc(),
     )
     .unwrap()

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
 use super::transform::{
-    apply_chain, fact_value_to_string, parse_modifier, Half, InstantRecord, Modified, ModifierCall,
+    apply_chain, parse_modifier, rendered, InstantRecord, Modified, Modifier, ModifierCall,
     NoValueCause, PathAccessor,
 };
 use super::value::{get_builtin_value, SourceAttributes};
@@ -133,8 +133,13 @@ pub enum PatternNoValue {
     /// The file's save time lies where Canon reads no time: at the edge of the years
     /// 0000–9999 or beyond.
     UnreadableSaveTime,
-    /// A modifier reads a finer grain than the time was written at.
-    TooCoarse { key: String, cause: NoValueCause },
+    /// A modifier reads a finer grain than the time was written at: the key, the modifier,
+    /// and the grain the time was known to.
+    TooCoarse {
+        key: String,
+        modifier: Modifier,
+        precision: Precision,
+    },
 }
 
 impl PatternNoValue {
@@ -143,8 +148,7 @@ impl PatternNoValue {
     pub fn too_coarse_chain(&self) -> Option<String> {
         match self {
             PatternNoValue::UnreadableSaveTime => None,
-            PatternNoValue::TooCoarse { key, cause } => {
-                let NoValueCause::TooCoarse { modifier, .. } = cause;
+            PatternNoValue::TooCoarse { key, modifier, .. } => {
                 let name: &'static str = (*modifier).into();
                 Some(format!("{key}|{name}"))
             }
@@ -156,10 +160,7 @@ impl PatternNoValue {
     pub fn too_coarse_grain(&self) -> Option<Precision> {
         match self {
             PatternNoValue::UnreadableSaveTime => None,
-            PatternNoValue::TooCoarse {
-                cause: NoValueCause::TooCoarse { precision, .. },
-                ..
-            } => Some(*precision),
+            PatternNoValue::TooCoarse { precision, .. } => Some(*precision),
         }
     }
 }
@@ -172,7 +173,16 @@ impl std::fmt::Display for PatternNoValue {
                 "Canon cannot read this file's save time: it lies at the edge of the years \
                  0000–9999 or beyond"
             ),
-            PatternNoValue::TooCoarse { cause, .. } => {
+            PatternNoValue::TooCoarse {
+                modifier,
+                precision,
+                ..
+            } => {
+                // The cause's own sentence, spoken once by the transforms.
+                let cause = NoValueCause::TooCoarse {
+                    modifier: *modifier,
+                    precision: *precision,
+                };
                 let chain = self.too_coarse_chain().unwrap_or_default();
                 write!(f, "{chain} has no value: {cause}")
             }
@@ -247,8 +257,8 @@ impl<'a> EvalContext<'a> {
     }
 
     /// Whether an evaluation through this context read an instant on its clock
-    /// (`domain::transform::reads_an_instant`): a pattern that placed a save time or an
-    /// instant fact, printed or modified. A clock reading places the same on any clock.
+    /// (`domain::transform::reads_an_instant`): a pattern that used a save time or an
+    /// instant fact, printed or modified. A clock reading reads the same in any time zone.
     pub fn read_an_instant(&self) -> bool {
         self.instant_read.read()
     }
@@ -492,12 +502,8 @@ fn normalize_pattern_result(path: &str) -> String {
 /// Evaluate a single expression
 fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
     let value = get_value(&expr.key, ctx)?;
-    ctx.instant_read.note(
-        &value,
-        expr.accessor.as_ref(),
-        &expr.modifiers,
-        Half::Pattern,
-    );
+    ctx.instant_read
+        .note(&value, expr.accessor.as_ref(), &expr.modifiers);
 
     // for_display: false since patterns are used for paths
     match apply_chain(
@@ -508,12 +514,28 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
         false,
         ctx.clock,
     )? {
-        Modified::Value(result) => Ok(fact_value_to_string(&result, ctx.clock)),
-        Modified::NoValue(cause) => Err(PatternNoValue::TooCoarse {
+        Modified::Value(result) => Ok(rendered(
+            expr.modifiers.last().map(|call| call.modifier),
+            &result,
+            ctx.clock,
+        )),
+        Modified::NoValue(NoValueCause::TooCoarse {
+            modifier,
+            precision,
+        }) => Err(PatternNoValue::TooCoarse {
             key: expr.key.clone(),
-            cause,
+            modifier,
+            precision,
         }
         .into()),
+        // Text that is not a time or a number, and an accessor finding no
+        // segment, leave a pattern the way a fact the source does not carry does; their own
+        // statement is a pattern hazard's to make.
+        Modified::NoValue(
+            cause @ (NoValueCause::NotATime { .. }
+            | NoValueCause::NotANumber
+            | NoValueCause::NoSegment),
+        ) => bail!("{} has no value: {cause}", expr.key),
     }
 }
 
@@ -800,6 +822,35 @@ mod tests {
         assert_eq!(result, "2024");
     }
 
+    /// A text modifier after a part reads the part's printed form, so a pattern places the
+    /// folders it always placed: `monday/`, `q2/`, `06/`.
+    #[test]
+    fn a_text_modifier_after_a_part_places_its_printed_form() {
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
+        let mut source = at("photos/image.jpg");
+        source.mtime = 1718582400; // 2024-06-17 00:00:00 UTC, a Monday
+        ctx.set_source(source);
+        for (text, placed) in [
+            (
+                "{source.mtime|weekday|lowercase}/{filename}",
+                "monday/image.jpg",
+            ),
+            (
+                "{source.mtime|quarter|lowercase}/{filename}",
+                "q2/image.jpg",
+            ),
+            ("{source.mtime|month|short}/{filename}", "06/image.jpg"),
+            ("{source.mtime|weekday}/{source.mtime|month}", "Monday/06"),
+        ] {
+            assert_eq!(
+                evaluate(&parse_pattern(text).unwrap(), &ctx).unwrap(),
+                placed,
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn test_evaluate_stem_modifier() {
         let pattern = parse_pattern("{stem}").unwrap();
@@ -827,8 +878,10 @@ mod tests {
         let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/image.jpg"));
         let result = evaluate(&pattern, &ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("out of bounds"));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "source.rel_path has no value: the path has no such segment"
+        );
     }
 
     #[test]
@@ -1309,9 +1362,9 @@ mod tests {
         assert_eq!(evaluate(&year, &ctx).unwrap(), "2024/a.jpg");
     }
 
-    /// A save time is an instant: placing it — modified or printed bare — reads the clock.
+    /// A save time is an instant: using it — modified or printed bare — reads the clock.
     #[test]
-    fn a_pattern_placing_a_save_time_reads_an_instant() {
+    fn a_pattern_using_a_save_time_reads_an_instant() {
         let zone = UserZone::utc();
         for pattern in [
             "{source.mtime|year}/{filename}",
@@ -1337,7 +1390,7 @@ mod tests {
     /// A clock reading reads as written on any clock, and a pattern naming no time reads
     /// none: neither is a clock that mattered.
     #[test]
-    fn a_pattern_placing_a_clock_reading_reads_none() {
+    fn a_pattern_using_a_clock_reading_reads_none() {
         let zone = UserZone::utc();
         let mut ctx = EvalContext::new(&zone);
         ctx.set_source(at("photos/a.jpg"));

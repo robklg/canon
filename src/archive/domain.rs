@@ -109,8 +109,8 @@ fn de_scope<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D
             Err(E::custom(
                 "meta.scope must be a list of paths. A string is the version 1 format, \
                  which joined several scopes into one field; splitting them apart again \
-                 would be a guess about where files land, so it is refused rather than \
-                 read. Fix it with `canon cluster refresh --edit <manifest>`, which opens \
+                 would be a guess about where files land, so Canon stops here instead of \
+                 guessing. Fix it with `canon cluster refresh --edit <manifest>`, which opens \
                  the file before reading it, or write scope as a list.",
             ))
         }
@@ -614,9 +614,9 @@ pub struct ManifestStanding {
     /// Why the manifest's zone cannot be settled for a refresh here, where it cannot
     /// (`settle_manifest_zone`).
     pub zone_refusal: Option<ZoneRefusalKind>,
-    /// Whether a line of the recorded query does not parse
+    /// Whether reading and binding refuse the recorded query
     /// (`ops::manifest::parse_recorded_query`).
-    pub query_unparseable: bool,
+    pub query_refused: bool,
 }
 
 /// The two acts that read a manifest.
@@ -646,7 +646,7 @@ pub enum RefreshRefusal {
     ZoneLine,
     /// The manifest has no zone line, and this machine's zone cannot be written down.
     NoMachineZone,
-    /// A line of the manifest's query does not parse.
+    /// The manifest's query cannot run.
     Query,
 }
 
@@ -797,8 +797,9 @@ pub enum Obstacle {
     /// The manifest has no zone line and this machine's zone cannot be
     /// written down. Enforced by `cluster refresh`, the same way.
     NoZoneToRecord,
-    /// A line of the manifest's query does not parse. Enforced by `cluster
-    /// refresh`, which states every such line beside the zone's cause.
+    /// The manifest's query cannot run: reading and binding refuse it (`expr::read_filters`,
+    /// on the recorded text as written — no alias is expanded there). Enforced by `cluster refresh`,
+    /// which states every cause beside the zone's.
     QueryUnreadable,
 }
 
@@ -955,7 +956,7 @@ impl ManifestStanding {
             Some(ZoneRefusalKind::Machine) => raised.push(Obstacle::NoZoneToRecord),
             None => {}
         }
-        if self.query_unparseable {
+        if self.query_refused {
             raised.push(Obstacle::QueryUnreadable);
         }
         raised
@@ -1566,7 +1567,7 @@ base_dir = "photos"
             scope_kept_nothing: false,
             scope_confirms_nothing: false,
             zone_refusal: None,
-            query_unparseable: false,
+            query_refused: false,
         }
     }
 
@@ -1632,8 +1633,7 @@ base_dir = "photos"
     /// scope's own two reasons are a door and the terminal rule, which are
     /// likewise not one row; then the zone's four — two about the lock's
     /// header, which stop `apply`, and two about the manifest's line, which
-    /// stop the refresh; and a query line that does not parse, which stops it
-    /// too.
+    /// stop the refresh; and a query that cannot run, which stops it too.
     #[test]
     fn the_table_holds_every_row_once() {
         let all = all_obstacles();
@@ -1805,7 +1805,7 @@ base_dir = "photos"
         let refresh_causes = ZONE_REFUSALS
             .into_iter()
             .flat_map(|z| [(z, false), (z, true)]);
-        for (zone_refusal, query_unparseable) in refresh_causes {
+        for (zone_refusal, query_refused) in refresh_causes {
             for lock in locks.iter().copied() {
                 for pattern_expands in [true, false] {
                     for pattern_needs_a_scope_it_lacks in [true, false] {
@@ -1829,7 +1829,7 @@ base_dir = "photos"
                                                 scope_kept_nothing,
                                                 scope_confirms_nothing,
                                                 zone_refusal,
-                                                query_unparseable,
+                                                query_refused,
                                             };
                                             let owed = standing.owed_way_back();
                                             if !matches!(standing.next_step(), NextStep::None) {
@@ -1864,7 +1864,7 @@ base_dir = "photos"
                                                     || parked_destination
                                                     || pattern_expands
                                                     || zone_refusal.is_some()
-                                                    || query_unparseable,
+                                                    || query_refused,
                                                 "nothing here states its own way back: {standing:?}"
                                             ),
                                             OwedWayBack::ScanOrEditScope => assert!(
@@ -1912,13 +1912,13 @@ base_dir = "photos"
                     let refresh_causes = ZONE_REFUSALS
                         .into_iter()
                         .flat_map(|z| [(z, false), (z, true)]);
-                    for (zone_refusal, query_unparseable) in refresh_causes {
+                    for (zone_refusal, query_refused) in refresh_causes {
                         let standing = ManifestStanding {
                             lock,
                             parked_scope,
                             scope_kept_nothing,
                             zone_refusal,
-                            query_unparseable,
+                            query_refused,
                             ..sound()
                         };
                         let refused = standing.refresh_refused_by();
@@ -1936,9 +1936,7 @@ base_dir = "photos"
                             (false, false, Some(ZoneRefusalKind::Machine)) => {
                                 Some(RefreshRefusal::NoMachineZone)
                             }
-                            (false, false, None) if query_unparseable => {
-                                Some(RefreshRefusal::Query)
-                            }
+                            (false, false, None) if query_refused => Some(RefreshRefusal::Query),
                             (false, false, None) => None,
                         };
                         assert_eq!(
@@ -2381,13 +2379,13 @@ base_dir = "photos"
         assert!(settle_manifest_zone(Some("UTC"), &unknown).is_ok());
     }
 
-    /// **A query line that does not parse stops the refresh and no apply**: `apply`
+    /// **A query that cannot run stops the refresh and no apply**: `apply`
     /// re-selects nothing. Beside a lock the rebuild would clear, no step is named, since the
     /// refresh would refuse; the report states the line in the refresh's own words.
     #[test]
-    fn an_unparseable_query_stops_the_refresh_and_no_apply() {
+    fn a_refused_query_stops_the_refresh_and_no_apply() {
         let standing = ManifestStanding {
-            query_unparseable: true,
+            query_refused: true,
             ..sound()
         };
         assert_eq!(standing.obstacles(), vec![Obstacle::QueryUnreadable]);

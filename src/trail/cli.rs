@@ -729,7 +729,7 @@ pub fn run_show(db: &mut Db, id: i64) -> Result<()> {
 
 /// What a row still reading `started` can tell, stated on the row itself.
 ///
-/// In the receipt-absence idiom (`no receipt (the run refused)`): what the
+/// In the receipt-absence idiom (`no receipt (the run was refused)`): what the
 /// reader can observe and its readings, never one cause. A settled row needs
 /// nothing here — its status and summary say what happened. A `started` row
 /// says only that its outcome was never written, and since every

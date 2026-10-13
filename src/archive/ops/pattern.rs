@@ -39,9 +39,9 @@ pub struct PatternGaps {
     pub too_coarse: BTreeMap<(String, Precision), usize>,
     /// A fact the source does not carry.
     pub fact_not_carried: bool,
-    /// Whether an entry that expanded placed an instant on the clock — what decides whether
+    /// Whether an entry that expanded used an instant — what decides whether
     /// the zone the run read on is worth a sentence.
-    pub placed_an_instant: bool,
+    pub used_an_instant: bool,
 }
 
 impl PatternGaps {
@@ -70,7 +70,7 @@ impl PatternGaps {
 
     /// Record one entry that expanded.
     pub fn placed(&mut self, expansion: &Expansion) {
-        self.placed_an_instant |= expansion.placed_an_instant;
+        self.used_an_instant |= expansion.used_an_instant;
     }
 
     /// Each `key|modifier` that met a time too coarse for it, once, in order.
@@ -87,7 +87,7 @@ impl PatternGaps {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expansion {
     pub rel_path: String,
-    pub placed_an_instant: bool,
+    pub used_an_instant: bool,
 }
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
@@ -179,7 +179,7 @@ pub fn evaluate_pattern(
     let rel_path = evaluate(pattern, &ctx)?;
     Ok(Expansion {
         rel_path,
-        placed_an_instant: ctx.read_an_instant(),
+        used_an_instant: ctx.read_an_instant(),
     })
 }
 

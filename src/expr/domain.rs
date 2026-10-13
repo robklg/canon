@@ -9,10 +9,12 @@
 //! written with. No I/O anywhere in this layer.
 
 pub(super) mod alias;
+pub(super) mod bind;
 pub(super) mod cache;
 pub(super) mod filter;
 pub(super) mod key;
 pub(super) mod pattern;
+pub(super) mod print;
 pub(super) mod transform;
 pub(super) mod value;
 pub(super) mod vantage;

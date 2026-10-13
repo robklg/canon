@@ -33,7 +33,7 @@ canon worklist --emit content.geo.lat --emit content.geo.lon
 
 Choosing a `--where` gate that a repeated pass converges on is covered in [Writing Processors](processors.md#resuming-a-pass).
 
-A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, emits nothing on stdout: the statement goes to stderr and the exit code is 1, so a consumer never reads an empty stream as "nothing here".
+A path on a [suspended](../roots/roots.md#suspending-roots) root, or the current directory inside one, emits nothing on stdout: the statement goes to stderr and the exit code is 1, so a consumer never mistakes an empty stream for "nothing here".
 
 ## Output Format
 
@@ -65,7 +65,7 @@ canon worklist --emit content.geo.lat --emit content.geo.lon
 {"source_id":124,"path":"/...","basis_rev":0,"facts":{"content.geo.lat":null,"content.geo.lon":null}}
 ```
 
-A time is written as ISO 8601 text, in the form and at the precision it is stored: with its offset (a zero offset as `+00:00`), with `-00:00` for an instant whose local offset is unknown, or with no offset for a clock reading. A fraction of a second is written where one is stored:
+A time is written as ISO 8601 text, in the form and at the precision it is stored: with its offset (a zero offset as `+00:00`), with `-00:00` for an instant whose local offset is unknown, or with no offset for a time that has none. A fraction of a second is written where one is stored:
 
 ```bash
 canon worklist --emit content.DateTimeOriginal
@@ -86,7 +86,7 @@ optional `content.` prefix for you: `--emit geo.lat` looks for a fact whose key 
 `geo.lat` and emits `null`, even where `--where 'geo.lat?'` on the same command line matches.
 Check how a key is stored with [`canon facts`](../query/facts.md). Built-in `source.*` keys are
 never emittable — no fact is ever stored under that namespace ([`import-facts`](import-facts.md)
-refuses it), and what they would say is already in the entry's own fields.
+rejects it), and what they would say is already in the entry's own fields.
 
 This enables processors to build on previous enrichment:
 

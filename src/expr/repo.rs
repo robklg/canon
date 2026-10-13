@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::domain::cache::FactCache;
 use super::domain::filter::{StatusPredicate, UsedStatus};
-use super::domain::key::{is_builtin_key, parse_key_with_modifiers, BuiltinKey};
+use super::domain::key::BuiltinKey;
 use super::domain::value::SourceAttributes;
 use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::repo::db::populate_temp_sources;
@@ -38,11 +38,10 @@ pub fn prefetch_facts(
         return Ok(cache);
     }
 
-    // Parse keys to get base keys (without accessors/modifiers)
-    let base_keys: Vec<String> = keys
-        .iter()
-        .filter_map(|k| parse_key_with_modifiers(k).ok().map(|(base, _, _)| base))
-        .collect();
+    // The keys arrive as base keys, already read (accessor and modifiers stripped, an alias
+    // read as its stored key) — never re-read here, so a quoted name holding `|` or `[` stays
+    // one name.
+    let base_keys: Vec<String> = keys.to_vec();
 
     // A built-in the source row computes needs no lookup; every other key is
     // read from the facts table under its stored name, the hash keys included
@@ -254,25 +253,6 @@ pub fn prefetch_status_data(
     Ok(())
 }
 
-/// Check if a key is known (either a built-in or exists in the facts table)
-pub fn is_known_key(conn: &Connection, base_key: &str) -> Result<bool> {
-    // Check built-in keys first
-    if is_builtin_key(base_key) {
-        return Ok(true);
-    }
-
-    // Check if key exists in facts table (for any entity)
-    let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM facts WHERE key = ? LIMIT 1",
-            [base_key],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-
-    Ok(exists)
-}
-
 /// A source row as a per-source comparison reads it: the attributes the built-in keys are
 /// resolved from, and whether its device and inode columns hold a value (a NULL one has no
 /// value to read).
@@ -454,7 +434,7 @@ mod tests {
         assert!(!rows.contains_key(&unhashed));
     }
 
-    /// A stored time Canon cannot place on its timeline — a clock reading stored as a second
+    /// A stored time Canon cannot read — a clock reading stored as a second
     /// in year 10000 — is no row for that key, and the fetch over it completes.
     #[test]
     fn a_stored_time_outside_the_readable_line_is_no_row_and_the_key_fetch_completes() {

@@ -6,7 +6,7 @@ use crate::core::domain::time::zone::UserZone;
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
-use crate::expr::Filter;
+use crate::expr::read_filters;
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 #[allow(clippy::too_many_arguments)]
@@ -29,10 +29,7 @@ pub fn run(
     }
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all(scope_prefixes);
 
@@ -173,10 +170,7 @@ pub fn show_duplicates(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all(scope_prefixes);
 

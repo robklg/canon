@@ -6,7 +6,7 @@ use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
 use crate::coverage::ops::{self, CoverageStats};
-use crate::expr::Filter;
+use crate::expr::read_filters;
 
 pub fn run(
     db: &mut Db,
@@ -20,10 +20,7 @@ pub fn run(
     let conn = db.conn();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all(scope_prefixes);
 

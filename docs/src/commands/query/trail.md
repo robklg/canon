@@ -160,7 +160,7 @@ Any combination of the three can appear: a location can draw content out, receiv
 
 `Rearranged here` carries no counterparty clause, unlike its two siblings: rearranged content stayed here, so there is no other place to name.
 
-The same decision reads differently from different scopes ([Crossing In, Crossing Out, Staying Put](../../concepts/decisions.md#crossing-in-crossing-out-staying-put)). An `apply` that moved content from `/archive/2016` to `/archive/2020`:
+The same decision looks different from different scopes ([Crossing In, Crossing Out, Staying Put](../../concepts/decisions.md#crossing-in-crossing-out-staying-put)). An `apply` that moved content from `/archive/2016` to `/archive/2020`:
 
 - Viewed at `/archive`, both endpoints are inside. Nothing crossed → **Rearranged here**.
 - Viewed at `/archive/2020`, the origin is outside. Content crossed in → **Arrived here**.
@@ -186,7 +186,7 @@ An origin line takes three lines at most — the path, then its marker where it 
 
 Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `arrived from <root>` entry, carrying how many decisions are behind it and the date range they span (open them with [`trail crossings --origin <root>`](#the-counterpart-door-trail-crossings)); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins come **standings**: what present content here was last touched by, one line per transition (`excluded: 28,412 files (19.2 GB)`), merged across every decision that produced it. A standing is a statement about this place now, so it carries no decision id; the decisions behind it are the timeline above. Then a `first indexed here` bucket for content this location saw first via a scan, and an `arrival unrecorded` bucket for content carrying no stamp at all. That content *is* tracked — it is indexed, present, and counted in the header above; what is missing is the record of how it arrived, and the row cannot say why, so the line names the absence and stops there.
 
-Where the record has a **gap**, the line names the one decision it is about, after the standings: `archived (origin unknown) here (#88)` for an apply the extraction ledger cannot attribute, `transition unrecorded here (#404)` for a stamp whose decision row no longer exists. A gap must read as a gap, so it is never merged away.
+Where the record has a **gap**, the line names the one decision it is about, after the standings: `archived (origin unknown) here (#88)` for an apply the extraction ledger cannot attribute, `transition unrecorded here (#404)` for a stamp whose decision row no longer exists. A gap must show as a gap, so it is never merged away.
 
 Long lists are capped with an explicit remainder line, never a silent truncation — and a capped card carries one invitation, not two, because the remainder absorbs the hint:
 
@@ -218,7 +218,7 @@ Exclusion doesn't remove standing: an excluded-but-present source still counts. 
 
 ## The time lens
 
-`--today`, `--since <when>`, or `--on <when>` switch to the day-grouped story view, chronological, so it reads forward:
+`--today`, `--since <when>`, or `--on <when>` switch to the day-grouped story view, in chronological order, oldest first:
 
 ```
 Decision trail: all roots — today
@@ -231,9 +231,9 @@ Saturday 2026-07-12 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB
 #65   11:30  excluded  /mnt/old-disk/misc    Excluded 210 duplicates (kept 105) · "redundant backup"
 ```
 
-`<when>` is `today`, `yesterday`, a weekday name (the most recent one, today included), or a time in any form Canon [reads as a time](../../concepts/facts.md#how-canon-reads-a-time): `2026`, `2026-07`, `2026-07-12`, `"2026-07-12 14:30"`, and the rest. Each names a period on your clock, as long as its precision: `--on 2026-07` is July 2026, `--since 2026` is everything from the start of 2026, and `--on "2026-07-12 14:30"` is that minute. A time with an offset is placed by its offset and read on your clock.
+`<when>` is `today`, `yesterday`, a weekday name (the most recent one, today included), or a time in any form Canon [accepts as a time](../../concepts/facts.md#how-canon-interprets-a-time): `2026`, `2026-07`, `2026-07-12`, `"2026-07-12 14:30"`, and the rest. Each covers the whole span its precision gives, in your local time: `--on 2026-07` is all of July 2026, `--since 2026` is everything from the start of 2026, and `--on "2026-07-12 14:30"` is that minute. A time with an offset is translated to your local time.
 
-The header names the period as your clock reads it (`— on 2026-07`, `— since 2026-07-12 14:30`); a word stays as typed (`— since saturday`). A day the period covers only in part says which part: the first day of a `--since` from a time of day reads `from` that time, and a period shorter than a day names its time. The counts on that line are the part's own:
+The header names the span in your local time (`— on 2026-07`, `— since 2026-07-12 14:30`); a word stays as typed (`— since saturday`). A day the span covers only in part says which part: the first day of a `--since` from a time of day shows `from` that time, and a span shorter than a day names its time. The counts on that line are the part's own:
 
 ```
 Decision trail: all roots — since 2026-07-12 09:00
@@ -241,7 +241,7 @@ Decision trail: all roots — since 2026-07-12 09:00
 Saturday 2026-07-12, from 09:00 — deleted 1,350 files (35.0 GB), archived 47 files (3.9 GB), excluded 210 files — and 1 other action
 ```
 
-A `<when>` the trail cannot read is refused with the reason and the forms it reads:
+A `<when>` the trail cannot interpret gives an error with the reason and the forms it accepts:
 
 ```
 Error: cannot read the date for --on
@@ -257,7 +257,7 @@ Scope still applies: `canon trail --today` inside a root shows that folder's day
 
 ## Notes in the timeline
 
-Notes ([`canon note`](../manage/note.md)) interleave with decisions by default, marked with `~` and carrying no id, act, counts, or status: a thought never reads as an action. The trail holds actions ("what did I do?"); notes hold thoughts ("what did I think?"). Use `--no-notes` for decisions only.
+Notes ([`canon note`](../manage/note.md)) interleave with decisions by default, marked with `~` and carrying no id, act, counts, or status: a thought never looks like an action. The trail holds actions ("what did I do?"); notes hold thoughts ("what did I think?"). Use `--no-notes` for decisions only.
 
 ## Full paths: `-l`
 
@@ -279,7 +279,7 @@ Paths are absolute in this mode wherever you run it, scoped views included: rela
 
 ## The counterpart door: `trail crossings`
 
-`canon trail crossings` reads the relation between two places: what this one gave another, or took from it. It takes the paths the trail's own output prints.
+`canon trail crossings` shows the relation between two places: what this one gave another, or took from it. It takes the paths the trail's own output prints.
 
 ### The bare view
 
@@ -418,7 +418,7 @@ Crossings: /archive
 Nothing has crossed between here and /archive/retired/archived-2026-08-08.
 ```
 
-A place can be known to Canon — indexed, noted, recorded — and still be no delivery's endpoint. Naming one is not an error and does not read as one; the answer is simply that nothing moved between the two places.
+A place can be known to Canon — indexed, noted, recorded — and still be no delivery's endpoint. Naming one is not an error and does not look like one; the answer is simply that nothing moved between the two places.
 
 A named counterpart matches at or below the path given, never above it. Asking about `/archive/2016` does not surface a delivery whose recorded destination is `/archive`: a common prefix says nothing about a particular folder beneath it. Matching is on literal bytes, so `_` and `%` in a folder name mean themselves.
 
@@ -432,13 +432,13 @@ Counterparts match on the paths recorded when each decision ran, so a removed ro
 $ canon trail crossings --global --origin /Volumes/old-backup/archived
 ```
 
-reads everything that drive ever delivered, wherever it went. This is the same computation as standing at the drive. `--global` therefore requires `--origin` or `--destination`; on its own there is nothing to measure against, and the command errors.
+shows everything that drive ever delivered, wherever it went. This is the same computation as standing at the drive. `--global` therefore requires `--origin` or `--destination`; on its own there is nothing to measure against, and the command errors.
 
-The same refusal applies without the flag. Running `canon trail crossings` from a directory no known root contains resolves to every root, which is the same boundless state, and it errors for the same reason: a view with no boundary cannot report a crossing, because every place is inside it. A [retired root's old path](#after-retirement-the-trail-stays-whole) answers instead of erroring, stating its retirement.
+The same error applies without the flag. Running `canon trail crossings` from a directory no known root contains resolves to every root, which is the same boundless state, and it errors for the same reason: a view with no boundary cannot report a crossing, because every place is inside it. A [retired root's old path](#after-retirement-the-trail-stays-whole) answers instead of erroring, stating its retirement.
 
-A directory inside a [suspended](../roots/roots.md#suspending-roots) root is not boundless: the boundary is that root, and crossings reads there like anywhere else, with the pause stated in the header. Naming the same path answers identically.
+A directory inside a [suspended](../roots/roots.md#suspending-roots) root is not boundless: the boundary is that root, and crossings works there like anywhere else, with the pause stated in the header. Naming the same path answers identically.
 
-The trail reads at a suspended place whether it is named alone or beside a live one, and states the door once in its header. Unlike the query commands, it sets nothing aside there: what Canon already recorded still reads.
+The trail works at a suspended place whether it is named alone or beside a live one, and states the door once in its header. Unlike the query commands, it sets nothing aside there: what Canon already recorded is still shown.
 
 On the composition card, an origin whose root is suspended is marked:
 
@@ -451,7 +451,7 @@ Standing here: 47 files (2.1 GB)
 
 The card states what stands here now, so the mark is about reaching that origin today. The timeline above it, and `trail show`'s `drew from:` lines, record what happened at the time and carry no such mark.
 
-When `--global` names both, the boundary is the deeper of the two where one contains the other, and the origin otherwise. Where the two paths do not nest, both choices select the same records and only the section header differs. Where one contains the other they select differently, and the deeper path is the one that reads the movement between them as a crossing rather than as a rearrangement inside the wider place.
+When `--global` names both, the boundary is the deeper of the two where one contains the other, and the origin otherwise. Where the two paths do not nest, both choices select the same records and only the section header differs. Where one contains the other they select differently, and the deeper path is the one that treats the movement between them as a crossing rather than as a rearrangement inside the wider place.
 
 ### Exits, caps and machine output
 
@@ -472,7 +472,7 @@ A counterpart Canon has no record of is stated, exit non-zero, no `Error:` prefi
 | `--all` | No cap |
 | `--jsonl` | Machine output (JSONL on stdout) |
 
-Counterparts are named by path. A root spec (`id:N`, `path:...`) is refused: it cannot name a location below a root, and a removed root's id is gone with the root.
+Counterparts are named by path. A root spec (`id:N`, `path:...`) is rejected: it cannot name a location below a root, and a removed root's id is gone with the root.
 
 ## Inspecting one decision: `trail show`
 
@@ -486,7 +486,7 @@ Decision #61 — exclude_duplicates
   counts:   attempted 315, completed 210, failed 0, skipped 105
   reason:   "redundant backup"
   command:  canon exclude duplicates /mnt/old-drive/photos --prefer /archive ...
-  read times on: Europe/Amsterdam
+  time zone: Europe/Amsterdam
   scope:    /mnt/old-drive/photos  (here)
   version:  0.5.2
   summary:  Excluded 210 duplicates (kept 105)
@@ -494,7 +494,7 @@ Decision #61 — exclude_duplicates
     /archive/.canon-ledger/000061-exclude_duplicates.toml
 ```
 
-`read times on:` names the time zone the decision read its times on, as its record states it ([decisions](../../concepts/decisions.md#the-time-zone-a-decision-reads-times-on)).
+`time zone:` names the time zone the decision used for times, as its record states it ([decisions](../../concepts/decisions.md#the-time-zone-a-decision-uses)).
 
 For an `apply` decision, a `drew from:` section lists what it took from each source root: path, files, and size. The path is a snapshot recorded at apply time, so it renders even after the root itself is gone from Canon. A root Canon no longer indexes ends its line with `(root removed)`: the path stays primary (it is the answer to "where did this come from?"), and the marker states that the path is history, not a place you can visit. For a copy, the originals may still exist at the origin, but they are no longer part of Canon's universe:
 
@@ -530,7 +530,7 @@ A row still reading `started` gains one more line, because the status alone does
 
 Every ordinary error now settles the row with a word and a sentence of its own, so `started` is reserved for a run whose outcome was never written down at all. The line states what that can mean rather than naming one cause; the `version:` line above it is what tells you whether the last reading applies. See [decisions](../../concepts/decisions.md).
 
-`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk, including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)`, `no receipt (the run refused)`, `no receipt (nothing transferred)` for a run that completed no transfer, or `no receipt recorded`); absence is never silent. A finished decision's receipt pointer names a file that exists: a run whose receipt was never written carries no pointer rather than a dangling one. A receipt pointer whose root has since been removed renders as `root #N (removed)/…`: the receipt was written, but the file now lives on storage Canon no longer indexes.
+`show` lists where the decision's [receipts](../../concepts/decisions.md) live on disk, including one receipt per source root for deletions. It does not print receipt contents; open the file to see the per-item record. When there is no receipt, the reason is stated (`no receipt (--no-receipt)`, `no receipt (the run was refused)`, `no receipt (nothing transferred)` for a run that completed no transfer, or `no receipt recorded`); absence is never silent. A finished decision's receipt pointer names a file that exists: a run whose receipt was never written carries no pointer rather than a dangling one. A receipt pointer whose root has since been removed renders as `root #N (removed)/…`: the receipt was written, but the file now lives on storage Canon no longer indexes.
 
 ### `show`'s scope list
 
@@ -545,7 +545,7 @@ A decision can name many places. `show` lists them one per line, capped at five 
             … and 26 more places
 ```
 
-`(here)` marks a scope that is the current directory or contains it; `(within here)` marks one the current directory contains. **`trail show <id>` therefore reads differently depending on where you run it** — the same scopes are always listed, only their order and these markers change. Run from outside every scope, or where the working directory cannot be resolved, the list is in recorded order with no markers.
+`(here)` marks a scope that is the current directory or contains it; `(within here)` marks one the current directory contains. **`trail show <id>` therefore looks different depending on where you run it** — the same scopes are always listed, only their order and these markers change. Run from outside every scope, or where the working directory cannot be resolved, the list is in recorded order with no markers.
 
 The markers use the same rule that decides whether a decision appears in a scoped `canon trail` at all, so a scope marked `(here)` is the reason that decision surfaces where you are standing.
 
@@ -586,8 +586,8 @@ canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summa
 |------|---------|
 | `--global` | All roots, ignoring current-directory scope |
 | `--today` | Time lens: today (sugar for `--since today`) |
-| `--since <when>` | Time lens: from the start of a period onward |
-| `--on <when>` | Time lens: within one period |
+| `--since <when>` | Time lens: from the start of `<when>` onward |
+| `--on <when>` | Time lens: within `<when>`, the whole span it names |
 | `--limit N` | Show at most N decisions (default 20) |
 | `--all` | No cap |
 | `--no-notes` | Decisions only |

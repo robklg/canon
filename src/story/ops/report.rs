@@ -50,7 +50,7 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
     let story = fetch_root_story(conn, root_id)?;
     if story.root.role == "archive" {
         bail!(
-            "Cannot read the story of {}: an archive root is where stories end up — its places are served by canon trail. The story review reads a source root toward letting go.",
+            "Cannot read the story of {}: an archive root is where stories end up — its places are served by canon trail. The story review is for a source root you are deciding whether to let go.",
             story.root.path
         );
     }

@@ -23,8 +23,12 @@ mod repo;
 // name in at least one consumer outside the facility.
 // ---------------------------------------------------------------------------
 
-// The asking half: a filter, run, and what the run reports about itself.
-pub use domain::filter::{Filter, UsedStatus};
+// The asking half: `--where` strings read and bound — or refused, with every reason —
+// before anything runs; a bound filter, run, and what the run reports about itself. The key
+// `facts --key` and `--group-by` name is read the same way.
+pub use domain::bind::FilterRefused;
+pub use domain::filter::UsedStatus;
+pub use ops::bind::{read_filters, read_report, BoundFilters};
 pub use ops::filter::apply_filters;
 
 // The language applied within a scope — the selector every command resolves
@@ -54,9 +58,7 @@ pub use ops::pattern::prefetch_pattern_facts;
 // Resolving a key to a value, and rendering one for display — together with
 // the attributes a built-in is computed from, which both halves of the
 // language hand the resolver.
-pub use domain::value::{
-    fact_value_to_display, get_builtin_value, resolve_fact_value, SourceAttributes,
-};
+pub use domain::value::{get_builtin_value, resolve_fact_value, SourceAttributes};
 
 // A source's one value for a stored key: the rule applied to a source's facts
 // already in hand, and the fetch that applies it to a batch.
@@ -71,26 +73,9 @@ pub use domain::key::{
     SCOPE_REL_PATH,
 };
 
-// The transforms a value can be put through, and what a modifier gives: a value, or none.
-pub use domain::transform::{apply_chain, Modified, Modifier, ModifierCategory};
+// What a modifier gives — a value, or none — and the one printed form of what it gave.
+pub use domain::transform::{rendered, Modified, Modifier, ModifierCategory};
 
-// ---------------------------------------------------------------------------
-// Completing the surface
-//
-// Parameter types of items above. Nothing outside names them today, but the
-// claim is structural rather than observed: `PathAccessor` and `ModifierCall`
-// are parameter types of `apply_chain`, so a caller
-// that wants to factor out a helper taking one must be able to name it.
-//
-// Return types are deliberately absent, per the parameter-type rule: inference
-// always lets a caller leave one unnamed, so carrying it would record demand
-// that does not exist. A consumer that genuinely needs to write one down —
-// storing it in a field, passing it onward — earns the item a place here by
-// a one-line pin edit, with that consumer as the evidence.
-//
-// The allow sits on the re-export statement rather than on the file, so that
-// a re-export which becomes dead for any other reason still says so.
-// ---------------------------------------------------------------------------
-
-#[allow(unused_imports)]
-pub use domain::transform::{ModifierCall, PathAccessor};
+// The statement that keys are of mixed type and its way out, each key printed by the
+// printing rule — read by `facts`' listing, `cluster`'s summary and a manifest's comments.
+pub use domain::print::{mixed_type_statement, mixed_type_way_out};

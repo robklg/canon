@@ -23,6 +23,7 @@ pub mod fate;
 pub mod folder_tree;
 pub mod format;
 pub mod include;
+pub mod number;
 pub mod object;
 pub mod path;
 pub mod resolution;

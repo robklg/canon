@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::filter::Filter;
+use super::filter::Expr;
 
 /// Check if a filter string contains any `@` alias references outside of quoted strings.
 /// This is the fast-path check to avoid loading the aliases file when not needed.
@@ -29,13 +29,28 @@ pub fn has_alias_references(input: &str) -> bool {
     false
 }
 
+/// The alias name that starts at `chars[at]`, just after an `@`: a letter, then letters, digits,
+/// `_` and `-`. `None` where no name starts there. The one spelling of an alias name: expansion
+/// reads references through it, and the tokenizer names an unexpanded one through it.
+pub(super) fn alias_name_at(chars: &[char], at: usize) -> Option<String> {
+    if !chars.get(at).is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let end = chars[at..]
+        .iter()
+        .position(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
+        .map_or(chars.len(), |n| at + n);
+    Some(chars[at..end].iter().collect())
+}
+
 /// Classify alias values: expression aliases get wrapped in parentheses,
-/// key aliases pass through unchanged. Classification uses `Filter::parse()` —
+/// key aliases pass through unchanged. Classification uses `Expr::parse()` (a clause whose key
+/// cannot be read still parses, and is refused where the alias is used) —
 /// if the value parses as a valid filter expression, it's an expression alias.
 pub fn classify_aliases(raw: HashMap<String, String>) -> HashMap<String, String> {
     raw.into_iter()
         .map(|(name, value)| {
-            let processed = if Filter::parse(&value).is_ok() {
+            let processed = if Expr::parse(&value).is_ok() {
                 format!("({value})")
             } else {
                 value
@@ -81,24 +96,15 @@ pub fn expand_aliases(
         if chars[i] == '@' {
             i += 1; // skip @
 
-            // Validate: name must start with a letter
-            if i >= chars.len() || !chars[i].is_ascii_alphabetic() {
+            let Some(name) = alias_name_at(&chars, i) else {
                 let bad: String = if i < chars.len() {
                     format!("@{}", chars[i])
                 } else {
                     "@".to_string()
                 };
                 bail!("Invalid alias syntax: '{bad}'. Alias names must start with a letter.");
-            }
-
-            // Read alias name: [a-zA-Z][a-zA-Z0-9_-]*
-            let name_start = i;
-            while i < chars.len()
-                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '-')
-            {
-                i += 1;
-            }
-            let name: String = chars[name_start..i].iter().collect();
+            };
+            i += name.chars().count();
 
             match aliases.get(&name) {
                 Some(value) => {

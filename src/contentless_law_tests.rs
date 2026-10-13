@@ -73,7 +73,7 @@ fn the_coverage_rollup_carries_the_empty_files_it_set_aside() {
     let mut c = canary();
     let (_, overall, _, _) = crate::coverage::compute_per_root(
         &mut c.conn,
-        &[],
+        &crate::expr::BoundFilters::none(),
         None,
         &Default::default(),
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -162,7 +162,7 @@ fn cluster_generate_carries_empty_files_instead_of_skipping_them() {
         &mut c.conn,
         &ClusterGenerateParams {
             scopes: vec![],
-            filters: vec![],
+            filters: crate::expr::BoundFilters::none(),
             allow_archived: false,
             allow_duplicates: false,
             clock: UserZone::utc(),
@@ -195,7 +195,7 @@ fn set_object_planning_sets_the_empty_file_aside() {
         &mut c.conn,
         &crate::exclude::ExcludeSetObjectsParams {
             scopes: vec![],
-            filters: vec![],
+            filters: crate::expr::BoundFilters::none(),
             clock: crate::core::domain::time::zone::UserZone::utc(),
         },
     )
@@ -222,7 +222,7 @@ fn survey_counts_the_empty_files_it_sets_aside() {
     let outcome = crate::survey::compute_survey(
         &mut c.conn,
         &["/r".to_string()],
-        &[],
+        &crate::expr::BoundFilters::none(),
         &crate::survey::SurveyParams {
             include: Default::default(),
             compute_affinity: false,

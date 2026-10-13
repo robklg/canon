@@ -26,7 +26,7 @@ use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
     ObjectSourceInfo, ReceiptDestination,
 };
-use crate::expr::Filter;
+use crate::expr::read_filters;
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
 /// their roots (the one funnel). Pass an empty slice for a global decision. A
@@ -135,10 +135,7 @@ pub fn set(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_set(
@@ -211,10 +208,7 @@ pub fn clear(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_clear(
@@ -408,10 +402,7 @@ pub fn exclude_duplicates(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     // Resolve paths (soft resolution: matches known roots, falls back to fs)
     let all_roots = crate::core::repo::root::fetch_all(conn)?;
@@ -704,10 +695,7 @@ pub fn set_objects_by_filter(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters: Vec<Filter> = filter_strs
-        .iter()
-        .map(|f| Filter::parse(f))
-        .collect::<Result<Vec<_>>>()?;
+    let filters = read_filters(conn, filter_strs)?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_set_objects(

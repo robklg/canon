@@ -5,7 +5,7 @@ use crate::core::testing::{
     insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
     setup_test_db,
 };
-use crate::expr::Filter;
+use crate::expr::{read_filters, BoundFilters};
 use crate::survey::domain::analysis::LocationKind;
 use crate::survey::ops::compute::{compute_survey, SurveyOutcome, SurveyParams};
 
@@ -16,7 +16,7 @@ fn run_compute(
     conn: &mut Connection,
     scope_paths: &[&str],
     params: &SurveyParams,
-    filters: &[Filter],
+    filters: &BoundFilters,
     other_paths: &[&str],
     archive_root_id: Option<i64>,
 ) -> SurveyOutcome {
@@ -72,7 +72,14 @@ fn test_basic_summary() {
     insert_source(&conn, archive, "2024/IMG_003.jpg", Some(obj3));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -100,7 +107,14 @@ fn test_empty_selection() {
     insert_source(&conn, root, "photos/a.jpg", Some(obj));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive/other"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive/other"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Empty => {}
@@ -116,7 +130,14 @@ fn test_all_unhashed() {
     insert_source(&conn, root, "b.jpg", None);
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::AllUnhashed { total_count } => {
@@ -140,7 +161,14 @@ fn test_no_related_locations() {
     insert_source(&conn, archive, "a.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -161,7 +189,14 @@ fn test_no_archived() {
     insert_source(&conn, root, "a.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -190,7 +225,7 @@ fn test_multiple_scope_paths() {
         &mut conn,
         &["/mnt/drive-a", "/mnt/drive-b"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &[],
         None,
     );
@@ -226,7 +261,14 @@ fn survey_counts_parked_evidence_on_the_outward_side() {
     insert_source(&conn, suspended, "c.jpg", Some(obj2));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -262,7 +304,7 @@ fn the_selection_side_still_sets_parked_sources_aside() {
     // A global survey selects only the live root's row, even though the
     // parked root's row is visible to the outward side.
     let params = test_params();
-    let outcome = run_compute(&mut conn, &[], &params, &[], &[], None);
+    let outcome = run_compute(&mut conn, &[], &params, &BoundFilters::none(), &[], None);
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -286,7 +328,14 @@ fn survey_never_marks_a_location_with_an_open_copy() {
     insert_source(&conn, mixed, "b.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -317,7 +366,14 @@ fn survey_never_leads_with_a_parked_location() {
     insert_source(&conn, live, "a.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -350,7 +406,14 @@ fn test_excluded_sources_hidden() {
     insert_source_excluded(&conn, other, "b.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -370,7 +433,14 @@ fn test_excluded_sources_hidden() {
         },
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -403,7 +473,14 @@ fn test_archive_scope_grouping() {
     insert_source(&conn, archive2, "backup/z.jpg", Some(obj3));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -431,7 +508,14 @@ fn test_same_root_different_scope() {
     insert_source(&conn, root, "documents/a_copy.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive/photos"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive/photos"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -477,7 +561,7 @@ fn test_affinity_basic() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -524,7 +608,7 @@ fn test_affinity_only_here_reduced() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -568,7 +652,7 @@ fn test_affinity_unhashed_excluded() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -602,7 +686,14 @@ fn test_no_filters_no_affinity() {
     insert_source(&conn, root_b, "trip/IMG_004.jpg", Some(obj4));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -665,7 +756,7 @@ fn test_classification_sort() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -709,7 +800,7 @@ fn test_selection_narrowed_by_filter() {
     insert_source(&conn, root, "photos/e.jpg", Some(obj5));
 
     let params = test_params();
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -740,7 +831,7 @@ fn test_same_root_complementary() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(
         &mut conn,
         &["/mnt/drive/photos"],
@@ -784,7 +875,7 @@ fn test_mirror_with_filters() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -831,7 +922,7 @@ fn test_other_basic() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let other = vec![("/mnt/backup/trip")];
     let outcome = run_compute(
         &mut conn,
@@ -881,7 +972,7 @@ fn test_other_never_reads_empty_files_as_shared_or_unique() {
         &mut conn,
         &["/mnt/drive-a"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &["/mnt/backup/trip"],
         None,
     );
@@ -925,7 +1016,7 @@ fn test_affinity_never_reads_empty_files_as_complementary() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(
         &mut conn,
         &["/mnt/drive-a"],
@@ -976,7 +1067,7 @@ fn test_other_zero_overlap() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let other = vec![("/mnt/backup")];
     let outcome = run_compute(
         &mut conn,
@@ -1021,7 +1112,14 @@ fn test_other_preserves_order() {
 
     let other = vec![("/mnt/root-c"), ("/mnt/root-b")];
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1057,7 +1155,7 @@ fn test_other_archive_root() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let other = vec![("/archive")];
     let outcome = run_compute(
         &mut conn,
@@ -1106,7 +1204,7 @@ fn test_brief_suppresses_affinity() {
 
     // affinity: true + brief: true → compute_affinity: false
     let params = test_params(); // compute_affinity defaults to false
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -1141,9 +1239,23 @@ fn test_brief_without_filters_noop() {
     insert_source(&conn, root_b, "trip/c.jpg", Some(obj3));
 
     let params_normal = test_params();
-    let outcome_normal = run_compute(&mut conn, &["/mnt/drive-a"], &params_normal, &[], &[], None);
+    let outcome_normal = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params_normal,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
     let params_brief = test_params(); // same — both have compute_affinity: false
-    let outcome_brief = run_compute(&mut conn, &["/mnt/drive-a"], &params_brief, &[], &[], None);
+    let outcome_brief = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params_brief,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match (outcome_normal, outcome_brief) {
         (SurveyOutcome::Result(normal), SurveyOutcome::Result(brief)) => {
@@ -1183,7 +1295,7 @@ fn test_other_with_brief() {
 
     // affinity: true + brief: true → compute_affinity: false
     let params = test_params();
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let other = vec![("/mnt/backup/trip")];
     let outcome = run_compute(
         &mut conn,
@@ -1227,7 +1339,7 @@ fn test_other_same_root_cross_scope() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let other = vec![("/mnt/drive/documents")];
     let outcome = run_compute(
         &mut conn,
@@ -1281,7 +1393,7 @@ fn test_detail_complement_paths() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -1317,7 +1429,7 @@ fn test_detail_complement_mirror_has_empty_paths() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -1344,7 +1456,14 @@ fn test_detail_complement_no_affinity_has_none_paths() {
     insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive-a"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1376,7 +1495,14 @@ fn test_unique_paths_populated() {
     insert_source(&conn, archive, "2024/c.jpg", Some(obj3));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1404,7 +1530,14 @@ fn test_unique_paths_empty_when_none_unique() {
     insert_source(&conn, root_b, "b.jpg", Some(obj2));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1427,7 +1560,14 @@ fn test_unique_paths_duplicates_within_selection() {
     insert_source(&conn, root, "photos/a_copy.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1459,7 +1599,7 @@ fn test_complement_paths_relative_to_location() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -1495,7 +1635,7 @@ fn test_complement_other_mode_zero_overlap_has_paths() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let other = vec![("/mnt/backup")];
     let outcome = run_compute(
         &mut conn,
@@ -1547,7 +1687,14 @@ fn test_archive_filter_specific_root() {
     insert_source(&conn, archive_b, "backup/z.jpg", Some(obj3));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
     match outcome {
         SurveyOutcome::Result(result) => {
             assert_eq!(result.archived_source_count, 3);
@@ -1560,7 +1707,7 @@ fn test_archive_filter_specific_root() {
         &mut conn,
         &["/mnt/drive"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &[],
         Some(archive_a),
     );
@@ -1596,7 +1743,7 @@ fn test_archive_filter_no_matches() {
         &mut conn,
         &["/mnt/drive"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &[],
         Some(archive_a),
     );
@@ -1633,12 +1780,19 @@ fn test_archive_filter_does_not_affect_other_sections() {
     insert_source(&conn, archive_b, "backup/y.jpg", Some(obj2));
 
     let params = test_params();
-    let outcome_all = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome_all = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
     let outcome_filtered = run_compute(
         &mut conn,
         &["/mnt/drive"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &[],
         Some(archive_a),
     );
@@ -1679,7 +1833,14 @@ fn test_many_locations_all_computed() {
     }
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/selection"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/selection"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1720,7 +1881,14 @@ fn test_orientation_default_no_filters() {
     insert_source(&conn, root_c, "misc/a.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1761,7 +1929,7 @@ fn test_orientation_with_filters() {
     insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
 
     let params = test_params();
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -1797,7 +1965,14 @@ fn test_zero_unique_shown() {
     insert_source(&conn, root_b, "b.jpg", Some(obj2));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -1827,7 +2002,7 @@ fn test_affinity_brief_noop() {
 
     // affinity: true + brief: true → compute_affinity: false
     let params = test_params();
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -1858,10 +2033,24 @@ fn test_brief_without_affinity_noop() {
     insert_source(&conn, root_b, "a.jpg", Some(obj1));
 
     let params_plain = test_params();
-    let outcome_plain = run_compute(&mut conn, &["/mnt/drive"], &params_plain, &[], &[], None);
+    let outcome_plain = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params_plain,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     let params_brief = test_params();
-    let outcome_brief = run_compute(&mut conn, &["/mnt/drive"], &params_brief, &[], &[], None);
+    let outcome_brief = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params_brief,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match (outcome_plain, outcome_brief) {
         (SurveyOutcome::Result(plain), SurveyOutcome::Result(brief)) => {
@@ -1904,7 +2093,7 @@ fn test_subset_classification() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -1946,7 +2135,7 @@ fn test_subset_vs_mirror() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = vec![Filter::parse("source.ext=jpg").unwrap()];
+    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -1983,7 +2172,14 @@ fn test_total_count_in_summary() {
     insert_source(&conn, root_b, "copy/pending.raw", None);
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2028,7 +2224,14 @@ fn test_overlap_detail_basic() {
         compute_overlap_pairs: true,
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2082,7 +2285,14 @@ fn test_overlap_detail_with_other() {
         ..test_params()
     };
     let other = vec![("/mnt/backup/trip")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2118,7 +2328,14 @@ fn test_overlap_detail_null() {
         compute_overlap_pairs: true,
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2149,7 +2366,14 @@ fn test_overlap_detail_no_overlap() {
         ..test_params()
     };
     let other = vec![("/mnt/backup")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2181,7 +2405,14 @@ fn test_overlap_multi_location_dedup() {
         compute_overlap_pairs: true,
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2221,7 +2452,14 @@ fn test_overlap_single_counterpart() {
         compute_overlap_pairs: true,
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2253,7 +2491,14 @@ fn test_overlap_multiple_counterparts() {
         compute_overlap_pairs: true,
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2284,7 +2529,14 @@ fn test_overlap_counterpart_relative_to_location() {
         ..test_params()
     };
     let other = vec![("/mnt/backup/trip")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2312,7 +2564,14 @@ fn test_overlap_null_delim_no_counterparts() {
         compute_overlap_pairs: true,
         ..test_params()
     };
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2350,7 +2609,14 @@ fn test_residual_detail_basic() {
         ..test_params()
     };
     let other = vec![("/mnt/backup")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2385,7 +2651,14 @@ fn test_residual_includes_unhashed() {
         ..test_params()
     };
     let other = vec![("/mnt/backup")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2432,7 +2705,7 @@ fn test_residual_never_lists_empty_files() {
         &mut conn,
         &["/mnt/drive-a"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &["/mnt/backup/trip"],
         None,
     );
@@ -2475,7 +2748,14 @@ fn test_residual_zero() {
         ..test_params()
     };
     let other = vec![("/mnt/backup")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2507,7 +2787,14 @@ fn test_residual_null() {
         ..test_params()
     };
     let other = vec![("/mnt/backup")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2546,7 +2833,14 @@ fn test_residual_multiple_other() {
         ..test_params()
     };
     let other = vec![("/mnt/backup-1"), ("/mnt/backup-2")];
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &other, None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &other,
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2585,7 +2879,14 @@ fn test_unique_detail_relative_paths() {
     insert_source(&conn, root, "photos/sub/unique.jpg", Some(obj1));
 
     let params = test_params();
-    let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &[], &[], None);
+    let outcome = run_compute(
+        &mut conn,
+        &["/mnt/drive"],
+        &params,
+        &BoundFilters::none(),
+        &[],
+        None,
+    );
 
     match outcome {
         SurveyOutcome::Result(result) => {
@@ -2621,7 +2922,14 @@ fn the_selection_side_stays_source_roots_whatever_the_include_set_says() {
             },
             ..test_params()
         };
-        let outcome = run_compute(&mut conn, &["/archive/photos"], &params, &[], &[], None);
+        let outcome = run_compute(
+            &mut conn,
+            &["/archive/photos"],
+            &params,
+            &BoundFilters::none(),
+            &[],
+            None,
+        );
         assert!(
             matches!(outcome, SurveyOutcome::Empty),
             "archive sources must never enter the selection (archived = {archived})"
@@ -2653,7 +2961,7 @@ fn an_other_location_spanning_two_standings_is_unmarked() {
         &mut conn,
         &["/mnt/drive"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &["/mnt/shelf"],
         None,
     );
@@ -2694,7 +3002,7 @@ fn an_other_location_wholly_behind_doors_is_marked() {
         &mut conn,
         &["/mnt/drive"],
         &params,
-        &[],
+        &BoundFilters::none(),
         &["/mnt/shelf"],
         None,
     );

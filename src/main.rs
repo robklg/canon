@@ -78,7 +78,7 @@ fn user_zone() -> &'static UserZone {
 
 /// This machine's zone for the manifest commands, read through the same owner **without** the
 /// unknown-zone notice. A manifest's run reads the zone the manifest or its lock records, so
-/// the notice's "times are read in UTC" would be false there; `cluster generate` and
+/// the notice's "times are shown and compared in UTC" would be false there; `cluster generate` and
 /// `cluster refresh` name the machine's zone in their own refusals and statements instead,
 /// and `cluster status` reads it only for what a refresh here would record.
 fn manifest_machine_zone() -> UserZone {
@@ -86,19 +86,19 @@ fn manifest_machine_zone() -> UserZone {
 }
 
 /// What a user is told about their clock: nothing for a zone Canon can read, and for one it
-/// cannot, that times are read in UTC and why.
+/// cannot, that times are shown and compared in UTC and why.
 fn notice_for(zone: &UserZone) -> Option<String> {
     match zone.label() {
         ZoneLabel::Unknown {
             unreadable_tz: None,
         } => Some(
-            "this machine's time zone is unknown; times are read in UTC — set TZ to change it"
+            "this machine's time zone is unknown; times are shown and compared in UTC — set TZ to change it"
                 .to_string(),
         ),
         ZoneLabel::Unknown {
             unreadable_tz: Some(tz),
         } => Some(format!(
-            "TZ={tz} is not a time zone Canon can read; times are read in UTC"
+            "TZ={tz} is not a time zone Canon can read; times are shown and compared in UTC"
         )),
         ZoneLabel::Named(_)
         | ZoneLabel::FixedOffset(_)
@@ -495,10 +495,10 @@ enum Commands {
         /// Today's story (sugar for --since today)
         #[arg(long, conflicts_with_all = ["since", "on"])]
         today: bool,
-        /// Story from a period onward: today, yesterday, a weekday, or a date or time (2024-06, 2024-06-15, ...)
+        /// Story from the start of the given date or time onward: today, yesterday, a weekday, or a date or time (2024-06, 2024-06-15, ...)
         #[arg(long, conflicts_with = "on")]
         since: Option<String>,
-        /// One period's story: today, yesterday, a weekday, or a date or time (2024-06, 2024-06-15, ...)
+        /// Story within the given date or time: today, yesterday, a weekday, or a date or time (2024-06, 2024-06-15, ...)
         #[arg(long)]
         on: Option<String>,
         /// Maximum decisions to show (default: 20)
@@ -970,20 +970,36 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
 /// and being told so is the answer to the question they asked — so a
 /// [`DoorRefused`] anywhere in the chain is stated as it stands, **on the
 /// dispatched command's own class channel** ([`door_channel_for`]) rather
-/// than unconditionally on stderr. Everything else is a real failure and
-/// renders exactly as before.
+/// than unconditionally on stderr. A [`crate::expr::FilterRefused`] that is
+/// only an answer about what a key is (two types, a type changed mid-run) is
+/// stated the same way; one holding input Canon cannot read prints with
+/// `Error:` on stderr. Everything else is a real failure and renders exactly
+/// as before.
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let channel = door_channel_for(&cli.command);
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            match err.downcast_ref::<crate::core::domain::root::DoorRefused>() {
-                Some(refusal) => match channel {
+            if let Some(refusal) = err.downcast_ref::<crate::core::domain::root::DoorRefused>() {
+                match channel {
                     scope::DoorChannel::Stdout => println!("{refusal}"),
                     scope::DoorChannel::Stderr => eprintln!("{refusal}"),
-                },
-                None => eprintln!("Error: {err:?}"),
+                }
+            } else if let Some(refusal) = err.downcast_ref::<crate::expr::FilterRefused>() {
+                // A filter Canon will not run: an answer about what a key is prints as it
+                // stands on the command's class channel, as a closed door does; anything
+                // holding input Canon cannot read is an error.
+                if refusal.is_answer() {
+                    match channel {
+                        scope::DoorChannel::Stdout => println!("{refusal}"),
+                        scope::DoorChannel::Stderr => eprintln!("{refusal}"),
+                    }
+                } else {
+                    eprintln!("Error: {refusal}");
+                }
+            } else {
+                eprintln!("Error: {err:?}");
             }
             std::process::ExitCode::FAILURE
         }
@@ -1365,7 +1381,7 @@ fn run(cli: Cli) -> Result<()> {
             if include.includes_archived() {
                 bail!(
                     "--include archived is not valid for survey.\n\
-                     Survey reads source-side selections; archive content is its outward\n\
+                     Survey works on source-side selections; archive content is its outward\n\
                      side, always visible.\n\
                      For what stands in an archive location: canon trail\n\
                      For a listing of what's there: canon ls"
@@ -1920,7 +1936,7 @@ mod tests {
         assert_eq!(
             notice_for(&zone).as_deref(),
             Some(
-                "this machine's time zone is unknown; times are read in UTC — set TZ to change it"
+                "this machine's time zone is unknown; times are shown and compared in UTC — set TZ to change it"
             )
         );
     }
@@ -1930,7 +1946,7 @@ mod tests {
         let zone = UserZone::for_test_unknown(Some("Europe/Amsterdm"));
         assert_eq!(
             notice_for(&zone).as_deref(),
-            Some("TZ=Europe/Amsterdm is not a time zone Canon can read; times are read in UTC")
+            Some("TZ=Europe/Amsterdm is not a time zone Canon can read; times are shown and compared in UTC")
         );
     }
 

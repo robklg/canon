@@ -368,7 +368,7 @@ fn a_refused_run_explains_its_missing_receipt() {
     let show = compute_show(&conn, refused, None).unwrap().unwrap();
     assert_eq!(
         show.receipt_absence.as_deref(),
-        Some("no receipt (the run refused)")
+        Some("no receipt (the run was refused)")
     );
 }
 

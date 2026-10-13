@@ -34,29 +34,29 @@ Each decision captures:
 - **Summary** — the completion message you saw
 - **Canon version** — which version produced the record
 - **Timestamp** — when the command started
-- **Time zone** — the zone the command read times on
+- **Time zone** — the time zone the command used for times
 
-### The time zone a decision reads times on
+### The time zone a decision uses
 
-A decision records the time zone its command read times on: your clock's zone when it ran, or, for `cluster generate`, `cluster refresh` and `apply`, the zone the manifest records ([the manifest's time zone](../commands/archive/cluster.md#the-manifests-time-zone)). The record and every receipt the decision writes carry the same text: [`trail show`](../commands/query/trail.md#inspecting-one-decision-trail-show) prints it as `read times on:`, and a receipt holds it as `zone` in `[meta]`.
+A decision records the time zone its command used for times: your time zone when it ran, or, for `cluster generate`, `cluster refresh` and `apply`, the zone the manifest records ([the manifest's time zone](../commands/archive/cluster.md#the-manifests-time-zone)). The record and every receipt the decision writes carry the same text: [`trail show`](../commands/query/trail.md#inspecting-one-decision-trail-show) prints it as `time zone:`, and a receipt holds it as `zone` in `[meta]`.
 
-A zone with no name is recorded as what Canon read:
+A zone with no name is recorded as Canon found it:
 
-| Your clock | Recorded as |
+| Your time zone | Recorded as |
 |---|---|
 | A named zone | `Europe/Amsterdam` |
 | A fixed offset | `+03:00` |
 | A `TZ` rule with no name | the rule as written: `CET-1CEST,M3.5.0,M10.5.0/3` |
 | Zone rules with no name and no rule text | `local rules with no name (UTC+01:00 at run time)` |
-| A zone Canon cannot read | `UTC (this machine's time zone is unknown)` |
+| A zone Canon cannot determine | `UTC (this machine's time zone is unknown)` |
 
 A decision recorded before Canon kept the zone has none, and `trail show` says what its times meant then:
 
 ```
-  read times on: UTC (recorded before Canon kept the zone; then a bare number against a time was seconds since 1970, and a typed date one moment at UTC midnight)
+  time zone: UTC (recorded before Canon kept the zone; then a bare number against a time was seconds since 1970, and a typed date meant midnight UTC)
 ```
 
-A receipt with no `zone` field was written then too: Canon read every time in UTC, a bare number against a time as seconds since 1970, and a typed date as one moment at UTC midnight.
+A receipt with no `zone` field was written then too: Canon interpreted every time in UTC, a bare number against a time as seconds since 1970, and a date you typed as midnight UTC.
 
 ## Two-Phase Recording
 
@@ -65,7 +65,7 @@ Recording happens in two phases:
 1. **Start**: A "started" record is written after you confirm (or just before execution for commands without confirmation)
 2. **Complete**: The record is updated with the outcome after execution finishes
 
-A run that refuses — a pre-flight check said no, so nothing was touched — records `refused`. One cut short after work began records `interrupted` or `partial`.
+A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`.
 
 If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives as a durable trace that the operation was attempted. A row left `started` means its outcome was never written. That has three readings: the run was killed or crashed; or it ended and the outcome could not be written down, for example when another canon process held the database locked at that moment; or the row was written by a version of Canon older than the one that settles every ordinary error. `canon trail show` prints the row's version and time, and says the same thing on the row itself.
 
@@ -119,7 +119,7 @@ id = 3
 - **`transition`** — the *what*, in fixed vocabulary: `archived`, `excluded`, `restored` (an exclusion undone), or `deleted`. This is the same word `canon trail` uses for the same action; the trail and the receipt tell one story in one vocabulary.
 - **`posture`** — whether Canon **performed** the change or **observed** one the world made. A scan-detected deletion is `observed`: Canon witnessed a loss, it did not cause one. Every other receipt today is `performed`.
 - **`[meta.locus]`** — the identity of the root the receipt is anchored to, making its placement into data. Locus is the *receipt's* where, not the action's: an exclusion run in a source folder has its `scope` there and its per-item `root`s there, but its locus is the archive ledger root, because that is where the receipt itself lives. **`path`** is the root's canonical path captured at write time — authoritative for a human and for rebuilding an index from disk, and still meaningful after a drive is remounted elsewhere or a receipt is copied off its root. **`id`** is the join key against a live database. Both are always present.
-- **`zone`** — the time zone the decision read times on, the same text as its record ([above](#the-time-zone-a-decision-reads-times-on)).
+- **`zone`** — the time zone the decision used for times, the same text as its record ([above](#the-time-zone-a-decision-uses)).
 - **`origin_disposition`** — apply receipts only: `retained` (a copy; the content now lives in two places) or `relocated` (a move; the origin no longer holds the file).
 
 **The granularity rule.** Subjects that can span roots always carry their own per-item root identity: apply items keep their `source_root`; exclusion and object entries keep their `root`. The **locus** root is always meta-level. Receipt-level-only identity (no per-item root, as in a deletion receipt) is valid exactly where single-root-ness is guaranteed by construction: a deletion receipt is coalesced to one root, so its items inherit the meta locus.
@@ -148,7 +148,7 @@ recording = "Full"   # Full | Records | Off
 layout = "Central"   # Central | Alongside
 ```
 
-A decision's recorded receipt location is settled at the decision's last act, so a finished row names a file that exists. The location is reserved when the run starts, before the receipt is written; if the receipt never appears — nothing transitioned, the write failed, or the run refused before moving anything — the reservation is withdrawn rather than left pointing at nothing, and [`trail show`](../commands/query/trail.md) states why. The counts carry the reason: a receipt records per-item transitions, so a run with none has nothing to receipt. A run that refused says so in its own status, so its missing receipt is explained by the row rather than left generic. A run whose outcome was never written leaves its row `started`, which is the state to look for when recovering from a crash — with the readings above, since a locked database can also stop an outcome being written.
+A decision's recorded receipt location is settled at the decision's last act, so a finished row names a file that exists. The location is reserved when the run starts, before the receipt is written; if the receipt never appears — nothing transitioned, the write failed, or the run stopped before moving anything — the reservation is withdrawn rather than left pointing at nothing, and [`trail show`](../commands/query/trail.md) states why. The counts carry the reason: a receipt records per-item transitions, so a run with none has nothing to receipt. A run recorded as `refused` says so in its own status, so its missing receipt is explained by the row rather than left generic. A run whose outcome was never written leaves its row `started`, which is the state to look for when recovering from a crash — with the readings above, since a locked database can also stop an outcome being written.
 
 If there is no archive root to hold it, exclusion decisions are still recorded, but no receipt can be written. The decision says so itself: its summary names the reason — no archive root is registered, or every archive root is suspended, with the suspended roots named — so the gap is visible in the trail years later rather than silent. Deletion receipts have no such dependency: they live on the source root, which always exists, so deletions from a root that was never archived are still recorded in full.
 
@@ -197,7 +197,7 @@ It is deliberately **aggregate-only**: one row per (decision, source root, origi
 
 Every row makes one uniform claim: *all its files lie under its recorded origin location, and were placed under its recorded destination location.* That claim is exactly what the trail matches: a row surfaces at the views that contain its locations and nowhere else, and wherever it surfaces, its counts are exact. This is deliberately a different rule from a decision's acted-on *scope*, which matches in both directions (acting on a parent folder acts on its children too): a scope declares "I acted on this subtree", while a placement records where files demonstrably are; a location *above* your view implies the first, never the second. Rows recorded before Canon kept directory precision hold coarse common prefixes; they make the same claim less tightly, so they match conservatively (at their recorded prefix and above, silent below it) until reindexed.
 
-The recorded paths are write-time snapshots, not live lookups: a row keeps telling its story after the source root has been removed from Canon. `canon trail show` marks such roots `(root removed)`, so a snapshot path never silently reads as a live, visitable location.
+The recorded paths are write-time snapshots, not live lookups: a row keeps telling its story after the source root has been removed from Canon. `canon trail show` marks such roots `(root removed)`, so a snapshot path is never mistaken for a live, visitable location.
 
 ### Disk is truth, the database is a rebuildable index
 
@@ -235,7 +235,7 @@ Because roots cannot nest, a decision with both endpoints inside one view is alw
 
 Counting such a decision as both a departure and an arrival would double it, with both counterparty counts naming the very place you are standing; dropping it silently would hide real work. So it gets its own line, and its own word.
 
-**The boundary moves when you move.** Standing at an archive root, a curation pass reads as a rearrangement; standing in the destination folder, the same pass reads as an arrival, because from there the origin genuinely is elsewhere. Each view answers its own question. What is guaranteed is that within any one view, the categories are disjoint: no file is counted twice.
+**The boundary moves when you move.** Standing at an archive root, a curation pass shows as a rearrangement; standing in the destination folder, the same pass shows as an arrival, because from there the origin genuinely is elsewhere. Each view answers its own question. What is guaranteed is that within any one view, the categories are disjoint: no file is counted twice.
 
 A movement that *does* cross the boundary is a **crossing**: a recorded movement across the boundary of the place in view, with an origin end and a destination end. It is the unit [`canon trail crossings`](../commands/query/trail.md#the-counterpart-door-trail-crossings) reads. A rearrangement is not one, because it crossed nothing.
 
