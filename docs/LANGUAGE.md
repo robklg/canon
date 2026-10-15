@@ -4,6 +4,10 @@ Canon's ubiquitous language: use its terms as defined here, in code, specs, docs
 discussion. A term is defined here or it is not a domain term. Meaning, not mechanics;
 fundamental nouns only.
 
+Words outside this register carry their everyday meaning, or their common meaning in software
+and archiving. A word or phrase coined for Canon is used only once it is registered here; coined
+language that is not registered is not used — in code, docs, specs or discussion.
+
 Some terms are deliberate metaphors (the story, the book, the shelf). Two guards keep them
 honest: on surfaces, a metaphor always travels with its concrete referent (a path, a file —
 never a bare "consult the shelf"); on disk, artifacts stay plainly named for the reader who
