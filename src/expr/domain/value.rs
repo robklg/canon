@@ -1,14 +1,14 @@
 //! Fact value resolution — domain layer for getting fact values.
 //!
 //! This module provides the core operation: "get the value of fact K for source S."
-//! It handles built-in facts (derived from Source fields), stored facts (from the
-//! facts table), and applies any transforms (accessors, modifiers).
+//! It handles the keys a source's own row answers (`source_row_value`), stored facts
+//! (from the facts table), and applies any transforms (accessors, modifiers).
 //!
 //! ## Design Principles
 //!
 //! 1. **Pure function**: `resolve_fact_value()` has no I/O or side effects
 //! 2. **Single source of truth**: This is THE way to get a fact's value for a source
-//! 3. **Handles both built-in and stored facts**: Caller doesn't need to distinguish
+//! 3. **Handles both computed keys and stored facts**: Caller doesn't need to distinguish
 //! 4. **Testable in isolation**: Can be unit tested without database
 //!
 //! ## Usage
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use super::key::{BuiltinKey, ParsedFactKey};
+use super::key::{BuiltinKey, Key, ParsedFactKey, SourceFact};
 use super::transform::{self, Modified};
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::FactValue;
@@ -33,8 +33,8 @@ use crate::core::domain::source::Source;
 use crate::core::domain::time::value::TimeValue;
 use crate::core::domain::time::zone::UserZone;
 
-/// Everything the built-in vocabulary can be computed from — the complete set,
-/// so a built-in either resolves from these or is a stored fact.
+/// Everything a source's own row answers a key from — the complete set, so a
+/// key either resolves from these or is a stored fact.
 ///
 /// Named as its own input because the resolver serves both halves of the
 /// language and the two halves hold different things. The asking half has a
@@ -115,15 +115,15 @@ pub fn resolve_fact_value(
     stored_facts: &HashMap<String, FactEntry>,
     zone: &UserZone,
 ) -> Result<Option<String>> {
-    // 1. Get raw value: the resolver for a built-in the source row computes,
-    // the stored facts for everything else — the hash keys included, which are
-    // built-ins the source row cannot answer. The partition is the key's
+    // 1. Get raw value: the source row for a key it answers, the stored facts
+    // for everything else — the content hash included, which `hash` and
+    // `hash_short` are read as. The partition is the key's
     // (`is_computed`), as in the filter's compare, never the resolver's `None`:
     // a computed key the row cannot answer (a save time outside the years Canon
     // reads) has no value, and never falls through to a stored row of its name.
-    let raw_value = match BuiltinKey::from_str(&key.base_key) {
-        Some(builtin) if builtin.is_computed() => {
-            get_builtin_value(&SourceAttributes::from(source), builtin)
+    let raw_value = match Key::read(&key.base_key) {
+        Some(read) if read.is_computed() => {
+            source_row_value(&SourceAttributes::from(source), &read)
         }
         _ => match stored_facts.get(&key.base_key) {
             Some(entry) => {
@@ -143,17 +143,53 @@ pub fn resolve_fact_value(
     }
 }
 
-/// Extract a built-in fact value from a source's own attributes.
+/// A key's value for a source, read from the source's own row.
 ///
-/// Built-in facts are derived from source columns without database lookup.
-/// Returns None for hash-based facts which require object lookup — and that
-/// `None` is load-bearing beyond this function: it is what
-/// `BuiltinKey::is_computed` is derived against, so which keys the pattern
-/// context answers for itself is read off these arms rather than listed
-/// anywhere.
-pub fn get_builtin_value(source: &SourceAttributes, builtin: BuiltinKey) -> Option<FactValue> {
-    match builtin {
-        BuiltinKey::SourceExt | BuiltinKey::Ext => {
+/// Every source fact has its arm here, and a built-in key with the same value as
+/// a source fact (`size`, `mtime`, `ext`, `id`) is read through that source
+/// fact's arm — one arm per value, never a copy. Returns `None` for the keys the
+/// source row cannot answer: the hash keys and every content fact — and that
+/// `None` is load-bearing beyond this function: it is what `Key::is_computed` is
+/// derived against, so which keys the pattern context answers for itself is read
+/// off these arms rather than listed anywhere.
+pub fn source_row_value(source: &SourceAttributes, key: &Key) -> Option<FactValue> {
+    if let Some(fact) = key.as_source_fact() {
+        return source_fact_value(source, fact);
+    }
+    match key {
+        Key::SourceFact(_) => unreachable!("every source fact is read above"),
+        Key::BuiltinKey(builtin) => match builtin {
+            BuiltinKey::Ext | BuiltinKey::Size | BuiltinKey::Mtime | BuiltinKey::Id => {
+                unreachable!("read through its source fact above")
+            }
+            BuiltinKey::Filename => {
+                let filename = std::path::Path::new(&source.rel_path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&source.rel_path)
+                    .to_string();
+                Some(FactValue::Text(filename))
+            }
+            BuiltinKey::Stem => {
+                let stem = std::path::Path::new(&source.rel_path)
+                    .file_stem()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(FactValue::Text(stem))
+            }
+            BuiltinKey::RootId => Some(FactValue::Num(source.root_id as f64)),
+            // Read as the stored content hash, which needs the object, not the source row.
+            BuiltinKey::Hash | BuiltinKey::HashShort => None,
+        },
+        Key::ContentFact(_) => None,
+    }
+}
+
+/// A source fact's value, read from what the scanner recorded.
+fn source_fact_value(source: &SourceAttributes, fact: SourceFact) -> Option<FactValue> {
+    match fact {
+        SourceFact::Ext => {
             let ext = std::path::Path::new(&source.rel_path)
                 .extension()
                 .and_then(|e| e.to_str())
@@ -161,36 +197,17 @@ pub fn get_builtin_value(source: &SourceAttributes, builtin: BuiltinKey) -> Opti
                 .unwrap_or_default();
             Some(FactValue::Text(ext))
         }
-        BuiltinKey::SourceSize | BuiltinKey::Size => Some(FactValue::Num(source.size as f64)),
+        SourceFact::Size => Some(FactValue::Num(source.size as f64)),
         // A save time outside the years every zone reads in 0000–9999 has no value.
-        BuiltinKey::SourceMtime | BuiltinKey::Mtime => TimeValue::from_epoch_secs(source.mtime)
+        SourceFact::Mtime => TimeValue::from_epoch_secs(source.mtime)
             .ok()
             .map(FactValue::Time),
-        BuiltinKey::SourcePath => Some(FactValue::Path(source.path())),
-        BuiltinKey::SourceRoot => Some(FactValue::Path(source.root_path.clone())),
-        BuiltinKey::SourceRelPath => Some(FactValue::Path(source.rel_path.clone())),
-        BuiltinKey::SourceId | BuiltinKey::Id => Some(FactValue::Num(source.id as f64)),
-        BuiltinKey::SourceDevice => Some(FactValue::Num(source.device as f64)),
-        BuiltinKey::SourceInode => Some(FactValue::Num(source.inode as f64)),
-        BuiltinKey::Filename => {
-            let filename = std::path::Path::new(&source.rel_path)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(&source.rel_path)
-                .to_string();
-            Some(FactValue::Text(filename))
-        }
-        BuiltinKey::Stem => {
-            let stem = std::path::Path::new(&source.rel_path)
-                .file_stem()
-                .and_then(|f| f.to_str())
-                .unwrap_or("")
-                .to_string();
-            Some(FactValue::Text(stem))
-        }
-        BuiltinKey::RootId => Some(FactValue::Num(source.root_id as f64)),
-        // Hash-based facts need object lookup, not available from Source alone
-        BuiltinKey::Hash | BuiltinKey::HashShort | BuiltinKey::ContentHashSha256 => None,
+        SourceFact::Path => Some(FactValue::Path(source.path())),
+        SourceFact::Root => Some(FactValue::Path(source.root_path.clone())),
+        SourceFact::RelPath => Some(FactValue::Path(source.rel_path.clone())),
+        SourceFact::Id => Some(FactValue::Num(source.id as f64)),
+        SourceFact::Device => Some(FactValue::Num(source.device as f64)),
+        SourceFact::Inode => Some(FactValue::Num(source.inode as f64)),
     }
 }
 
@@ -252,6 +269,7 @@ pub fn source_values(facts: &[FactEntry]) -> HashMap<&str, &FactValue> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::key::CONTENT_HASH;
     use super::*;
     use crate::core::domain::fact::FactValue;
 
@@ -333,36 +351,66 @@ mod tests {
         }
     }
 
-    /// The derived-surface equality: `is_computed` is not a second opinion
-    /// about the resolver, it is a reading of it. A hand-written list gets
-    /// this wrong — `content.hash.sha256` is a built-in *and* a genuinely
-    /// stored fact, and `hash`/`hash_short` are the resolver's other `None`
-    /// arms — so the classification is asserted against the resolver itself
-    /// rather than against a list someone maintained. The probe is a source
-    /// whose every attribute the resolver reads; a computed key the row cannot
-    /// answer (a save time outside the years Canon reads) is still computed —
-    /// it has no value, pinned at each reader that partitions on it
-    /// (`a_computed_key_never_falls_through_to_a_stored_row` and its twin).
-    ///
-    /// **Its limit, which is half the point.** The equality holds over
-    /// `BuiltinKey` and says nothing wider. `scope.rel_path` and
-    /// `object.hash` are context-supplied and are *not* `BuiltinKey`s; they
-    /// are the hand-written half of `is_context_supplied` and are pinned
-    /// there, separately. Widening this assertion to cover them would assert
-    /// an equality that does not hold and is exactly the false-equality
-    /// generator the limit rule exists to prevent.
+    /// The built-in keys that are short names for a source fact are the vocabulary's — `ext`,
+    /// `size`, `mtime`, `id` — as their one owner says (`BuiltinKey::source_fact`), and each
+    /// has its source fact's value. `source_row_value` reads such a key through the owner
+    /// before its own arms, so an arm written for one of them is never reached.
     #[test]
-    fn a_key_is_computed_exactly_when_the_resolver_answers_it() {
+    fn a_built_in_key_has_its_source_fact_s_value() {
         use strum::IntoEnumIterator;
 
-        for key in BuiltinKey::iter() {
-            let name: &'static str = key.into();
+        let paired: Vec<(BuiltinKey, SourceFact)> = BuiltinKey::iter()
+            .filter_map(|builtin| builtin.source_fact().map(|fact| (builtin, fact)))
+            .collect();
+        assert_eq!(
+            paired,
+            vec![
+                (BuiltinKey::Ext, SourceFact::Ext),
+                (BuiltinKey::Id, SourceFact::Id),
+                (BuiltinKey::Size, SourceFact::Size),
+                (BuiltinKey::Mtime, SourceFact::Mtime),
+            ]
+        );
+        for (builtin, fact) in paired {
+            let short = source_row_value(&probe(), &Key::BuiltinKey(builtin));
+            let long = source_row_value(&probe(), &Key::SourceFact(fact));
+            assert!(
+                short.is_some(),
+                "{builtin:?} has a value on a readable source"
+            );
+            assert_eq!(format!("{short:?}"), format!("{long:?}"), "{builtin:?}");
+        }
+    }
+
+    /// The derived-surface equality: `is_computed` is not a second opinion
+    /// about the resolver, it is a reading of it. A hand-written list gets
+    /// this wrong — `hash`/`hash_short` are built-in keys the row cannot
+    /// answer, and `content.hash.sha256` a content fact whose type is known
+    /// without rows — so the classification is asserted against the resolver
+    /// itself rather than against a list someone maintained. The probe is a
+    /// source whose every attribute the resolver reads; a computed key the row
+    /// cannot answer (a save time outside the years Canon reads) is still
+    /// computed — it has no value, pinned at each reader that partitions on it
+    /// (`a_computed_key_never_falls_through_to_a_stored_row` and its twin).
+    ///
+    /// **Its limit, which is half the point.** The equality holds over the
+    /// source facts, the built-in keys and the content hash, and says nothing
+    /// wider. `scope.rel_path` and `object.hash` are context-supplied and are
+    /// *not* `Key`s; they are the hand-written half of `is_context_supplied`
+    /// and are pinned there, separately. Widening this assertion to cover them
+    /// would assert an equality that does not hold and is exactly the
+    /// false-equality generator the limit rule exists to prevent.
+    #[test]
+    fn a_key_is_computed_exactly_when_the_resolver_answers_it() {
+        let keys = Key::all().chain([Key::ContentFact(CONTENT_HASH.to_string())]);
+        for key in keys {
+            let name = key.name();
             assert_eq!(
                 key.is_computed(),
-                get_builtin_value(&probe(), key).is_some(),
+                source_row_value(&probe(), &key).is_some(),
                 "'{name}' is classified is_computed()={} but the resolver {} it",
                 key.is_computed(),
-                if get_builtin_value(&probe(), key).is_some() {
+                if source_row_value(&probe(), &key).is_some() {
                     "answers"
                 } else {
                     "does not answer"
@@ -407,7 +455,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Built-in fact resolution tests
+    // Source-row value tests
     // =========================================================================
 
     #[test]
@@ -607,8 +655,8 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn resolve_builtin_takes_precedence() {
-        // If a key matches a builtin, stored fact is ignored
+    fn resolve_source_fact_takes_precedence() {
+        // If a key is a source fact, a stored fact of its name is ignored
         let source = make_source();
         let stored = make_stored_facts(vec![(
             "source.size",
@@ -616,7 +664,7 @@ mod tests {
         )]);
         let key = ParsedFactKey::parse("source.size").unwrap();
         let result = resolve_fact_value(&source, &key, &stored, &UserZone::utc()).unwrap();
-        // Should use the builtin value (1024000), not the stored one (999)
+        // Should use the source fact's value (1024000), not the stored one (999)
         assert_eq!(result, Some("1024000".to_string()));
     }
 

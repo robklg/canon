@@ -23,12 +23,10 @@ tool saw fewer files than they selected, and why. The two-tier stream discipline
 follows: the data goes to stdout, everything about the run goes to stderr, so piping stays
 clean.
 
-**`--emit` writes each source's one value per key** — `emit_keys` drives one
-`expr::fetch_source_values` call each, over every emitted source at once: the content's fact,
-the source's own where the content has none. Every key reads through
-it, `source.` keys included, and no Canon writer stores a `source.` fact (import refuses the
-namespace; a built-in's value is already an entry field), so `--emit source.size` is null.
-
-**`--emit` does not normalize its keys.** The key is read as typed, so `--emit geo.lat` finds
-nothing where the stored key is `content.geo.lat`. `--where` *does* normalize, so one command
-line can filter on a key it then emits as null.
+**`--emit` reads a name as an expression does.** `ops.rs::read_emit_keys` reads every name
+through the facility's one reader (`expr::Key`) before the filters and the selection, and refuses
+every `source.` name that is no source fact in one error, so nothing is selected or written.
+`build_entries` then reads each key for every emitted source at once through
+`expr::fetch_named_values`: a key the source row answers from the row, any other key the source's
+one value (`hash` and `hash_short` its content hash). Each field is named as given. Pinned in both files; the key-name law's
+`--emit` leg is pinned in `ops.rs`, because the verifier's subsystem may not name this one.

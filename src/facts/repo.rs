@@ -10,15 +10,15 @@ use rusqlite::OptionalExtension;
 use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::repo::db::{populate_temp_sources, Connection};
 use crate::core::repo::fact::{fact_value_at, fact_value_params, FACT_VALUE_COLUMNS};
-use crate::facts::domain::SourceFact;
+use crate::facts::domain::ContentFactOnSource;
 
 /// Count fact keys across sources: each stored key with how many of the given sources hold
 /// it, on the source or on its content. Used by `canon facts` (no --key) for each key's Count
 /// and Coverage; a key's type is read from all its facts, never from these
 /// (`core::repo::fact::key_types`).
 ///
-/// Only counts stored facts from the facts table. Built-in/derived facts
-/// are handled separately by the command layer.
+/// Only counts stored facts from the facts table. Source facts and built-in
+/// keys are handled separately by the command layer.
 pub fn count_fact_keys(conn: &mut Connection, source_ids: &[i64]) -> Result<Vec<(String, usize)>> {
     if source_ids.is_empty() {
         return Ok(Vec::new());
@@ -107,7 +107,7 @@ pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactType>> {
 
 /// Upsert a fact (insert or update on conflict).
 ///
-/// Works for both source and object facts. Uses INSERT ON CONFLICT to
+/// Works for facts stored on a source or on an object. Uses INSERT ON CONFLICT to
 /// atomically insert or update the fact; the value is written through the one
 /// column conversion, so every value column is replaced together.
 ///
@@ -118,7 +118,7 @@ pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactType>> {
 /// * `key` - Fact key (e.g., "content.Make")
 /// * `value` - The value to store
 /// * `observed_at` - When this fact was observed
-/// * `observed_basis_rev` - For source facts, the basis_rev at observation time
+/// * `observed_basis_rev` - For a fact stored on a source, the basis_rev at observation time
 pub fn upsert(
     conn: &Connection,
     entity_type: &str,
@@ -162,12 +162,15 @@ pub fn upsert(
     Ok(())
 }
 
-/// Fetch all facts for a source (entity_type = 'source').
+/// Fetch every fact stored on a source (entity_type = 'source') — content facts
+/// stored on the source, not those stored on its object.
 ///
-/// Returns all facts directly attached to the source (not object facts).
 /// Used during fact promotion when linking a source to an object. A stored time Canon
 /// cannot read is left out, and so stays where it is.
-pub fn fetch_source_facts(conn: &Connection, source_id: i64) -> Result<Vec<SourceFact>> {
+pub fn fetch_content_facts_on_source(
+    conn: &Connection,
+    source_id: i64,
+) -> Result<Vec<ContentFactOnSource>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT id, key, observed_at, {FACT_VALUE_COLUMNS}
          FROM facts
@@ -179,7 +182,7 @@ pub fn fetch_source_facts(conn: &Connection, source_id: i64) -> Result<Vec<Sourc
             let Some(value) = fact_value_at(row, 3)? else {
                 return Ok(None);
             };
-            Ok(Some(SourceFact {
+            Ok(Some(ContentFactOnSource {
                 id: row.get(0)?,
                 key: row.get(1)?,
                 value,
@@ -209,7 +212,7 @@ pub fn object_has_fact(conn: &Connection, object_id: i64, key: &str) -> Result<b
 
 /// Delete a fact by its ID.
 ///
-/// Used during fact promotion to remove the source fact after copying to object.
+/// Used during fact promotion to remove the fact stored on the source after copying it to the object.
 pub fn delete_by_id(conn: &Connection, fact_id: i64) -> Result<()> {
     conn.execute("DELETE FROM facts WHERE id = ?", [fact_id])?;
     Ok(())
@@ -217,7 +220,7 @@ pub fn delete_by_id(conn: &Connection, fact_id: i64) -> Result<()> {
 
 /// Insert a fact on an object (for promotion from source).
 ///
-/// Similar to upsert but specifically for object facts during promotion.
+/// Similar to upsert but specifically for facts moved onto an object during promotion.
 /// Does not update on conflict — callers should check `object_has_fact` first.
 pub fn insert_object_fact(
     conn: &Connection,
@@ -433,14 +436,14 @@ pub fn delete_by_criteria(
 // Stale fact pruning (for `canon facts prune --stale`)
 // ============================================================================
 
-/// Count stale source facts where observed_basis_rev != current basis_rev.
+/// Count stale facts stored on sources, where observed_basis_rev != current basis_rev.
 ///
 /// A fact is considered stale when its `observed_basis_rev` (the file's basis_rev
 /// at the time the fact was recorded) doesn't match the source's current `basis_rev`.
 /// This indicates the file has changed since the fact was observed.
 ///
-/// Only source facts with non-null observed_basis_rev are considered.
-/// Object facts don't have basis_rev tracking.
+/// Only facts stored on a source with non-null observed_basis_rev are considered.
+/// Facts stored on an object don't have basis_rev tracking.
 pub fn count_stale(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM facts f
@@ -453,7 +456,7 @@ pub fn count_stale(conn: &Connection) -> Result<i64> {
     Ok(count)
 }
 
-/// Delete stale source facts where observed_basis_rev != current basis_rev.
+/// Delete stale facts stored on sources, where observed_basis_rev != current basis_rev.
 ///
 /// Returns the number of facts deleted.
 ///
@@ -490,14 +493,14 @@ pub fn delete_stale(conn: &Connection) -> Result<usize> {
 /// * `scope` - Which facts to count: "source", "object", or "all"
 ///
 /// # Returns
-/// Tuple of (source_fact_count, object_fact_count).
-/// If scope is "source", object_fact_count will be 0.
-/// If scope is "object", source_fact_count will be 0.
+/// Tuple of (stored_on_source_count, stored_on_content_count).
+/// If scope is "source", stored_on_content_count will be 0.
+/// If scope is "object", stored_on_source_count will be 0.
 pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
     let count_sources = scope == "all" || scope == "source";
     let count_objects = scope == "all" || scope == "object";
 
-    let source_fact_count: i64 = if count_sources {
+    let stored_on_source_count: i64 = if count_sources {
         conn.query_row(
             "SELECT COUNT(*) FROM facts
              WHERE entity_type = 'source'
@@ -509,7 +512,7 @@ pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
         0
     };
 
-    let object_fact_count: i64 = if count_objects {
+    let stored_on_content_count: i64 = if count_objects {
         conn.query_row(
             "SELECT COUNT(*) FROM facts
              WHERE entity_type = 'object'
@@ -521,7 +524,7 @@ pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
         0
     };
 
-    Ok((source_fact_count, object_fact_count))
+    Ok((stored_on_source_count, stored_on_content_count))
 }
 
 /// Delete facts for excluded entities.
@@ -709,7 +712,7 @@ mod tests {
     /// of coverage >100% (e.g., content.mime at 101.8%).
     /// See commits dc6d301, 0374f5e, 50aacad for the history of this bug.
     #[test]
-    fn count_fact_keys_no_double_count_source_and_object_fact() {
+    fn count_fact_keys_no_double_count_on_source_and_object() {
         let mut conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_object(&conn, 100, "abc123");
@@ -913,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_source_fact_with_basis_rev() {
+    fn upsert_on_source_with_basis_rev() {
         let conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_source(&conn, 1, 1, "file.txt", None);
@@ -939,28 +942,28 @@ mod tests {
     }
 
     // =========================================================================
-    // fetch_source_facts tests
+    // fetch_content_facts_on_source tests
     // =========================================================================
 
     #[test]
-    fn fetch_source_facts_empty() {
+    fn fetch_content_facts_on_source_empty() {
         let conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_source(&conn, 1, 1, "file.txt", None);
 
-        let result = fetch_source_facts(&conn, 1).unwrap();
+        let result = fetch_content_facts_on_source(&conn, 1).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn fetch_source_facts_returns_all() {
+    fn fetch_content_facts_on_source_returns_all() {
         let conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_source(&conn, 1, 1, "file.txt", None);
         insert_fact_text(&conn, "source", 1, "content.Make", "Canon");
         insert_fact_num(&conn, "source", 1, "content.Width", 4000.0);
 
-        let result = fetch_source_facts(&conn, 1).unwrap();
+        let result = fetch_content_facts_on_source(&conn, 1).unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result.iter().any(|f| f.key == "content.Make"));
@@ -968,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_source_facts_excludes_object_facts() {
+    fn fetch_content_facts_on_source_excludes_object_facts() {
         let conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_object(&conn, 100, "abc123");
@@ -976,9 +979,9 @@ mod tests {
         insert_fact_text(&conn, "source", 1, "source.policy", "reviewed");
         insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
 
-        let result = fetch_source_facts(&conn, 1).unwrap();
+        let result = fetch_content_facts_on_source(&conn, 1).unwrap();
 
-        // Only the source fact should be returned
+        // Only the fact stored on the source is returned
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].key, "source.policy");
     }
@@ -1374,7 +1377,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Helper to insert a source fact with a specific observed_basis_rev
+    /// Helper to insert a fact stored on a source, with a specific observed_basis_rev
     fn insert_fact_with_basis_rev(
         conn: &Connection,
         source_id: i64,
@@ -1422,7 +1425,7 @@ mod tests {
     }
 
     // Note: count_stale_ignores_null_basis_rev was removed because the production
-    // schema's CHECK constraint prevents source facts with NULL observed_basis_rev.
+    // schema's CHECK constraint prevents facts stored on a source with NULL observed_basis_rev.
 
     #[test]
     fn count_stale_multiple_stale_facts() {
@@ -1516,7 +1519,7 @@ mod tests {
     }
 
     // Note: delete_stale_preserves_null_basis_rev was removed because the production
-    // schema's CHECK constraint prevents source facts with NULL observed_basis_rev.
+    // schema's CHECK constraint prevents facts stored on a source with NULL observed_basis_rev.
 
     #[test]
     fn delete_stale_ignores_object_facts() {
@@ -1671,7 +1674,7 @@ mod tests {
         assert_eq!(source_deleted, 0);
         assert_eq!(object_deleted, 1);
 
-        // Source fact should still exist
+        // The fact stored on the source should still exist
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM facts WHERE entity_type = 'source'",

@@ -248,8 +248,8 @@ enum Commands {
         /// Emit only one source per unique content hash (sources without a hash are skipped)
         #[arg(long)]
         unique_content: bool,
-        /// Include specific facts in the output, keyed exactly as stored —
-        /// unlike --where, no content. prefix is added (e.g. --emit content.geo.lat)
+        /// Include a key's value for each source: a source fact, a built-in key, or a content
+        /// fact (a name such as Make is read as content.Make)
         #[arg(long)]
         emit: Vec<String>,
     },
@@ -312,7 +312,7 @@ enum Commands {
         /// Maximum number of values to show (0 for unlimited, default 50)
         #[arg(long, default_value = "50")]
         limit: usize,
-        /// Show all built-in facts (including hidden ones like source.device, source.inode)
+        /// Show all source facts, including hidden ones like source.device and source.inode
         #[arg(long)]
         all: bool,
         /// Show pattern aliases available for manifest patterns
@@ -522,10 +522,11 @@ enum Commands {
         /// Delete objects that have no present sources, along with their facts and non-present sources
         #[arg(long)]
         orphaned_objects: bool,
-        /// Delete source facts where the file changed since the fact was recorded
+        /// Delete facts stored on a source whose file changed since the fact was recorded
         #[arg(long)]
         stale_facts: bool,
-        /// Delete facts for excluded sources and/or objects (=source, =object, or omit for both)
+        /// Delete facts stored on excluded sources or content: =source for sources only, =object for
+        /// content only, omit for both
         #[arg(long, value_name = "SCOPE", default_missing_value = "all", num_args = 0..=1)]
         excluded_facts: Option<String>,
         /// Execute deletion (default is dry-run)
@@ -706,7 +707,7 @@ enum FactsAction {
         /// Filter expressions (e.g., "source.ext=jpg")
         #[arg(long = "where")]
         filters: Vec<String>,
-        /// Entity type: 'source' or 'object'
+        /// Which facts: 'source' for facts stored on the source, 'object' for facts stored on the content
         #[arg(long, value_name = "TYPE")]
         on: String,
         /// Filter by value storage type (text, number, or time)

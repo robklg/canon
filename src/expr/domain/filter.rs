@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Result};
 
-use super::key::{parse_accessor, read_base_key};
+use super::key::{parse_accessor, read_base_key, Key};
 use super::transform::{parse_modifier, ModifierCall, PathAccessor};
 use crate::core::domain::time::value::PeriodOp;
 
@@ -71,6 +71,10 @@ pub(in crate::expr) struct Literal {
 pub(in crate::expr) struct WrittenKey {
     pub(in crate::expr) written: String,
     pub(in crate::expr) written_name: String,
+    /// The key the name as written reads as — `hash` the built-in key, though its base is the
+    /// content hash; `None` for a `source.` name that is no source fact. A quoted name reads as
+    /// its bare form.
+    pub(in crate::expr) key: Option<Key>,
     pub(in crate::expr) base: String,
     pub(in crate::expr) accessor: Option<PathAccessor>,
     pub(in crate::expr) modifiers: Vec<ModifierCall>,
@@ -342,6 +346,7 @@ impl WrittenKey {
         };
 
         let (base, leading_modifier) = read_base_key(&name);
+        let key = Key::read(&name);
         let mut modifiers = Vec::new();
         if let Some(modifier) = leading_modifier {
             modifiers.push(parse_modifier(modifier)?);
@@ -355,6 +360,7 @@ impl WrittenKey {
         Ok(WrittenKey {
             written: text.to_string(),
             written_name,
+            key,
             base,
             accessor,
             modifiers,
@@ -1089,6 +1095,45 @@ fn parse_char_class(pattern: &[char], start: usize) -> Option<(Vec<char>, usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key as written carries the key its name reads as, never its spelling: bare,
+    /// double-quoted and single-quoted spellings of one name carry the same key, and a modifier
+    /// changes nothing; `hash` is the built-in key though its base is the content hash. A
+    /// consumer deciding on a key reads this, never the text.
+    #[test]
+    fn a_written_key_carries_the_key_its_name_reads_as() {
+        use super::super::key::{BuiltinKey, SourceFact};
+
+        let same = [
+            (
+                ["size", "\"size\"", "'size'|bucket"],
+                Key::BuiltinKey(BuiltinKey::Size),
+            ),
+            (
+                ["hash", "\"hash\"", "'hash'|lowercase"],
+                Key::BuiltinKey(BuiltinKey::Hash),
+            ),
+            (
+                ["source.root", "\"source.root\"", "'source.root'"],
+                Key::SourceFact(SourceFact::Root),
+            ),
+            (
+                ["Make", "\"Make\"", "content.Make"],
+                Key::ContentFact("content.Make".to_string()),
+            ),
+        ];
+        for (spellings, key) in same {
+            for written in spellings {
+                assert_eq!(
+                    WrittenKey::read(written).unwrap().key,
+                    Some(key.clone()),
+                    "{written}"
+                );
+            }
+        }
+        assert_eq!(WrittenKey::read("source.extension").unwrap().key, None);
+    }
+
     // ========================================================================
     // The grammar: quoting, quoted keys, negation, clause text
     // ========================================================================
@@ -1163,7 +1208,7 @@ mod tests {
         assert_eq!(key.written_name, r#""content.File Size""#);
         assert_eq!((op, value.text.as_str()), (CompareOp::Gt, "1000"));
 
-        // Normalized as the bare key is: `content.` added, a built-in kept.
+        // Normalized as the bare key is: `content.` added, a source fact kept.
         assert_eq!(compare_of(r#""File Size"=1"#).0.base, "content.File Size");
         assert_eq!(compare_of("'source.mtime'=2024").0.base, "source.mtime");
         assert_eq!(

@@ -27,7 +27,7 @@ The processor must pass through `source_id` and `basis_rev` from the worklist en
 
 ## Fact Namespacing
 
-Facts are automatically namespaced under `content.*`: `mime` becomes `content.mime`. See [Namespaces](../../concepts/facts.md#namespaces).
+Facts are automatically namespaced under `content.*`: `mime` becomes `content.mime`. See [Reading a Key's Name](../../concepts/facts.md#reading-a-keys-name). A key starting with `source.` is skipped with a warning and counted as `skipped (reserved)`.
 
 The special key `hash.sha256` creates or links an object, enabling deduplication and archive tracking.
 

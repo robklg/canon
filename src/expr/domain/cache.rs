@@ -2,7 +2,7 @@
 //!
 //! Evaluating a filter over many sources one fact at a time is a query per
 //! source per key, so values are fetched in bulk first and read from here.
-//! The cache holds source facts, object facts, the source-to-object map, and
+//! The cache holds the facts stored on sources and on objects, the source-to-object map, and
 //! the sets that answer the status predicates. A source's value for a key is
 //! read through `value`, the one-value rule applied.
 //! Values are the fact noun's own (`core::domain::fact::FactValue`), read
@@ -20,10 +20,10 @@ use crate::expr::domain::value::source_value;
 
 /// Cache of prefetched fact values to avoid N+1 queries
 pub struct FactCache {
-    /// Source facts: (source_id, key) -> FactValue
-    pub source_facts: HashMap<(i64, String), fact::FactValue>,
-    /// Object facts: (object_id, key) -> FactValue
-    pub object_facts: HashMap<(i64, String), fact::FactValue>,
+    /// Facts stored on sources: (source_id, key) -> FactValue
+    pub on_sources: HashMap<(i64, String), fact::FactValue>,
+    /// Facts stored on objects: (object_id, key) -> FactValue
+    pub on_objects: HashMap<(i64, String), fact::FactValue>,
     /// Source to object mapping
     pub source_objects: HashMap<i64, i64>,
     /// Keys that were prefetched (for existence checks)
@@ -42,8 +42,8 @@ pub struct FactCache {
 impl FactCache {
     pub fn new() -> Self {
         FactCache {
-            source_facts: HashMap::new(),
-            object_facts: HashMap::new(),
+            on_sources: HashMap::new(),
+            on_objects: HashMap::new(),
             source_objects: HashMap::new(),
             prefetched_keys: HashSet::new(),
             archived_objects: None,
@@ -53,22 +53,22 @@ impl FactCache {
         }
     }
 
-    pub fn get_source_fact(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
-        self.source_facts.get(&(source_id, key.to_string()))
+    pub fn get_on_source(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
+        self.on_sources.get(&(source_id, key.to_string()))
     }
 
-    pub fn get_object_fact(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
+    pub fn get_on_object(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
         self.source_objects
             .get(&source_id)
-            .and_then(|obj_id| self.object_facts.get(&(*obj_id, key.to_string())))
+            .and_then(|obj_id| self.on_objects.get(&(*obj_id, key.to_string())))
     }
 
     /// The source's one value for a stored key: the content's fact first, the source's own
     /// where the content has none (`source_value`).
     pub fn value(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
         source_value(
-            self.get_source_fact(source_id, key),
-            self.get_object_fact(source_id, key),
+            self.get_on_source(source_id, key),
+            self.get_on_object(source_id, key),
         )
     }
 

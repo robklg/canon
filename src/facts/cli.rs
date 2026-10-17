@@ -15,10 +15,11 @@ use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
 use crate::expr::{read_filters, read_report};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
-use crate::expr::{BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey};
+use crate::expr::{Key, KeyKind, Listing, ParsedFactKey, SourceFact};
+use crate::facts::domain::{delete_key, names_the_root};
 use crate::facts::ops::maintain::{
     execute_delete, execute_prune_excluded, execute_prune_orphaned, execute_prune_stale,
-    plan_delete, plan_prune_excluded, plan_prune_orphaned, plan_prune_stale, validate_delete_key,
+    plan_delete, plan_prune_excluded, plan_prune_orphaned, plan_prune_stale,
     validate_prune_excluded_scope,
 };
 use crate::facts::ops::report::{
@@ -27,15 +28,14 @@ use crate::facts::ops::report::{
     KeyInfo, RootDistributionResult,
 };
 
-/// Check if a parsed key represents source.root (for special display formatting)
-fn is_root_key(key: &ParsedFactKey) -> bool {
-    key.raw == "source.root" || key.raw == "root_id"
-}
-
-fn get_fact_category(key: &str) -> BuiltinKeyCategory {
-    BuiltinKey::from_str(key)
-        .map(|k| k.category())
-        .unwrap_or(BuiltinKeyCategory::Stored)
+/// What kind of key the listing and a report's header say a key is: nothing after a content
+/// fact.
+fn kind_label(kind: KeyKind) -> Option<&'static str> {
+    match kind {
+        KeyKind::SourceFact => Some("(source fact)"),
+        KeyKind::BuiltinKey => Some("(built-in key)"),
+        KeyKind::ContentFact => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -218,7 +218,7 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
     let _ = writeln!(
         handle,
         "{:<30} {:>6} {:>10} {:>10}",
-        "Fact", "Type", "Count", "Coverage"
+        "Key", "Type", "Count", "Coverage"
     );
     let _ = writeln!(handle, "{}", "─".repeat(60));
 
@@ -229,13 +229,12 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
     }
 
     if !show_all {
-        use strum::IntoEnumIterator;
-        let hidden_count = BuiltinKey::iter()
-            .filter(|k| k.visibility() == BuiltinKeyVisibility::Hidden)
+        let hidden_count = Key::all()
+            .filter(|k| k.listing() == Listing::Hidden)
             .count();
         let _ = writeln!(
             handle,
-            "\n({hidden_count} built-in/derived facts hidden, use --all to show)"
+            "\n({hidden_count} source facts hidden, use --all to show)"
         );
     }
 
@@ -264,11 +263,9 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
 /// coverage, and what kind of key it is.
 fn key_row(key_info: &KeyInfo, total_sources: usize) -> String {
     let coverage = (key_info.count as f64 / total_sources as f64) * 100.0;
-    let suffix = match key_info.category {
-        BuiltinKeyCategory::BuiltIn => "  (built-in)",
-        BuiltinKeyCategory::Derived => "  (derived)",
-        BuiltinKeyCategory::Stored => "",
-    };
+    let suffix = kind_label(key_info.kind)
+        .map(|label| format!("  {label}"))
+        .unwrap_or_default();
     format!(
         "{:<30} {:>6} {:>10} {:>9.1}%{}",
         key_info.key,
@@ -308,15 +305,13 @@ fn value_cell(value: &str, base_key: &str) -> String {
     }
 }
 
-/// What an empty value is shown as in a report: `(no extension)` for the extension,
-/// `(empty)` for any other key. One label for every table a report prints, its main
+/// What an empty value is shown as in a report, by the key read: `(no extension)` for the
+/// extension (`ext`, `source.ext`), `(empty)` for any other key — `filename|ext` included,
+/// whose base is not the extension. One label for every table a report prints, its main
 /// values and its groups alike.
 fn empty_label(base_key: &str) -> &'static str {
     // Matched on the key, not its spelling: `ext` is the same value.
-    if matches!(
-        BuiltinKey::from_str(base_key),
-        Some(BuiltinKey::SourceExt | BuiltinKey::Ext)
-    ) {
+    if Key::read(base_key).and_then(|key| key.as_source_fact()) == Some(SourceFact::Ext) {
         "(no extension)"
     } else {
         "(empty)"
@@ -334,12 +329,10 @@ fn group_cell(value: &str, key: &ParsedFactKey) -> String {
 
 fn display_distribution(result: &DistributionResult, display_key: &str, key: &ParsedFactKey) {
     use std::io::Write;
-    // Build label with category for builtin keys
-    let category = get_fact_category(&key.base_key);
-    let label = match category {
-        BuiltinKeyCategory::BuiltIn => format!("{display_key} (built-in)"),
-        BuiltinKeyCategory::Derived => format!("{display_key} (derived)"),
-        BuiltinKeyCategory::Stored => display_key.to_string(),
+    // The header names what kind of key it is, as the listing does
+    let label = match kind_label(key.key.as_ref().map_or(KeyKind::ContentFact, Key::kind)) {
+        Some(kind) => format!("{display_key} {kind}"),
+        None => display_key.to_string(),
     };
 
     let stdout = std::io::stdout();
@@ -410,7 +403,7 @@ fn display_grouped_distribution(
 ) {
     use std::io::Write;
     // Build grouping label
-    let grouping_label = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
+    let grouping_label = if grouping_keys.len() == 1 && names_the_root(&grouping_keys[0]) {
         "by root".to_string()
     } else {
         let labels: Vec<&str> = grouping_keys.iter().map(|gk| gk.raw.as_str()).collect();
@@ -440,7 +433,7 @@ fn display_grouped_distribution(
             let sub_coverage = (sub.count as f64 / group.total_count as f64) * 100.0;
 
             // Format group display
-            let group_display = if grouping_keys.len() == 1 && is_root_key(&grouping_keys[0]) {
+            let group_display = if grouping_keys.len() == 1 && names_the_root(&grouping_keys[0]) {
                 if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref()) {
                     format_root_display(rid, rpath)
                 } else {
@@ -451,7 +444,7 @@ fn display_grouped_distribution(
                     .iter()
                     .enumerate()
                     .map(|(i, gk)| {
-                        if is_root_key(gk) {
+                        if names_the_root(gk) {
                             if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref())
                             {
                                 format_root_display(rid, rpath)
@@ -520,8 +513,8 @@ pub fn delete_facts(
     config: &LedgerConfig,
     no_receipt: bool,
 ) -> Result<()> {
-    // Validate key and entity type
-    validate_delete_key(key)?;
+    // The key acted on, read first: nothing below may hide its refusal.
+    let key = delete_key(key)?;
     if options.entity_type != "source" && options.entity_type != "object" {
         bail!(
             "Invalid entity type '{}'. Must be 'source' or 'object'.",
@@ -559,7 +552,7 @@ pub fn delete_facts(
     let plan = plan_delete(
         conn,
         &source_ids,
-        key,
+        &key,
         &options.entity_type,
         options.value_type,
     )?;
@@ -574,8 +567,9 @@ pub fn delete_facts(
         println!("No '{key}' facts found on matching {entity_label}.");
     } else if options.dry_run {
         println!(
-            "Would delete {} fact rows across {} {}",
+            "Would delete {} '{}' fact rows across {} {}",
             format_count(plan.fact_count),
+            plan.key,
             format_count(plan.entity_count),
             entity_label
         );
@@ -597,7 +591,6 @@ pub fn delete_facts(
         let result = execute_delete(
             conn,
             &source_ids,
-            key,
             &options.entity_type,
             options.value_type,
             &plan,
@@ -721,26 +714,34 @@ pub fn prune_excluded_facts(
 
     let plan = plan_prune_excluded(conn, scope)?;
 
-    if plan.total_count() == 0 {
-        println!("No facts found for excluded entities.");
-        return Ok(());
-    }
-
     let prune_sources = scope == "all" || scope == "source";
     let prune_objects = scope == "all" || scope == "object";
 
+    if plan.total_count() == 0 {
+        // The scope is validated above, so at least one side is asked.
+        println!(
+            "{}",
+            match (prune_sources, prune_objects) {
+                (true, true) => "No facts stored on excluded sources or content.",
+                (true, false) => "No facts stored on excluded sources.",
+                (false, _) => "No facts stored on excluded content.",
+            }
+        );
+        return Ok(());
+    }
+
     if dry_run {
-        println!("Facts for excluded entities:");
+        println!("Facts that would be deleted:");
         if prune_sources {
             println!(
-                "  Source facts (excluded sources): {}",
-                format_count(plan.source_fact_count)
+                "  Stored on excluded sources: {}",
+                format_count(plan.stored_on_source_count)
             );
         }
         if prune_objects {
             println!(
-                "  Object facts (excluded objects): {}",
-                format_count(plan.object_fact_count)
+                "  Stored on excluded content: {}",
+                format_count(plan.stored_on_content_count)
             );
         }
         println!(
@@ -801,10 +802,11 @@ pub fn show_aliases() {
 mod tests {
     use super::*;
 
-    /// An empty value reads the same in every table of a report: `(no extension)` for the
-    /// extension, by either name, and `(empty)` for any other key — a main value and a
-    /// grouping value alike. The defect it names: the grouped report printed `(empty)` and a
-    /// blank group for a file with no extension, where the plain report said `(no extension)`.
+    /// Both of a report's cells read one empty label: `(no extension)` for the extension, by
+    /// either name, and `(empty)` for any other key — `value_cell` for the plain table's
+    /// values, `group_cell` for the grouped table's main and grouping values. That the grouped
+    /// display calls `group_cell` is interface text this pin cannot see; it was read on the
+    /// binary.
     #[test]
     fn an_empty_value_is_labelled_alike_in_every_table() {
         let key = |written: &str| ParsedFactKey::parse(written).unwrap();
@@ -825,7 +827,7 @@ mod tests {
         KeyInfo {
             key: key.to_string(),
             count: 1,
-            category: BuiltinKeyCategory::Stored,
+            kind: KeyKind::ContentFact,
             types: crate::core::domain::fact::KeyTypes::from_counts(types.iter().copied()).unwrap(),
         }
     }
@@ -911,16 +913,6 @@ mod tests {
     // =========================================================================
     // value_cell tests
     // =========================================================================
-
-    /// An empty extension is labelled the same under either spelling of the
-    /// key; `ext` printed `(empty)` where `source.ext` printed this.
-    #[test]
-    fn an_empty_extension_is_labelled_under_either_spelling() {
-        for key in ["source.ext", "ext"] {
-            assert_eq!(value_cell("", key), "(no extension)", "{key}");
-        }
-        assert_eq!(value_cell("", "content.title"), "(empty)");
-    }
 
     /// A long value whose 35th byte falls inside an accented letter is cut
     /// between letters, never inside one.
@@ -1044,6 +1036,46 @@ mod tests {
                 assert_eq!(surviving(visible), 0, "the previewable fact is deleted");
                 assert_eq!(surviving(dismissed), 1, "a dismissed source is not listed");
                 assert_eq!(surviving(archived), 1, "nor is an archive copy");
+            },
+        )
+    }
+
+    /// The key is read before anything else the command does, so a name starting with
+    /// `source.` is refused even where the filter selects nothing — an empty selection
+    /// never answers "No sources match" in its place.
+    #[test]
+    fn a_source_name_is_refused_before_the_selection() {
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                use crate::core::repo::{open_in_memory_for_test, Db};
+                use crate::core::testing::{insert_root, insert_source};
+
+                let conn = open_in_memory_for_test();
+                let root = insert_root(&conn, "/photos", "source", false);
+                insert_source(&conn, root, "a.jpg", None);
+                let mut db = Db::from_connection(conn);
+                let options = DeleteOptions {
+                    entity_type: "source".to_string(),
+                    value_type: None,
+                    dry_run: true,
+                    include: IncludeSet::default(),
+                };
+                let refused = delete_facts(
+                    &mut db,
+                    "source.size",
+                    &[],
+                    &["source.size = 987654321".to_string()],
+                    &options,
+                    "canon facts delete source.size",
+                    &LedgerConfig::default(),
+                    true,
+                )
+                .expect_err("refused");
+                assert_eq!(
+                    refused.to_string(),
+                    "Cannot delete 'source.size': names starting with 'source.' cannot be deleted."
+                );
             },
         )
     }

@@ -48,7 +48,7 @@
 # Reference
 
 - [Facts](reference/facts.md)
-  - [Built-in Facts](reference/builtins.md)
+  - [Source Facts and Built-in Keys](reference/builtins.md)
 - [Filters](reference/filter.md)
 - [Pattern Expressions](reference/expr.md)
 - [The Book Format](reference/book-format.md)

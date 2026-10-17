@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::domain::cache::FactCache;
 use super::domain::filter::{StatusPredicate, UsedStatus};
-use super::domain::key::BuiltinKey;
+use super::domain::key::Key;
 use super::domain::value::SourceAttributes;
 use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::repo::db::populate_temp_sources;
@@ -43,12 +43,12 @@ pub fn prefetch_facts(
     // one name.
     let base_keys: Vec<String> = keys.to_vec();
 
-    // A built-in the source row computes needs no lookup; every other key is
-    // read from the facts table under its stored name, the hash keys included
+    // A key the source row computes needs no lookup; every other key is read
+    // from the facts table under its stored name, the content hash included
     // (the parser has already read `hash` as `content.hash.sha256`).
     let stored_keys: Vec<&String> = base_keys
         .iter()
-        .filter(|k| !BuiltinKey::from_str(k).is_some_and(|b| b.is_computed()))
+        .filter(|k| !Key::read(k).is_some_and(|key| key.is_computed()))
         .collect();
 
     for key in &base_keys {
@@ -83,7 +83,7 @@ pub fn prefetch_facts(
         cache.source_objects.insert(source_id, object_id);
     }
 
-    // Fetch source facts for all keys
+    // Fetch the facts stored on the sources, for all keys
     for key in &stored_keys {
         let facts: Vec<FactRow> = conn
             .prepare(&format!(
@@ -97,12 +97,12 @@ pub fn prefetch_facts(
 
         for (source_id, value) in facts {
             if let Some(fv) = value {
-                cache.source_facts.insert((source_id, (*key).clone()), fv);
+                cache.on_sources.insert((source_id, (*key).clone()), fv);
             }
         }
     }
 
-    // Fetch object facts for all keys
+    // Fetch the facts stored on their objects, for all keys
     // Get unique object IDs (multiple sources may share the same object)
     let object_ids: Vec<i64> = cache
         .source_objects
@@ -138,7 +138,7 @@ pub fn prefetch_facts(
 
             for (object_id, value) in facts {
                 if let Some(fv) = value {
-                    cache.object_facts.insert((object_id, (*key).clone()), fv);
+                    cache.on_objects.insert((object_id, (*key).clone()), fv);
                 }
             }
         }

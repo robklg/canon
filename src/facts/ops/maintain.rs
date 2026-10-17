@@ -16,10 +16,11 @@ use crate::facts::repo as facts_repo;
 
 /// Plan result for fact deletion.
 pub struct DeletePlan {
-    /// Kept for plan self-containedness — the interface currently uses its own
-    /// copies of key/entity_type for display and execute.
-    #[allow(dead_code)]
+    /// The key counted, and the one `execute_delete` deletes: one key for both,
+    /// so the count and the delete cannot diverge.
     pub key: String,
+    /// Kept for plan self-containedness — the interface uses its own copy for
+    /// display and execute.
     #[allow(dead_code)]
     pub entity_type: String,
     pub fact_count: i64,
@@ -37,34 +38,24 @@ pub struct PruneStalePlan {
 /// so no formatter can reflow it: at the default scope the repo runs two
 /// DELETEs, sources first, and a failure between them is what the hedge and
 /// the converge pointer are about.
-const EXCLUDED_PRUNE_UNWIND: &str = "Excluded-fact pruning ended early; excluded-source facts may be gone while excluded-object facts stand — re-run to converge";
+const EXCLUDED_PRUNE_UNWIND: &str = "Excluded-fact pruning ended early; facts stored on excluded sources may be gone while facts stored on excluded content remain — re-run to converge";
 
 /// Plan result for excluded fact pruning.
 pub struct PruneExcludedPlan {
     #[allow(dead_code)]
     pub scope: String,
-    pub source_fact_count: i64,
-    pub object_fact_count: i64,
+    pub stored_on_source_count: i64,
+    pub stored_on_content_count: i64,
 }
 
 impl PruneExcludedPlan {
     pub fn total_count(&self) -> i64 {
-        self.source_fact_count + self.object_fact_count
+        self.stored_on_source_count + self.stored_on_content_count
     }
-}
-
-/// Validate that a fact key is not protected from deletion.
-/// Protected namespaces: `source.*`, `policy.*`.
-pub fn validate_delete_key(key: &str) -> Result<()> {
-    if key.starts_with("source.") || key.starts_with("policy.") {
-        anyhow::bail!(
-            "Cannot delete protected fact '{key}'. Facts in source.* and policy.* namespaces cannot be deleted."
-        );
-    }
-    Ok(())
 }
 
 /// Plan fact deletion: count matching facts without performing the delete.
+/// `key` is the one `facts::domain::delete_key` read.
 pub fn plan_delete(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -88,7 +79,7 @@ pub struct DeleteResult {
     pub summary: String,
 }
 
-/// Execute fact deletion.
+/// Execute fact deletion of the plan's key.
 ///
 /// Records unconditionally: every caller checks the plan first and returns
 /// early on an empty one, so a decision row here always describes a real
@@ -114,7 +105,6 @@ pub struct DeleteResult {
 pub fn execute_delete(
     conn: &mut Connection,
     source_ids: &[i64],
-    key: &str,
     entity_type: &str,
     value_type: Option<FactType>,
     plan: &DeletePlan,
@@ -122,7 +112,7 @@ pub fn execute_delete(
 ) -> Result<DeleteResult> {
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
-    match delete_body(conn, source_ids, key, entity_type, value_type, plan) {
+    match delete_body(conn, source_ids, entity_type, value_type, plan) {
         Ok(summary) => {
             if let Some(recorder) = recorder.as_mut() {
                 recorder.complete(
@@ -149,7 +139,7 @@ pub fn execute_delete(
                     conn,
                     DecisionStatus::Interrupted,
                     DecisionCounts::none(),
-                    &format!("Deletion of {key} facts ended early"),
+                    &format!("Deletion of {} facts ended early", plan.key),
                 );
             }
             Err(e)
@@ -163,20 +153,20 @@ pub fn execute_delete(
 fn delete_body(
     conn: &mut Connection,
     source_ids: &[i64],
-    key: &str,
     entity_type: &str,
     value_type: Option<FactType>,
     plan: &DeletePlan,
 ) -> Result<String> {
-    facts_repo::delete_by_criteria(conn, source_ids, key, entity_type, value_type)?;
+    facts_repo::delete_by_criteria(conn, source_ids, &plan.key, entity_type, value_type)?;
     let entity_label = if entity_type == "source" {
         "sources"
     } else {
         "objects"
     };
     Ok(format!(
-        "Deleted {} fact rows across {} {}",
+        "Deleted {} '{}' fact rows across {} {}",
         format_count(plan.fact_count),
+        plan.key,
         format_count(plan.entity_count),
         entity_label
     ))
@@ -317,11 +307,12 @@ pub fn validate_prune_excluded_scope(scope: &str) -> Result<()> {
 
 /// Plan excluded fact pruning: count facts for excluded entities.
 pub fn plan_prune_excluded(conn: &Connection, scope: &str) -> Result<PruneExcludedPlan> {
-    let (source_fact_count, object_fact_count) = facts_repo::count_excluded(conn, scope)?;
+    let (stored_on_source_count, stored_on_content_count) =
+        facts_repo::count_excluded(conn, scope)?;
     Ok(PruneExcludedPlan {
         scope: scope.to_string(),
-        source_fact_count,
-        object_fact_count,
+        stored_on_source_count,
+        stored_on_content_count,
     })
 }
 
@@ -346,7 +337,7 @@ pub fn execute_prune_excluded(
 ) -> Result<PruneExcludedResult> {
     // Armed `partial`, not `interrupted`: at the default scope (`all`) the
     // repo runs two DELETEs, sources first, so a failure between them leaves
-    // source facts gone and object facts standing.
+    // the facts stored on sources gone and those stored on content in place.
     let mut recorder = decision.map(|d| {
         DecisionRecorder::start(conn, d, None).armed(
             conn,
@@ -365,13 +356,13 @@ pub fn execute_prune_excluded(
     let mut parts = Vec::new();
     if source_deleted > 0 {
         parts.push(format!(
-            "Deleted {} source facts (from excluded sources)",
+            "Deleted {} facts stored on excluded sources",
             format_count(source_deleted as i64)
         ));
     }
     if object_deleted > 0 {
         parts.push(format!(
-            "Deleted {} object facts (from excluded objects)",
+            "Deleted {} facts stored on excluded content",
             format_count(object_deleted as i64)
         ));
     }
@@ -409,18 +400,6 @@ mod tests {
     use super::*;
     use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
-
-    #[test]
-    fn test_validate_delete_key_protected() {
-        assert!(validate_delete_key("source.policy").is_err());
-        assert!(validate_delete_key("source.anything").is_err());
-        assert!(validate_delete_key("policy.reviewed").is_err());
-        assert!(validate_delete_key("policy.archive").is_err());
-
-        assert!(validate_delete_key("content.Make").is_ok());
-        assert!(validate_delete_key("custom.field").is_ok());
-        assert!(validate_delete_key("Make").is_ok());
-    }
 
     #[test]
     fn test_plan_delete_counts() {
@@ -510,16 +489,8 @@ mod tests {
         let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
         let decision =
             recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
-        let result = execute_delete(
-            &mut conn,
-            &[s1],
-            "content.Make",
-            "source",
-            None,
-            &plan,
-            Some(&decision),
-        )
-        .unwrap();
+        let result =
+            execute_delete(&mut conn, &[s1], "source", None, &plan, Some(&decision)).unwrap();
 
         let (command, status, attempted, completed, summary) = only_decision(&conn);
         assert_eq!(command, "facts_delete");
@@ -528,6 +499,46 @@ mod tests {
         assert_eq!(completed, 1);
         assert_eq!(summary, result.summary);
         assert!(!summary.is_empty());
+    }
+
+    /// **The delete acts on the key the plan counted.** `Make` is read as
+    /// `content.Make` (`facts::domain::delete_key`), the plan counts that key,
+    /// and the delete removes exactly the rows counted: a row stored under the
+    /// name as given (`Make`, planted by hand) and every other key stay. The
+    /// result names the key acted on, and is also the decision's summary.
+    #[test]
+    fn the_delete_removes_exactly_the_key_the_plan_counted() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", None);
+        let s2 = insert_source(&conn, root_id, "b.jpg", None);
+        crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s2, "content.Make", "Nikon");
+        crate::core::testing::insert_fact(&conn, s1, "Make", "as given");
+        crate::core::testing::insert_fact(&conn, s1, "content.Model", "EOS");
+
+        let key = crate::facts::domain::delete_key("Make").unwrap();
+        let plan = plan_delete(&mut conn, &[s1, s2], &key, "source", None).unwrap();
+        assert_eq!(plan.fact_count, 2);
+        let decision =
+            recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
+        let result =
+            execute_delete(&mut conn, &[s1, s2], "source", None, &plan, Some(&decision)).unwrap();
+
+        assert_eq!(
+            result.summary,
+            "Deleted 2 'content.Make' fact rows across 2 sources"
+        );
+        assert_eq!(only_decision(&conn).4, result.summary);
+        let mut left: Vec<String> = conn
+            .prepare("SELECT key FROM facts")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        left.sort();
+        assert_eq!(left, ["Make", "content.Model"]);
     }
 
     #[test]
@@ -603,7 +614,10 @@ mod tests {
         assert_eq!(attempted, 1);
         assert_eq!(completed, 1);
         assert_eq!(summary, result.summary);
-        assert!(!summary.is_empty());
+        assert_eq!(
+            summary,
+            "Deleted 1 facts stored on excluded sources\nTotal: 1 facts deleted"
+        );
     }
 
     // =========================================================================
@@ -641,16 +655,7 @@ mod tests {
             recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
         crate::core::testing::plant_failure(&conn, "DELETE", "facts");
 
-        assert!(execute_delete(
-            &mut conn,
-            &[s1],
-            "content.Make",
-            "source",
-            None,
-            &plan,
-            Some(&decision)
-        )
-        .is_err());
+        assert!(execute_delete(&mut conn, &[s1], "source", None, &plan, Some(&decision)).is_err());
 
         let (status, summary) = settled_row(&conn);
         assert_eq!(status, "interrupted");
@@ -710,8 +715,8 @@ mod tests {
         assert_eq!(status, "partial");
         assert_eq!(
             summary.unwrap(),
-            "Excluded-fact pruning ended early; excluded-source facts may be gone while \
-             excluded-object facts stand — re-run to converge",
+            "Excluded-fact pruning ended early; facts stored on excluded sources may be gone \
+             while facts stored on excluded content remain — re-run to converge",
             "the chartered sentence, spelled here rather than read from the const, \
              so the pin cannot follow a change to it"
         );

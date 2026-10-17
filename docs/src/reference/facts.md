@@ -6,21 +6,21 @@ Facts are key-value metadata. See [Concepts: Facts](../concepts/facts.md) for an
 
 | Namespace | Description |
 |-----------|-------------|
-| `source.*` | Facts about the file on disk (path, size, mtime) |
-| `content.*` | Facts about the content (hash, EXIF, mime type) |
+| `source.*` | Source facts: read from what the scanner records (path, size, mtime) |
+| `content.*` | Content facts: imported (EXIF, mime type), and the content hash |
 
-The `content.` prefix is optional when querying. For example, `Make=Apple` is equivalent to `content.Make=Apple`.
+The `content.` prefix is optional when querying. For example, `Make=Apple` is equivalent to `content.Make=Apple`. A name that is a [built-in key](builtins.md#built-in-keys), such as `size` or `filename`, reads as that key.
 
 ## Values
 
-Facts can hold three value types, and the built-in path keys a fourth:
+Facts can hold three value types, and the path source facts a fourth:
 
 | Type | Examples | Notes |
 |------|----------|-------|
 | Text | `Apple`, `image/jpeg`, `"2019"` | Compared in character order. A value that looks like a number or a time is quoted to be text ([Filters](filter.md#values-and-types)) |
 | Number | `1024`, `3.14`, `-5`, `1e6` | Compared as numbers |
 | Time | `2024-07-23 14:30:45`, `2024-07`, `2024` | Printed in your local time at the precision it was written; compared as spans of time. See [How Canon interprets a time](../concepts/facts.md#how-canon-interprets-a-time) |
-| Path | `source.rel_path` | Built-in keys only; compared as text, read in segments with [accessors](#path-accessors) |
+| Path | `source.rel_path` | Source facts only; compared as text, read in segments with [accessors](#path-accessors) |
 
 ## Modifiers
 
@@ -96,6 +96,6 @@ source.rel_path[0]         → photos
 
 ## See Also
 
-- [Built-in Facts](builtins.md) - Complete list of automatic facts
+- [Source Facts and Built-in Keys](builtins.md) - The keys Canon provides without enrichment
 - [Filters](filter.md) - Using facts in queries
 - [Pattern Expressions](expr.md) - Using facts in archive patterns

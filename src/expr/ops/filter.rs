@@ -3,9 +3,9 @@
 //! `apply_filters` is the whole of it from outside — hand it source ids and
 //! bound filters, get back the ids that match. Inside, the work runs against
 //! a prefetched cache rather than a query per source, with a per-source
-//! read for the built-in keys that are derived from source columns instead
-//! of stored as facts. Those values are read through the resolver that owns
-//! them (`get_builtin_value`), never derived again here; the source row they
+//! read for the keys that are derived from source columns instead of stored
+//! as facts. Those values are read through the resolver that owns them
+//! (`source_row_value`), never derived again here; the source row they
 //! are read from comes from the repository stratum beside this one. A stored
 //! key is compared on the source's one value, read through the cache.
 //!
@@ -25,9 +25,9 @@ use crate::expr::domain::cache::FactCache;
 use crate::expr::domain::filter::{
     compare_numbers, compare_text, glob_match, period_op, CompareOp, FilterResult, StatusPredicate,
 };
-use crate::expr::domain::key::BuiltinKey;
+use crate::expr::domain::key::{Key, SourceFact, CONTENT_HASH};
 use crate::expr::domain::transform::{apply_chain, InstantRecord, Modified};
-use crate::expr::domain::value::get_builtin_value;
+use crate::expr::domain::value::source_row_value;
 use crate::expr::ops::bind::BoundFilters;
 use crate::expr::repo::{fetch_source_row, prefetch_facts, prefetch_status_data, SourceRow};
 
@@ -220,7 +220,7 @@ fn compare(value: &FactValue, op: CompareOp, typed: &Value, zone: &UserZone) -> 
 // ============================================================================
 
 /// The value a comparison reads for one source: the key's value through its accessor and
-/// modifiers, or `None` where there is none — no fact, a built-in the row cannot answer, a
+/// modifiers, or `None` where there is none — no fact, a built-in key the row cannot answer, a
 /// modifier that gave no value. A stored value of another type than the key was bound for
 /// stops the run: the key's type changed while the filter ran.
 fn read_value(
@@ -236,8 +236,8 @@ fn read_value(
     through_chain(base, key, zone, &cache.instant_read)
 }
 
-/// The key's base value for one source: a built-in the source row computes, through its
-/// resolver; any other key (the hash keys included) the source's one value from the cache,
+/// The key's base value for one source: a key the source row computes, through its
+/// resolver; any other key (the content hash included) the source's one value from the cache,
 /// checked against the type the key was bound for.
 fn base_value(
     conn: &Connection,
@@ -246,8 +246,8 @@ fn base_value(
     cache: &FactCache,
 ) -> Result<Option<FactValue>> {
     let base = &key.written.base;
-    if let Some(builtin) = BuiltinKey::from_str(base).filter(BuiltinKey::is_computed) {
-        return Ok(fetch_source_row(conn, source_id)?.and_then(|row| builtin_value(&row, builtin)));
+    if let Some(computed) = Key::read(base).filter(Key::is_computed) {
+        return Ok(fetch_source_row(conn, source_id)?.and_then(|row| row_value(&row, &computed)));
     }
     let Some(value) = cache.value(source_id, base) else {
         return Ok(None);
@@ -274,25 +274,25 @@ fn through_chain(
     )
 }
 
-/// A built-in's value for one source row, through the resolver that owns it — `None` where
-/// the row cannot answer it: a NULL device or inode, or a save time outside the years Canon
-/// reads. Never a stored row of its name.
-fn builtin_value(row: &SourceRow, builtin: BuiltinKey) -> Option<FactValue> {
-    if (builtin == BuiltinKey::SourceDevice && !row.has_device)
-        || (builtin == BuiltinKey::SourceInode && !row.has_inode)
+/// A computed key's value for one source row, through the resolver that owns it — `None`
+/// where the row cannot answer it: a NULL device or inode, or a save time outside the years
+/// Canon reads. Never a stored row of its name.
+fn row_value(row: &SourceRow, key: &Key) -> Option<FactValue> {
+    if (*key == Key::SourceFact(SourceFact::Device) && !row.has_device)
+        || (*key == Key::SourceFact(SourceFact::Inode) && !row.has_inode)
     {
         return None;
     }
-    get_builtin_value(&row.attributes, builtin)
+    source_row_value(&row.attributes, key)
 }
 
 /// Whether a key exists for a source: exactly where it has a value, so `NOT K?` selects the
 /// sources a report shows under `(no value)` for `K`. Read through the key's accessor and
 /// modifiers — `K|month?` is false for a time known only to the year, and `K|year?` for text
 /// that is not a time. A bare `K?` reads no value, so it reads no clock and checks
-/// no type. The keys the source row cannot answer (the hash keys) exist where the cache holds
-/// a value; a computed built-in where its resolver answers (`?` reads a NULL device or inode
-/// as 0, as `facts` reports it).
+/// no type. The content hash, which the hash keys are read as, exists where the cache holds
+/// a value or the source is linked to content; a computed key where its resolver answers
+/// (`?` reads a NULL device or inode as 0, as `facts` reports it).
 fn check_exists(
     conn: &Connection,
     source_id: i64,
@@ -301,14 +301,14 @@ fn check_exists(
     zone: &UserZone,
 ) -> Result<bool> {
     let base = &key.written.base;
-    let value = match BuiltinKey::from_str(base) {
-        Some(builtin) if builtin.is_computed() => fetch_source_row(conn, source_id)?
-            .and_then(|row| get_builtin_value(&row.attributes, builtin)),
-        Some(_) => match cache.value(source_id, base) {
+    let value = match Key::read(base) {
+        Some(computed) if computed.is_computed() => fetch_source_row(conn, source_id)?
+            .and_then(|row| source_row_value(&row.attributes, &computed)),
+        _ if base == CONTENT_HASH => match cache.value(source_id, base) {
             Some(v) => Some(v.clone()),
             None => return Ok(cache.get_object_id(source_id).is_some()),
         },
-        None => match key.read_as {
+        _ => match key.read_as {
             ReadAs::Any => cache.value(source_id, base).cloned(),
             ReadAs::Absent | ReadAs::One(_) => base_value(conn, source_id, key, cache)?,
         },
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_modifier_failure_on_builtin_is_non_match() {
+    fn filter_modifier_failure_on_a_source_fact_is_non_match() {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos");
 
@@ -624,9 +624,7 @@ mod tests {
 
     #[test]
     fn the_filter_answers_every_computed_key_as_the_resolver_does() {
-        use strum::IntoEnumIterator;
-
-        // Two sources that differ in every attribute a built-in reads, so an
+        // Two sources that differ in every attribute a computed key reads, so an
         // equality selects exactly one of them and an inequality the other.
         let mut conn = setup_test_db();
         let root_a = insert_root(&conn, "/src");
@@ -653,9 +651,9 @@ mod tests {
             inode: 11,
         };
 
-        for builtin in BuiltinKey::iter().filter(|b| b.is_computed()) {
-            let name: &'static str = builtin.into();
-            let expected = get_builtin_value(&attributes, builtin)
+        for key in Key::all().filter(Key::is_computed) {
+            let name = key.name();
+            let expected = source_row_value(&attributes, &key)
                 .unwrap_or_else(|| panic!("{name} is computed but the resolver has no answer"));
             // The resolver's value as Canon prints it, which reads back as itself.
             let text = match &expected {
@@ -679,29 +677,33 @@ mod tests {
         }
     }
 
-    /// The other half of the keeper above: a built-in the source row cannot
-    /// answer reads the stored content hash, so every `BuiltinKey` answers in
-    /// `--where`. The claim table is written out rather than derived from
-    /// `BuiltinKey::reading`, and it must name every non-computed built-in.
+    /// The other half of the keeper above: a built-in key the source row cannot
+    /// answer reads the stored content hash, so every built-in key answers in
+    /// `--where`, and so does the content hash itself. The claim table is
+    /// written out rather than derived from `BuiltinKey::reading`, and it must
+    /// name every key of the vocabulary the source row does not compute.
     ///
     /// The defect it names: `hash` and `hash_short` reached the stored lookup
     /// under their own names, where no fact is ever kept — every comparison
     /// false, and `NOT` selecting every source.
     #[test]
     fn a_built_in_the_source_row_cannot_answer_reads_the_content_hash() {
-        use strum::IntoEnumIterator;
+        use crate::expr::domain::key::BuiltinKey;
 
         let full = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let claims = [
-            (BuiltinKey::Hash, full),
-            (BuiltinKey::HashShort, "2cf24dba"),
-            (BuiltinKey::ContentHashSha256, full),
+            (Key::BuiltinKey(BuiltinKey::Hash), full),
+            (Key::BuiltinKey(BuiltinKey::HashShort), "2cf24dba"),
+            (Key::ContentFact(CONTENT_HASH.to_string()), full),
         ];
-        for builtin in BuiltinKey::iter().filter(|b| !b.is_computed()) {
+        let not_computed = Key::all()
+            .chain([Key::ContentFact(CONTENT_HASH.to_string())])
+            .filter(|k| !k.is_computed());
+        for key in not_computed {
             assert!(
-                claims.iter().any(|(k, _)| *k == builtin),
+                claims.iter().any(|(k, _)| *k == key),
                 "{} has no claim in this table",
-                <&'static str>::from(builtin)
+                key.name()
             );
         }
 
@@ -720,8 +722,8 @@ mod tests {
         let subject = insert_source_with_object(&conn, root, "a.txt", Some(subject_obj));
         let other = insert_source_with_object(&conn, root, "b.txt", Some(other_obj));
 
-        for (builtin, value) in claims {
-            let name: &'static str = builtin.into();
+        for (key, value) in claims {
+            let name = key.name();
             for (clause, want) in [
                 (format!("{name}=\"{value}\""), vec![subject]),
                 (format!("NOT {name}=\"{value}\""), vec![other]),
@@ -770,8 +772,6 @@ mod tests {
 
     #[test]
     fn a_built_in_exists_when_the_resolver_answers_it_or_the_source_is_linked_to_an_object() {
-        use strum::IntoEnumIterator;
-
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/src");
         let obj = insert_object(&conn, "hash_exists");
@@ -779,13 +779,13 @@ mod tests {
         let unhashed = insert_source_with_object(&conn, root, "b.jpg", None);
         let ids = [hashed, unhashed];
 
-        for builtin in BuiltinKey::iter() {
-            let name: &'static str = builtin.into();
+        for key in Key::all().chain([Key::ContentFact(CONTENT_HASH.to_string())]) {
+            let name = key.name();
             let filter = bound(&conn, &format!("{name}?"));
             let matched = apply_filters(&mut conn, &ids, &filter, &UserZone::utc())
                 .unwrap()
                 .source_ids;
-            let expected = if builtin.is_computed() {
+            let expected = if key.is_computed() {
                 vec![hashed, unhashed]
             } else {
                 vec![hashed]
@@ -850,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_enriched_with_source_facts() {
+    fn filter_enriched_with_facts_on_the_source() {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/src");
         // Unhashed source with source-level fact
@@ -1501,7 +1501,7 @@ mod tests {
             selected(&mut conn, &all, "source.mtime?", &zone),
             vec![readable]
         );
-        // Every other computed built-in still exists for every source.
+        // Every other computed key still exists for every source.
         assert_eq!(
             selected(&mut conn, &all, "source.size?", &zone),
             all.to_vec()

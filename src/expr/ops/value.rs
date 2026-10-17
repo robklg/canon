@@ -1,4 +1,5 @@
-//! A stored key's value for a batch of sources, read out of the database.
+//! A key's value for a batch of sources: a stored key's read out of the
+//! database, and any key's as an expression reads it (`fetch_named_values`).
 //!
 //! A source can hold a key twice — a fact on the source and one on its content —
 //! and the rule that picks between them (`domain/value.rs`'s `source_value`)
@@ -10,8 +11,12 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::core::domain::fact::FactEntry;
-use crate::expr::domain::value::source_value;
+use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::source::Source;
+use crate::core::domain::time::zone::UserZone;
+use crate::expr::domain::key::{read_base_key, Key};
+use crate::expr::domain::transform::{apply_chain, parse_modifier, Modified};
+use crate::expr::domain::value::{source_row_value, source_value, SourceAttributes};
 use crate::expr::repo::fetch_key_rows;
 
 /// Every source's one value for a stored key: each id maps to its value, or `None` where
@@ -33,10 +38,57 @@ pub fn fetch_source_values(
         .collect())
 }
 
+/// Every source's value for a key of any kind, as an expression reads it: a key the source
+/// row answers from that row (`source_row_value`); any other from the stored facts, read as
+/// the filter reads it (`read_base_key`) — `hash` the source's one content hash, `hash_short`
+/// that hash through the modifier its reading names (`|short`), a content fact its one value
+/// (`fetch_source_values`). Each id maps to its value, or `None` where it has none.
+///
+/// `zone` is the clock a reading's modifier reads on, as in a filter; `|short`, today's only
+/// one, reads none.
+pub fn fetch_named_values(
+    conn: &mut Connection,
+    sources: &[&Source],
+    key: &Key,
+    zone: &UserZone,
+) -> Result<HashMap<i64, Option<FactValue>>> {
+    if key.is_computed() {
+        return Ok(sources
+            .iter()
+            .map(|&source| {
+                let value = source_row_value(&SourceAttributes::from(source), key);
+                (source.id, value)
+            })
+            .collect());
+    }
+    let (stored, leading) = read_base_key(key.name());
+    let modifiers: Vec<_> = leading
+        .map(parse_modifier)
+        .transpose()?
+        .into_iter()
+        .collect();
+    let ids: Vec<i64> = sources.iter().map(|source| source.id).collect();
+    let mut values = HashMap::with_capacity(ids.len());
+    for (id, entry) in fetch_source_values(conn, &ids, &stored)? {
+        let value = match entry {
+            Some(entry) => {
+                match apply_chain(entry.value, None, &modifiers, key.name(), false, zone)? {
+                    Modified::Value(value) => Some(value),
+                    Modified::NoValue(_) => None,
+                }
+            }
+            None => None,
+        };
+        values.insert(id, value);
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::domain::fact::FactValue;
+    use crate::core::domain::time::value::TimeValue;
+    use crate::core::repo::source::fetch_by_id;
     use crate::core::testing::{
         insert_fact, insert_object, insert_object_fact, insert_root, insert_source,
         insert_source_with_size, setup_test_db,
@@ -76,5 +128,55 @@ mod tests {
         assert_eq!(text(&values, empty_file), Some("Canon"));
         assert_eq!(text(&values, own_only), Some("Sony"));
         assert_eq!(text(&values, neither), None);
+    }
+
+    /// Any key's value, as an expression reads it: a source fact and a built-in key from the
+    /// source row, `size` the same value as `source.size`; `hash` the content hash in full and
+    /// `hash_short` its first eight characters, through `|short`; a plain name the `content.`
+    /// fact's one value. A source with no content has no hash.
+    #[test]
+    fn a_key_of_every_kind_reads_as_an_expression_reads_it() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let content = insert_object(&conn, "0123456789abcdef", false);
+        let hashed = insert_source_with_size(&conn, root, "trip/a.jpg", Some(content), 100);
+        let unhashed = insert_source(&conn, root, "b.png", None);
+        insert_object_fact(&conn, content, "content.hash.sha256", "0123456789abcdef");
+        insert_object_fact(&conn, content, "content.Make", "Canon");
+        insert_fact(&conn, hashed, "content.Make", "Nikon");
+        let a = fetch_by_id(&conn, hashed).unwrap().unwrap();
+        let b = fetch_by_id(&conn, unhashed).unwrap().unwrap();
+
+        // `FactValue` has no equality; values are compared by their debug form.
+        let zone = UserZone::utc();
+        let mut value = |name: &str, id: i64| {
+            let key = Key::read(name).unwrap();
+            let values = fetch_named_values(&mut conn, &[&a, &b], &key, &zone).unwrap();
+            format!("{:?}", values[&id])
+        };
+        let some = |value: FactValue| format!("{:?}", Some(value));
+        let text = |s: &str| some(FactValue::Text(s.to_string()));
+        let num = |n: i64| some(FactValue::Num(n as f64));
+        let none = format!("{:?}", None::<FactValue>);
+
+        assert_eq!(value("source.size", hashed), num(100));
+        assert_eq!(value("size", hashed), num(100));
+        assert_eq!(
+            value("source.mtime", hashed),
+            some(FactValue::Time(
+                TimeValue::from_epoch_secs(a.mtime).unwrap()
+            ))
+        );
+        assert_eq!(value("source.ext", hashed), text("jpg"));
+        assert_eq!(value("filename", hashed), text("a.jpg"));
+        assert_eq!(value("stem", unhashed), text("b"));
+        assert_eq!(value("id", hashed), num(hashed));
+        assert_eq!(value("root_id", hashed), num(root));
+        assert_eq!(value("hash", hashed), text("0123456789abcdef"));
+        assert_eq!(value("hash_short", hashed), text("01234567"));
+        assert_eq!(value("Make", hashed), text("Canon"));
+        assert_eq!(value("hash", unhashed), none);
+        assert_eq!(value("hash_short", unhashed), none);
+        assert_eq!(value("Make", unhashed), none);
     }
 }

@@ -120,9 +120,11 @@ canon worklist \
   | canon import-facts
 ```
 
+The facts `canonargs` passes through include every field `worklist --emit` wrote, so they are imported again under their names as given. A source fact such as `source.mtime` is skipped and counted as `skipped (reserved)`. A [built-in key](../../reference/builtins.md#built-in-keys) such as `filename` or `size` is stored as a content fact, `content.filename`, on the content of a hashed source, so every copy of that content shares it; a filter on `filename` still reads the built-in key.
+
 ## Using Existing Facts
 
-Processors can access previously imported facts via the `--emit` flag on worklist. See [Emitting Existing Facts](worklist.md#emitting-existing-facts) for details.
+Processors can read a key's value, an imported fact or a source fact, via the `--emit` flag on worklist. See [Emitting Existing Facts](worklist.md#emitting-existing-facts) for details.
 
 ## Resuming a Pass
 

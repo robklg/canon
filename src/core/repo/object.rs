@@ -439,16 +439,16 @@ pub struct OrphanedStats {
     pub object_count: i64,
     /// Number of non-present sources referencing orphaned objects
     pub source_count: i64,
-    /// Number of source facts for those sources
-    pub source_fact_count: i64,
-    /// Number of object facts for orphaned objects
-    pub object_fact_count: i64,
+    /// Number of facts stored on those sources
+    pub stored_on_source_count: i64,
+    /// Number of facts stored on orphaned objects
+    pub stored_on_content_count: i64,
 }
 
 impl OrphanedStats {
     /// Total number of facts (source + object)
     pub fn total_fact_count(&self) -> i64 {
-        self.source_fact_count + self.object_fact_count
+        self.stored_on_source_count + self.stored_on_content_count
     }
 }
 
@@ -487,8 +487,8 @@ pub fn find_orphaned_stats(conn: &Connection) -> Result<OrphanedStats> {
         |row| row.get(0),
     )?;
 
-    // Count source facts for those sources
-    let source_fact_count: i64 = conn.query_row(
+    // Count facts stored on those sources
+    let stored_on_source_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM facts f
          WHERE f.entity_type = 'source'
            AND f.entity_id IN (
@@ -506,8 +506,8 @@ pub fn find_orphaned_stats(conn: &Connection) -> Result<OrphanedStats> {
         |row| row.get(0),
     )?;
 
-    // Count object facts for orphaned objects
-    let object_fact_count: i64 = conn.query_row(
+    // Count facts stored on orphaned objects
+    let stored_on_content_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM facts f
          WHERE f.entity_type = 'object'
            AND f.entity_id IN (
@@ -524,17 +524,17 @@ pub fn find_orphaned_stats(conn: &Connection) -> Result<OrphanedStats> {
     Ok(OrphanedStats {
         object_count,
         source_count,
-        source_fact_count,
-        object_fact_count,
+        stored_on_source_count,
+        stored_on_content_count,
     })
 }
 
 /// Delete orphaned objects and all associated data.
 ///
 /// Deletes in cascade order:
-/// 1. Source facts for non-present sources of orphaned objects
+/// 1. Facts stored on non-present sources of orphaned objects
 /// 2. Non-present sources referencing orphaned objects
-/// 3. Object facts for orphaned objects
+/// 3. Facts stored on orphaned objects
 /// 4. Orphaned objects
 ///
 /// Returns actual counts deleted.
@@ -548,8 +548,8 @@ pub fn find_orphaned_stats(conn: &Connection) -> Result<OrphanedStats> {
 /// tx.commit()?;
 /// ```
 pub fn delete_orphaned(conn: &Connection) -> Result<OrphanedStats> {
-    // Delete source facts first
-    let source_fact_count = conn.execute(
+    // Delete facts stored on those sources first
+    let stored_on_source_count = conn.execute(
         "DELETE FROM facts
          WHERE entity_type = 'source'
            AND entity_id IN (
@@ -580,8 +580,8 @@ pub fn delete_orphaned(conn: &Connection) -> Result<OrphanedStats> {
         [],
     )?;
 
-    // Delete object facts
-    let object_fact_count = conn.execute(
+    // Delete facts stored on orphaned objects
+    let stored_on_content_count = conn.execute(
         "DELETE FROM facts
          WHERE entity_type = 'object'
            AND entity_id IN (
@@ -607,8 +607,8 @@ pub fn delete_orphaned(conn: &Connection) -> Result<OrphanedStats> {
     Ok(OrphanedStats {
         object_count: object_count as i64,
         source_count: source_count as i64,
-        source_fact_count: source_fact_count as i64,
-        object_fact_count: object_fact_count as i64,
+        stored_on_source_count: stored_on_source_count as i64,
+        stored_on_content_count: stored_on_content_count as i64,
     })
 }
 
@@ -1407,8 +1407,8 @@ mod tests {
 
         assert_eq!(stats.object_count, 0);
         assert_eq!(stats.source_count, 0);
-        assert_eq!(stats.source_fact_count, 0);
-        assert_eq!(stats.object_fact_count, 0);
+        assert_eq!(stats.stored_on_source_count, 0);
+        assert_eq!(stats.stored_on_content_count, 0);
     }
 
     #[test]
@@ -1449,19 +1449,19 @@ mod tests {
         let obj_id = insert_object(&conn, "abc123", false);
         let source_id = insert_source(&conn, root_id, "file.jpg", Some(obj_id), false);
 
-        // Add source facts
+        // Add facts stored on the source
         insert_fact(&conn, "source", source_id, "content.Make", "Canon");
         insert_fact(&conn, "source", source_id, "content.Model", "EOS");
 
-        // Add object facts
+        // Add a fact stored on the object
         insert_fact(&conn, "object", obj_id, "content.hash.sha256", "abc123");
 
         let stats = find_orphaned_stats(&conn).unwrap();
 
         assert_eq!(stats.object_count, 1);
         assert_eq!(stats.source_count, 1);
-        assert_eq!(stats.source_fact_count, 2);
-        assert_eq!(stats.object_fact_count, 1);
+        assert_eq!(stats.stored_on_source_count, 2);
+        assert_eq!(stats.stored_on_content_count, 1);
         assert_eq!(stats.total_fact_count(), 3);
     }
 
@@ -1485,7 +1485,7 @@ mod tests {
         // Only counts orphaned
         assert_eq!(stats.object_count, 1);
         assert_eq!(stats.source_count, 1);
-        assert_eq!(stats.object_fact_count, 1);
+        assert_eq!(stats.stored_on_content_count, 1);
     }
 
     #[test]
@@ -1542,8 +1542,8 @@ mod tests {
 
         assert_eq!(stats.object_count, 1);
         assert_eq!(stats.source_count, 1);
-        assert_eq!(stats.source_fact_count, 1);
-        assert_eq!(stats.object_fact_count, 1);
+        assert_eq!(stats.stored_on_source_count, 1);
+        assert_eq!(stats.stored_on_content_count, 1);
 
         // Verify all deleted
         let obj_count: i64 = conn
@@ -1591,8 +1591,8 @@ mod tests {
         // Only orphaned deleted
         assert_eq!(stats.object_count, 1);
         assert_eq!(stats.source_count, 1);
-        assert_eq!(stats.source_fact_count, 1);
-        assert_eq!(stats.object_fact_count, 1);
+        assert_eq!(stats.stored_on_source_count, 1);
+        assert_eq!(stats.stored_on_content_count, 1);
 
         // Active preserved
         let obj_count: i64 = conn

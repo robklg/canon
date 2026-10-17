@@ -37,7 +37,7 @@ pub enum FactType {
     Text,
     Num,
     Time,
-    Path, // Derived path facts that support segment indexing
+    Path, // Path source facts, which support segment indexing
 }
 
 impl FactType {
@@ -70,13 +70,13 @@ impl FactType {
 /// can hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyTypes {
-    /// Non-zero counts in a fixed order (text, number, time, path). A built-in holds no
-    /// facts, so its one entry counts nothing.
+    /// Non-zero counts in a fixed order (text, number, time, path). A source fact or a
+    /// built-in key holds no facts, so its one entry counts nothing.
     counts: Vec<(FactType, u64)>,
 }
 
 impl KeyTypes {
-    /// A built-in's type: one type, no facts counted.
+    /// A source fact's or a built-in key's type: one type, no facts counted.
     pub fn of(t: FactType) -> Self {
         KeyTypes {
             counts: vec![(t, 0)],
@@ -144,7 +144,7 @@ pub enum FactValue {
     Text(String),
     Num(f64),
     Time(TimeValue),
-    Path(String), // Path that supports segment indexing (for derived path facts)
+    Path(String), // Path that supports segment indexing (for the path source facts)
 }
 
 impl FactValue {
@@ -164,8 +164,8 @@ impl FactValue {
 /// Facts are stored in the database on either sources or objects, but for query
 /// purposes we associate them with sources. When fetching facts for a source,
 /// the result includes both:
-/// - Direct source facts (`entity_type = "source"`)
-/// - Object facts via the source's `object_id` (`entity_type = "object"`)
+/// - Facts stored on the source (`entity_type = "source"`)
+/// - Facts stored on its object, via the source's `object_id` (`entity_type = "object"`)
 ///
 /// The `entity_type` and `entity_id` fields preserve the original storage location,
 /// which is useful for debugging and for operations that need to distinguish
@@ -186,7 +186,7 @@ pub struct FactEntry {
 }
 
 impl FactEntry {
-    /// Whether the fact is held on the source itself rather than on its content.
+    /// Whether the fact is stored on the source itself rather than on its content.
     pub fn is_on_source(&self) -> bool {
         self.entity_type == "source"
     }

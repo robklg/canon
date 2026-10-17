@@ -16,7 +16,7 @@ use crate::archive::domain::{
     extract_notes_raw, LockEntry, LockHeader, LockScope, ManifestConfig, ManifestMeta,
     ManifestOptions, ManifestOutput, CURRENT_LOCK_VERSION, CURRENT_MANIFEST_VERSION,
 };
-use crate::core::domain::fact::{FactValue, KeyTypes};
+use crate::core::domain::fact::{FactType, FactValue, KeyTypes};
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
@@ -29,7 +29,7 @@ use crate::core::domain::FactEntry;
 use crate::core::repo::{self, Connection};
 use crate::expr::BoundFilters;
 use crate::expr::{
-    get_builtin_value, mixed_type_way_out, source_values, BuiltinKey, ScopeVantage,
+    mixed_type_way_out, source_row_value, source_values, BuiltinKey, Key, Listing, ScopeVantage,
     SourceAttributes, OBJECT_HASH, SCOPE_REL_PATH,
 };
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
@@ -62,9 +62,11 @@ pub struct ClusterGeneratePlan {
     pub archived: Vec<(String, String)>,
     /// Stored keys every lock entry has a value for, each with the key's own types.
     pub full_coverage_facts: Vec<FullCoverageFact>,
-    /// The listed built-ins every lock entry has a value for, in vocabulary order — all of
-    /// them, unless a save time Canon cannot read leaves one short.
-    pub full_coverage_builtins: Vec<BuiltinKey>,
+    /// The keys `canon facts` shows by default that every lock entry has a value for — the
+    /// shown source facts and `filename`, in vocabulary order — all of them, unless a save time
+    /// Canon cannot read leaves one short. Each with its type and description, which every
+    /// such key has.
+    pub full_coverage_shown_keys: Vec<(Key, FactType, &'static str)>,
     /// Root breakdown: (root_path, count) sorted by path.
     pub root_breakdown: Vec<(String, usize)>,
     /// Sources in plan with no archived copy.
@@ -213,8 +215,8 @@ pub fn plan_generate(
         })
         .collect();
     let lock_ids: HashSet<i64> = lock_entries.iter().map(|e| e.id).collect();
-    let full_coverage_builtins =
-        full_coverage_builtins(hashed_sources.iter().filter(|s| lock_ids.contains(&s.id)));
+    let full_coverage_shown_keys =
+        full_coverage_shown_keys(hashed_sources.iter().filter(|s| lock_ids.contains(&s.id)));
 
     // 10. Compute root breakdown from final lock entries
     let mut root_counts: HashMap<i64, usize> = HashMap::new();
@@ -246,7 +248,7 @@ pub fn plan_generate(
         lock_entries,
         archived,
         full_coverage_facts,
-        full_coverage_builtins,
+        full_coverage_shown_keys,
         root_breakdown,
         not_archived_count,
         excluded_count: selection.excluded_count,
@@ -269,7 +271,7 @@ impl ClusterGeneratePlan {
             lock_entries: vec![],
             archived: vec![],
             full_coverage_facts: vec![],
-            full_coverage_builtins: vec![],
+            full_coverage_shown_keys: vec![],
             root_breakdown: vec![],
             not_archived_count: 0,
             excluded_count: 0,
@@ -747,7 +749,7 @@ fn assemble_manifest(
     // to enumerate over nothing. The section is absent, not dropped.
     let fact_help = generate_fact_help(
         plan.lock_entries.len(),
-        &plan.full_coverage_builtins,
+        &plan.full_coverage_shown_keys,
         &plan.full_coverage_facts,
         !config.meta.scope.is_empty(),
     );
@@ -853,28 +855,25 @@ fn full_coverage_keys(
     covered
 }
 
-/// The default-listed built-ins every source has a value for, counted from the resolver's
+/// The keys shown by default that every source has a value for, counted from the resolver's
 /// own answers — never assumed to cover everything, because a save time Canon cannot read
 /// has no value.
-fn full_coverage_builtins<'s>(
+fn full_coverage_shown_keys<'s>(
     sources: impl Iterator<Item = &'s Source> + Clone,
-) -> Vec<BuiltinKey> {
-    use crate::expr::BuiltinKeyVisibility;
-    use strum::IntoEnumIterator;
-
-    BuiltinKey::iter()
-        .filter(|key| key.visibility() == BuiltinKeyVisibility::Default)
-        .filter(|key| {
+) -> Vec<(Key, FactType, &'static str)> {
+    Key::all_typed()
+        .filter(|(key, _, _)| key.listing() == Listing::Shown)
+        .filter(|(key, _, _)| {
             sources
                 .clone()
-                .all(|s| get_builtin_value(&SourceAttributes::from(s), *key).is_some())
+                .all(|s| source_row_value(&SourceAttributes::from(s), key).is_some())
         })
         .collect()
 }
 
 /// Get a human-readable description for a fact key.
 fn get_fact_description(key: &str) -> String {
-    BuiltinKey::from_str(key)
+    Key::read(key)
         .and_then(|k| k.description())
         .map(|s| s.to_string())
         .unwrap_or_default()
@@ -944,7 +943,7 @@ fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
 /// Generate fact help comments for the manifest.
 fn generate_fact_help(
     source_count: usize,
-    full_coverage_builtins: &[BuiltinKey],
+    full_coverage_shown_keys: &[(Key, FactType, &'static str)],
     full_coverage_facts: &[FullCoverageFact],
     has_scope: bool,
 ) -> String {
@@ -963,13 +962,12 @@ fn generate_fact_help(
 
     // Built-in facts
     help.push_str("# Built-in:\n");
-    for &key in full_coverage_builtins {
-        let name: &'static str = key.into();
-        let desc = key.description().unwrap_or("");
+    for (key, fact_type, desc) in full_coverage_shown_keys {
+        let type_word = fact_type.as_str();
         help.push_str(&format!(
             "#   {:18} {:6} - {}\n",
-            name,
-            key.fact_type().as_str(),
+            key.name(),
+            type_word,
             desc
         ));
     }
@@ -1080,6 +1078,7 @@ mod tests {
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
         insert_time_fact, setup_test_db,
     };
+    use crate::expr::SourceFact;
     use crate::expr::Unmeasured;
 
     fn default_params() -> ClusterGenerateParams {
@@ -1383,7 +1382,7 @@ mod tests {
         assert_eq!(plan.full_coverage_facts[0].key, "content.Make");
     }
 
-    /// The facts comment reads each source's one value: a key held on the source and on its
+    /// The facts comment reads each source's one value: a key stored on the source and on its
     /// content counts the content's, an empty file's as well. Both values read are written to
     /// the year and the two passed over to the second, so two values are known only to the
     /// year — none if the rows were swapped, one if the empty file read its own.
@@ -1596,8 +1595,8 @@ base_dir = \"output\"\n";
         assert_eq!(stamp, "2023-12-31T23:30:00Z");
     }
 
-    /// The manifest's facts comment lists a built-in only where every source has a value
-    /// for it: a save time Canon cannot read (9999-12-31 23:59:59 UTC here) takes
+    /// The manifest's facts comment lists a source fact or `filename` only where every source
+    /// has a value for it: a save time Canon cannot read (9999-12-31 23:59:59 UTC here) takes
     /// `source.mtime` off the list and leaves the rest.
     #[test]
     fn a_save_time_canon_cannot_read_leaves_the_coverage_list() {
@@ -1611,12 +1610,15 @@ base_dir = \"output\"\n";
 
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 2);
-        assert!(!plan
-            .full_coverage_builtins
-            .contains(&BuiltinKey::SourceMtime));
-        assert!(plan.full_coverage_builtins.contains(&BuiltinKey::SourceExt));
+        let shown = |fact: SourceFact| {
+            plan.full_coverage_shown_keys
+                .iter()
+                .any(|(key, _, _)| *key == Key::SourceFact(fact))
+        };
+        assert!(!shown(SourceFact::Mtime));
+        assert!(shown(SourceFact::Ext));
 
-        let help = generate_fact_help(2, &plan.full_coverage_builtins, &[], false);
+        let help = generate_fact_help(2, &plan.full_coverage_shown_keys, &[], false);
         assert!(!help.contains("source.mtime"), "{help}");
         assert!(help.contains("source.ext"), "{help}");
     }
@@ -1751,7 +1753,7 @@ base_dir = \"output\"\n";
             lock_entries,
             archived,
             full_coverage_facts: vec![],
-            full_coverage_builtins: vec![],
+            full_coverage_shown_keys: vec![],
             root_breakdown,
             not_archived_count,
             excluded_count,

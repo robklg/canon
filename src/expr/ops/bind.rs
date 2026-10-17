@@ -15,11 +15,11 @@ use rusqlite::Connection;
 use crate::core::domain::fact::KeyTypes;
 use crate::core::repo::fact::key_types;
 use crate::expr::domain::bind::{
-    bind_expr, bind_key, keep_ways_that_bind, stored_keys, BindCause, Bound, BoundKey, Entry,
-    FilterRefused, Reads, Refused,
+    bind_expr, bind_key, keep_ways_that_bind, known_type, stored_keys, BindCause, Bound, BoundKey,
+    Entry, FilterRefused, Reads, Refused,
 };
 use crate::expr::domain::filter::{Expr, UsedStatus, WrittenKey};
-use crate::expr::domain::key::{BuiltinKey, ParsedFactKey};
+use crate::expr::domain::key::ParsedFactKey;
 
 /// Filters read and bound: every clause's key checked and every typed value read as its
 /// key's type. Made only by [`read_filters`].
@@ -160,7 +160,7 @@ fn bind_report_key(
         Ok(key) => key.base,
         Err(error) => return Ok(Err(BindCause::Unparsed(Entry::unparsed(written, &error)))),
     };
-    let types = if BuiltinKey::from_str(&base).is_none() {
+    let types = if known_type(&base).is_none() {
         key_types(conn, &[base.as_str()])?
     } else {
         Default::default()
@@ -171,6 +171,7 @@ fn bind_report_key(
             base_key: key.base,
             accessor: key.accessor,
             modifiers: key.modifiers,
+            key: key.key,
             read_as: bound.read_as,
         }),
         Err(mut cause) => {
@@ -209,6 +210,60 @@ mod tests {
         insert_fact, insert_root, insert_source, insert_time_fact, setup_test_db,
     };
     use crate::expr::ops::filter::apply_filters;
+
+    /// The content hash's type (text) is known before any fact of it exists, so a comparison
+    /// on it binds on a database that holds none — `hash` too, which is read as it — where
+    /// any other key with no facts is refused as unknown.
+    #[test]
+    fn the_content_hash_binds_with_no_stored_rows() {
+        let conn = setup_test_db();
+        for filter in ["content.hash.sha256 = abc123", "hash = abc123"] {
+            bound(&conn, filter);
+        }
+        let other = refusal(&conn, &["content.Make = abc123"]);
+        assert_eq!(kind(&other.causes[0]), "unknown key");
+    }
+
+    /// A `source.` name that is no source fact names no key, so it is refused as unknown in
+    /// every position a filter or a report reads a key — compared, `?`, `NOT …?`, `--key`,
+    /// `--group-by` — with one sentence. The defect it names: read as a key with no facts,
+    /// `NOT source.extension?` selected every source. A source fact still binds for existence.
+    #[test]
+    fn a_source_name_that_is_no_source_fact_is_an_unknown_key_wherever_it_stands() {
+        let (conn, _) = world();
+        let sentence =
+            "Unknown fact key: 'source.extension'. Use 'canon facts' to see available keys.";
+        for filter in [
+            "source.extension = jpg",
+            "source.extension?",
+            "NOT source.extension?",
+            "source.extension|lowercase?",
+        ] {
+            let refused = refusal(&conn, &[filter]);
+            let kinds: Vec<&str> = refused.causes.iter().map(kind).collect();
+            assert_eq!(kinds, ["unknown key"], "{filter}");
+            assert!(
+                refused.to_string().contains(sentence),
+                "{filter}: {refused}"
+            );
+        }
+        let reports: [(Option<&str>, &[String]); 2] = [
+            (Some("source.extension"), &[]),
+            (None, &["source.extension".to_string()]),
+        ];
+        for (key, grouping) in reports {
+            let Err(error) = read_report(&conn, key, grouping, &[]) else {
+                panic!("{key:?} {grouping:?}: binds");
+            };
+            let refused = error.downcast::<FilterRefused>().expect("a refusal");
+            let kinds: Vec<&str> = refused.causes.iter().map(kind).collect();
+            assert_eq!(kinds, ["unknown key"], "{key:?} {grouping:?}");
+            assert!(refused.to_string().contains(sentence), "{refused}");
+        }
+        for filter in ["source.size?", "NOT source.size?"] {
+            bound(&conn, filter);
+        }
+    }
 
     /// One report key, read as `facts --key` reads it.
     fn read_key(conn: &Connection, key: &str) -> Result<ParsedFactKey> {

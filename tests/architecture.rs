@@ -1195,19 +1195,12 @@ fn architecture_rules_hold() {
 /// function and the fourth is gone, so what remains possible is a **fifth**
 /// site appearing somewhere new. This is the pin against that.
 ///
-/// **The exemptions are not oversights, and unifying them would be a false
-/// equality.** Two sites outside the facility match the same bytes and each
-/// serves a different verb:
-///
-/// - `facts/domain.rs` — *reserving an import namespace*: it refuses
-///   `source.*` on the way **in**. Same bytes, opposite direction.
-/// - `facts/ops/maintain.rs` — *protecting facts from deletion*: a different
-///   set (`source.*` **and** `policy.*`) answering a different question.
-///
-/// Convergent spelling without convergent meaning. A matcher that flagged
-/// these would be asserting the very equality the design rejects, so they are
-/// listed by name with their verbs, and the count is exact: a second spelling
-/// added inside an exempt file fails this too.
+/// **No site outside the facility is exempt.** `facts delete` and import
+/// refuse a `source.` name without spelling it: both read the facility's own
+/// name reader, where such a name has no content reading. A site that matched
+/// the same bytes for a different verb would be listed by name with its verb,
+/// and the count is exact, so a second spelling inside an exempt file fails
+/// this too.
 ///
 /// The scan covers test code as well as production. A test spelling the set
 /// out is still a spelling of it, and admitting one would need the same
@@ -1221,12 +1214,7 @@ fn the_context_supplied_set_is_spelled_only_inside_expr() {
 
     /// Each exemption, with the verb it serves and how many times it spells
     /// one of the above.
-    const EXEMPT: &[(&str, usize)] = &[
-        // reserving an import namespace
-        ("src/facts/domain.rs", 1),
-        // protecting facts from deletion
-        ("src/facts/ops/maintain.rs", 1),
-    ];
+    const EXEMPT: &[(&str, usize)] = &[];
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let base = Path::new(&manifest_dir);
@@ -3956,14 +3944,19 @@ mod source {
                 "prefetch_pattern_facts",
                 "PatternFacts",
                 "resolve_fact_value",
-                "get_builtin_value",
+                "source_row_value",
                 "SourceAttributes",
                 "source_values",
                 "fetch_source_values",
-                "ParsedFactKey",
+                "fetch_named_values",
+                "read_key_name",
                 "BuiltinKey",
-                "BuiltinKeyCategory",
-                "BuiltinKeyVisibility",
+                "Key",
+                "KeyKind",
+                "Listing",
+                "ParsedFactKey",
+                "SourceFact",
+                "CONTENT_HASH",
                 "SCOPE_REL_PATH",
                 "OBJECT_HASH",
                 "Modifier",

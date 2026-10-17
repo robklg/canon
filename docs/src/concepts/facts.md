@@ -4,28 +4,26 @@ Facts are key-value metadata attached to [sources](source.md) or [objects](objec
 
 ## Types of Facts
 
-**Built-in facts** are collected automatically during scanning:
+**Source facts** (`source.*`) are about a source itself, read from what the scanner records. Every source has the same fixed set, and they are never imported or deleted:
 - `source.ext` - File extension
 - `source.size` - File size in bytes
 - `source.mtime` - The file's save time
-- `content.hash.sha256` - Content hash (when computed)
+- `source.path`, `source.rel_path` - Where the file is
 
-**Imported facts** come from external tools via the [enrichment pipeline](../commands/enrich/index.md):
+**Content facts** (`content.*`) are about a source's content. External tools import them via the [enrichment pipeline](../commands/enrich/index.md), and Canon records the content hash when it hashes a file:
+- Content hash: `content.hash.sha256`
 - EXIF metadata: `content.Make`, `content.Model`, `content.DateTimeOriginal`
 - Geolocation: `content.geo.city`, `content.geo.country`
 - Media info: `content.mime`, `content.duration`
 - Any custom key-value pairs you choose to import
 
-## Namespaces
+**Built-in keys** (`filename`, `size`, `hash`, ...) are short names for values used often, neither source facts nor content facts. Some have the same value as a source fact: `size` has the same value as `source.size`. See [Source Facts and Built-in Keys](../reference/builtins.md) for the full lists.
 
-Facts are namespaced:
+## Reading a Key's Name
 
-- `source.*` - Facts about the file on disk (path, size, timestamps)
-- `content.*` - Facts about the content itself (stored on objects when hashed)
+When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`. A name that is a [built-in key](../reference/builtins.md#built-in-keys), such as `size`, `filename` or `id`, reads as that key instead, so a content fact imported under such a name is reached only by its full name, `content.size`.
 
-When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`.
-
-A source has one value for each key. A `content.*` key can be held on the source as well as on its content; filters, `canon facts`, patterns and `canon worklist` all read the facts from the content, except for the facts that exist only on the source.
+A source has one value for each key. A content fact can be stored on the source as well as on its content; filters, `canon facts`, patterns and `canon worklist` all read the fact stored on the content, and the one stored on the source only where the content has none.
 
 ## Value Types
 

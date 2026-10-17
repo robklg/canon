@@ -4,14 +4,14 @@
 (maintenance), and `canon import-facts` (JSONL import). A leaf subsystem: no sibling
 reaches in, and it reaches no sibling.
 
-**Strata**: `domain.rs` — the import-vocabulary half of the fact noun (`SourceFact`,
-`normalize_fact_key`, `is_content_fact`). `repo.rs` — the SQL only facts
+**Strata**: `domain.rs` — the import-vocabulary half of the fact noun (`ContentFactOnSource`,
+`is_content_fact`, `import_key`, `delete_key`, `names_the_root`). `repo.rs` — the SQL only facts
 performs: the type map, upsert, key counting, the fact-promotion reads and writes,
 counting and deleting by criteria, and the stale/excluded prunes, plus the private
 `value_type_clause`. `ops/report.rs` — the read-only distribution and enumeration
 computations (`compute_all_keys`, `compute_distribution`, `compute_grouped_distribution`,
 `compute_root_distribution`). `ops/maintain.rs` — the delete and prune plan/execute
-pairs. `ops/import.rs` — `process_record`, the per-record import, reading times
+pairs. `ops/import.rs` — `process_record`, per-record import, reading times
 through `core::domain::time::reading`, never as epoch seconds; durations through `core::domain::number`. `cli.rs` — the
 `canon facts` command surface. `cli/import.rs` — the `canon import-facts` one.
 

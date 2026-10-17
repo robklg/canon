@@ -1,16 +1,21 @@
-//! Import-vocabulary half of the fact domain model: the source-fact record
-//! promotion reads, and key normalization/classification. A value's kind is
-//! the fact noun's own (`core::domain::fact::FactType`).
+//! Import-vocabulary half of the fact domain model: the record of a content
+//! fact stored on the source, which promotion reads, key classification, and
+//! the keys an import stores and `facts delete` acts on.
+//! A key's name is read by the expression facility's one reader
+//! (`expr::read_key_name`). A value's kind is the fact noun's own
+//! (`core::domain::fact::FactType`).
 
 use crate::core::domain::fact::FactValue;
+use crate::expr::{read_key_name, BuiltinKey, Key, ParsedFactKey, SourceFact};
 
-/// A source fact record for promotion processing.
+/// A content fact stored on the source, moved to the content when an import
+/// links the source to it.
 ///
-/// When a source gets linked to an object, its content facts need to be
-/// "promoted" from the source to the object. This struct holds the fact
-/// data needed for that migration.
+/// An import that arrives before a source's content is known stores its facts
+/// on the source; once an import links the source to its object, promotion
+/// moves them to the object. This struct holds what that move reads.
 #[derive(Debug, Clone)]
-pub struct SourceFact {
+pub struct ContentFactOnSource {
     /// The fact ID in the database
     pub id: i64,
     /// The fact key (e.g., "content.Make")
@@ -21,27 +26,32 @@ pub struct SourceFact {
     pub observed_at: i64,
 }
 
-/// Normalize a fact key to use the content.* namespace.
-///
-/// - Keys starting with "source." are rejected (reserved namespace)
-/// - Keys already starting with "content." are left as-is
-/// - All other keys are prefixed with "content."
-///
-/// # Examples
-///
-/// ```ignore
-/// assert_eq!(normalize_fact_key("Make"), Ok("content.Make".to_string()));
-/// assert_eq!(normalize_fact_key("content.Make"), Ok("content.Make".to_string()));
-/// assert!(normalize_fact_key("source.size").is_err());
-/// ```
-pub fn normalize_fact_key(key: &str) -> Result<String, &'static str> {
-    if key.starts_with("source.") {
-        return Err("source.* namespace is reserved for built-in facts");
-    }
-    if key.starts_with("content.") {
-        return Ok(key.to_string());
-    }
-    Ok(format!("content.{key}"))
+/// The key `facts delete` acts on: the name's content reading (`Make` →
+/// `content.Make`), or a refusal for a name with none — any name starting with
+/// `source.`, a source fact or not. Read once, before anything else the command
+/// does, so no empty selection hides the refusal.
+pub fn delete_key(name: &str) -> anyhow::Result<String> {
+    read_key_name(name).content_key.ok_or_else(|| {
+        anyhow::anyhow!("Cannot delete '{name}': names starting with 'source.' cannot be deleted.")
+    })
+}
+
+/// The key an import stores a fact under: the name's content reading (`Make` →
+/// `content.Make`), or `None` for a name with none — any name starting with
+/// `source.`, which the import skips.
+pub fn import_key(name: &str) -> Option<String> {
+    read_key_name(name).content_key
+}
+
+/// Whether a report key names a source's root — `source.root` or `root_id`, quoted or not,
+/// with no accessor or modifier — which a report shows and groups by root. Decided by the key
+/// the name reads as (`ParsedFactKey::key`), never by its text.
+pub fn names_the_root(key: &ParsedFactKey) -> bool {
+    !key.has_transforms()
+        && matches!(
+            key.key,
+            Some(Key::SourceFact(SourceFact::Root) | Key::BuiltinKey(BuiltinKey::RootId))
+        )
 }
 
 /// Check if a key is a content fact (starts with "content.").
@@ -56,12 +66,18 @@ pub fn is_content_fact(key: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Import and the asking half name an importable key the same way, so
-    /// a filter finds a fact by the name it was imported under. The defect it
-    /// names: the asking half kept `policy.`/`object.` keys as written while
-    /// import stored them under `content.`, and `--where policy.reviewed?`
-    /// selected nothing. Sampled prefixes; a key spelled as a built-in name
-    /// (`size`, `hash`) is outside it — the asking half reads the built-in.
+    /// **The key-name law's verifier**: every command reads a key's name
+    /// through one reader (`expr::read_key_name`), and each applies its own rule
+    /// to the readings. For a name that is not a built-in key, import's reading,
+    /// the filter's and `facts delete`'s reach the same content fact, so a filter
+    /// finds, and a delete removes, a fact by the name it was imported under. The
+    /// defect it names: the asking half kept `policy.`/`object.` keys as written
+    /// while import stored them under `content.`, and `--where policy.reviewed?`
+    /// selected nothing. Sampled prefixes.
+    ///
+    /// For a built-in key's name they differ, by design, and that half is
+    /// pinned too: the filter reads the built-in key (`size` is the source's
+    /// size), import and the delete the content reading (`content.size`).
     #[test]
     fn a_key_is_read_by_the_name_import_stored_it_under() {
         use crate::expr::ParsedFactKey;
@@ -79,50 +95,56 @@ mod tests {
         for prefix in prefixes {
             for name in ["Make", "reviewed", "x.y"] {
                 let written = format!("{prefix}{name}");
-                let stored = normalize_fact_key(&written).unwrap();
-                let read = ParsedFactKey::parse(&written).unwrap().base_key;
-                assert_eq!(read, stored, "{written}");
+                let imported = import_key(&written).unwrap();
+                let filtered = ParsedFactKey::parse(&written).unwrap().base_key;
+                assert_eq!(filtered, imported, "{written}");
+                assert_eq!(delete_key(&written).unwrap(), imported, "{written}");
             }
+        }
+
+        // One built-in name, a deliberate difference: each command's own rule.
+        assert_eq!(ParsedFactKey::parse("size").unwrap().base_key, "size");
+        assert_eq!(import_key("size").as_deref(), Some("content.size"));
+        assert_eq!(delete_key("size").unwrap(), "content.size");
+    }
+
+    /// `facts delete` acts on the name's content reading, with no protected
+    /// namespace beyond `source.`; a name starting with `source.` is refused
+    /// with one sentence, whether or not it is a source fact.
+    #[test]
+    fn a_delete_reads_the_name_under_content_and_refuses_a_source_name() {
+        for (name, key) in [
+            ("Make", "content.Make"),
+            ("content.Make", "content.Make"),
+            ("policy.x", "content.policy.x"),
+            ("Make|lowercase", "content.Make|lowercase"),
+        ] {
+            assert_eq!(delete_key(name).unwrap(), key, "{name}");
+        }
+        for name in ["source.size", "source.extension"] {
+            assert_eq!(
+                delete_key(name).unwrap_err().to_string(),
+                format!("Cannot delete '{name}': names starting with 'source.' cannot be deleted.")
+            );
         }
     }
 
-    // =========================================================================
-    // normalize_fact_key tests
-    // =========================================================================
-
+    /// A report key names the root as `source.root` or `root_id`, bare, double- or
+    /// single-quoted: a modifier, a prefix or a near spelling does not.
     #[test]
-    fn normalize_fact_key_adds_content_prefix() {
-        assert_eq!(normalize_fact_key("Make"), Ok("content.Make".to_string()));
-        assert_eq!(
-            normalize_fact_key("hash.sha256"),
-            Ok("content.hash.sha256".to_string())
-        );
-        assert_eq!(
-            normalize_fact_key("DateTimeOriginal"),
-            Ok("content.DateTimeOriginal".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_fact_key_preserves_content_prefix() {
-        assert_eq!(
-            normalize_fact_key("content.Make"),
-            Ok("content.Make".to_string())
-        );
-        assert_eq!(
-            normalize_fact_key("content.hash.sha256"),
-            Ok("content.hash.sha256".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_fact_key_rejects_source_namespace() {
-        assert!(normalize_fact_key("source.size").is_err());
-        assert!(normalize_fact_key("source.mtime").is_err());
-        assert!(normalize_fact_key("source.ext").is_err());
-
-        let err = normalize_fact_key("source.size").unwrap_err();
-        assert!(err.contains("reserved"));
+    fn only_the_two_root_names_name_the_root() {
+        let names = |written: &str| names_the_root(&ParsedFactKey::parse(written).unwrap());
+        for written in ["source.root", "root_id", "\"source.root\"", "'root_id'"] {
+            assert!(names(written), "{written}");
+        }
+        for written in [
+            "source.root|lowercase",
+            "content.root_id",
+            "root",
+            "source.roots",
+        ] {
+            assert!(!names(written), "{written}");
+        }
     }
 
     // =========================================================================
@@ -144,12 +166,12 @@ mod tests {
     }
 
     // =========================================================================
-    // SourceFact tests
+    // ContentFactOnSource tests
     // =========================================================================
 
     #[test]
-    fn source_fact_construction() {
-        let fact = SourceFact {
+    fn content_fact_on_source_construction() {
+        let fact = ContentFactOnSource {
             id: 1,
             key: "content.Make".to_string(),
             value: FactValue::Text("Canon".to_string()),
@@ -163,8 +185,8 @@ mod tests {
     }
 
     #[test]
-    fn source_fact_with_num_value() {
-        let fact = SourceFact {
+    fn content_fact_on_source_with_num_value() {
+        let fact = ContentFactOnSource {
             id: 2,
             key: "content.Duration".to_string(),
             value: FactValue::Num(120.5),
@@ -175,9 +197,9 @@ mod tests {
     }
 
     #[test]
-    fn source_fact_with_time_value() {
+    fn content_fact_on_source_with_time_value() {
         let time = crate::core::domain::time::reading::read_time("2024-01-01T00:00:00").unwrap();
-        let fact = SourceFact {
+        let fact = ContentFactOnSource {
             id: 3,
             key: "content.DateTimeOriginal".to_string(),
             value: FactValue::Time(time),

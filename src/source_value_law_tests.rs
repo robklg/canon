@@ -85,9 +85,10 @@ fn placed(conn: &mut Connection, id: i64) -> String {
 /// What `worklist --emit content.Make` writes for one source.
 fn emitted(conn: &mut Connection, id: i64) -> serde_json::Value {
     let sources: Vec<Source> = vec![fetch_by_id(conn, id).unwrap().unwrap()];
+    let key = crate::expr::Key::read("content.Make").unwrap();
+    let keys = [("content.Make".to_string(), key)];
     let result =
-        crate::worklist::build_entries(conn, &sources, false, &["content.Make".to_string()])
-            .unwrap();
+        crate::worklist::build_entries(conn, &sources, false, &keys, &UserZone::utc()).unwrap();
     let facts = result.entries[0].facts.as_ref().unwrap();
     facts["content.Make"].clone()
 }

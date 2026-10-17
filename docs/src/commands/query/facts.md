@@ -27,7 +27,7 @@ canon facts --key source.rel_path[0]
 # Combine accessor and modifier: distribution by filename extension
 canon facts --key 'source.rel_path[-1]|ext'
 
-# Show hidden built-in facts
+# Show hidden source facts
 canon facts --all
 
 # Unlimited results (default is 50)
@@ -73,20 +73,20 @@ Example output:
 Facts: all roots
 Sources matching filters: 34692
 
-Fact                             Type      Count   Coverage
+Key                              Type      Count   Coverage
 ────────────────────────────────────────────────────────────
-source.ext                       text      34692     100.0%  (built-in)
-source.size                    number      34692     100.0%  (built-in)
-source.mtime                     time      34692     100.0%  (built-in)
-source.path                      path      34692     100.0%  (derived)
-source.rel_path                  path      34692     100.0%  (built-in)
-filename                         text      34692     100.0%  (derived)
+source.ext                       text      34692     100.0%  (source fact)
+source.size                    number      34692     100.0%  (source fact)
+source.mtime                     time      34692     100.0%  (source fact)
+source.path                      path      34692     100.0%  (source fact)
+source.rel_path                  path      34692     100.0%  (source fact)
+filename                         text      34692     100.0%  (built-in key)
 content.Make                     text       7935      22.9%
 content.Model                    text       7935      22.9%
 content.hash.sha256              text      34692     100.0%
 content.mime                     text      34692     100.0%
 
-(4 built-in/derived facts hidden, use --all to show)
+(4 source facts hidden, use --all to show)
 ...
 ```
 

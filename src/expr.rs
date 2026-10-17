@@ -56,21 +56,22 @@ pub use domain::pattern::PatternFacts;
 pub use ops::pattern::prefetch_pattern_facts;
 
 // Resolving a key to a value, and rendering one for display — together with
-// the attributes a built-in is computed from, which both halves of the
-// language hand the resolver.
-pub use domain::value::{get_builtin_value, resolve_fact_value, SourceAttributes};
+// the attributes a source's own row answers a key from, which both halves of
+// the language hand the resolver.
+pub use domain::value::{resolve_fact_value, source_row_value, SourceAttributes};
 
 // A source's one value for a stored key: the rule applied to a source's facts
-// already in hand, and the fetch that applies it to a batch.
+// already in hand, and the fetch that applies it to a batch — and a key of any
+// kind read for a batch as an expression reads it.
 pub use domain::value::source_values;
-pub use ops::value::fetch_source_values;
+pub use ops::value::{fetch_named_values, fetch_source_values};
 
-// The key vocabulary: what a key may name, and what a written one parsed to —
-// plus the two spellings of the pattern-only keys, which a manifest writes
-// down.
+// The key vocabulary: the one reader of a key's name, the three kinds of key,
+// and what a written one parsed to — plus the two spellings of the
+// pattern-only keys, which a manifest writes down.
 pub use domain::key::{
-    BuiltinKey, BuiltinKeyCategory, BuiltinKeyVisibility, ParsedFactKey, OBJECT_HASH,
-    SCOPE_REL_PATH,
+    read_key_name, BuiltinKey, Key, KeyKind, Listing, ParsedFactKey, SourceFact, CONTENT_HASH,
+    OBJECT_HASH, SCOPE_REL_PATH,
 };
 
 // What a modifier gives — a value, or none — and the one printed form of what it gave.

@@ -74,9 +74,9 @@ mod tests {
 
     /// One source with a stored `content.Make`, plus whatever hostile rows a
     /// test asks for. The planted rows go in through the shared fixture's raw
-    /// insert on purpose: no Canon write path can create them —
-    /// `facts::domain::normalize_fact_key` refuses the whole `source.`
-    /// namespace on import, and scanning writes only `content.hash.sha256` —
+    /// insert on purpose: no Canon write path can create them — import stores a
+    /// key only under its content reading (`expr::read_key_name`), which no
+    /// `source.` name has, and scanning writes only `content.hash.sha256` —
     /// so the hostile case the four skiplist comments warned about could not
     /// be reached through any writer, which is why nothing had ever
     /// exercised it.
@@ -159,10 +159,10 @@ mod tests {
         );
     }
 
-    /// The case a hand-written list gets wrong. `content.hash.sha256` is a
-    /// `BuiltinKey` — so a rule phrased as "skip the built-ins" would drop it
-    /// — but the source cannot answer it, so it is a genuinely stored fact
-    /// and must be fetched.
+    /// The case a hand-written list gets wrong. `content.hash.sha256` is a key
+    /// whose type is known without rows, and `hash` reads as it — so a rule
+    /// phrased as "skip the keys Canon knows" would drop it — but the source
+    /// cannot answer it, so it is a genuinely stored fact and must be fetched.
     #[test]
     fn content_hash_sha256_is_fetched_not_skipped() {
         let mut db = db(&[("content.hash.sha256", "abcdef")]);
@@ -184,10 +184,10 @@ mod tests {
     /// judgment record happened to argue would leave the other side changing
     /// silently.
     ///
-    /// No Canon writer can create either row: `facts::domain::normalize_fact_key`
-    /// refuses the whole `source.` prefix on import and rewrites everything
-    /// without a `content.` prefix — `scope.curated` included — into
-    /// `content.*`. These are planted by hand, so the change is unreachable in
+    /// No Canon writer can create either row: import stores a key only under
+    /// its content reading (`expr::read_key_name`), which no `source.` name has,
+    /// and which reads everything without a `content.` prefix — `scope.curated`
+    /// included — as `content.*`. These are planted by hand, so the change is unreachable in
     /// practice. It is pinned because it is a real widening of what can decide
     /// a destination, not because it is likely.
     #[test]

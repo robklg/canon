@@ -27,7 +27,7 @@ canon worklist --include excluded
 # Include both
 canon worklist --include all
 
-# Include existing facts in output (for chained enrichment)
+# Include keys' values in output (for chained enrichment)
 canon worklist --emit content.geo.lat --emit content.geo.lon
 ```
 
@@ -54,7 +54,7 @@ Each line is a JSON object with source metadata:
 
 ## Emitting Existing Facts
 
-With `--emit`, requested facts are included in the output (`null` if absent):
+With `--emit`, each source's value for the requested keys is included in the output (`null` if it has none):
 
 ```bash
 canon worklist --emit content.geo.lat --emit content.geo.lon
@@ -81,12 +81,25 @@ canon worklist --emit content.DateTimeOriginal
 
 The entry's own `mtime` field is a number of seconds, as in every entry.
 
-**`--emit` takes the key as stored — write it in full.** Unlike `--where`, it does not add the
-optional `content.` prefix for you: `--emit geo.lat` looks for a fact whose key is literally
-`geo.lat` and emits `null`, even where `--where 'geo.lat?'` on the same command line matches.
-Check how a key is stored with [`canon facts`](../query/facts.md). Built-in `source.*` keys are
-never emittable — no fact is ever stored under that namespace ([`import-facts`](import-facts.md)
-rejects it), and what they would say is already in the entry's own fields.
+`--emit` reads a key's name as `--where` does: a [source fact or built-in key](../../reference/builtins.md) emits its value for that source, and any other name is a content fact, so `--emit geo.lat` emits `content.geo.lat`. Each field is named as given. A source fact's time is an instant with no recorded offset, written with `-00:00`, and a file with no extension emits `""` for `source.ext`:
+
+```bash
+canon worklist --emit Make --emit source.mtime --emit source.ext
+```
+
+```json
+{"source_id":1,"path":"/photos/README","root_id":1,"size":5,"mtime":1792271246,"basis_rev":0,"facts":{"Make":null,"source.mtime":"2026-10-17T21:07:26-00:00","source.ext":""}}
+{"source_id":2,"path":"/photos/trip/IMG_0125.jpg","root_id":1,"size":3,"mtime":1792271246,"basis_rev":0,"facts":{"Make":"Canon","source.mtime":"2026-10-17T21:07:26-00:00","source.ext":"jpg"}}
+```
+
+A name starting with `source.` that is no source fact is refused before anything is selected, every such name on its own line, and nothing is written to stdout:
+
+```
+$ canon worklist --emit source.extension --emit source.nme
+Error: cannot use the key as given
+  `source.extension` is an unknown key
+  `source.nme` is an unknown key
+```
 
 This enables processors to build on previous enrichment:
 

@@ -7,12 +7,15 @@
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 
-use super::key::{expand_alias, parse_key_and_accessor, BuiltinKey, OBJECT_HASH, SCOPE_REL_PATH};
+use super::key::{
+    expand_alias, parse_key_and_accessor, read_key_name, Key, SourceFact, OBJECT_HASH,
+    SCOPE_REL_PATH,
+};
 use super::transform::{
     apply_chain, parse_modifier, rendered, InstantRecord, Modified, Modifier, ModifierCall,
     NoValueCause, PathAccessor,
 };
-use super::value::{get_builtin_value, SourceAttributes};
+use super::value::{source_row_value, SourceAttributes};
 use crate::core::domain::fact::{FactEntry, FactValue};
 use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::UserZone;
@@ -89,17 +92,23 @@ impl PatternFacts {
 /// a repair of it. What consumers get instead is `prefetch_pattern_facts`,
 /// which applies it for them.
 ///
-/// Two halves, and only one of them is derived. The built-in half reads
-/// `is_computed`, which reads the resolver — a hand-written list would get
-/// `content.hash.sha256` wrong, since it is a built-in *and* a genuinely
-/// stored fact. The other two are named literally because neither is a
-/// `BuiltinKey`: `scope.rel_path` is derived from the manifest's scope at
-/// evaluation time, and `object.hash` comes off the lock entry. That half is
-/// pinned rather than derived, and the pins say so.
+/// Two halves, and only one of them is derived. The derived half reads
+/// `Key::is_computed`, which reads the resolver — a hand-written list would
+/// get `hash` and `hash_short` wrong, since they are built-in keys the source
+/// row cannot answer. The other two are named literally because neither is a
+/// `Key`: `scope.rel_path` is derived from the manifest's scope at evaluation
+/// time, and `object.hash` comes off the lock entry. That half is pinned rather
+/// than derived, and the pins say so.
 pub(in crate::expr) fn is_context_supplied(key: &str) -> bool {
-    key == SCOPE_REL_PATH
-        || key == OBJECT_HASH
-        || BuiltinKey::from_str(key).is_some_and(|k| k.is_computed())
+    key == SCOPE_REL_PATH || key == OBJECT_HASH || pattern_key(key).is_some_and(|k| k.is_computed())
+}
+
+/// The key a pattern's key names: a source fact or a built-in key, never a
+/// content fact — a pattern reads its key as written, with no `content.`
+/// default, so `{Make}` is a stored fact named `Make` and `{content.Make}` the
+/// content fact.
+fn pattern_key(key: &str) -> Option<Key> {
+    read_key_name(key).in_pattern()
 }
 
 /// Why a source carries no scope-relative measurement.
@@ -197,9 +206,9 @@ pub struct EvalContext<'a> {
     /// Fact values by key, stored rather than computed. Under the
     /// context-supplied law nothing in here is a key this context answers
     /// itself, so a lookup falling through to this map cannot shadow a
-    /// built-in.
+    /// computed key.
     facts: HashMap<String, FactValue>,
-    /// What the source itself answers, which is every computed built-in. The
+    /// What the source itself answers, which is every computed key. The
     /// shaping half reaches the same resolver the asking half does; before it
     /// did, it held two path strings and could derive three keys from them.
     source: Option<SourceAttributes>,
@@ -454,12 +463,16 @@ fn expression_may_nest(expr: &PatternExpr) -> bool {
         return false;
     }
     // The scope-relative path is derived at evaluation time and carries no
-    // built-in key, but it is a path like any other.
+    // key, but it is a path like any other.
     if expr.key == SCOPE_REL_PATH {
         return true;
     }
-    BuiltinKey::from_str(&expr.key)
-        .is_some_and(|key| matches!(key.fact_type(), crate::core::domain::fact::FactType::Path))
+    pattern_key(&expr.key).is_some_and(|key| {
+        matches!(
+            key.known_type(),
+            Some(crate::core::domain::fact::FactType::Path)
+        )
+    })
 }
 
 // ============================================================================
@@ -542,7 +555,7 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
 /// Get a fact value by key.
 ///
 /// Three sources of an answer, in this order: the pattern-only
-/// `scope.rel_path`, which the context carries; the built-in vocabulary, which the
+/// `scope.rel_path`, which the context carries; the source facts and built-in keys, which the
 /// source answers through the one resolver both halves of the language share;
 /// and the facts the caller prefetched. The order is what makes the law hold
 /// from this side — but it is not what the law rests on. The prefetch never
@@ -586,24 +599,22 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
         return Ok(FactValue::Path(scope_rel.to_string()));
     }
 
-    // Every built-in the source itself answers goes to the resolver the
+    // Every key the source itself answers goes to the resolver the
     // asking half already uses. Three of these arms used to be written out
     // here by hand, which is why the other six were missing.
-    if let Some(builtin) = BuiltinKey::from_str(key) {
-        if builtin.is_computed() {
-            let source = ctx
-                .source
-                .as_ref()
-                .ok_or_else(|| anyhow!("{key} is not available: no source in context"))?;
-            // The one computed built-in that can have no value is a save time outside the
-            // years Canon reads; that cause is its own, never a fact not carried.
-            return get_builtin_value(source, builtin).ok_or_else(|| match builtin {
-                BuiltinKey::SourceMtime | BuiltinKey::Mtime => {
-                    PatternNoValue::UnreadableSaveTime.into()
-                }
+    if let Some(computed) = pattern_key(key).filter(Key::is_computed) {
+        let source = ctx
+            .source
+            .as_ref()
+            .ok_or_else(|| anyhow!("{key} is not available: no source in context"))?;
+        // The one computed key that can have no value is a save time outside the
+        // years Canon reads; that cause is its own, never a fact not carried.
+        return source_row_value(source, &computed).ok_or_else(|| {
+            match computed.as_source_fact() {
+                Some(SourceFact::Mtime) => PatternNoValue::UnreadableSaveTime.into(),
                 _ => anyhow!("{key} is not available"),
-            });
-        }
+            }
+        });
     }
 
     if let Some(value) = ctx.facts.get(key) {
@@ -624,17 +635,16 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
 /// inside the very message whose job is to describe it accurately — and the
 /// hole this story repairs was found precisely because this message happened
 /// to be honest about the three keys it knew.
-fn available<'k>(ctx: &'k EvalContext<'_>) -> Vec<&'k str> {
-    use strum::IntoEnumIterator;
-
-    let mut names: Vec<&str> = ctx.facts.keys().map(String::as_str).collect();
+fn available(ctx: &EvalContext<'_>) -> Vec<String> {
+    let mut names: Vec<String> = ctx.facts.keys().cloned().collect();
     if ctx.source.is_some() {
-        for key in BuiltinKey::iter().filter(BuiltinKey::is_computed) {
-            let name: &'static str = key.into();
-            names.push(name);
-        }
+        names.extend(
+            Key::all()
+                .filter(Key::is_computed)
+                .map(|key| key.name().to_string()),
+        );
         if ctx.scope_rel.is_some() {
-            names.push(SCOPE_REL_PATH);
+            names.push(SCOPE_REL_PATH.to_string());
         }
     }
     names.sort();
@@ -1012,7 +1022,7 @@ mod tests {
         assert!(evaluate(&pattern, &ctx).is_err());
 
         // And the key is not offered as available when it cannot be answered.
-        assert!(!available(&ctx).contains(&SCOPE_REL_PATH));
+        assert!(!available(&ctx).iter().any(|name| name == SCOPE_REL_PATH));
     }
 
     /// The message that says a key was not found must describe the set the
@@ -1021,7 +1031,7 @@ mod tests {
     /// keys a hand-written list would have left out, not on the three it
     /// used to name.
     #[test]
-    fn an_unknown_key_lists_the_computed_builtins_as_available() {
+    fn an_unknown_key_lists_the_source_facts_as_available() {
         let pattern = parse_pattern("{content.NotHere}").unwrap();
         let zone = UserZone::utc();
         let mut ctx = EvalContext::new(&zone);
@@ -1098,9 +1108,10 @@ mod tests {
         // cross.
         for written in ["{hash|uppercase}", "{hash_short|uppercase}"] {
             let pattern = parse_pattern(written).unwrap();
-            let stored: &'static str = BuiltinKey::ContentHashSha256.into();
             assert!(
-                !extract_fact_keys(&pattern).iter().any(|k| k == stored),
+                !extract_fact_keys(&pattern)
+                    .iter()
+                    .any(|k| k == super::super::key::CONTENT_HASH),
                 "{written} must not read the stored content hash"
             );
         }

@@ -18,7 +18,8 @@ use crate::core::domain::number::read_number;
 use crate::core::domain::time::now_epoch_secs;
 use crate::core::domain::time::reading::{self, TimeReadError};
 use crate::core::repo::{self, Connection};
-use crate::facts::domain::{is_content_fact, normalize_fact_key};
+use crate::expr::CONTENT_HASH;
+use crate::facts::domain::{import_key, is_content_fact};
 use crate::facts::repo as facts_repo;
 
 // ============================================================================
@@ -180,15 +181,16 @@ pub fn process_record(
     // Past the gates — this record will act on the source's root.
     state.touched_roots.insert(source.root_id);
 
-    // Normalize all fact keys first, collecting valid ones
+    // Read every fact key under its content reading first, collecting valid ones: a name
+    // starting with `source.` has none and is skipped.
     let mut normalized_facts: Vec<(String, &Value)> = Vec::new();
     for (key, value) in &record.facts {
-        match normalize_fact_key(key) {
-            Ok(normalized_key) => normalized_facts.push((normalized_key, value)),
-            Err(msg) => {
-                outcome
-                    .warnings
-                    .push(format!("skipping fact '{key}': {msg}"));
+        match import_key(key) {
+            Some(content_key) => normalized_facts.push((content_key, value)),
+            None => {
+                outcome.warnings.push(format!(
+                    "skipping fact '{key}': names starting with 'source.' cannot be imported"
+                ));
                 state.stats.skipped_reserved += 1;
             }
         }
@@ -198,7 +200,7 @@ pub fn process_record(
     let mut object_id = current_object_id;
     let hash_value = normalized_facts
         .iter()
-        .find(|(k, _)| k == "content.hash.sha256")
+        .find(|(k, _)| k == CONTENT_HASH)
         .map(|(_, v)| *v);
 
     if let Some(hash_val) = hash_value {
@@ -428,7 +430,7 @@ fn try_parse_duration(value: &Value) -> Option<f64> {
 /// The counter follows the insert, not the delete — it counts facts the object
 /// gained, not source rows removed.
 fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<u64> {
-    let facts = facts_repo::fetch_source_facts(conn, source_id)?;
+    let facts = facts_repo::fetch_content_facts_on_source(conn, source_id)?;
 
     let mut promoted = 0u64;
     for fact in facts {
@@ -803,6 +805,38 @@ mod tests {
         assert_eq!(state.stats.facts_imported, 1);
     }
 
+    /// A name is imported under its content reading (`Make` → `content.Make`); a name
+    /// starting with `source.` has none, and is skipped, counted and warned about.
+    #[test]
+    fn a_source_name_is_skipped_and_a_plain_name_stored_under_content() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let obj = insert_object(&conn, "hash1", false);
+        insert_source(&conn, root, "photo.jpg", Some(obj));
+        let mut state = init_state(&conn).unwrap();
+
+        let facts = HashMap::from([
+            ("source.size".to_string(), serde_json::json!(10)),
+            ("Make".to_string(), serde_json::json!("Canon")),
+        ]);
+        let outcome = process_record(&conn, &make_record(1, 0, facts), &mut state, false).unwrap();
+
+        assert_eq!(
+            outcome.warnings,
+            ["skipping fact 'source.size': names starting with 'source.' cannot be imported"]
+        );
+        assert_eq!(state.stats.skipped_reserved, 1);
+        assert_eq!(state.stats.facts_imported, 1);
+        let keys: Vec<String> = conn
+            .prepare("SELECT key FROM facts")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(keys, ["content.Make"]);
+    }
+
     #[test]
     fn test_process_record_hash_links_object() {
         let conn = setup_test_db();
@@ -1044,7 +1078,7 @@ mod tests {
         assert_eq!(state.stats.skipped_type_mismatch, cases.len() as u64);
         assert_eq!(state.stats.facts_imported, 0);
         assert_eq!(
-            source_fact_count(&conn, src),
+            stored_on_source_count(&conn, src),
             0,
             "nothing is stored, not even as a clock reading"
         );
@@ -1120,7 +1154,7 @@ mod tests {
     // promote_content_facts
     // =========================================================================
 
-    fn source_fact_count(conn: &Connection, source_id: i64) -> i64 {
+    fn stored_on_source_count(conn: &Connection, source_id: i64) -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM facts WHERE entity_type = 'source' AND entity_id = ?1",
             [source_id],
@@ -1154,7 +1188,7 @@ mod tests {
             object_fact_value(&conn, obj, "content.Make").as_deref(),
             Some("Canon")
         );
-        assert_eq!(source_fact_count(&conn, src), 0);
+        assert_eq!(stored_on_source_count(&conn, src), 0);
     }
 
     #[test]
@@ -1183,6 +1217,6 @@ mod tests {
             Some("Canon")
         );
         // ...and the redundant source copy goes regardless.
-        assert_eq!(source_fact_count(&conn, src), 0);
+        assert_eq!(stored_on_source_count(&conn, src), 0);
     }
 }

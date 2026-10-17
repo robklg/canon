@@ -856,6 +856,17 @@ const LAWS: &[Law] = &[
         authority: Authority::Recognised,
         record: "2026-10-11",
     },
+    Law {
+        // Every command that takes a key's name reads it through one reader — the source fact,
+        // the built-in key and the content fact the name may name — and each applies its own
+        // rule: an expression takes them in that order, import the content reading alone.
+        name: "key-name",
+        owner: "expr/domain/key.rs",
+        verifier: "a_key_is_read_by_the_name_import_stored_it_under",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Recognised,
+        record: "2026-10-17",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

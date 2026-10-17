@@ -23,7 +23,7 @@ use crate::core::domain::time::reading::{read_time, read_time_of_day, EXAMPLE_FO
 use crate::core::domain::time::value::{Precision, TimeValue};
 
 use super::filter::{CompareOp, Expr, Literal, StatusPredicate, UsedStatus, WrittenKey};
-use super::key::BuiltinKey;
+use super::key::{Key, CONTENT_HASH};
 use super::print::{convert_command, mixed_type_way_out, printed_key, printed_value, printed_word};
 use super::transform::{
     is_magnitude_bucket_label, threshold_bucket_labels, Modifier, ModifierCall, ModifierCategory,
@@ -209,14 +209,20 @@ impl Bound {
     }
 }
 
-/// The stored keys an expression names — every base key that is not a built-in — whose types
-/// binding reads.
+/// The type a base key has before any of its facts is read (`Key::known_type`): a source
+/// fact's, a built-in key's, the content hash's. `None`: read it from the key's facts.
+pub(in crate::expr) fn known_type(base: &str) -> Option<FactType> {
+    Key::read(base).and_then(|key| key.known_type())
+}
+
+/// The stored keys an expression names — every base key whose type is read from its facts —
+/// whose types binding reads.
 pub(in crate::expr) fn stored_keys(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::And(all) | Expr::Or(all) => all.iter().for_each(|e| stored_keys(e, out)),
         Expr::Not(inner) => stored_keys(inner, out),
         Expr::Exists { key, .. } | Expr::Compare { key, .. } | Expr::In { key, .. } => {
-            if BuiltinKey::from_str(&key.base).is_none() && !out.contains(&key.base) {
+            if known_type(&key.base).is_none() && !out.contains(&key.base) {
                 out.push(key.base.clone())
             }
         }
@@ -224,11 +230,11 @@ pub(in crate::expr) fn stored_keys(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
-/// The types of a key: a built-in's own, or what its stored facts hold (`types`, read from
+/// The types of a key: its known type, or what its stored facts hold (`types`, read from
 /// every fact of the key); `None` for a key with no facts.
 fn types_of(base: &str, types: &HashMap<String, KeyTypes>) -> Option<KeyTypes> {
-    match BuiltinKey::from_str(base) {
-        Some(builtin) => Some(KeyTypes::of(builtin.fact_type())),
+    match known_type(base) {
+        Some(known) => Some(KeyTypes::of(known)),
         None => types.get(base).cloned(),
     }
 }
@@ -392,13 +398,28 @@ pub(in crate::expr) struct Chain {
 
 /// Check a key: its type from all its facts, then its accessor and modifiers through the
 /// table. A key with no facts binds only for `?` (it has no value anywhere); a key of two
-/// types binds only for a bare `?`, which reads no value.
+/// types binds only for a bare `?`, which reads no value. A name with no reading in an
+/// expression — a `source.` name that is no source fact — names no key, and is refused
+/// wherever it stands.
 pub(in crate::expr) fn bind_key(
     key: &WrittenKey,
     clause: &str,
     reads: Reads,
     types: &HashMap<String, KeyTypes>,
 ) -> Result<(BoundKey, Chain), BindCause> {
+    let unknown = || {
+        BindCause::UnknownKey(Entry::new(
+            clause,
+            format!(
+                "Unknown fact key: '{}'. Use 'canon facts' to see available keys.",
+                key.base
+            ),
+            Vec::new(),
+        ))
+    };
+    if Key::read(&key.base).is_none() {
+        return Err(unknown());
+    }
     let bare_existence = reads != Reads::Value && !key.has_transforms();
     let unbound = |gives, read_as| {
         Ok((
@@ -423,14 +444,7 @@ pub(in crate::expr) fn bind_key(
                     ReadAs::Any
                 },
             ),
-            Reads::Value => Err(BindCause::UnknownKey(Entry::new(
-                clause,
-                format!(
-                    "Unknown fact key: '{}'. Use 'canon facts' to see available keys.",
-                    key.base
-                ),
-                Vec::new(),
-            ))),
+            Reads::Value => Err(unknown()),
         };
     };
     let Some(base_type) = key_types.single() else {
@@ -490,7 +504,7 @@ fn mixed_type(key: &WrittenKey, clause: &str, key_types: &KeyTypes, reads: Reads
 /// Walk a key's accessor and modifiers through the table.
 fn walk(key: &WrittenKey, base_type: FactType, clause: &str) -> Result<Chain, BindCause> {
     let mut gives = Gives::of(base_type);
-    let stored = BuiltinKey::from_str(&key.base).is_none();
+    let stored = known_type(&key.base).is_none();
     if let Some(accessor) = &key.accessor {
         if !matches!(gives, Gives::Text | Gives::Path) {
             let applicable = applicable_line(&gives, false);
@@ -854,7 +868,7 @@ impl Site<'_> {
                 .all(|v| reads(&Readings::of(&v.text)))
         };
         // A content hash holds hex text, never a number or a date: quoting is its one way out.
-        let hash = BuiltinKey::from_str(&self.key.base) == Some(BuiltinKey::ContentHashSha256);
+        let hash = self.key.base == CONTENT_HASH;
         // A way out rewrites the whole clause, so each is decided over every value of it, never
         // the one being read: every cause of one clause offers the same ways out.
         if !hash && all_read(&|r| r.number.is_some()) {

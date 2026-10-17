@@ -1,7 +1,7 @@
 //! Fact repository — infrastructure layer for fetching facts.
 //!
 //! This module provides batch fetch functions that return typed fact data.
-//! It transparently handles the source/object fact distinction, associating
+//! It transparently handles facts stored on a source and on its object, associating
 //! all facts with their source ID for easy consumption.
 //!
 //! ## Design Principles
@@ -9,7 +9,7 @@
 //! 1. **Simple SQL**: Queries do data access only, no business logic
 //! 2. **Batch fetching**: Use temp tables for large source sets
 //! 3. **Returns domain types**: Functions return `FactEntry` structs
-//! 4. **Source-centric**: Object facts are keyed by source_id in results
+//! 4. **Source-centric**: Facts stored on an object are keyed by source_id in results
 //!
 //! ## Usage
 //!
@@ -45,10 +45,10 @@ use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 ///
 /// Returns a map from source_id to list of FactEntry.
 /// Each source's facts include:
-/// - Direct source facts (entity_type = 'source', entity_id = source_id)
-/// - Object facts (entity_type = 'object', entity_id = object_id) if source has object_id
+/// - Facts stored on the source (entity_type = 'source', entity_id = source_id)
+/// - Facts stored on its object (entity_type = 'object', entity_id = object_id) if source has object_id
 ///
-/// Object facts are associated with the SOURCE id in the result map,
+/// Facts stored on the object are associated with the SOURCE id in the result map,
 /// making it easy to get "all facts for this source" without separate lookups.
 pub fn batch_fetch_for_sources(
     conn: &mut Connection,
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_fetch_for_sources_source_facts() {
+    fn batch_fetch_for_sources_facts_on_the_source() {
         let mut conn = setup_test_db();
         insert_root(&conn, 1, "/root");
         insert_source(&conn, 1, 1, "file.txt", None);

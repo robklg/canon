@@ -36,7 +36,8 @@ law is applied rather than merely stated. `selection` is the set of sources an o
 reports over or acts on — it lives here rather than beside any one command because exploring
 and acting must resolve to the same set. `alias` is the half of alias expansion that needs the
 outside world: the rewriting rules are a domain concern, reading the file they rewrite from is
-this one. `value` reads a stored key's one value for a batch of sources.
+this one. `value` reads a stored key's one value for a batch of sources, and any key's as an
+expression reads it (`fetch_named_values`, for `worklist --emit`).
 
 **`repo.rs`** — what the language needs read out of the database before it can be evaluated:
 `prefetch_facts` and `prefetch_status_data` fill the cache, `fetch_source_row` reads one source's
@@ -69,6 +70,8 @@ reads a `facts` report's `--key`, `--group-by` and `--where` the same way. A key
 from all its rows (`core::repo::fact::key_types`), so parking, scope and presence never move it.
 **Text is text**: against a text key, a bare value shaped like a number or a time is refused, and
 quoted it is text; against a number or time key, a quoted value means the same as a bare one.
+A `source.` name that is no source fact is an unknown key wherever a key stands, `?` and report
+keys included (`a_source_name_that_is_no_source_fact_is_an_unknown_key_wherever_it_stands`).
 Pins: `a_value_that_cannot_mean_anything_is_refused_before_selection` (the verifier),
 `every_negated_operator_selects_what_its_not_form_selects` (`!=` is `NOT =`, a source with no
 value included) and `a_type_that_changes_mid_run_refuses_the_run`.
@@ -178,7 +181,7 @@ that cannot work is one step short of that.
 
 Where it does **not** apply: `scope.rel_path` is pattern-only and never reaches a filter — a
 `--where` clause has no access to a manifest's scope, which is why `SCOPE_REL_PATH` is a plain
-const rather than a `BuiltinKey` variant. The facility itself never reads the manifest or the
+const rather than a `Key`. The facility itself never reads the manifest or the
 lock; the consumer hands it the measured value.
 
 **Whether a pattern names that key is the facility's answer, not the consumer's**
@@ -207,14 +210,13 @@ Two owners, one on each side of the seam.
 - **The fetch side** — `is_context_supplied` (`domain/pattern.rs`), applied by
   `prefetch_pattern_facts` (`ops/pattern.rs`). Rung: **pinned**.
 
-**The predicate is derived, not listed — but only half of it.** The built-in half reads
-`BuiltinKey::is_computed`, which reads `get_builtin_value`'s own arms; a hand-written list gets
-`content.hash.sha256` wrong, because it is a built-in *and* a genuinely stored fact, and
-`hash`/`hash_short` the same way. The other half — `SCOPE_REL_PATH` and `OBJECT_HASH` — is
-named literally, because neither is a `BuiltinKey`, and it is pinned rather than derived.
-`a_key_is_computed_exactly_when_the_resolver_answers_it` (`domain/value.rs`) holds the derived
-half over the whole enum and is deliberately not widened to the other two: they are not
-`BuiltinKey`s, so asserting the equality over them would assert something false.
+**The predicate is derived, not listed — but only half of it.** The derived half reads
+`Key::is_computed`, which reads `source_row_value`'s own arms; a hand-written list gets
+`hash`/`hash_short` wrong, built-in keys the source row cannot answer. The other half —
+`SCOPE_REL_PATH` and `OBJECT_HASH` — is named literally, because neither is a `Key`, and it is
+pinned rather than derived. `a_key_is_computed_exactly_when_the_resolver_answers_it`
+(`domain/value.rs`) holds the derived half and is deliberately not widened to the other two:
+asserting the equality over them would assert something false.
 
 **The rule leaves the facility as a fetch, never as a predicate.** `is_context_supplied` is
 `pub(in crate::expr)`; what callers get is `prefetch_pattern_facts`, which applies it for them.
@@ -224,49 +226,48 @@ repaired, so a wrong site is made impossible rather than merely detectable — a
 spelling appearing anywhere outside.
 
 **Reach: this facility, argued rather than defaulted.** The asking half needs no such rule —
-`resolve_fact_value` tries the built-in first and falls back to stored facts, so shadowing is
+`resolve_fact_value` tries the computed key first and falls back to stored facts, so shadowing is
 already structurally impossible there. No canon-wide reach is claimed.
 
-Where it does **not** apply, and these are not oversights — two sites outside spell the same
-bytes for two different verbs, and unifying them would be a false equality:
-`facts/domain.rs` reserves an import namespace (it refuses `source.*` on the way *in* — same
-bytes, opposite direction); `facts/ops/maintain.rs` protects facts from deletion (a different
-set, `source.*` *and* `policy.*`). They are the matcher's stated exemptions, each with its
-verb named there.
-
 One narrowing to know about: the law drops only what the context actually supplies, never the
-whole `source.` namespace. A `source.*` key that is not a built-in is supplied by nothing and
+whole `source.` namespace. A `source.*` key that is not a source fact is supplied by nothing and
 shadows nothing, so it is fetched like any other stored fact — pinned by
 `a_key_the_context_does_not_supply_is_fetched` (`ops/pattern.rs`). No Canon writer can create
 such a row, which is why the widening is unreachable in practice and pinned anyway.
 
 ## The per-source comparison reads its row through `repo`
 
-`ops/filter.rs` speaks no SQL. A built-in key compared or tested for existence is resolved per
-source, and the row it is resolved from — the source's attributes — comes from `repo.rs`'s
-`fetch_source_row`. Every other key, the hash keys included, is compared on the source's one
+`ops/filter.rs` speaks no SQL. A key the source row computes, compared or tested for existence,
+is resolved per source, and the row it is resolved from — the source's attributes — comes from
+`repo.rs`'s `fetch_source_row`. Every other key, the content hash included, is compared on the source's one
 value, read from the prefetched cache (`FactCache::value`). The comparison stays in `ops`;
 moving it into `repo` would put comparison logic in the repository instead.
 
-## Built-in values are derived once
+## Source-row values are derived once
 
-`get_builtin_value` (`domain/value.rs`) is the one place a built-in value is derived from a
-source row; `--where`, `facts --key` and `{source.*}` read it. Readers split built-in from stored
-by the key (`is_computed()`, pinned equal to the resolver's answer on a readable source), never
-by its `None` or by visibility: a computed key the row cannot answer has no value. Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
+`source_row_value` (`domain/value.rs`) is the one place a value is derived from a source row,
+a built-in key's through a source fact's arm where it is a short name for one (`size`, `ext`), which
+`BuiltinKey::source_fact` alone says — the size buckets, the year grouping and the save-time cause read it too; `--where`,
+`facts --key`, `--emit` and `{source.*}` read it. Readers
+split computed from stored by the key (`Key::is_computed()`, pinned equal to the resolver's answer on a readable source), never
+by its `None` or by listing: a computed key the row cannot answer has no value. Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
 `content.hash.sha256|short` (`BuiltinKey::reading`); patterns keep the lock's `object.hash`.
 Pinned per reader. Not bound: pattern aliases' own modifier chains.
 
-Separately, a written key keeps its prefix only where a stored key can carry one (`source.`,
-`content.`); `object.` names a key in patterns alone. Agreement with import is pinned on sampled
-prefixes beside import.
+**The key-name law**: every command taking a key's name reads it through `read_key_name`
+(`domain/key.rs`) — the source fact, built-in key and content fact it names — and applies its
+own rule: an expression and `--emit` take them in that order, import and `facts delete` the
+content reading alone. A consumer then decides by the key read (`ParsedFactKey::key`), never
+the text, since quoting never changes which key. Verifier
+`a_key_is_read_by_the_name_import_stored_it_under` (`facts/domain.rs`); `--emit`'s leg is in
+`worklist/ops.rs`. Not patterns (`pattern_key`).
 
 ## The source-value law
 
 **A source has one value for a stored key**: its content's fact; the source's own only where the
 content has none. `source_value` (`domain/value.rs`) decides it. Readers reach it
 through `FactCache::value` (the filter), `fetch_source_values` (`ops/value.rs`: patterns, `facts`
-reports, `worklist --emit`), or `source_values` (`domain/value.rs`), which `cluster generate`
+reports, and `worklist --emit` through `fetch_named_values`), or `source_values` (`domain/value.rs`), which `cluster generate`
 hands the facts it already holds for a source; none outside pairs the two rows or picks
 between them, and which row a fact sits on is the fact noun's (`FactEntry::is_on_source`). Why:
 a filter matching either row selected sources the report beside it never counted.
@@ -276,7 +277,7 @@ surfaces, an empty file among its sources; `cluster generate`'s facts comment by
 `the_coverage_comment_reads_one_value_per_source`.
 
 Where it does **not** apply: a key's type (`core::repo::fact::key_types` reads every row); `?` on a
-hash key, true too for a source linked to content with no stored hash; a computed built-in, never
+hash key, true too for a source linked to content with no stored hash; a computed key, never
 read from the facts table.
 
 ## The clock is a parameter
