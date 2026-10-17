@@ -170,14 +170,17 @@ fn process_entry(
 
 /// Create a typed fact value with type hint
 fn typed_value(value: &str, type_hint: &str) -> serde_json::Value {
-    // For number type, parse and store as a JSON number
+    // For number type, store it as a JSON number where it is one. A value with no JSON number
+    // (`inf`, `NaN`, too large to hold) or none at all is forwarded as given, never replaced,
+    // so the import refuses it with a warning.
     if type_hint == "number" {
-        if let Ok(n) = value.parse::<f64>() {
-            return serde_json::Value::Number(
-                serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)),
-            );
+        if let Some(n) = value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+        {
+            return serde_json::Value::Number(n);
         }
-        // Fall through to typed hint if parsing fails
     }
     serde_json::json!({
         "value": value,
@@ -251,4 +254,24 @@ fn current_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A number is stored as a JSON number; a value that has none is forwarded as given with
+    /// its hint, never replaced. The defect it names: `inf`, `NaN` and `1e400` were written as
+    /// `0`, so the import stored a zero nobody measured, with no warning.
+    #[test]
+    fn a_number_with_no_json_number_is_forwarded_never_replaced() {
+        assert_eq!(typed_value("12", "number"), serde_json::json!(12.0));
+        for written in ["inf", "-inf", "NaN", "1e400", "twelve"] {
+            assert_eq!(
+                typed_value(written, "number"),
+                serde_json::json!({"value": written, "type": "number"}),
+                "{written}"
+            );
+        }
+    }
 }
