@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::core::domain::fact::FactValue;
+use crate::core::domain::number::spelled;
 use crate::core::domain::source::Source;
 use crate::core::repo::Connection;
 use crate::expr::fetch_source_values;
@@ -115,7 +116,8 @@ pub fn build_entries(
 fn emit_value(value: &FactValue) -> serde_json::Value {
     match value {
         FactValue::Text(s) | FactValue::Path(s) => serde_json::Value::String(s.clone()),
-        FactValue::Num(n) => serde_json::Number::from_f64(*n)
+        // Through the one spelling of a number, so a whole number is written `5`, never `5.0`.
+        FactValue::Num(n) => serde_json::from_str::<serde_json::Number>(&spelled(*n))
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         FactValue::Time(tv) => serde_json::Value::String(tv.iso_text()),
@@ -135,6 +137,29 @@ mod tests {
 
     fn emitted(written: &str) -> serde_json::Value {
         emit_value(&FactValue::Time(read_time(written).unwrap()))
+    }
+
+    /// A number is written as Canon spells it: a whole number with no fraction (`5`, not
+    /// `5.0`), any other as the shortest decimal that reads back the same. The defect it names:
+    /// every number went through `f64`'s JSON form, so a size imported as `5` came back `5.0`.
+    #[test]
+    fn a_number_emits_as_canon_spells_it() {
+        for (n, written) in [
+            (5.0, "5"),
+            (-3.0, "-3"),
+            (0.0, "0"),
+            (1e6, "1000000"),
+            (2.5, "2.5"),
+            (0.1, "0.1"),
+            (52.37, "52.37"),
+        ] {
+            let emitted = emit_value(&FactValue::Num(n));
+            assert_eq!(serde_json::to_string(&emitted).unwrap(), written, "{n}");
+        }
+        assert_eq!(
+            emit_value(&FactValue::Num(f64::NAN)),
+            serde_json::Value::Null
+        );
     }
 
     #[test]
