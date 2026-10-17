@@ -300,17 +300,33 @@ fn mixed_key_lines(result: &AllKeysResult) -> Vec<String> {
 /// characters, as the column's padding does, never bytes.
 fn value_cell(value: &str, base_key: &str) -> String {
     if value.is_empty() {
-        // Matched on the key, not its spelling: `ext` is the same value.
-        if matches!(
-            BuiltinKey::from_str(base_key),
-            Some(BuiltinKey::SourceExt | BuiltinKey::Ext)
-        ) {
-            "(no extension)".to_string()
-        } else {
-            "(empty)".to_string()
-        }
+        empty_label(base_key).to_string()
     } else if value.chars().count() > 38 {
         format!("{}...", first_chars(value, 35))
+    } else {
+        value.to_string()
+    }
+}
+
+/// What an empty value is shown as in a report: `(no extension)` for the extension,
+/// `(empty)` for any other key. One label for every table a report prints, its main
+/// values and its groups alike.
+fn empty_label(base_key: &str) -> &'static str {
+    // Matched on the key, not its spelling: `ext` is the same value.
+    if matches!(
+        BuiltinKey::from_str(base_key),
+        Some(BuiltinKey::SourceExt | BuiltinKey::Ext)
+    ) {
+        "(no extension)"
+    } else {
+        "(empty)"
+    }
+}
+
+/// A grouping value as a report's group line shows it: labelled when empty.
+fn group_cell(value: &str, key: &ParsedFactKey) -> String {
+    if value.is_empty() {
+        empty_label(&key.base_key).to_string()
     } else {
         value.to_string()
     }
@@ -407,11 +423,7 @@ fn display_grouped_distribution(
 
     for group in &result.groups {
         let coverage = (group.total_count as f64 / total_sources as f64) * 100.0;
-        let main_display = if group.main_value.is_empty() {
-            "(empty)"
-        } else {
-            &group.main_value
-        };
+        let main_display = group_cell(&group.main_value, main_key);
         if writeln!(
             handle,
             "{} (total: {:>6}, {:>5.1}%)",
@@ -432,7 +444,7 @@ fn display_grouped_distribution(
                 if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref()) {
                     format_root_display(rid, rpath)
                 } else {
-                    sub.group_values[0].clone()
+                    group_cell(&sub.group_values[0], &grouping_keys[0])
                 }
             } else {
                 let parts: Vec<String> = grouping_keys
@@ -444,10 +456,10 @@ fn display_grouped_distribution(
                             {
                                 format_root_display(rid, rpath)
                             } else {
-                                sub.group_values[i].clone()
+                                group_cell(&sub.group_values[i], gk)
                             }
                         } else {
-                            sub.group_values[i].clone()
+                            group_cell(&sub.group_values[i], gk)
                         }
                     })
                     .collect();
@@ -788,6 +800,22 @@ pub fn show_aliases() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty value reads the same in every table of a report: `(no extension)` for the
+    /// extension, by either name, and `(empty)` for any other key — a main value and a
+    /// grouping value alike. The defect it names: the grouped report printed `(empty)` and a
+    /// blank group for a file with no extension, where the plain report said `(no extension)`.
+    #[test]
+    fn an_empty_value_is_labelled_alike_in_every_table() {
+        let key = |written: &str| ParsedFactKey::parse(written).unwrap();
+        for written in ["ext", "source.ext"] {
+            assert_eq!(value_cell("", &key(written).base_key), "(no extension)");
+            assert_eq!(group_cell("", &key(written)), "(no extension)");
+        }
+        assert_eq!(value_cell("", "content.Make"), "(empty)");
+        assert_eq!(group_cell("", &key("Make")), "(empty)");
+        assert_eq!(group_cell("jpg", &key("ext")), "jpg");
+    }
 
     // =========================================================================
     // The key listing
