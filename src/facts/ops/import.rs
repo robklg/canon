@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::domain::fact::{FactType, FactValue};
+use crate::core::domain::number::read_number;
 use crate::core::domain::time::now_epoch_secs;
 use crate::core::domain::time::reading::{self, TimeReadError};
 use crate::core::repo::{self, Connection};
@@ -395,31 +396,28 @@ fn read_plain(value: &Value) -> FactValue {
     }
 }
 
-/// Parse duration string to seconds.
+/// Parse duration string to seconds. Each part is read through the one reading of a number
+/// (`core::domain::number::read_number`), so `inf`, `NaN` and a leading `+` are refused as
+/// they are everywhere, and a total too large to hold has no value.
 fn try_parse_duration(value: &Value) -> Option<f64> {
-    match value {
+    let seconds = match value {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => {
             let s = s.trim();
+            let number = |part: &str| read_number(part).ok();
             let parts: Vec<&str> = s.split(':').collect();
             match parts.len() {
                 3 => {
-                    let hours: f64 = parts[0].parse().ok()?;
-                    let mins: f64 = parts[1].parse().ok()?;
-                    let secs: f64 = parts[2].parse().ok()?;
-                    Some(hours * 3600.0 + mins * 60.0 + secs)
+                    Some(number(parts[0])? * 3600.0 + number(parts[1])? * 60.0 + number(parts[2])?)
                 }
-                2 => {
-                    let mins: f64 = parts[0].parse().ok()?;
-                    let secs: f64 = parts[1].parse().ok()?;
-                    Some(mins * 60.0 + secs)
-                }
-                1 => s.parse().ok(),
+                2 => Some(number(parts[0])? * 60.0 + number(parts[1])?),
+                1 => number(s),
                 _ => None,
             }
         }
         _ => None,
-    }
+    }?;
+    seconds.is_finite().then_some(seconds)
 }
 
 /// Promote content facts from a source to its newly-linked object.
@@ -572,6 +570,35 @@ mod tests {
     fn test_try_parse_duration_numeric_json() {
         let secs = try_parse_duration(&serde_json::json!(120)).unwrap();
         assert!((secs - 120.0).abs() < 0.01);
+    }
+
+    /// A duration's parts are numbers as Canon reads them everywhere. Where that grammar and
+    /// Rust's own parser differ, Canon's holds: `inf`, `NaN`, a leading `+` and a point with no
+    /// digit on one side (`.5`, `5.`) are refused, and so is a total too large to hold. The
+    /// defect it names: the parts went through Rust's parser, so `inf` was stored, printed, and
+    /// then refused by `--where` as not a number, and `NaN` reached the store as a constraint
+    /// error.
+    #[test]
+    fn a_duration_reads_its_parts_as_canon_reads_a_number() {
+        for written in [
+            "inf",
+            "-inf",
+            "NaN",
+            "+5",
+            ".5",
+            "5.",
+            "1:30.",
+            "1:inf",
+            "inf:00:00",
+            "1e308:00:00",
+        ] {
+            let value = Value::String(written.to_string());
+            assert_eq!(try_parse_duration(&value), None, "{written}");
+        }
+        assert_eq!(
+            try_parse_duration(&Value::String("1e3".to_string())),
+            Some(1000.0)
+        );
     }
 
     #[test]

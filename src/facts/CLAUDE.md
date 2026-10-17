@@ -11,8 +11,8 @@ counting and deleting by criteria, and the stale/excluded prunes, plus the priva
 `value_type_clause`. `ops/report.rs` — the read-only distribution and enumeration
 computations (`compute_all_keys`, `compute_distribution`, `compute_grouped_distribution`,
 `compute_root_distribution`). `ops/maintain.rs` — the delete and prune plan/execute
-pairs. `ops/import.rs` — `process_record`, the per-record import logic, reading times
-through `core::domain::time::reading`, never as epoch seconds. `cli.rs` — the
+pairs. `ops/import.rs` — `process_record`, the per-record import, reading times
+through `core::domain::time::reading`, never as epoch seconds; durations through `core::domain::number`. `cli.rs` — the
 `canon facts` command surface. `cli/import.rs` — the `canon import-facts` one.
 
 **The fact noun is split, not moved.** `FactEntry`, `FactType` and `FactValue` stay in

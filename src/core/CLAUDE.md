@@ -102,8 +102,8 @@ precision), read and written only through `repo::fact`'s conversion pair (`fact_
 one reading of text as a number — Canon's grammar, no `inf`, no leading `+`, no hexadecimal,
 nothing too large to hold — and `spelled` the one writing, the shortest plain decimal that reads
 back as the same number, never an exponent. Pinned beside it, every spelling read back;
-recognised here, with no roster row. **Not reached**: `facts/ops/import.rs`'s duration hint,
-which still reads its own numbers; and plain `|bucket`'s range labels (`expr/domain/transform.rs`), which keep their own short form.
+recognised here, with no roster row. **Not reached**: plain `|bucket`'s range labels
+(`expr/domain/transform.rs`), which keep their own short form.
 
 **Text is cut by characters, never by byte index**, because a cut inside a multi-byte
 character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies
