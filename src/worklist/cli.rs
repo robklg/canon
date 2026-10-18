@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
-use crate::expr::read_filters;
+use crate::expr::{read_filters, ExpressionRefused};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 pub fn run(
@@ -17,9 +17,22 @@ pub fn run(
 ) -> Result<()> {
     let conn = db.conn_mut();
 
-    // Read the `--emit` names, then the filters, before anything is selected.
-    let emit_keys = crate::worklist::ops::read_emit_keys(emit_keys)?;
-    let filters = read_filters(conn, filter_strs)?;
+    // Read the `--emit` names and the filters before anything is selected; when both are
+    // refused, one refusal names every problem, the filter's first.
+    let (emit_keys, filters) = match (
+        crate::worklist::ops::read_emit_keys(emit_keys),
+        read_filters(conn, filter_strs),
+    ) {
+        (Ok(keys), Ok(filters)) => (keys, filters),
+        (Err(names), Ok(_)) => return Err(names.into()),
+        (Ok(_), Err(error)) => return Err(error),
+        (Err(names), Err(error)) => {
+            return Err(match error.downcast::<ExpressionRefused>() {
+                Ok(filters) => filters.join(names).into(),
+                Err(error) => error,
+            })
+        }
+    };
 
     let scopes = classify_all(scope_prefixes);
 
@@ -67,32 +80,44 @@ pub fn run(
 mod tests {
     use super::*;
 
-    /// The `--emit` names are read first: a refused name is the run's one answer even beside
-    /// a filter that cannot be read, so nothing is selected and nothing reaches stdout.
+    /// An `--emit` name and a filter refused in one run are named together, the filter's first
+    /// line leading and the name after the filter's blocks, so nothing is selected and nothing
+    /// reaches stdout; a name refused alone keeps the key's first line.
     #[test]
-    fn an_unknown_emit_name_is_refused_before_the_filters_and_the_selection() {
+    fn an_emit_name_and_a_filter_are_refused_together() {
         crate::core::domain::time::zone::with_test_zone(
             crate::core::domain::time::zone::UserZone::utc(),
             || {
                 use crate::core::repo::open_in_memory_for_test;
-                use crate::core::testing::{insert_root, insert_source};
+                use crate::core::testing::{insert_number_fact, insert_root, insert_source};
 
                 let conn = open_in_memory_for_test();
                 let root = insert_root(&conn, "/photos", "source", false);
-                insert_source(&conn, root, "a.jpg", None);
+                let a = insert_source(&conn, root, "a.jpg", None);
+                insert_number_fact(&conn, a, "content.Rating", 5.0);
                 let mut db = Db::from_connection(conn);
-                let refused = run(
-                    &mut db,
-                    &[],
-                    &["source.size >".to_string()],
-                    &IncludeSet::default(),
-                    false,
-                    &["source.extension".to_string()],
-                )
-                .expect_err("refused");
+                let mut refused = |filters: &[&str]| {
+                    run(
+                        &mut db,
+                        &[],
+                        &filters.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
+                        &IncludeSet::default(),
+                        false,
+                        &["source.extension".to_string()],
+                    )
+                    .expect_err("refused")
+                    .to_string()
+                };
                 assert_eq!(
-                    refused.to_string(),
-                    "cannot use the key as given\n  `source.extension` is an unknown key"
+                    refused(&["Rating=big"]),
+                    "cannot run the filter as given\n  Rating=big\n         ^ Rating holds \
+                     numbers; \"big\" is not a number.\n    Type a number: 1024, -5, 3.14, \
+                     1e20\n  `source.extension` is an unknown key\n    `canon facts` lists the keys"
+                );
+                assert_eq!(
+                    refused(&[]),
+                    "cannot use the key as given\n  `source.extension` is an unknown key\n    \
+                     `canon facts` lists the keys"
                 );
             },
         );

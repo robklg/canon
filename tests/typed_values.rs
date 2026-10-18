@@ -114,7 +114,7 @@ impl Fixture {
         assert_ne!(run.code, 0, "{args:?} must fail:\n{all}");
         assert!(
             run.stderr
-                .starts_with("Error: cannot run the filter as written\n"),
+                .starts_with("Error: cannot run the filter as given\n"),
             "{args:?}:\n{all}"
         );
         assert!(
@@ -582,7 +582,7 @@ fn what_worklist_emits_pastes_back() {
     assert!(
         refused
             .stderr
-            .starts_with("Error: cannot run the filter as written\n")
+            .starts_with("Error: cannot run the filter as given\n")
             && refused.stderr.contains(&bare)
             && refused.stderr.contains(&format!(r#"stamp="{stamp}""#)),
         "{}",
@@ -664,10 +664,438 @@ fn an_answer_prints_without_error_on_the_commands_channel() {
     assert!(both.stdout.is_empty(), "{}", both.stdout);
     assert!(
         both.stderr
-            .starts_with("Error: cannot run the filter as written\n")
+            .starts_with("Error: cannot run the filter as given\n")
             && both.stderr.contains(answer)
             && both.stderr.contains("source.size=garbage"),
         "{}",
         both.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// How a refusal points at what was typed, on the built binary.
+// ---------------------------------------------------------------------------
+
+/// Run `args` and assert it was refused before anything ran: nothing on stdout, a non-zero
+/// exit, no decision recorded. The refusal's text is returned.
+fn refused(fx: &Fixture, args: &[&str]) -> String {
+    let before = fx.decisions();
+    let run = fx.run(args);
+    assert_ne!(run.code, 0, "{args:?}:\n{}{}", run.stdout, run.stderr);
+    assert!(run.stdout.is_empty(), "{args:?}:\n{}", run.stdout);
+    assert_eq!(fx.decisions(), before, "{args:?} recorded a decision");
+    run.stderr
+}
+
+/// A `ls` run that must succeed; its stdout.
+fn listed(fx: &Fixture, filter: &str) -> String {
+    let run = fx.run(&["ls", "--global", "--where", filter]);
+    assert_eq!(run.code, 0, "{filter}: {}{}", run.stdout, run.stderr);
+    run.stdout
+}
+
+/// **A refusal points at each problem**: under the first line, the typed line and a caret
+/// under the first character of each problem with its sentence, every problem of the run in
+/// order of position, each `--where` echoing its own text; a filter over several lines shows
+/// only the line holding the problem; `facts --key` takes the key's first line.
+#[test]
+fn a_refusal_points_at_each_problem_with_a_caret() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    let stderr = refused(
+        &fx,
+        &[
+            "ls",
+            "--global",
+            "--where",
+            "filename=a%b AND source.size=big",
+            "--where",
+            "source.ext=jpg AND Foo=1",
+        ],
+    );
+    assert_eq!(
+        stderr,
+        "Error: cannot run the filter as given\n\
+         \x20 filename=a%b AND source.size=big\n\
+         \x20           ^ `%` needs quotes around the value: filename=\"a%b\"\n\
+         \x20 filename=a%b AND source.size=big\n\
+         \x20                              ^ source.size holds numbers; \"big\" is not a number.\n\
+         \x20   Type a number: 1024, -5, 3.14, 1e20\n\
+         \x20 source.ext=jpg AND Foo=1\n\
+         \x20                    ^ `Foo` is an unknown key\n\
+         \x20   `canon facts` lists the keys\n"
+    );
+    let stderr = refused(
+        &fx,
+        &[
+            "ls",
+            "--global",
+            "--where",
+            "filename=x\nAND source.size=big",
+        ],
+    );
+    assert_eq!(
+        stderr,
+        "Error: cannot run the filter as given\n\
+         \x20 AND source.size=big\n\
+         \x20                 ^ source.size holds numbers; \"big\" is not a number.\n\
+         \x20   Type a number: 1024, -5, 3.14, 1e20\n"
+    );
+    let stderr = refused(&fx, &["facts", "--global", "--key", "source.ext|yeer"]);
+    assert!(
+        stderr.starts_with(
+            "Error: cannot use the key as given\n  source.ext|yeer\n            ^ `|yeer` is \
+             not a modifier — Modifiers: "
+        ),
+        "{stderr}"
+    );
+}
+
+/// **Plain values**: a value is read by the reading rules — a character that cannot stand bare
+/// needs quotes, with the value quoted as the fix (the other quote mark where that needs no
+/// doubling, a lone `]` among them); a space ends a value; in a list, a space between items is
+/// named; a key of another type reads the value as its type; an unknown key is only unknown.
+/// A lowercase `or`, a capital `AND` and letters of any language are values.
+#[test]
+fn plain_values_are_read_by_the_reading_rules() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    for (filter, line) in [
+        (
+            "filename=a]b",
+            "^ `]` needs quotes around the value: filename=\"a]b\"",
+        ),
+        (
+            "filename=O'Brien",
+            "^ `'` needs quotes around the value: filename=\"O'Brien\"",
+        ),
+        (
+            "filename=O\"Brien",
+            "^ `\"` needs quotes around the value: filename='O\"Brien'",
+        ),
+        (
+            "filename IN (a.jpg b.jpg)",
+            "^ values in a list are separated by commas\n",
+        ),
+        ("Model=EOS 5D", "^ a space separates values\n"),
+        (
+            "source.size=4%",
+            "^ source.size holds numbers; \"4%\" is not a number.",
+        ),
+        ("Foo=a%b", "^ `Foo` is an unknown key\n"),
+    ] {
+        let stderr = refused(&fx, &["ls", "--global", "--where", filter]);
+        assert!(stderr.contains(line), "{filter}:\n{stderr}");
+        assert!(
+            filter.starts_with("filename") || !stderr.contains("needs quotes"),
+            "{filter}:\n{stderr}"
+        );
+    }
+    for filter in ["filename=or", "filename=AND", "filename=照片1.jpg"] {
+        listed(&fx, filter);
+    }
+}
+
+/// **A wildcard after `=`**: named as a wildcard the operator does not take, with the glob and
+/// the exact text; after `!=` the glob is `!~`; in a list, no fix; a key of another type reads
+/// the value as its type.
+#[test]
+fn a_wildcard_after_equals_is_named_with_both_readings() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    for (filter, line) in [
+        (
+            "filename=IMG*",
+            "^ `*` is a wildcard, but `=` does not take wildcards. As a glob: filename~IMG*   As \
+             exact text: filename=\"IMG*\"\n",
+        ),
+        (
+            "filename!=IMG?",
+            "^ `?` is a wildcard, but `!=` does not take wildcards. As a glob: filename!~IMG?   \
+             As exact text: filename!=\"IMG?\"\n",
+        ),
+        (
+            "filename IN (IMG*)",
+            "^ `*` is a wildcard, but IN does not take wildcards\n",
+        ),
+        (
+            "source.size=1*",
+            "^ source.size holds numbers; \"1*\" is not a number.",
+        ),
+    ] {
+        let stderr = refused(&fx, &["ls", "--global", "--where", filter]);
+        assert!(stderr.contains(line), "{filter}:\n{stderr}");
+    }
+}
+
+/// The empty-key sentences: an empty `--key`, and a `--group-by` list with nothing after or
+/// before a comma.
+#[test]
+fn the_empty_key_sentences_name_where_a_key_is_missing() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    let stderr = refused(&fx, &["facts", "--global", "--key", ""]);
+    assert_eq!(
+        stderr,
+        "Error: cannot use the key as given\n  the key is empty\n"
+    );
+    for (grouping, line) in [
+        ("Make,", "       ^ a key is missing after `,`\n"),
+        (",Make", "  ^ a key is missing before `,`\n"),
+    ] {
+        let stderr = refused(
+            &fx,
+            &[
+                "facts",
+                "--global",
+                "--key",
+                "source.ext",
+                "--group-by",
+                grouping,
+            ],
+        );
+        assert!(
+            stderr.starts_with("Error: cannot use the key as given\n")
+                && stderr.contains(&format!("\n  {grouping}\n{line}")),
+            "{grouping}:\n{stderr}"
+        );
+    }
+    let run = fx.run(&[
+        "facts",
+        "--global",
+        "--key",
+        "source.ext",
+        "--group-by",
+        "Make, source.size|bucket(60,300)",
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+}
+
+/// A report names its key as the key was read, spaces around it dropped, in the plain header
+/// and in the grouped one alike.
+#[test]
+fn a_report_names_its_key_as_read_in_both_headers() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    fx.import(&[(
+        "a.jpg",
+        serde_json::json!({"Make": "Canon", "Model": "EOS"}),
+    )]);
+    let plain = fx.run(&["facts", "--global", "--key", " Make "]);
+    assert_eq!(plain.code, 0, "{}{}", plain.stdout, plain.stderr);
+    let header = format!("{:<40} {:>10} {:>10}\n", "Make", "Count", "Coverage");
+    assert!(plain.stdout.contains(&header), "{}", plain.stdout);
+    let grouped = fx.run(&[
+        "facts",
+        "--global",
+        "--key",
+        " Make ",
+        "--group-by",
+        "Model ",
+    ]);
+    assert_eq!(grouped.code, 0, "{}{}", grouped.stdout, grouped.stderr);
+    assert!(
+        grouped.stdout.contains("\nMake (grouped by Model)\n"),
+        "{}",
+        grouped.stdout
+    );
+}
+
+/// `worklist`'s `--emit` names and its filter are refused together, the filter's first line
+/// leading and each name on its own line after the filter's blocks.
+#[test]
+fn worklist_names_an_emit_name_beside_a_refused_filter() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    fx.import(&[("a.jpg", serde_json::json!({"Rating": 5}))]);
+    let stderr = refused(
+        &fx,
+        &[
+            "worklist",
+            "--global",
+            "--where",
+            "Rating=big",
+            "--emit",
+            "source.extension",
+        ],
+    );
+    assert_eq!(
+        stderr,
+        "Error: cannot run the filter as given\n\
+         \x20 Rating=big\n\
+         \x20        ^ Rating holds numbers; \"big\" is not a number.\n\
+         \x20   Type a number: 1024, -5, 3.14, 1e20\n\
+         \x20 `source.extension` is an unknown key\n\
+         \x20   `canon facts` lists the keys\n"
+    );
+}
+
+/// A quoted word is never a status word: `"archived"?` asks whether the stored fact
+/// `content.archived` has a value, and `NOT "archived"?` selects every source without it —
+/// where `NOT archived?`, the status word, selects every source not archived.
+#[test]
+fn a_quoted_status_word_names_a_stored_fact() {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    fx.import(&[("a.jpg", serde_json::json!({"archived": "yes"}))]);
+    let quoted = listed(&fx, "\"archived\"?");
+    assert!(
+        quoted.contains("a.jpg") && !quoted.contains("b.jpg"),
+        "{quoted}"
+    );
+    let not_quoted = listed(&fx, "NOT \"archived\"?");
+    assert!(
+        !not_quoted.contains("a.jpg") && not_quoted.contains("b.jpg"),
+        "{not_quoted}"
+    );
+    let status = listed(&fx, "NOT archived?");
+    assert!(
+        status.contains("a.jpg") && status.contains("b.jpg"),
+        "{status}"
+    );
+}
+
+/// An effectful command refused for a value that needs quotes records nothing, under `--yes`.
+#[test]
+fn a_value_that_needs_quotes_stops_exclude_set_under_yes() {
+    let fx = Fixture::new();
+    let stderr = refused(
+        &fx,
+        &[
+            "exclude",
+            "set",
+            "--global",
+            "--where",
+            "filename=a%b",
+            "--yes",
+        ],
+    );
+    assert!(
+        stderr.starts_with("Error: cannot run the filter as given\n"),
+        "{stderr}"
+    );
+}
+
+/// A manifest generated with `source.ext=jpg`, its recorded query then edited to `query`.
+fn manifest_with_query(fx: &Fixture, query: &str) -> PathBuf {
+    let manifest = fx.path("m.toml");
+    let (src, dest) = (fx.path_str("src"), format!("{}/out", fx.path_str("arc")));
+    let run = fx.run(&[
+        "cluster",
+        "generate",
+        &src,
+        "--dest",
+        &dest,
+        "--where",
+        "source.ext=jpg",
+        "--allow",
+        "duplicates",
+        "--output",
+        &manifest.to_string_lossy(),
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let config = std::fs::read_to_string(&manifest).unwrap();
+    let edited = config.replace(
+        r#"query = ["source.ext=jpg"]"#,
+        &format!("query = [{query:?}]"),
+    );
+    assert_ne!(
+        config, edited,
+        "the query line is where expected:\n{config}"
+    );
+    std::fs::write(&manifest, edited).unwrap();
+    manifest
+}
+
+/// **A recorded query is refused as specified**: `cluster refresh` gives the filter's first
+/// line for a manifest, the caret blocks, the way back alone after them and the abort; `cluster
+/// status` names the refresh it would reject and the way back on one line, the blocks under it.
+#[test]
+fn a_recorded_query_is_refused_as_specified_at_refresh_and_nested_at_status() {
+    let fx = Fixture::new();
+    let manifest = manifest_with_query(&fx, "source.ext =");
+    let m = manifest.to_string_lossy();
+    let refresh = fx.run(&["cluster", "refresh", &m]);
+    assert_ne!(refresh.code, 0);
+    assert_eq!(
+        refresh.stderr,
+        format!(
+            "Options from manifest: allow duplicates\n\
+             Error: cannot run the filter as specified\n\
+             \x20 source.ext =\n\
+             \x20             ^ a value is missing after `=`\n\
+             `canon cluster refresh --edit {m}` to fix the query and select again\n\
+             Refresh aborted — {m} and its lock file are unchanged.\n"
+        )
+    );
+    let status = fx.run(&["cluster", "status", &m]);
+    let block = format!(
+        "\ncluster refresh would be rejected: the recorded query cannot run — `canon cluster \
+         refresh --edit {m}` to fix the query and select again\n\
+         \x20   source.ext =\n\
+         \x20               ^ a value is missing after `=`\n"
+    );
+    assert!(
+        status.stdout.contains(&block),
+        "{}{}",
+        status.stdout,
+        status.stderr
+    );
+    assert!(!status.stdout.contains("Error:"), "{}", status.stdout);
+}
+
+/// **The query block stands at the query's place in every arm of a refusing refresh**: after a
+/// parked scope's door lines (stdout, no `Error:`, exit 1) and after "no sources known" for a
+/// scope that kept nothing — the block whole, then the abort once.
+#[test]
+fn the_refresh_query_block_stands_at_the_querys_place_in_every_arm() {
+    let order = |out: &str, parts: &[&str]| {
+        let at: Vec<usize> = parts
+            .iter()
+            .map(|p| out.find(p).unwrap_or_else(|| panic!("{p} missing:\n{out}")))
+            .collect();
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "{parts:?} out of order:\n{out}"
+        );
+        assert_eq!(out.matches("Refresh aborted").count(), 1, "{out}");
+    };
+    let block = [
+        "cannot run the filter as specified\n  source.ext =\n              ^ a value is missing \
+         after `=`\n`canon cluster refresh --edit ",
+        "Refresh aborted",
+    ];
+
+    let fx = Fixture::new();
+    let manifest = manifest_with_query(&fx, "source.ext =");
+    let suspended = fx.run(&["roots", "suspend", &format!("path:{}", fx.path_str("src"))]);
+    assert_eq!(
+        suspended.code, 0,
+        "{}{}",
+        suspended.stdout, suspended.stderr
+    );
+    let refresh = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
+    assert_eq!(refresh.code, 1, "{}{}", refresh.stdout, refresh.stderr);
+    assert!(!refresh.stdout.contains("Error:") && !refresh.stderr.contains("Error:"));
+    order(&refresh.stdout, &["suspended", block[0], block[1]]);
+
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.path("src/empty")).unwrap();
+    let manifest = manifest_with_query(&fx, "source.ext =");
+    let config = std::fs::read_to_string(&manifest).unwrap();
+    let edited: Vec<String> = config
+        .lines()
+        .map(|line| {
+            if line.starts_with("scope = ") {
+                format!("scope = [{:?}]", fx.path_str("src/empty"))
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    assert_ne!(
+        edited.join("\n") + "\n",
+        config,
+        "the scope line is where expected"
+    );
+    std::fs::write(&manifest, edited.join("\n") + "\n").unwrap();
+    let refresh = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
+    assert_ne!(refresh.code, 0, "{}{}", refresh.stdout, refresh.stderr);
+    order(
+        &refresh.stderr,
+        &["no sources known at", block[0], block[1]],
     );
 }

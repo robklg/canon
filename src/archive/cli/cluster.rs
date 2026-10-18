@@ -379,19 +379,13 @@ fn refresh_with_editor(
     // written until every cause is clear.
     let settled_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
     let recorded_query = parse_recorded_query(conn, &config.meta.query)?;
-    let query_causes: &[(String, String)] = match &recorded_query {
-        Ok(_) => &[],
-        Err(causes) => causes,
-    };
     let mut causes: Vec<String> = Vec::new();
     if let Err(refusal) = &settled_zone {
         causes.push(super::zone_refusal(refusal));
     }
-    causes.extend(
-        query_causes
-            .iter()
-            .map(|(line, error)| super::query_line_refusal(line, error, config_path)),
-    );
+    if let Err(refusal) = &recorded_query {
+        causes.push(super::query_refusal_block(refusal, config_path));
+    }
     let aborted = format!(
         "Refresh aborted — {} and its lock file are unchanged.",
         config_path.display()
@@ -994,9 +988,10 @@ fn state_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<u8> 
     for line in zone_lines(status, manifest) {
         let _ = writeln!(out, "{line}");
     }
-    for (line, error) in &status.query_causes {
-        let refusal = super::query_line_refusal(line, error, manifest);
-        let _ = writeln!(out, "{}", super::refresh_would_refuse(&refusal));
+    if let Some(refusal) = &status.query_refusal {
+        for line in super::query_status_lines(refusal, manifest) {
+            let _ = writeln!(out, "{line}");
+        }
     }
     out
 }
@@ -1658,7 +1653,7 @@ mod tests {
                 } => Some(LockZone::Recorded(parse_zone_name("UTC").unwrap())),
             },
             manifest_zone: Ok(ManifestZone::Recorded(parse_zone_name("UTC").unwrap())),
-            query_causes: Vec::new(),
+            query_refusal: None,
             unplaced: 0,
         };
         // The ordinary manifest, so a row that is not about the scope poses no
@@ -3551,33 +3546,41 @@ mod tests {
     }
 
     /// **An `@name` where a key belongs is named as an alias**, which a manifest's query takes
-    /// none of — never as a stray character. Inside a value an `@` is text, as it is after
-    /// expansion: the manifest records what expansion produced, so a generated line holding one
-    /// (an alias `retina = "source.rel_path ~ *@2x*"`, recorded expanded) still runs.
+    /// none of — never as a stray character. After `~` an `@` is part of the glob, so a
+    /// generated line holding one (an alias `retina = "source.rel_path ~ *@2x*"`, recorded
+    /// expanded) still runs; after `=` it is a character that needs quotes, and quoted it runs.
     #[test]
     fn refresh_names_an_alias_in_the_recorded_query() {
-        for line in ["@img AND source.ext = jpg", "source.ext = jpg AND @img"] {
+        for (line, at) in [
+            ("@img AND source.ext = jpg", 0),
+            ("source.ext = jpg AND @img", 21),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let (mut db, manifest, _lock) =
                 new_year_setup(dir.path(), line, Some("Europe/Amsterdam"));
             let before = fs::read_to_string(&manifest).unwrap();
             let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
             assert!(
-                err.contains(&format!(
-                    "the recorded query cannot run: {line}: '@img' is an alias, and aliases are \
-                     not expanded here; write the filter it stands for"
+                err.starts_with(&format!(
+                    "cannot run the filter as specified\n  {line}\n  {}^ '@img' is an alias, and \
+                     aliases are not expanded here; write the filter it stands for\n`canon \
+                     cluster refresh --edit ",
+                    " ".repeat(at)
                 )),
                 "{err}"
             );
-            assert!(!err.contains("Unexpected character"), "{err}");
             assert_eq!(fs::read_to_string(&manifest).unwrap(), before, "{line}");
         }
 
-        for line in [
-            "(source.rel_path ~ *@2x*)",
-            "source.ext = @img",
-            "source.ext = \"@img\"",
-        ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, _lock) =
+            new_year_setup(dir.path(), "source.ext = @img", Some("Europe/Amsterdam"));
+        let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
+        assert!(
+            err.contains("  source.ext = @img\n               ^ `@` needs quotes around the value"),
+            "{err}"
+        );
+        for line in ["(source.rel_path ~ *@2x*)", "source.ext = \"@img\""] {
             let dir = tempfile::tempdir().unwrap();
             let (mut db, manifest, _lock) =
                 new_year_setup(dir.path(), line, Some("Europe/Amsterdam"));
@@ -3608,7 +3611,10 @@ mod tests {
             .find("this machine's time zone data does not know \"Europe/Amsterdm\"")
             .unwrap_or_else(|| panic!("{err}"));
         let query_at = err
-            .find("the recorded query cannot run: source.ext = (")
+            .find(
+                "cannot run the filter as specified\n  source.ext = (\n               ^ `(` needs \
+                 quotes around the value: source.ext = \"(\"\n`canon cluster refresh --edit ",
+            )
             .unwrap_or_else(|| panic!("the query's own cause is reported too: {err}"));
         let aborted_at = err
             .find("Refresh aborted")
@@ -4018,22 +4024,29 @@ mod tests {
                 "Europe/Amsterdm".to_string(),
             ),
         ));
-        status.query_causes = vec![(
-            "source.ext = (".to_string(),
-            "Expected a value, got '('".to_string(),
-        )];
+        let conn = crate::core::repo::open_in_memory_for_test();
+        let refused = crate::expr::read_filters(&conn, &["source.ext =".to_string()])
+            .expect_err("a value is missing")
+            .downcast::<crate::expr::ExpressionRefused>()
+            .unwrap()
+            .into_specified();
+        status.query_refusal = Some(refused);
         let text = String::from_utf8(state_lines(&status, Path::new("/m/c.toml"))).unwrap();
         let door = text.find("suspended").unwrap_or_else(|| panic!("{text}"));
         let zone = text
             .find("Europe/Amsterdm")
             .unwrap_or_else(|| panic!("{text}"));
         let query = text
-            .find("source.ext = (")
+            .find("source.ext =")
             .unwrap_or_else(|| panic!("{text}"));
         assert!(door < zone && zone < query, "{text}");
         assert!(
-            text.contains(
-                "cluster refresh would be rejected: the recorded query cannot run: source.ext = (: Expected a value, got '(' — `canon cluster refresh --edit /m/c.toml` to fix the query and select again"
+            text.ends_with(
+                "cluster refresh would be rejected: the recorded query cannot run — `canon cluster \
+                 refresh --edit /m/c.toml` to fix the query and select again
+    source.ext =
+                ^ a value is missing after `=`
+"
             ),
             "{text}"
         );

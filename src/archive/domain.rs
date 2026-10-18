@@ -798,7 +798,7 @@ pub enum Obstacle {
     /// written down. Enforced by `cluster refresh`, the same way.
     NoZoneToRecord,
     /// The manifest's query cannot run: reading and binding refuse it (`expr::read_filters`,
-    /// on the recorded text as written — no alias is expanded there). Enforced by `cluster refresh`,
+    /// on the recorded text as specified — no alias is expanded there). Enforced by `cluster refresh`,
     /// which states every cause beside the zone's.
     QueryUnreadable,
 }

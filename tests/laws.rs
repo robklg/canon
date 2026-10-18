@@ -847,7 +847,7 @@ const LAWS: &[Law] = &[
     },
     Law {
         // A value or key Canon prints reads back, typed into `--where`, as itself: the
-        // writer asks the reader — the tokenizer, alias expansion and the binder — and keeps
+        // writer asks the reader — the filter reader, alias expansion and the binder — and keeps
         // no character list of its own.
         name: "printing rule",
         owner: "expr/domain/print.rs",

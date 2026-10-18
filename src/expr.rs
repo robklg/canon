@@ -26,7 +26,7 @@ mod repo;
 // The asking half: `--where` strings read and bound — or refused, with every reason —
 // before anything runs; a bound filter, run, and what the run reports about itself. The key
 // `facts --key` and `--group-by` name is read the same way.
-pub use domain::bind::FilterRefused;
+pub use domain::bind::ExpressionRefused;
 pub use domain::filter::UsedStatus;
 pub use ops::bind::{read_filters, read_report, BoundFilters};
 pub use ops::filter::apply_filters;

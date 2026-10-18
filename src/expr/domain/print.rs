@@ -1,9 +1,9 @@
 //! **The printing rule**: how Canon writes a value or a key so that, typed back into
 //! `--where`, it reads as the same value or key. The writer asks the reader: a value prints
-//! bare exactly when the tokenizer reads it back after `=` as one bare value with the same
+//! bare exactly when the reader reads it back after `=` as one bare value with the same
 //! text **and** the binder reads that bare text as the same value for its type; a key prints
-//! bare exactly when the tokenizer reads it back as one key and the key reader reads it as
-//! the same key. Otherwise it prints in double quotes, an inner `"` doubled — which the
+//! bare exactly when the reader reads it back as one key, in a filter and as a report key, with
+//! no accessor or modifier and the same base key. Otherwise it prints in double quotes, an inner `"` doubled — which the
 //! grammar reads back as the text inside. No character list lives here, so the writer cannot
 //! drift from the reader.
 
@@ -14,7 +14,7 @@ use crate::core::domain::time::reading::read_time;
 
 use super::alias::has_alias_references;
 use super::bind::{bare_class, BareClass};
-use super::filter::{reads_as_one_bare_key, reads_as_one_bare_value, WrittenKey};
+use super::read::{read_keys, reads_as_one_bare_key, reads_as_one_bare_value, Grammar};
 
 /// A value as Canon prints it for the reader of `read_as`: bare where the bare text reads
 /// back as the same value of that type, otherwise double-quoted.
@@ -32,7 +32,7 @@ pub fn printed_value(text: &str, read_as: FactType) -> String {
 }
 
 /// A word that names itself whatever it is compared with — a bucket's range, a part's
-/// name: bare where the tokenizer reads it back as one bare value, otherwise quoted.
+/// name: bare where the reader reads it back as one bare value, otherwise quoted.
 pub(in crate::expr) fn printed_word(text: &str) -> String {
     if reads_back_bare(text) {
         text.to_string()
@@ -44,14 +44,22 @@ pub(in crate::expr) fn printed_word(text: &str) -> String {
 /// A full stored key as Canon prints it: bare where the bare text reads back as that same
 /// key, otherwise double-quoted (`"content.File Size"`).
 pub fn printed_key(key: &str) -> String {
-    let same_key = reads_as_one_bare_key(key)
-        && !has_alias_references(key)
-        && WrittenKey::read(key).is_ok_and(|read| !read.has_transforms() && read.base == key);
+    let same_key =
+        reads_as_one_bare_key(key) && !has_alias_references(key) && is_its_own_base_key(key);
     if same_key {
         key.to_string()
     } else {
         quoted(key)
     }
+}
+
+/// Whether `key`, read as a report reads a key, is one key with no accessor and no modifier
+/// whose base key is `key` itself.
+fn is_its_own_base_key(key: &str) -> bool {
+    let reading = read_keys(key, 0, Grammar::Key);
+    reading.problems.is_empty()
+        && matches!(reading.value.as_deref(),
+            Some([read]) if !read.has_transforms() && read.base == key)
 }
 
 /// The command that inspects a key and converts it to one type, as printed: backticked, the
@@ -98,14 +106,14 @@ pub fn mixed_type_way_out(keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// The tokenizer's half: one bare value with the same text, and nothing alias expansion
+/// The reader's half: one bare value with the same text, and nothing alias expansion
 /// would rewrite.
 fn reads_back_bare(text: &str) -> bool {
     !text.is_empty() && !has_alias_references(text) && reads_as_one_bare_value(text)
 }
 
 /// Double quotes, an inner `"` doubled.
-fn quoted(text: &str) -> String {
+pub(in crate::expr) fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
@@ -116,7 +124,7 @@ mod tests {
     use super::*;
     use crate::core::domain::fact::KeyTypes;
     use crate::expr::domain::bind::{bind_expr, Bound, Test};
-    use crate::expr::domain::filter::Expr;
+    use crate::expr::domain::read::read_filter;
 
     /// The value the binder reads from `k=<printed>` against a key of type `t`.
     fn read_back(printed: &str, t: FactType) -> Test {
@@ -125,7 +133,15 @@ mod tests {
             KeyTypes::from_counts([(t, 1)]).unwrap(),
         )]);
         let text = format!("k={printed}");
-        let expr = Expr::parse(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let reading = read_filter(&text, 0);
+        assert!(
+            reading.problems.is_empty(),
+            "{text}: {:?}",
+            reading.problems
+        );
+        let expr = reading
+            .value
+            .unwrap_or_else(|| panic!("{text}: nothing read"));
         let mut causes = Vec::new();
         match bind_expr(&expr, &types, &mut causes) {
             Bound::Compare { test, .. } if causes.is_empty() => test,
@@ -147,13 +163,17 @@ mod tests {
             ("it's", r#""it's""#),
             ("icon@2x.png", r#""icon@2x.png""#),
             ("a,b", r#""a,b""#),
+            // After `=` a wildcard character is read as a wildcard, so text holding one prints
+            // quoted.
+            ("a?b", r#""a?b""#),
+            ("[draft]", r#""[draft]""#),
             ("2019", r#""2019""#),
             ("2024-06-15", r#""2024-06-15""#),
             ("0500", r#""0500""#),
             ("18:00", r#""18:00""#),
             ("2019:05:04 10:12:00", r#""2019:05:04 10:12:00""#),
         ];
-        let bare_text = ["DMC-FZ38", "IMG_0001.jpg", "a?b", "[draft]", "AND"];
+        let bare_text = ["DMC-FZ38", "IMG_0001.jpg", "AND"];
         for (value, printed) in quoted_text {
             assert_eq!(printed_value(value, FactType::Text), printed, "{value:?}");
         }
@@ -198,18 +218,21 @@ mod tests {
             ("content.Make", "content.Make"),
             ("source.mtime", "source.mtime"),
             ("content.File Size", r#""content.File Size""#),
-            ("content.XMP-dc:Subject", r#""content.XMP-dc:Subject""#),
+            // A name takes `-`, so it reads back bare.
+            ("content.XMP-dc:Subject", "content.XMP-dc:Subject"),
             (r#"content.a"b"#, r#""content.a""b""#),
             ("content.a|b", r#""content.a|b""#),
             ("content.icon@2x", r#""content.icon@2x""#),
         ] {
             assert_eq!(printed_key(key), printed, "{key}");
-            let read = WrittenKey::read(&printed_key(key)).unwrap();
+            let reading = read_keys(&printed_key(key), 0, Grammar::Key);
+            assert!(reading.problems.is_empty(), "{key}");
+            let read = &reading.value.unwrap()[0];
             assert_eq!((read.base.as_str(), read.has_transforms()), (key, false));
         }
     }
 
-    /// Whether the reader itself — alias expansion, the tokenizer, the parser and the binder —
+    /// Whether the reader itself — alias expansion, the filter reader and the binder —
     /// reads `text` as written, against a text key: the oracle the writer must agree with.
     fn reader_reads_bare(text: &str) -> bool {
         let filter = format!("k={text}");
@@ -226,7 +249,8 @@ mod tests {
             "content.k".to_string(),
             KeyTypes::from_counts([(FactType::Text, 1)]).unwrap(),
         )]);
-        let Ok(expr) = Expr::parse(&filter) else {
+        let reading = read_filter(&filter, 0);
+        let (true, Some(expr)) = (reading.problems.is_empty(), reading.value) else {
             return false;
         };
         let mut causes = Vec::new();

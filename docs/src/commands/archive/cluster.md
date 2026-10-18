@@ -177,7 +177,19 @@ A zone line holding a rule such as `EST5EDT,M3.2.0,M11.1.0` instead of a name st
 Error: TZ=Europe/Amsterdm is not a time zone Canon can read; run it with TZ set to a zone name, for example TZ=Europe/Amsterdam canon cluster generate …
 ```
 
-A refresh reports these causes together, in one run: the scope's first, then the zone line, then each query line that parsing or binding rejects: a line that does not parse is named whole, and otherwise each clause that `--where` would reject ([When a Filter Is Rejected](../../reference/filter.md#when-a-filter-is-rejected)). The query is used as it is written in the manifest, with no aliases.
+A refresh reports these causes together, in one run: the scope's first, then the zone line, then the query. A query Canon cannot run is shown as a `--where` filter's problems are ([When a Filter Is Rejected](../../reference/filter.md#when-a-filter-is-rejected)), as specified in the manifest, followed by the command to fix it:
+
+```
+Options from manifest: allow duplicates
+Error: cannot run the filter as specified
+  source.ext=jpg AND Model=EOS 5D
+                              ^ a space separates values
+    After a value: AND, OR, ) or the end
+`canon cluster refresh --edit manifest.toml` to fix the query and select again
+Refresh aborted — manifest.toml and its lock file are unchanged.
+```
+
+The query is used as it is written in the manifest, with no aliases. To copy a fix into the manifest, paste it between `'''` and `'''`, which holds both quote marks and backslashes as written: `query = ['''filename="a%b.jpg"''']`.
 
 **What "the same on any machine" rests on.** Zone rules come from each machine's own time zone data. Two machines put a file in the same folder when their data agree for the manifest's zone. `apply --dry-run` on the machine that applies shows the destinations that run will use.
 
@@ -383,7 +395,16 @@ Time zone: America/New_York (the lock's)
   the manifest has no zone line; a refresh on this machine would record Europe/Paris: canon cluster refresh manifest.toml
 ```
 
-A zone line Canon does not recognize, and a query line that parsing or binding rejects (one that does not parse is named whole; otherwise each clause `--where` would reject, taken with no aliases), are named as what stops the refresh (`cluster refresh would be rejected: …`, in the refresh's own words), and the report then names no rebuild. Neither stops an apply, which uses the lock's time zone and re-selects nothing.
+A zone line Canon does not recognize, and a query Canon cannot run (taken with no aliases), are named as what stops the refresh (`cluster refresh would be rejected: …`, in the refresh's own words), and the report then names no rebuild. A query's problems are shown under that line as a refresh shows them:
+
+```
+cluster refresh would be rejected: the recorded query cannot run — `canon cluster refresh --edit manifest.toml` to fix the query and select again
+    source.ext=jpg AND Model=EOS 5D
+                                ^ a space separates values
+      After a value: AND, OR, ) or the end
+```
+
+A fix is copied into the manifest as for a refresh, between `'''` and `'''`. Neither stops an apply, which uses the lock's time zone and re-selects nothing.
 
 A lock that records no zone Canon recognizes gets no destinations and no counts: the summary names its entries once, with their source files unchecked, and the rebuild is the step. A lock built before lock files recorded the zone says so on its `Lock:` line; a lock naming a zone this machine's time zone data does not know names the ways out:
 

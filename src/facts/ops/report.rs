@@ -924,7 +924,7 @@ mod tests {
         for err in [plain.err(), grouped.err()] {
             let err = err.expect("a changed type must stop the report");
             let refused = err
-                .downcast_ref::<crate::expr::FilterRefused>()
+                .downcast_ref::<crate::expr::ExpressionRefused>()
                 .unwrap_or_else(|| panic!("{err}"));
             assert!(refused.is_answer());
             assert_eq!(
@@ -936,7 +936,7 @@ mod tests {
             panic!("a key gaining facts mid-report must stop it");
         };
         let refused = err
-            .downcast_ref::<crate::expr::FilterRefused>()
+            .downcast_ref::<crate::expr::ExpressionRefused>()
             .unwrap_or_else(|| panic!("{err}"));
         assert!(refused.is_answer(), "{refused}");
         assert_eq!(

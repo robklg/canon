@@ -128,7 +128,7 @@ pub fn run(
         }
     }
 
-    if let (Some(fact_key), Some(main_key)) = (key_arg, main_key) {
+    if let Some(main_key) = main_key {
         if !grouping_keys.is_empty() {
             let result = compute_grouped_distribution(
                 conn,
@@ -142,7 +142,7 @@ pub fn run(
         } else {
             let result =
                 compute_distribution(conn, &source_ids, &main_key, limit, crate::user_zone())?;
-            display_distribution(&result, fact_key, &main_key);
+            display_distribution(&result, &main_key);
         }
     } else if by_root {
         let result = compute_root_distribution(&sel.sources);
@@ -327,12 +327,12 @@ fn group_cell(value: &str, key: &ParsedFactKey) -> String {
     }
 }
 
-fn display_distribution(result: &DistributionResult, display_key: &str, key: &ParsedFactKey) {
+fn display_distribution(result: &DistributionResult, key: &ParsedFactKey) {
     use std::io::Write;
-    // The header names what kind of key it is, as the listing does
+    // The header names the key as it was read, and what kind of key it is, as the listing does
     let label = match kind_label(key.key.as_ref().map_or(KeyKind::ContentFact, Key::kind)) {
-        Some(kind) => format!("{display_key} {kind}"),
-        None => display_key.to_string(),
+        Some(kind) => format!("{} {kind}", key.raw),
+        None => key.raw.clone(),
     };
 
     let stdout = std::io::stdout();

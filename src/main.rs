@@ -325,7 +325,7 @@ enum Commands {
         #[arg(long)]
         by_root: bool,
         /// Group results by fact key(s), comma-separated (requires --key). Supports modifiers.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long)]
         group_by: Vec<String>,
     },
     /// Show archive coverage statistics
@@ -971,7 +971,7 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
 /// and being told so is the answer to the question they asked — so a
 /// [`DoorRefused`] anywhere in the chain is stated as it stands, **on the
 /// dispatched command's own class channel** ([`door_channel_for`]) rather
-/// than unconditionally on stderr. A [`crate::expr::FilterRefused`] that is
+/// than unconditionally on stderr. A [`crate::expr::ExpressionRefused`] that is
 /// only an answer about what a key is (two types, a type changed mid-run) is
 /// stated the same way; one holding input Canon cannot read prints with
 /// `Error:` on stderr. Everything else is a real failure and renders exactly
@@ -987,7 +987,7 @@ fn main() -> std::process::ExitCode {
                     scope::DoorChannel::Stdout => println!("{refusal}"),
                     scope::DoorChannel::Stderr => eprintln!("{refusal}"),
                 }
-            } else if let Some(refusal) = err.downcast_ref::<crate::expr::FilterRefused>() {
+            } else if let Some(refusal) = err.downcast_ref::<crate::expr::ExpressionRefused>() {
                 // A filter Canon will not run: an answer about what a key is prints as it
                 // stands on the command's class channel, as a closed door does; anything
                 // holding input Canon cannot read is an error.

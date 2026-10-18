@@ -1,7 +1,7 @@
 //! The expression facility's operations layer: the language applied.
 //!
 //! Where the pure grammar meets a database, a scope, and the aliases file.
-//! Filtering is the bulk of it: the parsed language run against real rows, and
+//! Filtering is the bulk of it: the language, read and bound, run against real rows, and
 //! the one thing here that still speaks SQL itself. Selection — the set of
 //! sources an operation reports over or acts on — is the language applied
 //! within a scope, and it lives here rather than beside any one command because

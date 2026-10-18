@@ -106,7 +106,7 @@ impl From<&Source> for SourceAttributes {
 ///
 /// # Errors
 ///
-/// A [`crate::expr::FilterRefused`] answer where a stored value is not what the key was read
+/// A [`crate::expr::ExpressionRefused`] answer where a stored value is not what the key was read
 /// as — its type changed while the report ran ([`ParsedFactKey::check_type`]). Otherwise a
 /// transform that fails is a defect `read_report` should have refused, and is raised as one.
 pub fn resolve_fact_value(

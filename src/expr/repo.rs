@@ -45,7 +45,7 @@ pub fn prefetch_facts(
 
     // A key the source row computes needs no lookup; every other key is read
     // from the facts table under its stored name, the content hash included
-    // (the parser has already read `hash` as `content.hash.sha256`).
+    // (the reader has already read `hash` as `content.hash.sha256`).
     let stored_keys: Vec<&String> = base_keys
         .iter()
         .filter(|k| !Key::read(k).is_some_and(|key| key.is_computed()))

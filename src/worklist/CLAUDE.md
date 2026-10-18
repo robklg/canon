@@ -24,8 +24,9 @@ follows: the data goes to stdout, everything about the run goes to stderr, so pi
 clean.
 
 **`--emit` reads a name as an expression does.** `ops.rs::read_emit_keys` reads every name
-through the facility's one reader (`expr::Key`) before the filters and the selection, and refuses
-every `source.` name that is no source fact in one error, so nothing is selected or written.
+through the facility's one reader (`expr::Key`) beside the filters, before the selection, and
+refuses every `source.` name that is no source fact; refused with the filters, both are one
+refusal, the filter's first (`ExpressionRefused::join`), so nothing is selected or written.
 `build_entries` then reads each key for every emitted source at once through
 `expr::fetch_named_values`: a key the source row answers from the row, any other key the source's
 one value (`hash` and `hash_short` its content hash). Each field is named as given. Pinned in both files; the key-name law's

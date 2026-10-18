@@ -51,9 +51,13 @@ A pattern matches text and paths. Against a number or a time key it gives an err
 --where 'filename!~*.tmp'
 ```
 
-Values after operators like `~`, `=`, `!=` accept most characters without quoting, including `/`, `-`, `?`, `*`, `[`, `]`. See [Quoting](#quoting) for the rest.
+After `~` and `!~`, a pattern can hold without quotes letters and digits of any language, `_ . - / : +`, and `*`, `?`, `[`, `]`, `|`, `#` and `%`. An accent mark written as its own character needs quotes there. See [Quoting](#quoting) for the rest.
 
 ## Quoting
+
+A value can be written without quotes when it holds only letters and digits, of any language, accent marks written as their own character, and `_ . - / : +`: `filename=照片1.jpg`, `source.size>-5`, `source.mtime>=2024-06-15`. Any other character needs quotes, a space included: `content.Model="EOS 5D"`. A value ends at the first space, so in `content.Model=EOS 5D` the `5D` is a second value and the filter is rejected. After `=` and `!=`, `*`, `?` and `[` are wildcards, and Canon shows both ways to write them (see [When a Filter Is Rejected](#when-a-filter-is-rejected)).
+
+A key name can be written without quotes when it holds only letters, digits and `_ . : / -`: `content.XMP-dc:Subject`. A name with any other character, a space included, is written in quotes: `"content.File Size"`.
 
 A value or a key that needs quotes is written in double quotes. A double quote inside is doubled. Single quotes work the same way, a single quote inside doubled. A backslash is an ordinary character.
 
@@ -82,6 +86,8 @@ Every key has a [type](../concepts/facts.md#value-types): text, number, time, or
 **Text is text.** Against a text key, a bare value that looks like a number or a time (`2019`, `0500`, `2024-06-15`, `18:00`) gives an error, because Canon cannot tell which you meant. Quoted, it is text (`content.Model="2019"`). To ask a number or a date question of text, say so with a modifier: `content.numtext|number>=10`, `content.textdate|year=2024`. Words such as `Canon` or `IMG_0001.jpg` are text without quotes.
 
 Canon's message prints each value and key so that, copied back into a filter, it means the same: text that looks like a number or a time is shown there in quotes. A row of [`canon facts`](../commands/query/facts.md) prints text as it is, so text such as `2019` appears bare there; put it in quotes when you copy it into a filter.
+
+**Text is compared exactly as stored.** An accented letter stored as one character and the same letter stored as a letter followed by a separate accent mark are two different texts to `=`, `!=`, `IN` and the ordering operators. A path typed as an argument, such as a scope, is found in either stored form; a value in `--where` is not.
 
 **A key's type belongs to the key.** It is determined from every fact the key holds, on every root, so it does not change with the scope or the filter. A key with no facts has no type: `key?` is false everywhere, and anything else asked of it is rejected as an unknown key.
 
@@ -115,15 +121,49 @@ For the same reason, `content.DateTimeOriginal<2024` and `NOT content.DateTimeOr
 
 ## When a Filter Is Rejected
 
-A filter Canon cannot interpret as you meant is rejected before anything runs: nothing is listed, planned or changed. Every reason is named at once, each with the clause as you wrote it and the ways to write what you meant. A rewrite is offered only where the rewritten clause runs:
+When Canon can't process a filter, it points out where the mistake is, and for common cases shows the fix. The filter is rejected before anything runs: nothing is listed, planned or changed. Every problem is named at once, each under the line it is on, with a `^` under its first character, a sentence, and the rule it breaks where there is one:
 
 ```
-Error: cannot run the filter as written
-  Model=2019: Model holds text; 2019 is a number or a year.
+Error: cannot run the filter as given
+  filename=a%b.jpg AND Rating=big
+            ^ `%` needs quotes around the value: filename="a%b.jpg"
+  filename=a%b.jpg AND Rating=big
+                              ^ Rating holds numbers; "big" is not a number.
+    Type a number: 1024, -5, 3.14, 1e20
+```
+
+A fix shows how Canon's rules read what was typed, to copy and judge against what was meant. A fix is shown only where the filter it shows runs, and only in these cases:
+
+| What was typed | The fix |
+|----------------|---------|
+| A character that needs quotes, in a value after `=`, `!=`, `<`, `>`, `<=` or `>=`, or in an `IN` list | The value in quotes, with `'` where the value holds a `"` and no `'`. A list gets one fix, with every item that needs quotes in quotes |
+| `*`, `?` or `[` in a value after `=` or `!=` | Both readings: the pattern with `~`, and the exact text in quotes |
+| A character that needs quotes in a key name | The name in quotes, for a key that has facts |
+
+```
+Error: cannot run the filter as given
+  filename=IMG*
+              ^ `*` is a wildcard, but `=` does not take wildcards. As a glob: filename~IMG*   As exact text: filename="IMG*"
+```
+
+```
+Error: cannot run the filter as given
+  Lens#2=35mm
+      ^ an operator is missing after `Lens`
+    After a key: =, !=, <, >, <=, >=, ~, !~, ?, IN or NOT IN
+    A key name contains letters, digits, _ . : / and -; quote a name with any other character: "Lens#2"
+```
+
+A fix keeps where the rules end each part and adds only quotes. In `Title=O'Brien was here` the value ends at the space, so the fix is `Title="O'Brien"`, and the space is named on its own: a space separates values.
+
+A value that cannot be read as its key's type is named with the ways to write what you meant. A rewrite is offered only where the rewritten clause runs:
+
+```
+Error: cannot run the filter as given
+  Model=2019
+        ^ Model holds text; 2019 is a number or a year.
     As text: Model="2019"     As numbers, if its values are numbers: Model|number=2019     As dates, if its values are dates: Model|year=2019
     `canon facts convert content.Model` to see what it holds and change its type
-  source.size=big: source.size holds numbers; "big" is not a number.
-    Type a number: 1024, -5, 3.14, 1e20
 ```
 
 A key whose facts hold two types cannot be compared or modified, since a filter compares one type only. That is an answer about the key, not an error, so it prints without `Error:`, and asking whether the key exists (`Model?`) still works:
@@ -148,7 +188,7 @@ Status predicates check computed state: whether a source is in a particular cond
 | `excluded?` | Source or object is excluded |
 | `enriched?` | Has any stored metadata beyond the content hash |
 
-Status predicates are boolean-only: they work with `?` and `NOT ... ?`; asked with a comparison operator (`archived=1`), the filter gives an error.
+Status predicates are written in lower case and are boolean-only: they work with `?` and `NOT ... ?`; asked with a comparison operator (`archived=1`), the filter gives an error. A name in quotes is never a status predicate: `"archived"?` asks whether the stored fact `content.archived` has a value.
 
 ```bash
 # What still needs archiving?
@@ -184,6 +224,8 @@ canon ls --include excluded --where 'excluded?'
 | `(expr)` | Grouping for precedence |
 
 Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to override.
+
+`AND`, `OR`, `NOT`, `IN` and `NOT IN` are written in capitals; `and` or `aNd` is a word, so `a=1 and b=2` is rejected. A keyword counts only where one can stand: `AND` and `OR` after a complete condition, `NOT` where a condition starts, `IN` and `NOT IN` after a key. Elsewhere the word is read as what stands there: `filename=AND` compares with the text `AND`, and `source.ext= AND source.size>1`, as an empty shell variable leaves it, reads `AND` as the value of `source.ext`, so Canon points at the space before `source.size`: a space separates values.
 
 ## Aliases
 
@@ -256,12 +298,12 @@ canon ls --where 'NOT @large'
 
 ### How Classification Works
 
-Canon determines whether each alias is a key or an expression by parsing the value. If the value is a valid filter expression (contains an operator), it's an expression alias and gets wrapped in parentheses. If not (it's just a key path), it's a key alias and gets substituted literally.
+Canon reads each alias's value as a filter. A value that reads as a filter with no problem is an expression alias and gets wrapped in parentheses. Any other value, a key path such as `source.rel_path[-1]` among them, is substituted literally, and a value that does not read where it is used is rejected there, as part of the filter it was used in.
 
 **Rules:**
 - Alias names must start with a letter and can contain letters, digits, underscores, and hyphens
 - `@` inside quoted strings is treated as a literal character, not an alias reference
-- Nested aliases are not supported: an `@name` where a key belongs in an alias's value gives an error naming it; elsewhere in a value an `@` is literal
+- Nested aliases are not supported: an alias's value is substituted without being expanded again, so an `@name` where a key belongs in it gives an error naming it, and an `@` elsewhere in it is a character that needs quotes (`icon = 'filename="icon@2x.png"'`)
 - The aliases file is only loaded when `@` appears in a `--where` argument
 - If the file doesn't exist and no `@` aliases are used, no error is raised
 

@@ -11,14 +11,22 @@
 //!
 //! `read_key_name` is the one reader of a key's name, and each command applies
 //! its own rule to the readings it gets. Parsing a written key splits it into
-//! that name, an optional path accessor, and a modifier chain — the same
-//! reading for both halves of the language.
+//! that name, an optional path accessor, and a modifier chain. Two grammars read a written
+//! key: `read_key`, the reader's, and `parse_key_and_accessor` with `parse_modifier`, which
+//! patterns read through (`read_key` also reads a built-in key's own modifier with
+//! `parse_modifier`).
 
 use anyhow::{bail, Result};
 
 use super::bind::{check_read_as, ReadAs, Refused};
-use super::transform::{apply_chain, Modified, ModifierCall, PathAccessor};
+use super::print::quoted;
+use super::problem::{cut, Fix, Place};
+use super::read::{is_space, read_quoted, skip_end, skip_to, Cursor, Grammar};
+use super::transform::{
+    apply_chain, parse_modifier, Modified, Modifier, ModifierCall, PathAccessor,
+};
 use crate::core::domain::fact::{FactType, FactValue};
+use crate::core::domain::number::read_number;
 use crate::core::domain::time::zone::UserZone;
 
 // ============================================================================
@@ -465,9 +473,9 @@ impl Key {
 
 /// A parsed fact key with optional accessor and modifiers.
 ///
-/// What `expr::read_report` gives a report for each key: the key as written, read through the one key
-/// reader (`filter::WrittenKey::read`) and checked against its type, then applied to every
-/// source a distribution or a grouping counts.
+/// What `expr::read_report` gives a report for each key: the key as typed, read by the key grammar
+/// ([`read_key`]) and checked against its type, then applied to every source a distribution or
+/// a grouping counts.
 ///
 /// ## Example
 ///
@@ -480,7 +488,8 @@ impl Key {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ParsedFactKey {
-    /// Original key string for display (e.g., "source.mtime|year")
+    /// The key's text as the reader read it, for display: as typed, quotes kept, the spaces
+    /// around it dropped (e.g., "source.mtime|year")
     pub raw: String,
     /// Base fact key after reading (e.g., "source.mtime")
     pub base_key: String,
@@ -506,13 +515,20 @@ impl ParsedFactKey {
     /// other name is read under `content.` (`Make` becomes `content.Make`).
     #[cfg(test)]
     pub fn parse(key: &str) -> Result<Self> {
-        let read = super::filter::WrittenKey::read(key)?;
+        let reading = super::read::read_keys(key, 0, Grammar::Key);
+        let (true, Some([read])) = (reading.problems.is_empty(), reading.value.as_deref()) else {
+            anyhow::bail!("not one key: {key}: {:?}", reading.problems);
+        };
         Ok(Self {
-            raw: key.to_string(),
-            base_key: read.base,
-            accessor: read.accessor,
-            modifiers: read.modifiers,
-            key: read.key,
+            raw: read.input.clone(),
+            base_key: read.base.clone(),
+            accessor: read.accessor.as_ref().map(|(accessor, _)| accessor.clone()),
+            modifiers: read
+                .modifiers
+                .iter()
+                .map(|(call, _)| call.clone())
+                .collect(),
+            key: read.key.clone(),
             read_as: ReadAs::Any,
         })
     }
@@ -631,6 +647,389 @@ pub(in crate::expr) fn read_base_key(key: &str) -> (String, Option<&'static str>
 
 fn builtin_name(key: BuiltinKey) -> &'static str {
     key.into()
+}
+
+// ============================================================================
+// The key grammar
+// ============================================================================
+
+/// A key as typed, and what it reads as: the whole key and its name part as typed (quotes
+/// included), where each sits, the key its name reads as (`read_key_name(..).in_expression()`;
+/// `None` for a `source.` name that is no source fact), the base key a value is read from, its
+/// accessor and its modifiers, each with its place.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::expr) struct InputKey {
+    pub input: String,
+    pub input_name: String,
+    pub place: Place,
+    pub name_place: Place,
+    pub key: Option<Key>,
+    pub base: String,
+    pub accessor: Option<(PathAccessor, Place)>,
+    pub modifiers: Vec<(ModifierCall, Place)>,
+}
+
+impl InputKey {
+    /// Whether the key reads its base through an accessor or a modifier.
+    pub(in crate::expr) fn has_transforms(&self) -> bool {
+        self.accessor.is_some() || !self.modifiers.is_empty()
+    }
+
+    fn is_quoted(&self) -> bool {
+        self.input_name.starts_with(['"', '\''])
+    }
+
+    /// Whether the name is `word`, typed bare — the one spelling a keyword or status word has;
+    /// a quoted word is never one.
+    pub(in crate::expr) fn is_bare_name_spelled(&self, word: &str) -> bool {
+        !self.is_quoted() && self.input_name == word
+    }
+
+    /// Whether the name, bare or quoted, is `name`.
+    pub(in crate::expr) fn names(&self, name: &str) -> bool {
+        self.input_name == name || (self.is_quoted() && self.name_text() == name)
+    }
+
+    /// The name inside its quotes, an inner quote undoubled.
+    fn name_text(&self) -> String {
+        let mut cursor = Cursor::new(&self.input_name, 0);
+        if self.is_quoted() {
+            read_quoted(&mut cursor).unwrap_or_default()
+        } else {
+            self.input_name.clone()
+        }
+    }
+
+    /// **The quoted name a refusal may offer**: the name quoted, where the key is a bare name and the character
+    /// straight after it (byte `end` of `text`) is one a name cannot contain and that cannot
+    /// start anything that may follow a key in this position. In a filter a space may stand
+    /// before an operator, so it never is one; in a report key a space followed by more text
+    /// (not a `,`) is. The quoted name runs to where what follows the key may start. Whether it
+    /// is shown is binding's (a key with facts).
+    pub(in crate::expr) fn quoted_name_fix(
+        &self,
+        text: &str,
+        end: usize,
+        grammar: Grammar,
+    ) -> Option<String> {
+        // A key ending past its name has an accessor or a modifier typed after it; a built-in
+        // key's own reading (`hash_short` as `|short`) is no such text.
+        if self.is_quoted() || end != self.name_place.end {
+            return None;
+        }
+        let rest = cut(text, end, text.len());
+        let next = rest.chars().next()?;
+        let candidate = match grammar {
+            Grammar::Filter => !follows_a_key_in_a_filter(rest),
+            Grammar::Key | Grammar::KeyList => {
+                let more = rest.trim_start_matches(is_space).chars().next();
+                match (is_space(next), grammar) {
+                    (true, Grammar::KeyList) => more.is_some_and(|c| c != ','),
+                    (true, _) => more.is_some(),
+                    (false, Grammar::KeyList) => next != ',',
+                    (false, _) => true,
+                }
+            }
+        };
+        if !candidate {
+            return None;
+        }
+        // The name runs to where what may follow it starts, read as the reader skips: a `)`
+        // closing a `(` the name opened belongs to it (`content.Foo(5)`), and quoted text where a
+        // part starts is stepped over whole.
+        let extent = skip_end(text, end, |at, c| match grammar {
+            Grammar::Filter => follows_a_key_in_a_filter(at.rest()),
+            Grammar::Key => matches!(c, '[' | '|'),
+            Grammar::KeyList => matches!(c, '[' | '|' | ','),
+        }) - end;
+        let name = format!(
+            "{}{}",
+            self.input_name,
+            cut(rest, 0, extent).trim_end_matches(is_space)
+        );
+        Some(quoted(&name))
+    }
+}
+
+/// Whether `rest` starts with what may follow a key in a filter: a space, `[`, `|`, an
+/// operator (`?` among them), `)` or `,`.
+pub(in crate::expr) fn follows_a_key_in_a_filter(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) if is_space(c) => true,
+        Some('[' | '|' | '=' | '<' | '>' | '~' | '?' | ')' | ',') => true,
+        Some('!') => matches!(chars.next(), Some('=' | '~')),
+        _ => false,
+    }
+}
+
+/// Whether a not-a-key text ends before `rest`: at what may follow a key in this position — in
+/// a filter an operator, `?`, a space, `)` or `,`; in a key list a `,`; for one key only the
+/// end.
+fn ends_not_a_key(rest: &str, grammar: Grammar) -> bool {
+    let mut chars = rest.chars();
+    match grammar {
+        Grammar::Filter => match chars.next() {
+            Some(c) if is_space(c) => true,
+            Some('=' | '<' | '>' | '~' | '?' | ')' | ',') => true,
+            Some('!') => matches!(chars.next(), Some('=' | '~')),
+            _ => false,
+        },
+        Grammar::KeyList => chars.next() == Some(','),
+        Grammar::Key => false,
+    }
+}
+
+/// Whether `c` continues a bare name: letters and digits of any language, `_ . : / -`.
+pub(in crate::expr) fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-')
+}
+
+/// The rule line under every `|bucket` number sentence.
+const BUCKET_RULE: &str = "|bucket takes numbers: |bucket(10,100)";
+
+/// **The key grammar**: a name — a letter or `_` first, then letters, digits and
+/// `_ . : / -` — or a quoted name; then one `[…]` straight after it; then modifiers `|name`, the
+/// name in exact lower case, only `|bucket` taking numbers in parentheses. The key ends at the
+/// first character that does not fit, and the caller says what may stand there. Problems
+/// inside the key are recorded on the cursor; `None` where nothing can be read as a key — a
+/// text that is not one, an empty quoted name — or reading stopped.
+pub(in crate::expr) fn read_key(cursor: &mut Cursor, grammar: Grammar) -> Option<InputKey> {
+    let start = cursor.at();
+    let first = cursor.peek()?;
+    let name = if matches!(first, '"' | '\'') {
+        let name = read_quoted(cursor)?;
+        if name.is_empty() {
+            let typed = cursor.slice(start, cursor.at()).to_string();
+            cursor.problem(
+                start,
+                cursor.at(),
+                format!("`{typed}` is not a key"),
+                None,
+                Fix::None,
+            );
+            return None;
+        }
+        name
+    } else if first.is_alphabetic() || first == '_' {
+        cursor.bump_while(is_name_char);
+        cursor.slice(start, cursor.at()).to_string()
+    } else {
+        // The text runs to what may follow a key here, read as the reader skips; it is named
+        // before it is read through, so a quote in it that never closes is named after it.
+        // A `(` it starts with is paired like any other; any other first character is its own.
+        let ends = |at: &Cursor, _| ends_not_a_key(at.rest(), grammar);
+        let from = if first == '(' {
+            start
+        } else {
+            start + first.len_utf8()
+        };
+        let run_end = skip_end(cursor.text(), from, ends);
+        let typed = cursor.slice(start, run_end).trim_end_matches(is_space);
+        let end = start + typed.len();
+        let sentence = format!("`{typed}` is not a key");
+        cursor.problem(start, end, sentence, None, Fix::None);
+        cursor.set_at(from);
+        skip_to(cursor, ends);
+        return None;
+    };
+    let name_end = cursor.at();
+    let name_place = cursor.place(start, name_end);
+
+    let accessor = if cursor.peek() == Some('[') {
+        Some(read_accessor(cursor)?)
+    } else {
+        None
+    };
+
+    let (base, leading) = read_base_key(&name);
+    let mut modifiers = Vec::new();
+    if let Some(leading) = leading {
+        let call = parse_modifier(leading).expect("a built-in key's reading names a modifier");
+        modifiers.push((call, name_place));
+    }
+    while cursor.peek() == Some('|') {
+        if let Some(modifier) = read_modifier(cursor) {
+            modifiers.push(modifier);
+        }
+    }
+
+    let end = cursor.at();
+    Some(InputKey {
+        input: cursor.slice(start, end).to_string(),
+        input_name: cursor.slice(start, name_end).to_string(),
+        place: cursor.place(start, end),
+        name_place,
+        key: Key::read(&name),
+        base,
+        accessor: accessor.flatten(),
+        modifiers,
+    })
+}
+
+/// `[n]` or `[a:b]`, from the `[`: whole numbers, an optional leading `-`, no `+`, no spaces,
+/// either bound of a slice left out at will. `Some(None)` where a position cannot be read (its
+/// problem recorded), `None` where the `[` never closes (reading stopped).
+fn read_accessor(cursor: &mut Cursor) -> Option<Option<(PathAccessor, Place)>> {
+    let open = cursor.at();
+    cursor.bump();
+    let inner_start = cursor.at();
+    cursor.bump_while(|c| c != ']');
+    if cursor.at_end() {
+        cursor.problem(open, open + 1, "this `[` is unclosed", None, Fix::None);
+        cursor.stop();
+        return None;
+    }
+    let inner_end = cursor.at();
+    cursor.bump();
+    let place = cursor.place(open, cursor.at());
+    let inner = cursor.slice(inner_start, inner_end);
+    if inner.is_empty() {
+        let sentence = "a position is missing after `[`";
+        cursor.problem(inner_end, inner_end + 1, sentence, None, Fix::None);
+        return Some(None);
+    }
+    let parts: Vec<(usize, &str)> = match inner.find(':') {
+        None => vec![(inner_start, inner)],
+        Some(colon) => vec![
+            (inner_start, cut(inner, 0, colon)),
+            (inner_start + colon + 1, cut(inner, colon + 1, inner.len())),
+        ],
+    };
+    let mut bounds = Vec::new();
+    for &(at, part) in &parts {
+        if part.is_empty() && parts.len() == 2 {
+            bounds.push(None);
+            continue;
+        }
+        match whole_number(part) {
+            Some(n) => bounds.push(Some(n)),
+            None => cursor.problem(
+                at,
+                at + part.len(),
+                format!(
+                    "`{part}` is not a position — positions are whole numbers: [0], [-1], [1:3]"
+                ),
+                None,
+                Fix::None,
+            ),
+        }
+    }
+    if bounds.len() != parts.len() {
+        return Some(None);
+    }
+    let accessor = match bounds.as_slice() {
+        [Some(index)] => PathAccessor::Index(*index),
+        [start, end] => PathAccessor::Slice {
+            start: *start,
+            end: *end,
+        },
+        _ => unreachable!("one bound per part, every part read"),
+    };
+    Some(Some((accessor, place)))
+}
+
+/// A whole number as a position writes it: digits, an optional leading `-`.
+fn whole_number(text: &str) -> Option<i32> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// One modifier, from its `|`: the name in exact lower case, and for `|bucket` the numbers in
+/// parentheses after it. `None` where it cannot be read (its problem recorded). Any other
+/// modifier followed by `(` ends the key there.
+fn read_modifier(cursor: &mut Cursor) -> Option<(ModifierCall, Place)> {
+    use strum::IntoEnumIterator;
+
+    let bar = cursor.at();
+    cursor.bump();
+    let name_start = cursor.at();
+    cursor.bump_while(|c| c.is_alphanumeric() || c == '_');
+    let name = cursor.slice(name_start, cursor.at());
+    if name.is_empty() {
+        let at = cursor.at();
+        let end = at + cursor.peek().map_or(0, char::len_utf8);
+        cursor.problem(at, end, "a modifier is missing after `|`", None, Fix::None);
+        return None;
+    }
+    let Some(modifier) = Modifier::iter().find(|m| <&'static str>::from(*m) == name) else {
+        let all: Vec<&'static str> = Modifier::iter().map(<&'static str>::from).collect();
+        let sentence = format!(
+            "`|{name}` is not a modifier — Modifiers: {}",
+            all.join(", ")
+        );
+        let end = cursor.at();
+        cursor.problem(bar, end, sentence, None, Fix::None);
+        return None;
+    };
+    let args = if modifier == Modifier::Bucket && cursor.peek() == Some('(') {
+        read_bucket_numbers(cursor)?
+    } else {
+        Vec::new()
+    };
+    let place = cursor.place(bar, cursor.at());
+    Some((ModifierCall { modifier, args }, place))
+}
+
+/// `|bucket`'s numbers, from the `(`: one or more, separated by commas, each larger than the
+/// one before, spaces allowed inside the parentheses. `None` where they cannot be read (each
+/// problem recorded).
+fn read_bucket_numbers(cursor: &mut Cursor) -> Option<Vec<f64>> {
+    let open = cursor.at();
+    cursor.bump();
+    let before = cursor.problem_count();
+    let mut numbers: Vec<f64> = Vec::new();
+    let mut first = true;
+    loop {
+        cursor.skip_spaces();
+        let item_start = cursor.at();
+        cursor.bump_while(|c| c != ',' && c != ')');
+        if cursor.at_end() {
+            // Everything after the `(` was read as its numbers.
+            cursor.problem(open, open + 1, "this `(` is unclosed", None, Fix::None);
+            cursor.stop();
+            return None;
+        }
+        let item = cursor
+            .slice(item_start, cursor.at())
+            .trim_end_matches(is_space);
+        let item_end = item_start + item.len();
+        if item.is_empty() {
+            let sentence = if first {
+                "a number is missing after `(`"
+            } else {
+                "a number is missing after `,`"
+            };
+            let at = cursor.at();
+            cursor.problem(at, at + 1, sentence, Some(BUCKET_RULE), Fix::None);
+        } else {
+            match read_number(item) {
+                Err(_) => cursor.problem(
+                    item_start,
+                    item_end,
+                    format!("`{item}` is not a number"),
+                    Some(BUCKET_RULE),
+                    Fix::None,
+                ),
+                Ok(n) if numbers.last().is_some_and(|&last| n <= last) => cursor.problem(
+                    item_start,
+                    item_end,
+                    "each number of |bucket must be larger than the one before",
+                    Some(BUCKET_RULE),
+                    Fix::None,
+                ),
+                Ok(n) => numbers.push(n),
+            }
+        }
+        first = false;
+        if cursor.bump() == Some(')') {
+            break;
+        }
+    }
+    (cursor.problem_count() == before).then_some(numbers)
 }
 
 // ============================================================================
@@ -806,8 +1205,8 @@ mod tests {
         assert!(names(KeyKind::ContentFact).is_empty());
     }
 
-    /// A reading turns an alias into its stored key once, through the one key reader
-    /// (`WrittenKey::read`) that `--where`, `--key` and `--group-by` share. It holds because a
+    /// A reading turns an alias into its stored key once, through the key grammar ([`read_key`])
+    /// that `--where`, `--key` and `--group-by` share. It holds because a
     /// target is a content fact, which has no reading; a doubled `short` would hide, since
     /// cutting a cut hash changes nothing, so the modifier count is what is asserted.
     #[test]
@@ -823,7 +1222,10 @@ mod tests {
                 matches!(Key::read(target), Some(Key::ContentFact(_))),
                 "{name} reads as {target}, which has a reading of its own"
             );
-            let filter = super::super::filter::WrittenKey::read(name).unwrap();
+            let filter = super::super::read::read_keys(name, 0, Grammar::Key)
+                .value
+                .unwrap()
+                .remove(0);
             assert_eq!(filter.base, target, "{name}");
             assert_eq!(
                 filter.modifiers.len(),
@@ -958,5 +1360,394 @@ mod tests {
                 "stem",
             ]
         );
+    }
+
+    // =========================================================================
+    // The key grammar
+    // =========================================================================
+
+    use super::super::problem::Problem;
+    use super::super::read::read_keys;
+
+    type Said = (usize, String, Option<String>, Fix);
+
+    fn said(problems: &[Problem]) -> Vec<Said> {
+        problems
+            .iter()
+            .map(|p| {
+                (
+                    p.place.start,
+                    p.sentence.clone(),
+                    p.rule_line.clone(),
+                    p.fix.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Each key read without a problem, as typed, and every problem.
+    fn read(text: &str, grammar: Grammar) -> (Vec<String>, Vec<Said>) {
+        let reading = read_keys(text, 0, grammar);
+        let keys = reading.value.unwrap_or_default();
+        (
+            keys.into_iter().map(|k| k.input).collect(),
+            said(&reading.problems),
+        )
+    }
+
+    fn one(at: usize, sentence: &str) -> Vec<Said> {
+        vec![(at, sentence.to_string(), None, Fix::None)]
+    }
+
+    fn with_rule(at: usize, sentence: &str, rule: &str) -> Vec<Said> {
+        vec![(at, sentence.to_string(), Some(rule.to_string()), Fix::None)]
+    }
+
+    /// Where a filter's key ends and where the cursor stands after it.
+    fn key_in_filter(text: &str) -> (InputKey, usize) {
+        let mut cursor = Cursor::new(text, 0);
+        let key = read_key(&mut cursor, Grammar::Filter).expect(text);
+        assert_eq!(cursor.problem_count(), 0, "{text}");
+        (key, cursor.at())
+    }
+
+    #[test]
+    fn a_key_ends_at_the_first_character_that_does_not_fit() {
+        for (text, key, end) in [
+            ("source.rel_path|stem[0]=a", "source.rel_path|stem", 20),
+            ("content.Foo@Bar=1", "content.Foo", 11),
+            ("source.mtime|year|stem(1)", "source.mtime|year|stem", 22),
+            ("Make IN (a)", "Make", 4),
+            ("source.rel_path[-1]|stem?", "source.rel_path[-1]|stem", 24),
+        ] {
+            let (read, at) = key_in_filter(text);
+            assert_eq!((read.input.as_str(), at), (key, end), "{text}");
+        }
+        let (key, _) = key_in_filter("source.rel_path[-1]|stem?");
+        assert_eq!(key.input_name, "source.rel_path");
+        assert_eq!(
+            key.accessor.map(|(a, p)| (a, p.start, p.end)),
+            Some((PathAccessor::Index(-1), 15, 19))
+        );
+        assert_eq!(key.modifiers.len(), 1);
+        assert_eq!(key.modifiers[0].0.modifier, Modifier::Stem);
+
+        // Where only the end may follow, what follows is named as it stands.
+        assert_eq!(
+            read("source.rel_path|stem(5)", Grammar::Key).1,
+            one(20, "`(5)` cannot follow `source.rel_path|stem`")
+        );
+    }
+
+    #[test]
+    fn only_bucket_takes_numbers() {
+        const RULE: &str = "|bucket takes numbers: |bucket(10,100)";
+        for text in [
+            "source.size|bucket(60,300)",
+            "source.size|bucket( 60 , 300 )",
+        ] {
+            let reading = read_keys(text, 0, Grammar::Key);
+            assert!(reading.problems.is_empty(), "{text}");
+            let keys = reading.value.unwrap();
+            assert_eq!(keys[0].modifiers[0].0.args, vec![60.0, 300.0], "{text}");
+        }
+        for (text, at, sentence) in [
+            ("source.size|bucket()", 19, "a number is missing after `(`"),
+            ("source.size|bucket(a)", 19, "`a` is not a number"),
+            (
+                "source.size|bucket(300,60)",
+                23,
+                "each number of |bucket must be larger than the one before",
+            ),
+            (
+                "source.size|bucket(1,1)",
+                21,
+                "each number of |bucket must be larger than the one before",
+            ),
+            (
+                "source.size|bucket(60,)",
+                22,
+                "a number is missing after `,`",
+            ),
+        ] {
+            assert_eq!(
+                read(text, Grammar::Key),
+                (vec![], with_rule(at, sentence, RULE)),
+                "{text}"
+            );
+        }
+        // Any other modifier takes nothing: the key ends at its `(`.
+        assert_eq!(
+            read("source.rel_path|stem(1)", Grammar::Key).1,
+            one(20, "`(1)` cannot follow `source.rel_path|stem`")
+        );
+    }
+
+    #[test]
+    fn a_comma_inside_bucket_or_a_quoted_name_belongs_to_the_key() {
+        assert_eq!(
+            read("Make,source.size|bucket(60,300)", Grammar::KeyList),
+            (
+                vec!["Make".to_string(), "source.size|bucket(60,300)".to_string()],
+                vec![]
+            )
+        );
+        let reading = read_keys(r#""a,b",Make"#, 0, Grammar::KeyList);
+        assert!(reading.problems.is_empty());
+        let keys = reading.value.unwrap();
+        assert_eq!(keys[0].input, r#""a,b""#);
+        assert_eq!(keys[0].base, "content.a,b");
+        assert_eq!(keys[1].base, "content.Make");
+    }
+
+    #[test]
+    fn spaces_around_a_comma_in_a_key_list() {
+        for text in ["Make , source.ext", " Make, source.ext ", "Make,source.ext"] {
+            assert_eq!(
+                read(text, Grammar::KeyList),
+                (vec!["Make".to_string(), "source.ext".to_string()], vec![]),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            read(" Make ", Grammar::Key),
+            (vec!["Make".to_string()], vec![])
+        );
+    }
+
+    #[test]
+    fn the_empty_key_sentences() {
+        for (text, grammar) in [
+            ("", Grammar::Key),
+            ("  ", Grammar::Key),
+            ("", Grammar::KeyList),
+        ] {
+            assert_eq!(
+                read(text, grammar),
+                (vec![], one(0, "the key is empty")),
+                "{text:?}"
+            );
+        }
+        let reading = read_keys("", 0, Grammar::Key);
+        assert_eq!(reading.problems[0].render("", "  "), ["  the key is empty"]);
+        assert_eq!(
+            read("Make,", Grammar::KeyList),
+            (
+                vec!["Make".to_string()],
+                one(5, "a key is missing after `,`")
+            )
+        );
+        assert_eq!(
+            read("Make,,Model", Grammar::KeyList),
+            (
+                vec!["Make".to_string(), "Model".to_string()],
+                one(5, "a key is missing after `,`")
+            )
+        );
+        assert_eq!(
+            read(",Make", Grammar::KeyList),
+            (
+                vec!["Make".to_string()],
+                one(0, "a key is missing before `,`")
+            )
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_dash_reads_bare() {
+        let reading = read_keys("content.XMP-dc:Subject", 0, Grammar::Key);
+        assert!(reading.problems.is_empty());
+        let key = &reading.value.unwrap()[0];
+        assert_eq!(key.base, "content.XMP-dc:Subject");
+        assert_eq!(
+            key.key,
+            Some(Key::ContentFact("content.XMP-dc:Subject".to_string()))
+        );
+    }
+
+    #[test]
+    fn modifier_names_are_exact_lower_case() {
+        assert_eq!(
+            read("source.mtime|YEAR", Grammar::Key),
+            (
+                vec![],
+                one(
+                    12,
+                    "`|YEAR` is not a modifier — Modifiers: year, month, day, hour, minute, second, \
+                     date, time, datetime, yearmonth, week, weekday, quarter, stem, ext, short, \
+                     lowercase, uppercase, capitalize, bucket, number"
+                )
+            )
+        );
+        let (keys, problems) = read("source.mtime|year", Grammar::Key);
+        assert_eq!((keys.len(), problems.len()), (1, 0));
+    }
+
+    /// The rest of the key grammar's sentences, one input each.
+    #[test]
+    fn every_sentence_of_the_key_grammar() {
+        const POSITIONS: &str = "positions are whole numbers: [0], [-1], [1:3]";
+        let position = |part: &str| format!("`{part}` is not a position — {POSITIONS}");
+        for (text, at, sentence) in [
+            ("source.rel_path[x]", 16, position("x")),
+            ("source.rel_path[+0]", 16, position("+0")),
+            ("source.rel_path[1:x]", 18, position("x")),
+            ("source.rel_path[1:2:3]", 18, position("2:3")),
+            ("source.rel_path[ 1]", 16, position(" 1")),
+            (
+                "source.rel_path[]",
+                16,
+                "a position is missing after `[`".to_string(),
+            ),
+            ("source.rel_path[0", 15, "this `[` is unclosed".to_string()),
+            (
+                "source.mtime|",
+                13,
+                "a modifier is missing after `|`".to_string(),
+            ),
+            ("%x", 0, "`%x` is not a key".to_string()),
+            (r#""""#, 0, r#"`""` is not a key"#.to_string()),
+            ("'Make", 0, "this quote is unclosed".to_string()),
+            (
+                "scope.rel_path",
+                0,
+                "`scope.rel_path` can only be used in a pattern".to_string(),
+            ),
+        ] {
+            assert_eq!(
+                read(text, Grammar::Key),
+                (vec![], one(at, &sentence)),
+                "{text}"
+            );
+        }
+        for slice in [
+            "source.rel_path[1:]",
+            "source.rel_path[:-1]",
+            "source.rel_path[:]",
+        ] {
+            let (keys, problems) = read(slice, Grammar::Key);
+            assert_eq!((keys.len(), problems.len()), (1, 0), "{slice}");
+        }
+        // A status word is not a key; quoted, it names the stored fact.
+        assert_eq!(
+            read("archived", Grammar::Key),
+            (
+                vec![],
+                with_rule(
+                    0,
+                    "`archived` is not a key",
+                    "a stored fact of that name is `content.archived`"
+                )
+            )
+        );
+        let reading = read_keys(r#""archived""#, 0, Grammar::Key);
+        assert!(reading.problems.is_empty());
+        assert_eq!(reading.value.unwrap()[0].base, "content.archived");
+        // A built-in key's reading is a leading modifier.
+        let reading = read_keys("hash_short", 0, Grammar::Key);
+        let key = &reading.value.unwrap()[0];
+        assert_eq!(key.base, CONTENT_HASH);
+        assert_eq!(key.modifiers[0].0.modifier, Modifier::Short);
+    }
+
+    /// The quoted name offered where the character straight after a bare name can start
+    /// nothing that may follow the key there (in a report key, a space followed by more).
+    #[test]
+    fn a_quoted_name_is_offered_only_where_nothing_may_follow_the_name() {
+        let offered = |at: usize, sentence: &str, rewrite: &str| {
+            vec![(
+                at,
+                sentence.to_string(),
+                None,
+                Fix::KeyName {
+                    rewrite: rewrite.to_string(),
+                },
+            )]
+        };
+        assert_eq!(
+            read("content.File Size", Grammar::Key).1,
+            offered(
+                13,
+                "`Size` cannot follow `content.File`",
+                r#""content.File Size""#
+            )
+        );
+        assert_eq!(
+            read("content.Foo@Bar", Grammar::Key).1,
+            offered(
+                11,
+                "`@Bar` cannot follow `content.Foo`",
+                r#""content.Foo@Bar""#
+            )
+        );
+        assert_eq!(
+            read("content.File Size, Make", Grammar::KeyList),
+            (
+                vec!["Make".to_string()],
+                offered(
+                    13,
+                    "`Size` cannot follow `content.File`",
+                    r#""content.File Size""#
+                )
+            )
+        );
+        // A built-in key's own reading is no modifier typed after its name.
+        assert_eq!(
+            read("hash_short@x", Grammar::Key).1,
+            offered(10, "`@x` cannot follow `hash_short`", r#""hash_short@x""#)
+        );
+        // An apostrophe inside a word opens no quote: the item ends at its `,`, where the
+        // quoted name ends too.
+        assert_eq!(
+            read("Make's,Model", Grammar::KeyList),
+            (
+                vec!["Model".to_string()],
+                offered(4, "`'s` cannot follow `Make`", r#""Make's""#)
+            )
+        );
+        // Quoted text where a part starts is stepped over by the item and the name alike.
+        assert_eq!(
+            read("Make x='a,b',Model", Grammar::KeyList),
+            (
+                vec!["Model".to_string()],
+                offered(5, "`x='a,b'` cannot follow `Make`", r#""Make x='a,b'""#)
+            )
+        );
+        // A `(` that never closes hides no `,`.
+        assert_eq!(
+            read("Make x(a, Model", Grammar::KeyList),
+            (
+                vec!["Model".to_string()],
+                offered(5, "`x(a` cannot follow `Make`", r#""Make x(a""#)
+            )
+        );
+        // Text that is not a key pairs the `(` it starts with.
+        assert_eq!(
+            read("(a,b), Model", Grammar::KeyList),
+            (vec!["Model".to_string()], one(0, "`(a,b)` is not a key"))
+        );
+        // After a modifier the key is no bare name; quoted, it already is one.
+        assert_eq!(
+            read("source.rel_path|stem(5)", Grammar::Key).1[0].3,
+            Fix::None
+        );
+        assert_eq!(read(r#""a"b"#, Grammar::Key).1[0].3, Fix::None);
+
+        // In a filter a space or an operator may follow a name; `@` or `(` cannot.
+        for (text, want) in [
+            ("content.Foo@Bar=1", Some(r#""content.Foo@Bar""#)),
+            ("content.Foo(5)=1", Some(r#""content.Foo(5)""#)),
+            ("content.Foo@Bar|year=1", Some(r#""content.Foo@Bar""#)),
+            ("content.Foo =1", None),
+            ("content.Foo!=1", None),
+            ("content.Foo?", None),
+        ] {
+            let (key, at) = key_in_filter(text);
+            assert_eq!(
+                key.quoted_name_fix(text, at, Grammar::Filter).as_deref(),
+                want,
+                "{text}"
+            );
+        }
     }
 }

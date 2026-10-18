@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::filter::Expr;
+use super::read::read_filter;
 
 /// Check if a filter string contains any `@` alias references outside of quoted strings.
 /// This is the fast-path check to avoid loading the aliases file when not needed.
@@ -31,7 +31,7 @@ pub fn has_alias_references(input: &str) -> bool {
 
 /// The alias name that starts at `chars[at]`, just after an `@`: a letter, then letters, digits,
 /// `_` and `-`. `None` where no name starts there. The one spelling of an alias name: expansion
-/// reads references through it, and the tokenizer names an unexpanded one through it.
+/// reads references through it, and the filter reader names an unexpanded one through it.
 pub(super) fn alias_name_at(chars: &[char], at: usize) -> Option<String> {
     if !chars.get(at).is_some_and(|c| c.is_ascii_alphabetic()) {
         return None;
@@ -44,13 +44,13 @@ pub(super) fn alias_name_at(chars: &[char], at: usize) -> Option<String> {
 }
 
 /// Classify alias values: expression aliases get wrapped in parentheses,
-/// key aliases pass through unchanged. Classification uses `Expr::parse()` (a clause whose key
-/// cannot be read still parses, and is refused where the alias is used) —
-/// if the value parses as a valid filter expression, it's an expression alias.
+/// key aliases pass through unchanged. A value the reader reads as a filter with no
+/// problem is an expression alias; any other value is pasted in as it stands, and is refused
+/// where the alias is used if it cannot be read there.
 pub fn classify_aliases(raw: HashMap<String, String>) -> HashMap<String, String> {
     raw.into_iter()
         .map(|(name, value)| {
-            let processed = if Expr::parse(&value).is_ok() {
+            let processed = if read_filter(&value, 0).problems.is_empty() {
                 format!("({value})")
             } else {
                 value

@@ -129,6 +129,15 @@ pub fn insert_fact(conn: &Connection, source_id: i64, key: &str, value: &str) {
     .unwrap();
 }
 
+/// Insert a number fact for a source.
+pub fn insert_number_fact(conn: &Connection, source_id: i64, key: &str, n: f64) {
+    conn.execute(
+        "INSERT INTO facts (entity_type, entity_id, key, value_num, observed_at, observed_basis_rev) VALUES ('source', ?, ?, ?, 0, 0)",
+        rusqlite::params![source_id, key, n],
+    )
+    .unwrap();
+}
+
 /// Insert a text fact on content (an object), the other half of a source's two rows.
 pub fn insert_object_fact(conn: &Connection, object_id: i64, key: &str, value: &str) {
     conn.execute(

@@ -9,19 +9,19 @@ surface, and every subsystem that takes a **selection** consumes it.
 engine consumes finished results — it never re-derives a rule. When a rule looks like it
 needs restating somewhere else, that is the signal something belongs in this facility.
 
-**Modules**: `domain/key`, `domain/transform`, `domain/pattern`, `domain/vantage`,
-`domain/filter`, `domain/bind`, `domain/print`, `domain/cache`, `domain/value`,
-`domain/alias`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
+**Modules**: `domain/key`, `domain/read`, `domain/problem`, `domain/transform`,
+`domain/pattern`, `domain/vantage`, `domain/filter`, `domain/bind`, `domain/print`,
+`domain/cache`, `domain/value`, `domain/alias`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
 `ops/value`, `repo`.
 
 ## Strata
 
 **`domain/`** — the language as pure logic, no I/O anywhere. `key` is the key vocabulary and
-how a written key is read. `transform` holds the modifiers and path accessors a value can be
+how a written key is read. `read` is the reader — see The reader below — and `problem` what
+it records where a text cannot be read, and how a refusal draws it. `transform` holds the modifiers and path accessors a value can be
 put through. `pattern` parses and evaluates the shaping half, and `vantage` owns the one rule
 that half cannot answer per source — see The scope vantage below. `filter` is the asking
-half: the `--where` grammar, its syntax tree, the comparisons it reduces to, and the glob
-matcher. `bind` reads each clause's value as its key's type — the modifier table, the
+half: the syntax tree the reader builds, the comparisons it reduces to, and the glob matcher. `bind` reads each clause's value as its key's type — the modifier table, the
 bare-value classes, the refusal and its ways out — and `print` is the printing rule. `cache`
 is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
 because putting a return type in the layer above the function that returns it is a
@@ -59,14 +59,41 @@ exported item takes a type nothing outside names, and return types never do.
 direction. A sibling may not bind the facility's own name (`use crate::expr;`) — the boundary
 checks cannot see through a bare `expr::` prefix.
 
+## The reader
+
+**What may stand at a position decides what is read there**, and where it cannot be read, that
+position's sentence follows (`domain/read.rs`: `read_filter`, and `read_keys` for `--key` and
+`--group-by`). A keyword is one only in exact capitals and only where one may stand; elsewhere
+the word is a value or a key's name. A status word (`archived`, `hashed`, `excluded`, `enriched`)
+is one only unquoted and in lower case, and takes `?` alone, refused with an operator, an accessor
+or a modifier; quoted or in other case it is a key name (`"archived"?` asks about
+`content.archived`; `status_words_count_only_in_lower_case_and_only_with_a_question_mark`). A key is read by one grammar, `domain/key.rs::read_key`,
+whose caller says what may follow it. A problem is recorded where it is met, as a byte range,
+and reading goes on: after a problem in a value at the value's end, after any other at the next
+`AND` or `OR` of the same group or the `)` closing it, quotes and closed parentheses
+stepped over. Reading **stops** only where everything after a point is inside it — an unclosed quote,
+`[` or `|bucket(` — and nothing is recorded after a stop. The reader words nothing that depends
+on a key's type: a value that cannot stand bare carries its first such character
+(`NeedsQuotes`, a wildcard outranking any other), and binding words it. `domain/problem.rs`
+draws a problem: the typed line that contains it, a caret counted in terminal columns, the
+sentence, its rule line, and a fix from a closed list (`Fix`). Pins:
+`a_keyword_is_a_keyword_only_where_one_may_stand`,
+`a_grammar_problem_resumes_at_the_next_and_or_or_closing_paren` and
+`reading_stops_at_an_unclosed_quote`.
+
+**Who reads through it**: binding (`--where`, `facts --key` and `--group-by`, a manifest's
+recorded query), the printing rule and alias sorting. Its tree is `domain/filter.rs`'s `Expr`.
+
 ## Binding
 
-**The binding law**: between parse and evaluation every `--where` clause reads its value once,
+**The binding law**: between reading and evaluation every `--where` clause reads its value once,
 as its key's type, and a value that cannot mean anything for the key is refused by name before
 anything is selected — never a silent false that `NOT` turns into every row. Owner
 `ops/bind.rs` (`read_filters`), over the pure `domain/bind.rs`. `apply_filters` takes only
 `BoundFilters`, which only `read_filters` makes, so an unbound filter cannot run; `read_report`
-reads a `facts` report's `--key`, `--group-by` and `--where` the same way. A key's type is read
+reads a `facts` report's `--key`, `--group-by` and `--where` the same way. A text with a problem
+the reader met never runs, though what of it could be read is bound, so its causes are named too
+(`a_filter_with_a_reading_problem_never_runs`). A key's type is read
 from all its rows (`core::repo::fact::key_types`), so parking, scope and presence never move it.
 **Text is text**: against a text key, a bare value shaped like a number or a time is refused, and
 quoted it is text; against a number or time key, a quoted value means the same as a bare one.
@@ -85,34 +112,42 @@ and `a_key_that_gains_its_first_facts_mid_run_refuses_the_run`, on the report by
 `a_type_that_changes_mid_report_refuses_the_report`.
 
 What a modifier reads and gives is one table, `result_of`, read by binding and agreeing with the
-chain. Every cause is collected into one `FilterRefused`, its causes matched with no `_` arm: each
-entry names the clause as written in the expanded filter, and its ways out rewrite only what
-they change. **A way out makes what it rewrites bind**: a way out is one value, `Way` — what it
+chain. Every problem and cause is collected into one `ExpressionRefused`, its causes matched with
+no `_` arm (a command's refused key names join it, the filter's first line leading:
+`unknown_keys`, `join`), and each is drawn under the typed line it sits in, a caret under the value, the
+key's name, the `|` of a modifier or the `[` of an accessor; a key of two types keeps its
+`clause: statement` line. Where the key gives text, an unquoted value's character that needs
+quotes, or a wildcard after `=`, `!=` or in a list, is binding's sentence; any other type reads
+the value as that type. Ways out rewrite only what they change. **A way out makes what it rewrites bind**: a way out is one value, `Way` — what it
 does and what it rewrites to — and every one that rewrites is bound before it is shown, a
 filter's as a clause, a report's as a key, and dropped if it would be refused again
 (`keep_ways_that_bind`). Pinned at the filter by `every_way_out_binds_the_whole_clause`, at the
-report by `a_report_key_is_read_and_checked_like_a_filter_key`. **Held by discipline**: a builder
+report by `a_report_key_is_read_and_checked_like_a_filter_key`. A fix from the closed list
+(`Fix`) is checked the same way: the quoted value, or the glob and the exact text, both or
+neither, read back and bound before it is shown; a quoted name only where it names a key with
+facts (`every_fix_shown_reads_back_and_binds`, `a_quoted_name_is_offered_only_for_a_key_with_facts`). **Held by discipline**: a builder
 offers a rewrite through `Way::to`, never as hint text, and a new caller of `bind_key` calls the
 check. The conversion pointer rewrites nothing and is gated where it is built. A cause about what a key is — two types, or a
 type that changed, or a key that gained its first facts, while the run read it — is an answer and prints without `Error:`
-(`FilterRefused::is_answer`); every other cause is input Canon cannot read. Evaluation compares
+(`ExpressionRefused::is_answer`); every other cause is input Canon cannot read. Evaluation compares
 text by code point, numbers with a tolerance, times through the time noun's period table, a
 modifier's part as a whole number, a bucket's label by equality.
 
 **Where it does not apply**: a pattern, which reads its keys through `parse_key_and_accessor`
 and meets a wrong-type modifier as a gap when `apply` evaluates it; a manifest's recorded query
-is bound like `--where`, read as written with no aliases, its causes joining a refresh's list
-without their ways out. It holds what expansion produced, so it is read as expanded text: an
-`@name` where a key belongs is named as an alias by the tokenizer, which also meets one left
-inside an alias's own value, and inside a value an `@` is text. The alias name has one
+is bound like `--where`, read as specified with no aliases, its refusal's first line saying so
+(`ExpressionRefused::into_specified`). It holds what expansion produced, so it is read as expanded
+text: an `@name` where a key belongs is named as an alias by the reader, which also meets one
+left inside an alias's own value; after `=` an `@` needs quotes, and after `~` it is part of the
+glob. The alias name has one
 spelling, `domain/alias.rs::alias_name_at`.
 
 ## The printing rule
 
 `domain/print.rs` writes a value or a key so that, typed into `--where`, it reads back as
 itself: bare where the reader reads the bare text back the same, double-quoted otherwise. The
-writer asks the reader — the tokenizer, alias expansion's `@` test and the binder's bare-value
-class — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
+writer asks the reader — the filter reader (`reads_as_one_bare_value`, `reads_as_one_bare_key`),
+alias expansion's `@` test and the binder's bare-value class — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
 printable one- and two-character value checked against the reader). A refusal's clauses and
 ways out print through it. So does the statement that keys hold two types and its way out
 (`mixed_type_statement`, `mixed_type_way_out`), which `facts`' listing, `cluster`'s summary and

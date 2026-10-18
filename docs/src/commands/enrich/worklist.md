@@ -98,7 +98,20 @@ A name starting with `source.` that is no source fact is refused before anything
 $ canon worklist --emit source.extension --emit source.nme
 Error: cannot use the key as given
   `source.extension` is an unknown key
+    `canon facts` lists the keys
   `source.nme` is an unknown key
+    `canon facts` lists the keys
+```
+
+A `--where` filter with a problem is refused in the same run, its problems first and under its own first line:
+
+```
+$ canon worklist --emit source.extension --where 'source.ext=a%b'
+Error: cannot run the filter as given
+  source.ext=a%b
+              ^ `%` needs quotes around the value: source.ext="a%b"
+  `source.extension` is an unknown key
+    `canon facts` lists the keys
 ```
 
 This enables processors to build on previous enrichment:

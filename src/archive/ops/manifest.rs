@@ -19,7 +19,7 @@ use rusqlite::Connection;
 
 use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
 use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, ZoneNameError};
-use crate::expr::{read_filters, BoundFilters, FilterRefused, Pattern, Unmeasured};
+use crate::expr::{read_filters, BoundFilters, ExpressionRefused, Pattern, Unmeasured};
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
 /// This prevents race conditions when opening the file in an editor
@@ -65,8 +65,9 @@ pub(super) fn write_lock_file(
 }
 
 /// The manifest's recorded query, read and bound once for a run as `--where` is: the bound
-/// filters, or — where any line cannot run — every cause with the clause it names, in the
-/// order they stand. The two are exclusive, so a refused query can never be selected on.
+/// filters, or — where any line cannot run — the refusal naming every cause, its first line
+/// saying the filter is the one the manifest specified. The two are exclusive, so a refused
+/// query can never be selected on.
 /// `cluster refresh` refuses on the causes, all in one run; `cluster status` names them as what
 /// would stop that refresh. Every cause reading and binding refuse the recorded text for is
 /// collected here, before anything runs; the text is read as written, so an `@name` in it is
@@ -74,11 +75,11 @@ pub(super) fn write_lock_file(
 pub fn parse_recorded_query(
     conn: &Connection,
     lines: &[String],
-) -> Result<std::result::Result<BoundFilters, Vec<(String, String)>>> {
+) -> Result<std::result::Result<BoundFilters, ExpressionRefused>> {
     match read_filters(conn, lines) {
         Ok(bound) => Ok(Ok(bound)),
-        Err(error) => match error.downcast::<FilterRefused>() {
-            Ok(refused) => Ok(Err(refused.entries())),
+        Err(error) => match error.downcast::<ExpressionRefused>() {
+            Ok(refused) => Ok(Err(refused.into_specified())),
             Err(other) => Err(other),
         },
     }

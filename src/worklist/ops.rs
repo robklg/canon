@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::core::domain::fact::FactValue;
@@ -16,7 +16,7 @@ use crate::core::domain::number::spelled;
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::Connection;
-use crate::expr::{fetch_named_values, Key};
+use crate::expr::{fetch_named_values, ExpressionRefused, Key};
 
 /// A single worklist entry, ready for JSONL serialization.
 #[derive(Serialize)]
@@ -43,19 +43,21 @@ pub struct WorklistResult {
 /// Each `--emit` name read as an expression reads it (`Key::read`): the source fact it
 /// names, else the built-in key, else the content fact (`Make` is `content.Make`) — kept
 /// beside the name as given, which names its field. Every name with no reading (a `source.`
-/// name that is no source fact) is refused, one line each under one first line, so one run
-/// names them all; the caller reads them before it selects anything.
-pub fn read_emit_keys(names: &[String]) -> Result<Vec<(String, Key)>> {
+/// name that is no source fact) is refused in one refusal, so one run names them all; the
+/// caller reads them before it selects anything.
+pub fn read_emit_keys(
+    names: &[String],
+) -> std::result::Result<Vec<(String, Key)>, ExpressionRefused> {
     let mut keys = Vec::with_capacity(names.len());
     let mut unknown = Vec::new();
     for name in names {
         match Key::read(name) {
             Some(key) => keys.push((name.clone(), key)),
-            None => unknown.push(format!("  `{name}` is an unknown key")),
+            None => unknown.push(name.clone()),
         }
     }
     if !unknown.is_empty() {
-        bail!("cannot use the key as given\n{}", unknown.join("\n"));
+        return Err(ExpressionRefused::unknown_keys(unknown));
     }
     Ok(keys)
 }
@@ -347,14 +349,16 @@ mod tests {
     }
 
     /// A name with no reading — a `source.` name that is no source fact — is refused, every
-    /// such name on its own line under one first line; a name that reads is never named.
+    /// such name on its own line under one first line, the unknown key's rule line under each;
+    /// a name that reads is never named.
     #[test]
     fn every_unknown_emit_name_is_refused_in_one_error() {
         let names = ["source.extension", "Make", "source.nme"].map(String::from);
         let refused = read_emit_keys(&names).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            "cannot use the key as given\n  `source.extension` is an unknown key\n  `source.nme` is an unknown key"
+            "cannot use the key as given\n  `source.extension` is an unknown key\n    `canon facts` \
+             lists the keys\n  `source.nme` is an unknown key\n    `canon facts` lists the keys"
         );
     }
 

@@ -18,7 +18,7 @@ use crate::core::domain::root::{ParkedRoot, Root};
 use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
-use crate::expr::{prefetch_pattern_facts, Unmeasured};
+use crate::expr::{prefetch_pattern_facts, ExpressionRefused, Unmeasured};
 
 use super::manifest::{parse_recorded_query, read_lock_file, read_manifest_config, LockZone};
 use super::pattern::PatternGaps;
@@ -225,9 +225,9 @@ pub struct ManifestStatus {
     /// where it has none — or why it cannot be settled (`settle_manifest_zone`, the refresh's
     /// own reading). Read only for what the report says about a refresh.
     pub manifest_zone: Result<ManifestZone, ZoneRefusal>,
-    /// Every cause the recorded query cannot run for, with the clause it names — what
-    /// `cluster refresh` refuses on (`parse_recorded_query`, its own reading).
-    pub query_causes: Vec<(String, String)>,
+    /// The recorded query's refusal, where it cannot run — what `cluster refresh` refuses on
+    /// (`parse_recorded_query`, its own reading).
+    pub query_refusal: Option<ExpressionRefused>,
     /// How many lock entries have no destination computed, because the lock records no zone
     /// this machine can read: every entry of such a lock, and none of any other. Counted in
     /// no destination state — neither pending nor at the destination — and said once.
@@ -272,7 +272,7 @@ impl ManifestStatus {
             scope_kept_nothing: self.scope_kept_nothing,
             scope_confirms_nothing: self.scope_confirms_nothing,
             zone_refusal: self.manifest_zone.as_ref().err().map(ZoneRefusal::kind),
-            query_refused: !self.query_causes.is_empty(),
+            query_refused: self.query_refusal.is_some(),
         }
     }
 
@@ -402,9 +402,7 @@ pub fn compute_manifest_status(
         };
     let lock_entry_count = lock_entries.len();
     let manifest_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
-    let query_causes = parse_recorded_query(conn, &config.meta.query)?
-        .err()
-        .unwrap_or_default();
+    let query_refusal = parse_recorded_query(conn, &config.meta.query)?.err();
 
     // 3. Fetch roots, build root_paths map
     let roots = repo::root::fetch_all(conn)?;
@@ -583,7 +581,7 @@ pub fn compute_manifest_status(
         expansion_failure_count,
         lock_zone,
         manifest_zone,
-        query_causes,
+        query_refusal,
         unplaced,
     })
 }
@@ -1338,7 +1336,7 @@ mod tests {
         rewrite_manifest_zone(&manifest, Some("Europe/Amsterdm"));
 
         let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
-        assert_eq!(status.query_causes.len(), 1, "{:?}", status.query_causes);
+        assert!(status.query_refusal.is_some());
         assert!(status.manifest_zone.is_err());
         assert_eq!(status.refresh_refused_by(), Some(RefreshRefusal::ZoneLine));
         assert!(status

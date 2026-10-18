@@ -245,7 +245,7 @@ fn base_value(
     key: &BoundKey,
     cache: &FactCache,
 ) -> Result<Option<FactValue>> {
-    let base = &key.written.base;
+    let base = &key.base;
     if let Some(computed) = Key::read(base).filter(Key::is_computed) {
         return Ok(fetch_source_row(conn, source_id)?.and_then(|row| row_value(&row, &computed)));
     }
@@ -264,10 +264,10 @@ fn through_chain(
     zone: &UserZone,
     record: &InstantRecord,
 ) -> Result<Option<FactValue>> {
-    let (accessor, modifiers) = (key.written.accessor.as_ref(), &key.written.modifiers);
+    let (accessor, modifiers) = (key.accessor.as_ref(), &key.modifiers);
     record.note(&value, accessor, modifiers);
     Ok(
-        match apply_chain(value, accessor, modifiers, &key.written.written, true, zone)? {
+        match apply_chain(value, accessor, modifiers, &key.input, true, zone)? {
             Modified::Value(v) => Some(v),
             Modified::NoValue(_) => None,
         },
@@ -300,7 +300,7 @@ fn check_exists(
     cache: &FactCache,
     zone: &UserZone,
 ) -> Result<bool> {
-    let base = &key.written.base;
+    let base = &key.base;
     let value = match Key::read(base) {
         Some(computed) if computed.is_computed() => fetch_source_row(conn, source_id)?
             .and_then(|row| source_row_value(&row.attributes, &computed)),
@@ -316,7 +316,7 @@ fn check_exists(
     let Some(value) = value else {
         return Ok(false);
     };
-    if !key.written.has_transforms() {
+    if !key.has_transforms() {
         return Ok(true);
     }
     Ok(through_chain(value, key, zone, &cache.instant_read)?.is_some())
@@ -333,9 +333,9 @@ mod tests {
     use crate::core::domain::number::spelled;
     use crate::core::repo::open_in_memory_for_test;
     use crate::core::testing::insert_time_fact;
-    use crate::expr::domain::filter::WrittenKey;
     use crate::expr::domain::filter::STATUS_KEYWORDS;
     use crate::expr::domain::print::printed_value;
+    use crate::expr::domain::read::Grammar;
     use crate::expr::domain::value::SourceAttributes;
     use crate::expr::ops::bind::bound;
     use rusqlite::Connection as RawConnection;
@@ -991,7 +991,11 @@ mod tests {
         // Refused when the filter is read, before any source is looked at.
         let err = crate::expr::ops::bind::read_filters(&conn, &["content.mime=image/jpeg".into()])
             .expect_err("an unknown key in a comparison is refused");
-        assert!(err.to_string().contains("Unknown fact key"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("^ `content.mime` is an unknown key\n    `canon facts` lists the keys"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1107,7 +1111,7 @@ mod tests {
                 panic!("{filter} ran over a changed type");
             };
             let refused = err
-                .downcast_ref::<crate::expr::FilterRefused>()
+                .downcast_ref::<crate::expr::ExpressionRefused>()
                 .unwrap_or_else(|| panic!("{filter}: {err}"));
             assert!(refused.is_answer(), "{filter}");
             assert_eq!(
@@ -1130,7 +1134,7 @@ mod tests {
             panic!("a key gaining facts mid-run must stop the run");
         };
         let refused = err
-            .downcast_ref::<crate::expr::FilterRefused>()
+            .downcast_ref::<crate::expr::ExpressionRefused>()
             .unwrap_or_else(|| panic!("{err}"));
         assert!(refused.is_answer());
         assert_eq!(
@@ -1662,7 +1666,11 @@ mod tests {
         let neighbour = insert_source_with_object(&conn, root, "b.txt", Some(other));
         let ids = [subject, neighbour];
 
-        let hash = WrittenKey::read("hash").unwrap().base;
+        let hash = crate::expr::domain::read::read_keys("hash", 0, Grammar::Key)
+            .value
+            .unwrap()
+            .remove(0)
+            .base;
         let cache = prefetch_facts(&mut conn, &ids, &[hash]).unwrap();
         assert!(matches!(
             cache.value(subject, "content.hash.sha256"),

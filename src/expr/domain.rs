@@ -1,6 +1,8 @@
 //! The expression facility's domain layer: the language itself, as pure logic.
 //!
-//! What a key may name and how a written key is read; the transforms a value
+//! The reader, which reads a typed expression once by one rule per position,
+//! and the problems it and binding find, with the caret layout a refusal
+//! draws them in. What a key may name and how a typed key is read; the transforms a value
 //! can be put through; the grammar and syntax tree of a `--where` expression,
 //! and the comparisons it comes down to; the patterns that arrange values into
 //! a path, and the place a scope-relative one measures from; the shape a
@@ -15,6 +17,8 @@ pub(super) mod filter;
 pub(super) mod key;
 pub(super) mod pattern;
 pub(super) mod print;
+pub(super) mod problem;
+pub(super) mod read;
 pub(super) mod transform;
 pub(super) mod value;
 pub(super) mod vantage;

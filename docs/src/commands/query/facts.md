@@ -57,6 +57,9 @@ canon facts --key source.ext --group-by 'source.mtime|year'
 
 # Compound grouping (root + another fact)
 canon facts --key source.ext --by-root --group-by 'content.Make'
+
+# Group by several keys, as a list
+canon facts --key content.Make --group-by 'content.Model, source.size|bucket(1e6,1e7)'
 ```
 
 The output begins with a scope header showing what's being queried (`Facts: /path` or `Facts: all roots`). It is printed whether or not anything matched, so a report of nothing says where Canon looked:
@@ -139,13 +142,27 @@ DateTimeOriginal|month                        Count   Coverage
 (no value)                                        1      25.0%
 ```
 
-A key or modifier Canon cannot use as written is rejected before anything is counted, every cause in `--key`, `--group-by` and `--where` at once. Each names a rewritten key where one works (`source.size|lowercase` names `source.size|number|lowercase`), and otherwise the modifiers that do apply to the key's type:
+`--group-by` takes one key or a list of keys separated by commas, with or without spaces around them. A comma inside `|bucket(…)` or inside a quoted name belongs to the key. `--group-by` can be given more than once.
+
+A key or modifier Canon cannot use as given is rejected before anything is counted, every cause in `--key`, `--group-by` and `--where` at once, in the [layout a filter's problems use](../../reference/filter.md#when-a-filter-is-rejected). Each names a rewritten key where one works (`source.size|lowercase` names `source.size|number|lowercase`), and otherwise the modifiers that do apply to the key's type:
 
 ```
-Error: cannot use the key as written
-  source.size|year: |year works on times or text; source.size holds numbers.
+Error: cannot use the key as given
+  source.size|year
+             ^ |year works on times or text; source.size holds numbers.
     Modifiers for numbers: |bucket, |number
 ```
+
+A key name with a space is written in quotes; for a key that has facts, Canon shows it quoted:
+
+```
+Error: cannot use the key as given
+  content.File Size
+               ^ `Size` cannot follow `content.File`
+    A key name contains letters, digits, _ . : / and -; quote a name with any other character: "content.File Size"
+```
+
+Where the `--where` filter has a problem too, the first line is the filter's: `Error: cannot run the filter as given`.
 
 A modifier on a key whose facts hold two types is rejected the same way, without `Error:`, since that is an answer about the key; the bare key still reports both types' rows.
 

@@ -15,6 +15,7 @@ use crate::archive::ops::pattern::PatternGaps;
 use crate::core::domain::format::shell_quote;
 use crate::core::domain::format_count;
 use crate::core::domain::time::zone::{RecordedZone, Unrecordable, UserZone, ZoneNameError};
+use crate::expr::ExpressionRefused;
 
 /// Whether a `cluster refresh` would run, as far as the caller telling the
 /// user about one knows.
@@ -621,15 +622,30 @@ fn manifest_zone_line_deleted(zone: &RecordedZone, manifest: &Path) -> String {
     )
 }
 
-/// A part of the recorded query that cannot run, as `cluster refresh` refuses on it and
-/// `cluster status` names it: the clause as written (or the whole line where it does not
-/// parse), what is wrong, and the way back. The clause is shown as typed, never re-quoted.
-fn query_line_refusal(clause: &str, error: &str, manifest: &Path) -> String {
+/// The way back from a recorded query that cannot run, as `cluster refresh` and `cluster
+/// status` state it.
+fn query_way_back(manifest: &Path) -> String {
     format!(
-        "the recorded query cannot run: {clause}: {error} — `{}` to fix the query and select \
-         again",
+        "`{}` to fix the query and select again",
         refresh_command(manifest, true)
     )
+}
+
+/// The recorded query's refusal as `cluster refresh` states it: the refusal — its first line,
+/// then each cause under the typed line it sits in — and the way back.
+fn query_refusal_block(refusal: &ExpressionRefused, manifest: &Path) -> String {
+    format!("{refusal}\n{}", query_way_back(manifest))
+}
+
+/// The recorded query's refusal as `cluster status` states it: what the refresh would be
+/// rejected for and the way back on one line, then each cause under it, four spaces further in.
+fn query_status_lines(refusal: &ExpressionRefused, manifest: &Path) -> Vec<String> {
+    let mut lines = vec![refresh_would_refuse(&format!(
+        "the recorded query cannot run — {}",
+        query_way_back(manifest)
+    ))];
+    lines.extend(refusal.render("    "));
+    lines
 }
 
 /// What stops a refresh — the manifest's zone or a query line — in the refresh's own words, as
