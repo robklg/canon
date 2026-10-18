@@ -3546,9 +3546,10 @@ mod tests {
     }
 
     /// **An `@name` where a key belongs is named as an alias**, which a manifest's query takes
-    /// none of — never as a stray character. After `~` an `@` is part of the glob, so a
-    /// generated line holding one (an alias `retina = "source.rel_path ~ *@2x*"`, recorded
-    /// expanded) still runs; after `=` it is a character that needs quotes, and quoted it runs.
+    /// none of — never as a stray character. After `~` an `@` is part of the glob, and needs
+    /// quotes there: a generated line holding one (an alias `retina = "source.rel_path ~ *@2x*"`,
+    /// recorded expanded) is refused for the character, never as an alias, and with the `@`
+    /// quoted it runs; after `=` it is a character that needs quotes, and quoted it runs.
     #[test]
     fn refresh_names_an_alias_in_the_recorded_query() {
         for (line, at) in [
@@ -3580,7 +3581,21 @@ mod tests {
             err.contains("  source.ext = @img\n               ^ `@` needs quotes around the value"),
             "{err}"
         );
-        for line in ["(source.rel_path ~ *@2x*)", "source.ext = \"@img\""] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut db, manifest, _lock) = new_year_setup(
+            dir.path(),
+            "(source.rel_path ~ *@2x*)",
+            Some("Europe/Amsterdam"),
+        );
+        let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
+        assert!(
+            err.contains(
+                "  (source.rel_path ~ *@2x*)\n                      ^ `@` needs quotes; quote that \
+                 part, but not * ? [ ]"
+            ),
+            "{err}"
+        );
+        for line in ["(source.rel_path ~ *\"@\"2x*)", "source.ext = \"@img\""] {
             let dir = tempfile::tempdir().unwrap();
             let (mut db, manifest, _lock) =
                 new_year_setup(dir.path(), line, Some("Europe/Amsterdam"));

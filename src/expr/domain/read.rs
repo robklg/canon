@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use unicode_normalization::char::is_combining_mark;
 
 use super::alias::alias_name_at;
-use super::filter::{is_value_char, CompareOp, Expr, InputValue, NeedsQuotes, STATUS_KEYWORDS};
+use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, STATUS_KEYWORDS};
+use super::glob::read_glob;
 use super::key::{follows_a_key_in_a_filter, is_name_char, read_key, InputKey, SCOPE_REL_PATH};
 use super::problem::{cut, Fix, Place, Problem};
 
@@ -492,16 +493,15 @@ pub(in crate::expr) fn reads_as_one_bare_key(key: &str) -> bool {
 
 /// Whether `c` may stand in an unquoted value: letters and digits of any language, accents and
 /// vowel signs written as their own character, and `_ . - / : +`.
-fn is_bare_value_char(c: char) -> bool {
+pub(in crate::expr) fn is_bare_value_char(c: char) -> bool {
     c.is_alphanumeric() || is_combining_mark(c) || matches!(c, '_' | '.' | '-' | '/' | ':' | '+')
 }
 
-/// What a value is read against, for the characters that may stand in it unquoted: a glob after `~` and `!~`
-/// keeps its own character set; after `=`, `!=` and in an `IN` list, `*`, `?` and `[` are
-/// wildcards.
+/// What a value is read against, for the characters that may stand in it unquoted: after `=`,
+/// `!=` and in an `IN` list, `*`, `?` and `[` are wildcards. A glob after `~` and `!~` is read
+/// by its own grammar (`domain/glob.rs`).
 #[derive(Clone, Copy)]
 struct ValueRead {
-    glob: bool,
     wildcards: bool,
     in_list: bool,
 }
@@ -731,35 +731,58 @@ impl<'t> FilterReader<'t> {
         };
         self.cursor.set_at(self.cursor.at() + op.typed.len());
         self.cursor.skip_spaces();
-        let read = ValueRead {
-            glob: op.op == CompareOp::Glob,
-            wildcards: op.op == CompareOp::Eq,
-            in_list: false,
-        };
-        let Some(value) = self.value(read) else {
-            let at = self.cursor.at();
-            let end = if self.cursor.at_end() { at } else { at + 1 };
+        let missing = |cursor: &mut Cursor| {
+            let at = cursor.at();
+            let end = if cursor.at_end() { at } else { at + 1 };
             let sentence = format!("a value is missing after `{}`", op.typed);
-            self.cursor.problem(at, end, sentence, None, Fix::None);
-            return None;
+            cursor.problem(at, end, sentence, None, Fix::None);
         };
-        let place = self.cursor.place(start, value.place.end);
-        let clause = self.cursor.slice(start, place.end).to_string();
-        self.after_value();
+        let condition = match op.reads {
+            Operation::Glob => {
+                let Some(glob) = read_glob(&mut self.cursor) else {
+                    // Where the glob stopped reading, the cursor records nothing more, so only
+                    // a glob that never started is said to be missing.
+                    missing(&mut self.cursor);
+                    return None;
+                };
+                let place = self.cursor.place(start, glob.place.end);
+                let clause = self.cursor.slice(start, place.end).to_string();
+                self.after_value(true);
+                Expr::Glob {
+                    key,
+                    glob,
+                    clause,
+                    place,
+                }
+            }
+            Operation::Compare(compare) => {
+                let read = ValueRead {
+                    wildcards: compare == CompareOp::Eq,
+                    in_list: false,
+                };
+                let Some(value) = self.value(read) else {
+                    missing(&mut self.cursor);
+                    return None;
+                };
+                let place = self.cursor.place(start, value.place.end);
+                let clause = self.cursor.slice(start, place.end).to_string();
+                self.after_value(false);
+                Expr::Compare {
+                    key,
+                    op: compare,
+                    value,
+                    clause,
+                    place,
+                }
+            }
+        };
         if !key_read || self.cursor.stopped() {
             return None;
         }
-        let compare = Expr::Compare {
-            key,
-            op: op.op,
-            value,
-            clause,
-            place,
-        };
         Some(if op.negated {
-            Expr::Not(Box::new(compare))
+            Expr::Not(Box::new(condition))
         } else {
-            compare
+            condition
         })
     }
 
@@ -775,7 +798,6 @@ impl<'t> FilterReader<'t> {
             return None;
         }
         let read = ValueRead {
-            glob: false,
             wildcards: true,
             in_list: true,
         };
@@ -890,11 +912,7 @@ impl<'t> FilterReader<'t> {
             let at = self.cursor.at();
             if read.wildcards && matches!(c, '*' | '?' | '[') {
                 wildcard.get_or_insert(at);
-            } else if !(if read.glob {
-                is_value_char(c)
-            } else {
-                is_bare_value_char(c)
-            }) {
+            } else if !is_bare_value_char(c) {
                 other.get_or_insert(at);
             }
             self.cursor.bump();
@@ -914,7 +932,8 @@ impl<'t> FilterReader<'t> {
 
     /// After a value, a space and more than `AND`, `OR`, a `)` or the end: the value ended at the
     /// space, the problem placed under that space, and reading resumes past what follows it.
-    fn after_value(&mut self) {
+    /// After a glob the sentence says which parts to quote.
+    fn after_value(&mut self, glob: bool) {
         let value_end = self.cursor.at();
         self.cursor.skip_spaces();
         if self.cursor.at() == value_end
@@ -925,10 +944,15 @@ impl<'t> FilterReader<'t> {
             return;
         }
         // The caret goes under the space that ended the value.
+        let sentence = if glob {
+            "a space separates values; quote the part with the space, but not * ? [ ]"
+        } else {
+            "a space separates values"
+        };
         self.cursor.problem(
             value_end,
             value_end + 1,
-            "a space separates values",
+            sentence,
             Some(AFTER_VALUE),
             Fix::None,
         );
@@ -994,27 +1018,39 @@ impl<'t> FilterReader<'t> {
 /// An operator as typed, what it reads as, and whether it is `NOT` of that.
 struct Operator {
     typed: &'static str,
-    op: CompareOp,
+    reads: Operation,
     negated: bool,
 }
 
-/// The comparison operator `rest` starts with, the longest that fits: `!=`, `!~`, `<=`, `>=`,
-/// `=`, `<`, `>`, `~`.
+/// What an operator reads its value as: a comparison's value, or a glob.
+#[derive(Clone, Copy)]
+enum Operation {
+    Compare(CompareOp),
+    Glob,
+}
+
+/// The operator `rest` starts with, the longest that fits: `!=`, `!~`, `<=`, `>=`, `=`, `<`,
+/// `>`, `~`.
 fn operator_at(rest: &str) -> Option<Operator> {
-    const OPERATORS: [(&str, CompareOp, bool); 8] = [
-        ("!=", CompareOp::Eq, true),
-        ("!~", CompareOp::Glob, true),
-        ("<=", CompareOp::Le, false),
-        (">=", CompareOp::Ge, false),
-        ("=", CompareOp::Eq, false),
-        ("<", CompareOp::Lt, false),
-        (">", CompareOp::Gt, false),
-        ("~", CompareOp::Glob, false),
+    use Operation::{Compare, Glob};
+    const OPERATORS: [(&str, Operation, bool); 8] = [
+        ("!=", Compare(CompareOp::Eq), true),
+        ("!~", Glob, true),
+        ("<=", Compare(CompareOp::Le), false),
+        (">=", Compare(CompareOp::Ge), false),
+        ("=", Compare(CompareOp::Eq), false),
+        ("<", Compare(CompareOp::Lt), false),
+        (">", Compare(CompareOp::Gt), false),
+        ("~", Glob, false),
     ];
     OPERATORS
         .iter()
         .find(|(typed, _, _)| rest.starts_with(typed))
-        .map(|&(typed, op, negated)| Operator { typed, op, negated })
+        .map(|&(typed, reads, negated)| Operator {
+            typed,
+            reads,
+            negated,
+        })
 }
 
 /// The parts read, joined: none is nothing, one is itself.
@@ -1072,6 +1108,7 @@ mod tests {
     // =========================================================================
 
     use super::super::filter::StatusPredicate;
+    use super::super::glob::{needs_quotes_sentence, InputGlob};
     use super::super::key::Key;
     use super::super::transform::PathAccessor;
 
@@ -1113,6 +1150,15 @@ mod tests {
                 ..
             } => (key, op, value, clause),
             other => panic!("{text}: expected a comparison, got {other:?}"),
+        }
+    }
+
+    fn glob_of(text: &str) -> (InputKey, InputGlob, String) {
+        match runs(text) {
+            Expr::Glob {
+                key, glob, clause, ..
+            } => (key, glob, clause),
+            other => panic!("{text}: expected a glob, got {other:?}"),
         }
     }
 
@@ -1252,7 +1298,8 @@ mod tests {
                 Expr::Not(inner) => walk(inner, out),
                 Expr::Exists { clause, place, .. }
                 | Expr::Compare { clause, place, .. }
-                | Expr::In { clause, place, .. } => {
+                | Expr::In { clause, place, .. }
+                | Expr::Glob { clause, place, .. } => {
                     out.push((clause.clone(), place.start, place.end))
                 }
                 Expr::Status { place, .. } => out.push((String::new(), place.start, place.end)),
@@ -1672,19 +1719,150 @@ mod tests {
         assert_eq!(clause, "x IN ( a , b )");
     }
 
+    /// The parts of a glob that need quotes, as the caret byte and the sentence binding words
+    /// each with for a text or path key.
+    fn glob_needs(text: &str) -> Vec<(usize, String)> {
+        let (_, glob, _) = glob_of(text);
+        glob.needs_quotes
+            .iter()
+            .map(|&at| {
+                let c = cut(text, at, text.len()).chars().next().unwrap();
+                (at, needs_quotes_sentence(c))
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_tilde_value_ends_where_every_value_ends() {
-        let (_, op, value, _) = compare_of("filename~*O'Brien*");
-        assert_eq!(op, CompareOp::Glob);
-        assert_eq!(value.text, "*O'Brien*");
-        assert_eq!(value.needs_quotes, Some(NeedsQuotes::Character(11)));
-        let (_, _, value, _) = compare_of("filename~a&b");
-        assert_eq!(value.needs_quotes, Some(NeedsQuotes::Character(10)));
+    fn a_glob_ends_where_a_value_ends() {
+        // A `(` opened inside the glob closes inside it: one glob, one part needing quotes.
+        let (_, glob, clause) = glob_of("filename~*(1)*");
+        assert_eq!(
+            (glob.input.as_str(), clause.as_str()),
+            ("*(1)*", "filename~*(1)*")
+        );
+        assert_eq!(glob.needs_quotes, [10]);
+        // A `)` closing a `(` opened before the glob ends it.
+        assert_eq!(
+            clauses(&runs("(filename~*(1)* OR x=1)")),
+            ["filename~*(1)*", "x=1"]
+        );
         assert_eq!(
             clauses(&runs("(filename~*.jpg) AND x?")),
             ["filename~*.jpg", "x?"]
         );
-        assert_eq!(said("filename~*.jpg x"), at(14, "a space separates values"));
+        // A space inside quotes is part of the glob; one reached inside a set leaves the set
+        // unclosed, so a forgotten `]` never takes in the clauses after it.
+        assert_eq!(said("filename~*[ _]*"), at(10, "this set is unclosed"));
+        assert_eq!(
+            said("filename~[abc OR filename~x.jpg]"),
+            at(9, "this set is unclosed")
+        );
+        assert_eq!(
+            glob_of(r#"source.rel_path~*/"My Pictures"/*"#).1.input,
+            r#"*/"My Pictures"/*"#
+        );
+        // Quoted, the glob is its text.
+        let (_, glob, _) = glob_of(r#"filename~"*.jpg""#);
+        assert!(glob.glob.matches("*.jpg"));
+        assert!(!glob.glob.matches("a.jpg"));
+        assert_eq!(said("filename~"), at(9, "a value is missing after `~`"));
+    }
+
+    /// One row per place a glob cannot be read, with its sentence and rule line as the record
+    /// states them, the caret byte counted by hand.
+    #[test]
+    fn every_sentence_of_the_glob_grammar() {
+        const SPACE: &str =
+            "a space separates values; quote the part with the space, but not * ? [ ]";
+        for (text, caret, sentence, rule_line) in [
+            ("filename~[abc", 9, "this set is unclosed", None),
+            // Reading stops at the set: nothing after it is recorded.
+            ("filename~*[2024* AND x=", 10, "this set is unclosed", None),
+            ("filename~O'Brien*", 10, "this quote is unclosed", None),
+            (
+                "source.rel_path~*/My Pictures/*",
+                20,
+                SPACE,
+                Some(AFTER_VALUE),
+            ),
+            ("filename~IMG* and x", 13, SPACE, Some(AFTER_VALUE)),
+            (
+                "filename=IMG x",
+                12,
+                "a space separates values",
+                Some(AFTER_VALUE),
+            ),
+        ] {
+            assert_eq!(
+                read(text).1,
+                [(
+                    caret,
+                    sentence.to_string(),
+                    rule_line.map(str::to_string),
+                    Fix::None
+                )],
+                "{text}"
+            );
+        }
+        for (text, c) in [
+            ("filename~a@b", '@'),
+            ("filename~a#b", '#'),
+            ("filename~a%b", '%'),
+            ("filename~a|b", '|'),
+            (r"filename~a\b", '\\'),
+            ("filename~a(b", '('),
+            ("filename~a=b", '='),
+        ] {
+            assert_eq!(
+                glob_needs(text),
+                [(
+                    10,
+                    format!("`{c}` needs quotes; quote that part, but not * ? [ ]")
+                )],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negated_glob_reads_as_not_of_the_glob() {
+        for text in ["ext!~*.jpg", "ext !~ *.bak"] {
+            let Expr::Not(inner) = runs(text) else {
+                panic!("{text}: NOT");
+            };
+            let Expr::Glob { clause, .. } = *inner else {
+                panic!("{text}: a glob");
+            };
+            assert_eq!(clause, text);
+        }
+    }
+
+    #[test]
+    fn each_part_that_needs_quotes_is_one_problem() {
+        assert_eq!(glob_of("filename~*R&B#1*").1.needs_quotes, [11]);
+        assert_eq!(glob_of("filename~*a@b*c#d*").1.needs_quotes, [11, 15]);
+        assert_eq!(glob_of(r#"filename~a@"x"b#"#).1.needs_quotes, [10, 15]);
+        // A set's members are never reported.
+        assert_eq!(glob_of("filename~*[@#]x@*").1.needs_quotes, [15]);
+        // Where reading stops inside the glob, the parts before the stop are worded by the
+        // reader, then the stop; on any key, since the condition is never bound.
+        let part = |c: char| format!("`{c}` needs quotes; quote that part, but not * ? [ ]");
+        for (text, before, stop, sentence) in [
+            ("filename~a%b[c", (10, '%'), 12, "this set is unclosed"),
+            ("filename~*R&B's*", (11, '&'), 13, "this quote is unclosed"),
+            ("source.mtime~a%b[c", (14, '%'), 16, "this set is unclosed"),
+        ] {
+            let (expr, problems) = read(text);
+            assert!(expr.is_none(), "{text}");
+            assert_eq!(
+                problems,
+                [
+                    (before.0, part(before.1), None, Fix::None),
+                    (stop, sentence.to_string(), None, Fix::None)
+                ],
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -1756,7 +1934,7 @@ mod tests {
         };
         assert!(matches!(
             parts.as_slice(),
-            [Expr::Status { .. }, Expr::Compare { .. }]
+            [Expr::Status { .. }, Expr::Glob { .. }]
         ));
         // In any other case, or quoted, or a near word, it is a key.
         for (text, base) in [
@@ -1846,18 +2024,6 @@ mod tests {
             panic!("a list");
         };
         assert_eq!(values[1].needs_quotes, Some(NeedsQuotes::Wildcard(10)));
-    }
-
-    #[test]
-    fn a_tilde_value_keeps_its_own_character_set() {
-        for value in ["*.jp?g", "[jJ][pP][gG]", "a|b@c#d%e"] {
-            let (_, _, read, _) = compare_of(&format!("filename~{value}"));
-            assert_eq!((read.text.as_str(), read.needs_quotes), (value, None));
-        }
-        let (_, _, value, _) = compare_of(r#"filename~"*.jpg""#);
-        assert_eq!((value.text.as_str(), value.quoted), ("*.jpg", true));
-        let (_, _, value, _) = compare_of("filename~a(b)");
-        assert_eq!(value.needs_quotes, Some(NeedsQuotes::Character(10)));
     }
 
     #[test]
@@ -2055,15 +2221,14 @@ mod tests {
 
     #[test]
     fn the_negated_operators_read_as_not_of_their_positive_form() {
-        for (text, positive) in [("ext!=jpg", CompareOp::Eq), ("ext!~*.jpg", CompareOp::Glob)] {
-            let Expr::Not(inner) = runs(text) else {
-                panic!("{text}: NOT");
-            };
-            let Expr::Compare { op, clause, .. } = *inner else {
-                panic!("{text}: a comparison");
-            };
-            assert_eq!((op, clause.as_str()), (positive, text));
-        }
+        let text = "ext!=jpg";
+        let Expr::Not(inner) = runs(text) else {
+            panic!("{text}: NOT");
+        };
+        let Expr::Compare { op, clause, .. } = *inner else {
+            panic!("{text}: a comparison");
+        };
+        assert_eq!((op, clause.as_str()), (CompareOp::Eq, text));
     }
 
     #[test]
@@ -2115,8 +2280,6 @@ mod tests {
                 CompareOp::Eq,
                 "application/octet-stream",
             ),
-            ("ext~jp?g", "ext", CompareOp::Glob, "jp?g"),
-            ("ext~*.tmp", "ext", CompareOp::Glob, "*.tmp"),
             (
                 "tag=my-custom-tag",
                 "content.tag",
@@ -2129,7 +2292,6 @@ mod tests {
                 CompareOp::Eq,
                 "application/octet-stream",
             ),
-            ("ext~[jJ][pP][gG]", "ext", CompareOp::Glob, "[jJ][pP][gG]"),
             ("source.size>-1", "source.size", CompareOp::Gt, "-1"),
             (
                 "source.mtime>2024-01-15",
@@ -2146,12 +2308,18 @@ mod tests {
                 "{text}"
             );
         }
-        let Expr::Not(inner) = runs("ext!~*.bak") else {
-            panic!("NOT of a glob");
-        };
-        assert!(
-            matches!(*inner, Expr::Compare { op: CompareOp::Glob, ref value, .. } if value.text == "*.bak")
-        );
+        for (text, base, glob) in [
+            ("ext~jp?g", "ext", "jp?g"),
+            ("ext~*.tmp", "ext", "*.tmp"),
+            ("ext~[jJ][pP][gG]", "ext", "[jJ][pP][gG]"),
+        ] {
+            let (key, read_glob, _) = glob_of(text);
+            assert_eq!(
+                (key.base.as_str(), read_glob.input.as_str()),
+                (base, glob),
+                "{text}"
+            );
+        }
         assert_eq!(
             clauses(&runs("mime=image/jpeg AND source.size>1000")),
             ["mime=image/jpeg", "source.size>1000"]

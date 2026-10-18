@@ -11,8 +11,8 @@ Filters select sources based on facts using a boolean expression language. Most 
 | `key?` | Fact has a value; for a key with modifiers, the modified value (`content.DateTimeOriginal\|month?` is false for a time known only to a year) |
 | `key=value` | Fact equals value (case-sensitive); for a time, the value falls within the time you typed (`2024-06` is all of June 2024) |
 | `key!=value` | Everything `key=value` does not select, sources with no value included |
-| `key~pattern` | Glob pattern match on text (case-sensitive) |
-| `key!~pattern` | Everything `key~pattern` does not select, sources with no value included |
+| `key~glob` | Glob match on text and paths (case-sensitive); see [Globs](#globs) |
+| `key!~glob` | Everything `key~glob` does not select, sources with no value included |
 | `key>value` | Greater than; for a time, starts at or after the end of the time you typed |
 | `key>=value` | Greater or equal; for a time, starts at or after the start of the time you typed |
 | `key<value` | Less than; for a time, ends by the start of the time you typed |
@@ -22,20 +22,22 @@ Filters select sources based on facts using a boolean expression language. Most 
 
 Numbers compare as numbers, times as spans of time in your local time (see [Times](#times)), and text in character order, so `B` sorts before `a` and `10` before `9`.
 
-### Glob Patterns
+### Globs
 
-The `~` operator supports shell-style glob patterns:
+After `~` and `!~` the value is a glob, read as a shell reads it:
 
-| Pattern | Meaning |
-|---------|---------|
-| `*` | Match zero or more characters |
-| `?` | Match exactly one character |
-| `[abc]` | Match any character in set |
-| `[a-z]` | Match character range |
-| `[!abc]` | Match any character NOT in set |
-| `\*` | Literal asterisk (escape) |
+| Glob | Meaning |
+|------|---------|
+| `*` | Any run of characters, `/` included, or none |
+| `?` | One visible character |
+| `[abc]` | One character from the set |
+| `[a-z]` | One character in the range |
+| `[!abc]` or `[^abc]` | One character not in the set |
+| `"…"` or `'…'` | The quoted text itself, joined to the text beside it |
 
-A pattern matches text and paths. Against a number or a time key it gives an error that suggests another way to ask: a range for a number, a modifier for a time (`DateTimeOriginal~2024*` suggests `DateTimeOriginal|year=2024`).
+`?` and a set member count one visible character: an accented letter or an emoji is one however it is stored, where bash counts one code point. Inside a set every character is itself, a quote mark included; a `]` first in the set and a `-` first or last are members. A space ends the glob inside a set too, so a set never holds a space, and a set a space reaches before its `]` is refused (`filename~[abc OR filename~x.jpg]` is an unclosed set). This is unlike bash, where `*[" "_]*` matches a space or an underscore: in Canon a quote mark inside a set is a member, so that set is unclosed too; write `filename~*" "* OR filename~*_*`. A glob with no wildcard or set matches the whole value.
+
+Text in a glob compares exactly as stored. `filename~Cafe*` selects a `Café.jpg` whose `é` is stored as `e` and an accent mark, and not one stored as the single character `é`.
 
 ```bash
 # Files starting with IMG_
@@ -49,9 +51,37 @@ A pattern matches text and paths. Against a number or a time key it gives an err
 
 # Exclude temp files
 --where 'filename!~*.tmp'
+
+# Names starting with a literal *
+--where 'filename~"*"*'
+
+# Names holding [2024], and names holding @2x
+--where 'filename~*"[2024]"*'
+--where 'filename~*"@"2x*'
+
+# A directory name with a space
+--where 'source.rel_path~*/"My Pictures"/*'
 ```
 
-After `~` and `!~`, a pattern can hold without quotes letters and digits of any language, `_ . - / : +`, and `*`, `?`, `[`, `]`, `|`, `#` and `%`. An accent mark written as its own character needs quotes there. See [Quoting](#quoting) for the rest.
+Without quotes a glob holds what a plain value holds (see [Quoting](#quoting)) and `* ? [ ]`. Any other character needs quotes around its part, with `* ? [ ]` left outside them; the refusal names the first such character in each part:
+
+```
+Error: cannot run the filter as given
+  filename~Rock&Roll*
+               ^ `&` needs quotes; quote that part, but not * ? [ ]
+```
+
+A quote mark inside a glob starts quoted text, as in a shell, so two apostrophes in one glob close each other; inside an `=` value a quote mark needs quotes instead. `filename~John's*` is an unclosed quote, and `filename=John's` is shown with the quoted fix. To match an apostrophe, quote it with the other mark: `filename~*"'"*` selects every name holding one, and `filename~*"O'Brien"*` the names holding `O'Brien`.
+
+Inside quotes a doubled mark is a quote mark, so two quoted parts in the same mark cannot touch: write one quoted run (`*"[2024]@2x"*`) or switch marks (`*"[2024]"'@2x'*`).
+
+A set never closed is refused (`this set is unclosed`), and so is a glob on a number or a time:
+
+```
+Error: cannot run the filter as given
+  source.mtime~2024*
+               ^ `~` works on text; source.mtime is of type time
+```
 
 ## Quoting
 
@@ -137,7 +167,7 @@ A fix shows how Canon's rules read what was typed, to copy and judge against wha
 | What was typed | The fix |
 |----------------|---------|
 | A character that needs quotes, in a value after `=`, `!=`, `<`, `>`, `<=` or `>=`, or in an `IN` list | The value in quotes, with `'` where the value holds a `"` and no `'`. A list gets one fix, with every item that needs quotes in quotes |
-| `*`, `?` or `[` in a value after `=` or `!=` | Both readings: the pattern with `~`, and the exact text in quotes |
+| `*`, `?` or `[` in a value after `=` or `!=` | Both readings: the glob with `~`, and the exact text in quotes |
 | A character that needs quotes in a key name | The name in quotes, for a key that has facts |
 
 ```
@@ -287,7 +317,7 @@ canon ls --where '@image'
 canon ls --where '@image OR @video'
 
 # Key alias with operator
-canon ls --where '@filename ~ "IMG_*"'
+canon ls --where '@filename~IMG_*'
 
 # Mix both kinds
 canon ls --where '@image AND @year >= 2020'

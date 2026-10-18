@@ -23,6 +23,7 @@ use crate::core::domain::time::reading::{read_time, read_time_of_day, EXAMPLE_FO
 use crate::core::domain::time::value::{Precision, TimeValue};
 
 use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, StatusPredicate, UsedStatus};
+use super::glob::{needs_quotes_problem, Glob, InputGlob};
 use super::key::{InputKey, Key, CONTENT_HASH};
 use super::print::{
     convert_command, mixed_type_way_out, printed_key, printed_value, printed_word, quoted,
@@ -81,6 +82,23 @@ impl Gives {
         }
     }
 
+    /// **The type statement**: what a value of `key`, as typed, is — "is of type number", "is a
+    /// day", "is a year, four digits", "is grouped into ranges". One writer, total over what a
+    /// key can give.
+    fn statement(&self, key: &str) -> String {
+        let what = match self {
+            Gives::Text => "is of type text".to_string(),
+            Gives::Path => "is of type path".to_string(),
+            Gives::Number => "is of type number".to_string(),
+            Gives::Time => "is of type time".to_string(),
+            Gives::TimeAt(precision) => format!("is a {}", precision.word()),
+            Gives::TimeOfDay => "is a time of day".to_string(),
+            Gives::Part(m) => format!("is {}", part_rule(*m).range),
+            Gives::Bucket(_) => "is grouped into ranges".to_string(),
+        };
+        format!("{key} {what}")
+    }
+
     /// Whether text modifiers read this result as text without a modifier before them.
     fn is_text(&self) -> bool {
         matches!(self, Gives::Text | Gives::Path | Gives::Bucket(_))
@@ -98,7 +116,6 @@ pub(in crate::expr) enum Test {
     TimeOfDay(TimeValue),
     Part(i64),
     Bucket(String),
-    Glob(String),
 }
 
 // ============================================================================
@@ -192,6 +209,11 @@ pub(in crate::expr) enum Bound {
         key: BoundKey,
         tests: Vec<Test>,
     },
+    /// A glob, bound only for a key whose result is text or a path.
+    Glob {
+        key: BoundKey,
+        glob: Glob,
+    },
     Status(StatusPredicate),
 }
 
@@ -207,7 +229,10 @@ impl Bound {
                 StatusPredicate::Excluded => used.excluded = true,
                 StatusPredicate::Enriched => used.enriched = true,
             },
-            Bound::Exists { .. } | Bound::Compare { .. } | Bound::In { .. } => {}
+            Bound::Exists { .. }
+            | Bound::Compare { .. }
+            | Bound::In { .. }
+            | Bound::Glob { .. } => {}
         }
     }
 
@@ -216,9 +241,10 @@ impl Bound {
         match self {
             Bound::And(all) | Bound::Or(all) => all.iter().for_each(|b| b.keys(out)),
             Bound::Not(inner) => inner.keys(out),
-            Bound::Exists { key } | Bound::Compare { key, .. } | Bound::In { key, .. } => {
-                out.push(key.base.clone())
-            }
+            Bound::Exists { key }
+            | Bound::Compare { key, .. }
+            | Bound::In { key, .. }
+            | Bound::Glob { key, .. } => out.push(key.base.clone()),
             Bound::Status(_) => {}
         }
     }
@@ -230,7 +256,7 @@ impl Bound {
             Bound::Not(inner) => inner.tests(out),
             Bound::Compare { test, .. } => out.push(test.clone()),
             Bound::In { tests, .. } => out.extend(tests.iter().cloned()),
-            Bound::Exists { .. } | Bound::Status(_) => {}
+            Bound::Exists { .. } | Bound::Glob { .. } | Bound::Status(_) => {}
         }
     }
 }
@@ -247,7 +273,10 @@ pub(in crate::expr) fn stored_keys(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::And(all) | Expr::Or(all) => all.iter().for_each(|e| stored_keys(e, out)),
         Expr::Not(inner) => stored_keys(inner, out),
-        Expr::Exists { key, .. } | Expr::Compare { key, .. } | Expr::In { key, .. } => {
+        Expr::Exists { key, .. }
+        | Expr::Compare { key, .. }
+        | Expr::In { key, .. }
+        | Expr::Glob { key, .. } => {
             if known_type(&key.base).is_none() && !out.contains(&key.base) {
                 out.push(key.base.clone())
             }
@@ -424,6 +453,65 @@ fn bind_clauses(
                 refused()
             }
         },
+        Expr::Glob {
+            key, glob, clause, ..
+        } => match bind_key(key, clause, Reads::Value, types) {
+            Ok((bound, chain)) => match bind_glob(key, glob, clause, &chain.gives) {
+                Ok(glob) => Bound::Glob { key: bound, glob },
+                Err(glob_causes) => {
+                    causes.extend(glob_causes);
+                    refused()
+                }
+            },
+            Err(cause) => {
+                causes.push(cause);
+                refused()
+            }
+        },
+    }
+}
+
+/// The operator of `clause` as typed, with the spaces around it: what stands between the key
+/// and the value starting at byte `value_start` of the typed text.
+fn operator_as_typed<'c>(clause: &'c str, key: &InputKey, value_start: usize) -> &'c str {
+    cut(clause, key.input.len(), value_start - key.place.start)
+}
+
+/// **A glob binds where the key's result is text or a path**, and holds nothing that needs
+/// quotes: each part that does is one problem, its caret under the part's first such character.
+/// For any other result the one cause is the type statement, the operator named as typed, with
+/// no way out — and a character that needs quotes is not reported, since quoting it would only
+/// meet the type refusal.
+fn bind_glob(
+    key: &InputKey,
+    glob: &InputGlob,
+    clause: &str,
+    gives: &Gives,
+) -> Result<Glob, Vec<BindCause>> {
+    match gives {
+        Gives::Text | Gives::Path if glob.needs_quotes.is_empty() => Ok(glob.glob.clone()),
+        Gives::Text | Gives::Path => Err(glob
+            .needs_quotes
+            .iter()
+            .map(|&at| {
+                let rest = cut(&glob.input, at - glob.place.start, glob.input.len());
+                BindCause::Read(needs_quotes_problem(rest, at, glob.place.text))
+            })
+            .collect()),
+        Gives::Number
+        | Gives::Time
+        | Gives::TimeAt(_)
+        | Gives::TimeOfDay
+        | Gives::Part(_)
+        | Gives::Bucket(_) => {
+            let op = operator_as_typed(clause, key, glob.place.start).trim_matches(is_space);
+            Err(vec![BindCause::GlobNotText(Entry::new(
+                clause,
+                glob.place,
+                format!("`{op}` works on text; {}", gives.statement(&key.input)),
+                Vec::new(),
+            ))])
+        }
     }
 }
 
@@ -866,14 +954,14 @@ impl Site<'_> {
     fn read(&self, op: CompareOp, value: &InputValue) -> Result<Test, BindCause> {
         if let Some(needs) = value.needs_quotes {
             if self.chain.gives.is_text() {
-                return Err(self.needs_quotes(op, value, needs));
+                return Err(self.needs_quotes(value, needs));
             }
         }
         match &self.chain.gives {
-            Gives::Text | Gives::Path => self.read_text(op, value),
-            Gives::Number => self.read_number(op, value),
-            Gives::Time | Gives::TimeAt(_) | Gives::TimeOfDay => self.read_time(op, value),
-            Gives::Part(m) => self.read_part(*m, op, value),
+            Gives::Text | Gives::Path => self.read_text(value),
+            Gives::Number => self.read_number(value),
+            Gives::Time | Gives::TimeAt(_) | Gives::TimeOfDay => self.read_time(value),
+            Gives::Part(m) => self.read_part(*m, value),
             Gives::Bucket(args) => self.read_bucket(args, op, value),
         }
     }
@@ -891,11 +979,11 @@ impl Site<'_> {
     /// text: the character needs quotes, or — after `=`, `!=` or in a list — it is a wildcard
     /// the comparison does not take. Its caret sits under the character. The fix, from the
     /// closed list, adds only quotes or reads the operator as a glob, everything else as typed:
-    /// after any operator but `~` the value quoted; in a list one fix for the clause, every item
-    /// that needs quotes quoted, shown with the first; a wildcard after `=` or `!=` the glob and
-    /// the exact text; a wildcard in a list, or a value after `~`, none. Whether it
-    /// is shown is decided when it is read back ([`keep_ways_that_bind`]).
-    fn needs_quotes(&self, op: CompareOp, value: &InputValue, needs: NeedsQuotes) -> BindCause {
+    /// the value quoted; in a list one fix for the clause, every item that needs quotes quoted,
+    /// shown with the first; a wildcard after `=` or `!=` the glob and the exact text; a
+    /// wildcard in a list, none. Whether it is shown is decided when it is read back
+    /// ([`keep_ways_that_bind`]).
+    fn needs_quotes(&self, value: &InputValue, needs: NeedsQuotes) -> BindCause {
         let (at, wildcard) = match needs {
             NeedsQuotes::Character(at) => (at, false),
             NeedsQuotes::Wildcard(at) => (at, true),
@@ -909,16 +997,12 @@ impl Site<'_> {
         } else if self.list.is_some() {
             format!("`{c}` is a wildcard, but IN does not take wildcards")
         } else {
-            let op = cut(
-                self.clause,
-                self.key.input.len(),
-                value.place.start - self.key.place.start,
-            )
-            .trim_matches(is_space);
+            let op =
+                operator_as_typed(self.clause, self.key, value.place.start).trim_matches(is_space);
             format!("`{c}` is a wildcard, but `{op}` does not take wildcards")
         };
         let fix = match (wildcard, self.list) {
-            (false, None) if op != CompareOp::Glob => Fix::Quoted {
+            (false, None) => Fix::Quoted {
                 rewrite: self.with_value(value, &quoted_as_typed(&value.text)),
             },
             (false, Some(values)) if self.first_to_quote(values, value) => Fix::Quoted {
@@ -974,11 +1058,7 @@ impl Site<'_> {
     /// The clause with its `=` read as `~` and `!=` as `!~`, the value as typed; `None` after
     /// any other operator.
     fn as_glob(&self, value: &InputValue) -> Option<String> {
-        let between = cut(
-            self.clause,
-            self.key.input.len(),
-            value.place.start - self.key.place.start,
-        );
+        let between = operator_as_typed(self.clause, self.key, value.place.start);
         let glob = match between.trim_matches(is_space) {
             "=" => between.replacen('=', "~", 1),
             "!=" => between.replacen("!=", "!~", 1),
@@ -997,10 +1077,7 @@ impl Site<'_> {
         format!("{} {verb} {}", self.key.input, self.chain.gives.words())
     }
 
-    fn read_text(&self, op: CompareOp, value: &InputValue) -> Result<Test, BindCause> {
-        if op == CompareOp::Glob {
-            return Ok(Test::Glob(value.text.clone()));
-        }
+    fn read_text(&self, value: &InputValue) -> Result<Test, BindCause> {
         if value.quoted || bare_class(&value.text) == BareClass::Word {
             return Ok(Test::Text(value.text.clone()));
         }
@@ -1072,10 +1149,7 @@ impl Site<'_> {
         )))
     }
 
-    fn read_number(&self, op: CompareOp, value: &InputValue) -> Result<Test, BindCause> {
-        if op == CompareOp::Glob {
-            return Err(self.glob_on_numbers(value));
-        }
+    fn read_number(&self, value: &InputValue) -> Result<Test, BindCause> {
         if let Ok(n) = read_number(&value.text) {
             return Ok(Test::Number(n));
         }
@@ -1102,10 +1176,7 @@ impl Site<'_> {
         )))
     }
 
-    fn read_time(&self, op: CompareOp, value: &InputValue) -> Result<Test, BindCause> {
-        if op == CompareOp::Glob {
-            return Err(self.glob_on_times(value));
-        }
+    fn read_time(&self, value: &InputValue) -> Result<Test, BindCause> {
         let printed = printed_value(&value.text, FactType::Time);
         if self.chain.gives == Gives::TimeOfDay {
             return read_time_of_day(&value.text)
@@ -1166,15 +1237,7 @@ impl Site<'_> {
         }
     }
 
-    fn read_part(
-        &self,
-        modifier: Modifier,
-        op: CompareOp,
-        value: &InputValue,
-    ) -> Result<Test, BindCause> {
-        if op == CompareOp::Glob {
-            return Err(self.glob_on_numbers(value));
-        }
+    fn read_part(&self, modifier: Modifier, value: &InputValue) -> Result<Test, BindCause> {
         let rule = part_rule(modifier);
         let text = value.text.as_str();
         if let Some(at) = rule.words.iter().position(|w| *w == text) {
@@ -1252,58 +1315,6 @@ impl Site<'_> {
             format!("{} is not one of the bucket's ranges.", printed_word(text)),
             vec![format!("Its ranges: {}", printed.join(", "))],
         )))
-    }
-
-    fn glob_on_numbers(&self, value: &InputValue) -> BindCause {
-        BindCause::GlobNotText(self.entry(
-            value,
-            format!("a pattern (~) matches text; {}.", self.subject()),
-            vec![format!(
-                "To select a range, compare {} with >= and <",
-                self.key.input
-            )],
-        ))
-    }
-
-    fn glob_on_times(&self, value: &InputValue) -> BindCause {
-        let pattern = value.text.as_str();
-        let prefix = pattern
-            .strip_suffix('*')
-            .filter(|p| !p.contains(['*', '?', '[']))
-            .map(|p| p.trim_end_matches(['-', ':', 'T', ' ']));
-        let grain = prefix.and_then(|p| read_time(p).ok().map(|t| (p, t.precision())));
-        let negated = self
-            .clause
-            .get(self.key.input.len()..)
-            .is_some_and(|rest| rest.trim_start().starts_with("!~"));
-        let eq = if negated { "!=" } else { "=" };
-        let way = match grain {
-            Some((p, precision)) if precision <= Precision::Day => {
-                let modifier = match precision {
-                    Precision::Year => Modifier::Year,
-                    Precision::Month => Modifier::YearMonth,
-                    _ => Modifier::Date,
-                };
-                // The date the pattern reached for, reprinted as every way out reprints one.
-                let asked = as_asked(p).unwrap_or_else(|| printed_value(p, FactType::Time));
-                Way::to(
-                    format!("To select by {}", precision.word()),
-                    format!("{}{eq}{asked}", self.key_at_grain(modifier)),
-                )
-            }
-            _ if self.chain.gives == Gives::TimeOfDay => {
-                Way::hint("Compare a time of day with =, <, >, <= or >=: 14:30, 14:30:05")
-            }
-            _ => Way::hint(format!(
-                "Compare times with =, <, >= at the grain you mean: {}|year, |yearmonth, |date",
-                self.key.input
-            )),
-        };
-        BindCause::GlobNotText(self.entry_with(
-            value,
-            format!("a pattern (~) matches text; {}.", self.subject()),
-            vec![vec![way]],
-        ))
     }
 
     fn too_fine(&self, grain: Precision, value: &InputValue) -> BindCause {
@@ -1414,22 +1425,6 @@ impl Site<'_> {
             self.key_without_last_modifier(),
             <&'static str>::from(modifier)
         )
-    }
-
-    /// The key for a time at a grain: the last modifier replaced where it reads a time at a
-    /// grain (`|date`, `|yearmonth`, `|datetime`), otherwise the modifier added.
-    fn key_at_grain(&self, modifier: Modifier) -> String {
-        let replace = self.key.modifiers.last().is_some_and(|(call, _)| {
-            matches!(
-                call.modifier,
-                Modifier::Date | Modifier::YearMonth | Modifier::DateTime
-            )
-        });
-        if replace {
-            self.key_replacing_last(modifier)
-        } else {
-            format!("{}|{}", self.key.input, <&'static str>::from(modifier))
-        }
     }
 
     /// The key as typed, without its last modifier.
@@ -2180,9 +2175,9 @@ mod tests {
         for (text, word) in [("ext=E-5", "E-5"), ("ext=3gp", "3gp"), ("Title=nan", "nan")] {
             assert_eq!(test_of(text), Test::Text(word.into()), "{text}");
         }
-        // Quoted, every value is text; the operand of `~` is a pattern whatever its spelling.
+        // Quoted, every value is text; after `~` a glob, whatever its spelling.
         assert_eq!(test_of(r#"numtext="10""#), Test::Text("10".into()));
-        assert_eq!(test_of("numtext~1*"), Test::Glob("1*".into()));
+        assert!(matches!(bind("numtext~1*"), Ok(Bound::Glob { .. })));
     }
 
     // ------------------------------------------------------------------
@@ -2400,7 +2395,7 @@ mod tests {
         );
         assert_eq!(test_of("SourceFile[-1]=x.jpg"), Test::Text("x.jpg".into()));
         assert!(bind("FNumber|number|lowercase=x").is_ok());
-        assert!(bind(r#"source.mtime|datetime|lowercase~"2024-06*""#).is_ok());
+        assert!(bind("source.mtime|datetime|lowercase~2024-06*").is_ok());
         // A time of day has no date: a date-reading modifier after `|time` is refused, an hour
         // is read.
         for text in [
@@ -2484,25 +2479,142 @@ mod tests {
     // Globs against numbers and times
     // ------------------------------------------------------------------
 
+    /// The refusal of one glob clause: the typed line and a caret under the glob with
+    /// `sentence`, and nothing under it.
+    fn glob_refusal(text: &str, sentence: &str) -> String {
+        let at = text.find('~').map(|at| at + 1).unwrap();
+        let rest = cut(text, at, text.len());
+        let at = at + rest.len() - rest.trim_start().len();
+        [
+            "cannot run the filter as given".to_string(),
+            format!("  {text}"),
+            format!("  {}^ {sentence}", " ".repeat(at)),
+        ]
+        .join("\n")
+    }
+
     #[test]
-    fn a_glob_against_a_number_or_time_names_the_question_it_asked() {
-        let entry = |text| match causes(text).as_slice() {
-            [BindCause::GlobNotText(entry)] => entry.clone(),
-            other => panic!("{text}: {other:?}"),
-        };
+    fn a_glob_on_another_type_names_its_type_with_no_fix() {
+        for (text, sentence) in [
+            (
+                "source.size~1*",
+                "`~` works on text; source.size is of type number",
+            ),
+            ("FNumber~2*", "`~` works on text; FNumber is of type number"),
+            (
+                "source.mtime~2024*",
+                "`~` works on text; source.mtime is of type time",
+            ),
+            (
+                "taken|time~14*",
+                "`~` works on text; taken|time is a time of day",
+            ),
+            (
+                "taken|year~20*",
+                "`~` works on text; taken|year is a year, four digits",
+            ),
+            (
+                "taken|yearmonth~2024*",
+                "`~` works on text; taken|yearmonth is a month",
+            ),
+            (
+                "taken|date~2024-06*",
+                "`~` works on text; taken|date is a day",
+            ),
+            (
+                "source.size|bucket~1*",
+                "`~` works on text; source.size|bucket is grouped into ranges",
+            ),
+            (
+                "source.mtime!~2024*",
+                "`!~` works on text; source.mtime is of type time",
+            ),
+            (
+                "source.size !~ 1*",
+                "`!~` works on text; source.size is of type number",
+            ),
+        ] {
+            assert!(
+                matches!(causes(text).as_slice(), [BindCause::GlobNotText(_)]),
+                "{text}"
+            );
+            assert_eq!(refusal(text), glob_refusal(text, sentence), "{text}");
+        }
+    }
+
+    /// The type statement, one row per kind of result a key can give. The words for a year, a
+    /// month, a day, a month part, a time of day and a range group are the language's sentence
+    /// tables'; the other parts read "is" and the range Canon already prints for that part in
+    /// its out-of-range sentence ("|hour gives an hour from 0 to 23").
+    #[test]
+    fn the_type_statement_follows_what_the_key_gives() {
+        let rows = [
+            (Gives::Text, "k is of type text"),
+            (Gives::Path, "k is of type path"),
+            (Gives::Number, "k is of type number"),
+            (Gives::Time, "k is of type time"),
+            (Gives::TimeAt(Precision::Day), "k is a day"),
+            (Gives::TimeAt(Precision::Month), "k is a month"),
+            (Gives::TimeOfDay, "k is a time of day"),
+            (Gives::Part(Modifier::Year), "k is a year, four digits"),
+            (Gives::Part(Modifier::Month), "k is a month from 1 to 12"),
+            (Gives::Part(Modifier::Day), "k is a day from 1 to 31"),
+            (Gives::Part(Modifier::Hour), "k is an hour from 0 to 23"),
+            (Gives::Part(Modifier::Minute), "k is a minute from 0 to 59"),
+            (Gives::Part(Modifier::Second), "k is a second from 0 to 59"),
+            (Gives::Part(Modifier::Week), "k is a week from 1 to 53"),
+            (
+                Gives::Part(Modifier::Weekday),
+                "k is a weekday from 1 to 7, Monday 1",
+            ),
+            (Gives::Part(Modifier::Quarter), "k is a quarter from 1 to 4"),
+            (Gives::Bucket(Vec::new()), "k is grouped into ranges"),
+            (Gives::Bucket(vec![10.0]), "k is grouped into ranges"),
+        ];
+        for (gives, statement) in rows {
+            assert_eq!(gives.statement("k"), statement, "{gives:?}");
+        }
+    }
+
+    #[test]
+    fn a_glob_that_needs_quotes_on_another_type_says_only_the_type() {
         assert_eq!(
-            entry("source.mtime|date~2024-06*").rewrites(),
-            ["source.mtime|yearmonth=2024-06".to_string()]
+            refusal("source.mtime~2024@*"),
+            glob_refusal(
+                "source.mtime~2024@*",
+                "`~` works on text; source.mtime is of type time"
+            )
         );
+        // On a text key the part is named instead, with no fix.
         assert_eq!(
-            entry("source.mtime~2026:10:11*").rewrites(),
-            ["source.mtime|date=2026-10-11".to_string()]
+            refusal("Title~2024@*"),
+            [
+                "cannot run the filter as given",
+                "  Title~2024@*",
+                "            ^ `@` needs quotes; quote that part, but not * ? [ ]",
+            ]
+            .join("\n")
         );
-        assert_eq!(
-            entry("source.mtime!~2024*").rewrites(),
-            ["source.mtime|year!=2024".to_string()]
-        );
-        assert!(refusal("source.size~1*").contains("compare source.size with >= and <"));
+        // Where reading stops in the glob, what the reader found is all there is to say, on
+        // any key: the condition is never bound.
+        for text in ["source.mtime~a%b[c", "Nosuch~a%b[c", "Title~a%b[c"] {
+            let at = text.find('%').unwrap();
+            assert_eq!(
+                refusal(text),
+                [
+                    "cannot run the filter as given".to_string(),
+                    format!("  {text}"),
+                    format!(
+                        "  {}^ `%` needs quotes; quote that part, but not * ? [ ]",
+                        " ".repeat(at)
+                    ),
+                    format!("  {text}"),
+                    format!("  {}^ this set is unclosed", " ".repeat(at + 2)),
+                ]
+                .join("\n"),
+                "{text}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3024,13 +3136,7 @@ mod tests {
                 }
             }
         }
-        for kind in [
-            "unreadable",
-            "type mismatch",
-            "wrong modifier",
-            "glob",
-            "too fine",
-        ] {
+        for kind in ["unreadable", "type mismatch", "wrong modifier", "too fine"] {
             assert!(reached.contains(&kind), "no {kind} way out was reached");
         }
         assert!(checked > 1000, "only {checked} ways out were checked");
@@ -3068,10 +3174,6 @@ mod tests {
                 "is stored as 0: source.size IN (1, 0)",
             ),
             ("source.mtime=12:30", "|time: source.mtime|time=12:30"),
-            (
-                "source.mtime~2024-06*",
-                "To select by month: source.mtime|yearmonth=2024-06",
-            ),
             (
                 "taken|yearmonth=2024-06-15",
                 "To compare by day: taken|date=2024-06-15",

@@ -144,8 +144,8 @@ Gates are per fact vocabulary, so a processor covering several kinds of file nee
 
 ```bash
 canon worklist --global --include archived --where '
-  ((mime ~ "image/*" OR mime ~ "video/*") AND NOT content.media.width?)
-  OR (mime ~ "audio/*" AND NOT content.audio.duration?)
+  ((mime ~ image/* OR mime ~ video/*) AND NOT content.media.width?)
+  OR (mime ~ audio/* AND NOT content.audio.duration?)
 '
 ```
 

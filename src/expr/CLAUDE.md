@@ -10,7 +10,7 @@ engine consumes finished results — it never re-derives a rule. When a rule loo
 needs restating somewhere else, that is the signal something belongs in this facility.
 
 **Modules**: `domain/key`, `domain/read`, `domain/problem`, `domain/transform`,
-`domain/pattern`, `domain/vantage`, `domain/filter`, `domain/bind`, `domain/print`,
+`domain/pattern`, `domain/vantage`, `domain/filter`, `domain/glob`, `domain/bind`, `domain/print`,
 `domain/cache`, `domain/value`, `domain/alias`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
 `ops/value`, `repo`.
 
@@ -21,7 +21,8 @@ how a written key is read. `read` is the reader — see The reader below — and
 it records where a text cannot be read, and how a refusal draws it. `transform` holds the modifiers and path accessors a value can be
 put through. `pattern` parses and evaluates the shaping half, and `vantage` owns the one rule
 that half cannot answer per source — see The scope vantage below. `filter` is the asking
-half: the syntax tree the reader builds, the comparisons it reduces to, and the glob matcher. `bind` reads each clause's value as its key's type — the modifier table, the
+half: the syntax tree the reader builds and the comparisons it reduces to. `glob` is a glob's
+own grammar and its matcher. `bind` reads each clause's value as its key's type — the modifier table, the
 bare-value classes, the refusal and its ways out — and `print` is the printing rule. `cache`
 is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
 because putting a return type in the layer above the function that returns it is a
@@ -81,6 +82,15 @@ sentence, its rule line, and a fix from a closed list (`Fix`). Pins:
 `a_grammar_problem_resumes_at_the_next_and_or_or_closing_paren` and
 `reading_stops_at_an_unclosed_quote`.
 
+**A glob** after `~` or `!~` is read once into pieces by `domain/glob.rs::read_glob`, so quoted
+text stays literal; it ends where any value ends, and a set a space reaches is unclosed. Text
+compares as stored; `?` and a set member take one visible character (an extended grapheme
+cluster), only from where one starts. Each unquoted part holding a character a plain value
+cannot hold records its first; binding words it, or the reader where reading stops later in the
+glob, both through `needs_quotes_problem`. `!~` reads as `NOT` of the glob. Pins:
+`every_sentence_of_the_glob_grammar`, `inside_a_set_a_quote_is_a_member_and_a_space_ends_it`,
+`question_mark_takes_one_visible_character`, `the_matcher_stays_polynomial`.
+
 **Who reads through it**: binding (`--where`, `facts --key` and `--group-by`, a manifest's
 recorded query), the printing rule and alias sorting. Its tree is `domain/filter.rs`'s `Expr`.
 
@@ -118,7 +128,9 @@ no `_` arm (a command's refused key names join it, the filter's first line leadi
 key's name, the `|` of a modifier or the `[` of an accessor; a key of two types keeps its
 `clause: statement` line. Where the key gives text, an unquoted value's character that needs
 quotes, or a wildcard after `=`, `!=` or in a list, is binding's sentence; any other type reads
-the value as that type. Ways out rewrite only what they change. **A way out makes what it rewrites bind**: a way out is one value, `Way` — what it
+the value as that type. A glob binds only where the key gives text or a path; for any other
+result its one cause is the key's type statement (`Gives::statement`, one writer), so no
+comparison meets a glob. Ways out rewrite only what they change. **A way out makes what it rewrites bind**: a way out is one value, `Way` — what it
 does and what it rewrites to — and every one that rewrites is bound before it is shown, a
 filter's as a clause, a report's as a key, and dropped if it would be refused again
 (`keep_ways_that_bind`). Pinned at the filter by `every_way_out_binds_the_whole_clause`, at the
@@ -130,7 +142,7 @@ offers a rewrite through `Way::to`, never as hint text, and a new caller of `bin
 check. The conversion pointer rewrites nothing and is gated where it is built. A cause about what a key is — two types, or a
 type that changed, or a key that gained its first facts, while the run read it — is an answer and prints without `Error:`
 (`ExpressionRefused::is_answer`); every other cause is input Canon cannot read. Evaluation compares
-text by code point, numbers with a tolerance, times through the time noun's period table, a
+text by code point, a glob through its matcher, numbers with a tolerance, times through the time noun's period table, a
 modifier's part as a whole number, a bucket's label by equality.
 
 **Where it does not apply**: a pattern, which reads its keys through `parse_key_and_accessor`

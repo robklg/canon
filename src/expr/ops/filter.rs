@@ -14,7 +14,7 @@
 //! whole-period table on the user's clock, parts and bucket labels as read. A source with no
 //! value fails every comparison, and `NOT` is everything else.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 
 use crate::core::domain::fact::FactValue;
@@ -23,8 +23,9 @@ use crate::core::domain::time::zone::UserZone;
 use crate::expr::domain::bind::{check_read_as, Bound, BoundKey, ReadAs, Refused, Test};
 use crate::expr::domain::cache::FactCache;
 use crate::expr::domain::filter::{
-    compare_numbers, compare_text, glob_match, period_op, CompareOp, FilterResult, StatusPredicate,
+    compare_numbers, compare_text, period_op, CompareOp, FilterResult, StatusPredicate,
 };
+use crate::expr::domain::glob::Glob;
 use crate::expr::domain::key::{Key, SourceFact, CONTENT_HASH};
 use crate::expr::domain::transform::{apply_chain, InstantRecord, Modified};
 use crate::expr::domain::value::source_row_value;
@@ -97,6 +98,7 @@ enum Local<'a> {
     Exists(&'a BoundKey),
     Compare(&'a BoundKey, CompareOp, Value<'a>),
     In(&'a BoundKey, Vec<Value<'a>>),
+    Glob(&'a BoundKey, &'a Glob),
     Status(StatusPredicate),
 }
 
@@ -107,7 +109,6 @@ enum Value<'a> {
     Span(ClockSpan),
     Part(i64),
     Bucket(&'a str),
-    Glob(&'a str),
 }
 
 fn to_local<'a>(tree: &'a Bound, zone: &UserZone) -> Local<'a> {
@@ -117,7 +118,6 @@ fn to_local<'a>(tree: &'a Bound, zone: &UserZone) -> Local<'a> {
         Test::Period(tv) | Test::TimeOfDay(tv) => Value::Span(tv.on_clock(zone)),
         Test::Part(n) => Value::Part(*n),
         Test::Bucket(label) => Value::Bucket(label),
-        Test::Glob(pattern) => Value::Glob(pattern),
     };
     match tree {
         Bound::And(all) => Local::And(all.iter().map(|t| to_local(t, zone)).collect()),
@@ -126,6 +126,7 @@ fn to_local<'a>(tree: &'a Bound, zone: &UserZone) -> Local<'a> {
         Bound::Exists { key } => Local::Exists(key),
         Bound::Compare { key, op, test } => Local::Compare(key, *op, value(test)),
         Bound::In { key, tests } => Local::In(key, tests.iter().map(value).collect()),
+        Bound::Glob { key, glob } => Local::Glob(key, glob),
         Bound::Status(predicate) => Local::Status(*predicate),
     }
 }
@@ -175,6 +176,11 @@ fn eval(
             }
             Ok(false)
         }
+        Local::Glob(key, glob) => match read_value(conn, source_id, key, cache, zone)? {
+            Some(FactValue::Text(s) | FactValue::Path(s)) => Ok(glob.matches(&s)),
+            Some(value) => Err(not_bound_for(&value)),
+            None => Ok(false),
+        },
         Local::Status(predicate) => Ok(match predicate {
             StatusPredicate::Hashed => cache.get_object_id(source_id).is_some(),
             StatusPredicate::Archived => {
@@ -200,19 +206,23 @@ fn eval(
 fn compare(value: &FactValue, op: CompareOp, typed: &Value, zone: &UserZone) -> Result<bool> {
     Ok(match (typed, value) {
         (Value::Text(t), FactValue::Text(s) | FactValue::Path(s)) => compare_text(s, op, t),
-        (Value::Glob(p), FactValue::Text(s) | FactValue::Path(s)) => glob_match(s, p),
         (Value::Number(n), FactValue::Num(v)) => compare_numbers(*v, op, *n),
         (Value::Part(n), FactValue::Num(v)) => compare_numbers(*v, op, *n as f64),
         (Value::Bucket(label), FactValue::Text(s)) => s == label,
-        (Value::Span(period), FactValue::Time(tv)) => match period_op(op) {
-            Some(row) => tv.on_clock(zone).satisfies(row, period),
-            None => bail!("a glob reached a time comparison"),
-        },
-        _ => bail!(
-            "a bound comparison met a {} value it was not bound for",
-            value.kind()
-        ),
+        (Value::Span(period), FactValue::Time(tv)) => {
+            tv.on_clock(zone).satisfies(period_op(op), period)
+        }
+        _ => return Err(not_bound_for(value)),
     })
+}
+
+/// The defect of a value meeting a comparison or glob that binding did not bind for its type:
+/// raised, never read as false.
+fn not_bound_for(value: &FactValue) -> anyhow::Error {
+    anyhow!(
+        "a bound comparison met a {} value it was not bound for",
+        value.kind()
+    )
 }
 
 // ============================================================================
@@ -372,11 +382,33 @@ mod tests {
         // 2-segment path: "2024/doc.txt" (index [1] = "doc.txt")
         let s3 = insert_source(&conn, root, "2024/doc.txt");
 
-        let filter = bound(&conn, "source.rel_path[1]~'*tion*'");
+        let filter = bound(&conn, "source.rel_path[1]~*tion*");
         let result = apply_filters(&mut conn, &[s1, s2, s3], &filter, &UserZone::utc()).unwrap();
 
         // s1 silently skipped (out of bounds), s2 matches, s3 doesn't match glob
         assert_eq!(result.source_ids, vec![s2]);
+    }
+
+    /// Quoted text in a glob is literal: a quoted glob matches only the name it spells, and
+    /// `!~` of it selects everything else.
+    #[test]
+    fn a_quoted_glob_matches_its_text_exactly() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let literal = insert_source(&conn, root, "IMG_*");
+        let photo = insert_source(&conn, root, "IMG_0001.jpg");
+        let bracketed = insert_source(&conn, root, "Holiday [2024].jpg");
+        let all = [literal, photo, bracketed];
+        for (text, expected) in [
+            (r#"filename~"IMG_*""#, vec![literal]),
+            (r#"filename!~"IMG_*""#, vec![photo, bracketed]),
+            ("filename~IMG_*", vec![literal, photo]),
+            (r#"filename~*"[2024]"*"#, vec![bracketed]),
+        ] {
+            let filter = bound(&conn, text);
+            let result = apply_filters(&mut conn, &all, &filter, &UserZone::utc()).unwrap();
+            assert_eq!(result.source_ids, expected, "{text}");
+        }
     }
 
     #[test]
@@ -405,7 +437,7 @@ mod tests {
         // 4-segment path: [2:4] = "c/d"
         let s2 = insert_source(&conn, root, "a/b/c/d");
 
-        let filter = bound(&conn, "source.rel_path[2:4]~'c*'");
+        let filter = bound(&conn, "source.rel_path[2:4]~c*");
         let result = apply_filters(&mut conn, &[s1, s2], &filter, &UserZone::utc()).unwrap();
 
         assert_eq!(result.source_ids, vec![s2]);

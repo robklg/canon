@@ -502,7 +502,7 @@ mod tests {
         }
         // An alias left unexpanded where a key belongs — a manifest's line, or one inside an
         // alias's own value — is named, in words true at either door; after `~` an `@` is part
-        // of the glob.
+        // of the glob, and needs quotes there like any character a plain value cannot hold.
         let text = refusal(&conn, &["@image OR source.ext = jpg"]).to_string();
         assert!(
             text.contains(
@@ -511,7 +511,10 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(read_filters(&conn, &["source.rel_path ~ *@2x*".to_string()]).is_ok());
+        assert!(refusal(&conn, &["source.rel_path ~ *@2x*"])
+            .to_string()
+            .contains("`@` needs quotes; quote that part, but not * ? [ ]"));
+        assert!(read_filters(&conn, &[r#"source.rel_path ~ *"@"2x*"#.to_string()]).is_ok());
         // A bare `?` followed by another condition is still the whole question.
         assert!(read_filters(&conn, &["archived? AND source.ext?".to_string()]).is_ok());
     }
@@ -826,7 +829,11 @@ mod tests {
                 16,
                 "`[` is a wildcard, but IN does not take wildcards",
             ),
-            ("filename~a&b", 10, "`&` needs quotes around the value"),
+            (
+                "filename~a&b",
+                10,
+                "`&` needs quotes; quote that part, but not * ? [ ]",
+            ),
             (
                 "numtext=a#b",
                 9,
@@ -895,6 +902,10 @@ mod tests {
             "photo(1).jpg",
             "a*%",
             "a%b)",
+            "O'Brien*",
+            "a@b*",
+            "a\\b*",
+            "[abc",
         ];
         let mut clauses = Vec::new();
         for key in keys {
@@ -937,6 +948,28 @@ mod tests {
             }
         }
         assert!(quoted >= 20 && pairs >= 5, "{quoted} quoted, {pairs} pairs");
+        // The glob half is read by the glob reader: where it cannot be read, neither fix shows.
+        for clause in [
+            "filename=O'Brien*",
+            "filename=a@b*",
+            "filename=a\\b*",
+            "filename=[abc",
+        ] {
+            assert_eq!(
+                said(&conn, clause),
+                [format!(
+                    "`{}` is a wildcard, but `=` does not take wildcards",
+                    if clause.ends_with("[abc") { '[' } else { '*' }
+                )],
+                "{clause}"
+            );
+        }
+        assert_eq!(
+            said(&conn, "filename=IMG*"),
+            [
+                r#"`*` is a wildcard, but `=` does not take wildcards. As a glob: filename~IMG*   As exact text: filename="IMG*""#
+            ]
+        );
     }
 
     /// A value starting with a character an operator can hold — `=`, `!`, `<`, `>`, `~`, `(` —
@@ -999,7 +1032,8 @@ mod tests {
     }
 
     /// After an ordering operator a value is quoted as after `=`: a text key compares quoted
-    /// text in character order. After `~` a value is a glob, which shows no fix.
+    /// text in character order. After `~` a value is a glob, which shows no fix, and where a
+    /// quote mark opens quoted text.
     #[test]
     fn a_value_after_an_ordering_operator_is_quoted_too() {
         let conn = world_with_text(&["content.Title"]);
@@ -1012,9 +1046,10 @@ mod tests {
             );
         }
         assert_eq!(
-            said(&conn, "Title~a'b"),
-            ["`'` needs quotes around the value"]
+            said(&conn, "Title~a%b"),
+            ["`%` needs quotes; quote that part, but not * ? [ ]"]
         );
+        assert_eq!(said(&conn, "Title~a'b"), ["this quote is unclosed"]);
     }
 
     /// A quoted value uses `"`, or `'` where the text holds a `"` and no `'`, so no mark is
