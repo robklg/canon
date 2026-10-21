@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::ResolvedScope;
 use crate::core::repo;
+use crate::expr::ExpressionText;
 use crate::survey::ops::compute::{SurveyOutcome, SurveyParams};
 use crate::survey::ops::orchestrate::{run_survey, SurveyOrchestration, SurveyRun};
 use crate::survey::render;
@@ -92,8 +93,6 @@ fn suppress_early_exit_header(null_delim: bool, detail: Option<DetailMode>) -> b
 
 /// Options controlling survey behavior.
 pub struct SurveyOptions {
-    /// Original (pre-expansion) filter strings — for display in selection header.
-    pub original_filters: Vec<String>,
     /// Visibility control (--include excluded).
     pub include: IncludeSet,
     /// Compare against specific locations instead of discovering them.
@@ -129,11 +128,11 @@ pub enum SurveyExit {
 pub fn run(
     db: &mut repo::Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     options: &SurveyOptions,
 ) -> Result<SurveyExit> {
     // Validate --detail complement requires --where
-    if options.detail == Some(DetailMode::Complement) && filter_strs.is_empty() {
+    if options.detail == Some(DetailMode::Complement) && filter_text.typed().is_empty() {
         bail!("`--detail complement` requires `--where` filters to define matching content.");
     }
 
@@ -143,7 +142,7 @@ pub fn run(
     }
 
     // Validate --affinity requires --where
-    if options.affinity && filter_strs.is_empty() {
+    if options.affinity && filter_text.typed().is_empty() {
         bail!("`--affinity` requires `--where` filters.");
     }
 
@@ -176,7 +175,7 @@ pub fn run(
     } = run_survey(
         conn,
         scope_prefixes,
-        filter_strs,
+        filter_text,
         &orchestration,
         &params,
         crate::user_zone(),
@@ -215,7 +214,7 @@ pub fn run(
                 // channel bends; the statement never goes unsaid.
                 render::eprint_set_asides(&header);
             } else {
-                render::print_survey_header(&header, &options.original_filters, 0, 0, 0, 0, None);
+                render::print_survey_header(&header, filter_text.typed(), 0, 0, 0, 0, None);
                 if let Some((ref ctx, ref scope_rel)) = note_context {
                     render::print_notes_section(ctx, scope_rel, options.verbose);
                 }
@@ -228,7 +227,7 @@ pub fn run(
             } else {
                 render::print_survey_header(
                     &header,
-                    &options.original_filters,
+                    filter_text.typed(),
                     total_count,
                     total_count,
                     0,
@@ -252,7 +251,7 @@ pub fn run(
                     if !options.null_delim {
                         render::print_survey_header(
                             &header,
-                            &options.original_filters,
+                            filter_text.typed(),
                             result.total_count,
                             result.unhashed_count,
                             result.total_hashed,
@@ -280,7 +279,7 @@ pub fn run(
                 Some(DetailMode::Complement) => {
                     render::print_survey_header(
                         &header,
-                        &options.original_filters,
+                        filter_text.typed(),
                         result.total_count,
                         result.unhashed_count,
                         result.total_hashed,
@@ -302,7 +301,7 @@ pub fn run(
                     if !options.null_delim {
                         render::print_survey_header(
                             &header,
-                            &options.original_filters,
+                            filter_text.typed(),
                             result.total_count,
                             result.unhashed_count,
                             result.total_hashed,
@@ -332,7 +331,7 @@ pub fn run(
                     if !options.null_delim {
                         render::print_survey_header(
                             &header,
-                            &options.original_filters,
+                            filter_text.typed(),
                             result.total_count,
                             result.unhashed_count,
                             result.total_hashed,
@@ -371,7 +370,7 @@ pub fn run(
                 None => {
                     render::print_survey_header(
                         &header,
-                        &options.original_filters,
+                        filter_text.typed(),
                         result.total_count,
                         result.unhashed_count,
                         result.total_hashed,
@@ -431,7 +430,6 @@ mod tests {
 
     fn test_options() -> SurveyOptions {
         SurveyOptions {
-            original_filters: Vec::new(),
             include: IncludeSet::default(),
             other_paths: Vec::new(),
             affinity: false,
@@ -535,7 +533,13 @@ mod tests {
                     ..test_options()
                 };
                 let mut db = repo::Db::from_connection(conn);
-                let exit = run(&mut db, &["/archive/media".to_string()], &[], &options).unwrap();
+                let exit = run(
+                    &mut db,
+                    &["/archive/media".to_string()],
+                    &ExpressionText::plain(&[]),
+                    &options,
+                )
+                .unwrap();
                 assert_eq!(exit, SurveyExit::FrameRefused);
             },
         )
@@ -554,10 +558,10 @@ mod tests {
             ..test_options()
         };
         let paths = vec!["/mnt/drive".to_string()];
-        let filter_strs: Vec<String> = vec![];
+        let filter_text = ExpressionText::plain(&[]);
 
         let mut db = repo::Db::from_connection(conn);
-        let result = run(&mut db, &paths, &filter_strs, &options);
+        let result = run(&mut db, &paths, &filter_text, &options);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("--affinity"));
@@ -577,10 +581,10 @@ mod tests {
             ..test_options()
         };
         let paths = vec!["/mnt/drive".to_string()];
-        let filter_strs: Vec<String> = vec![];
+        let filter_text = ExpressionText::plain(&[]);
 
         let mut db = repo::Db::from_connection(conn);
-        let result = run(&mut db, &paths, &filter_strs, &options);
+        let result = run(&mut db, &paths, &filter_text, &options);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("--detail residual"));

@@ -573,6 +573,7 @@ mod tests {
 
     use crate::core::domain::fact::FactType;
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::expr::ExpressionText;
 
     /// Insert a fact stored on a source, with a time value.
     fn insert_time_fact(conn: &Connection, source_id: i64, key: &str, timestamp: i64) {
@@ -900,7 +901,7 @@ mod tests {
             &conn,
             Some("Make|lowercase"),
             &["Make|uppercase".into()],
-            &[],
+            &ExpressionText::plain(&[]),
         )
         .unwrap();
         let (key, group) = (read.key.unwrap(), read.grouping);
@@ -915,10 +916,11 @@ mod tests {
         let grouped =
             compute_grouped_distribution(&mut conn, &[s1, s2], &bare, &group, 0, &UserZone::utc());
         // A key with no facts when it was read, which gains a time its modifier cannot take.
-        let absent = crate::expr::read_report(&conn, Some("New|number"), &[], &[])
-            .unwrap()
-            .key
-            .unwrap();
+        let absent =
+            crate::expr::read_report(&conn, Some("New|number"), &[], &ExpressionText::plain(&[]))
+                .unwrap()
+                .key
+                .unwrap();
         crate::core::testing::insert_time_fact(&conn, s1, "content.New", "2024-06-15");
         let gained = compute_distribution(&mut conn, &[s1, s2], &absent, 0, &UserZone::utc());
         for err in [plain.err(), grouped.err()] {

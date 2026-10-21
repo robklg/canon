@@ -345,7 +345,7 @@ mod tests {
     use crate::core::testing::insert_time_fact;
     use crate::expr::domain::filter::STATUS_KEYWORDS;
     use crate::expr::domain::print::printed_value;
-    use crate::expr::domain::read::Grammar;
+    use crate::expr::domain::read::{AliasMode, Grammar};
     use crate::expr::domain::value::SourceAttributes;
     use crate::expr::ops::bind::bound;
     use rusqlite::Connection as RawConnection;
@@ -1021,8 +1021,11 @@ mod tests {
         insert_source(&conn, root, "a.jpg");
 
         // Refused when the filter is read, before any source is looked at.
-        let err = crate::expr::ops::bind::read_filters(&conn, &["content.mime=image/jpeg".into()])
-            .expect_err("an unknown key in a comparison is refused");
+        let err = crate::expr::ops::bind::read_filters(
+            &conn,
+            &crate::expr::ops::bind::ExpressionText::plain(&["content.mime=image/jpeg"]),
+        )
+        .expect_err("an unknown key in a comparison is refused");
         assert!(
             err.to_string()
                 .contains("^ `content.mime` is an unknown key\n    `canon facts` lists the keys"),
@@ -1698,11 +1701,12 @@ mod tests {
         let neighbour = insert_source_with_object(&conn, root, "b.txt", Some(other));
         let ids = [subject, neighbour];
 
-        let hash = crate::expr::domain::read::read_keys("hash", 0, Grammar::Key)
-            .value
-            .unwrap()
-            .remove(0)
-            .base;
+        let hash =
+            crate::expr::domain::read::read_keys("hash", 0, Grammar::Key, AliasMode::NotLoaded)
+                .value
+                .unwrap()
+                .remove(0)
+                .base;
         let cache = prefetch_facts(&mut conn, &ids, &[hash]).unwrap();
         assert!(matches!(
             cache.value(subject, "content.hash.sha256"),

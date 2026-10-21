@@ -7,7 +7,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::read::is_space;
 
-/// Where a problem sits: which of the refusal's texts, and a byte range in it.
+/// Where a problem sits: which of the refusal's texts, and a byte range in it. A place inside an
+/// alias's value sits in that use's own text, which the refusal records where it was typed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::expr) struct Place {
     pub text: usize,

@@ -26,8 +26,8 @@ own grammar and its matcher. `bind` reads each clause's value as its key's type 
 bare-value classes, the refusal and its ways out — and `print` is the printing rule. `cache`
 is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
 because putting a return type in the layer above the function that returns it is a
-repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` rewrites
-the `@name` shorthands a filter may be written with.
+repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` checks
+the aliases file's entries and writes the text a manifest records for a filter that used one.
 
 **`ops/`** — the language applied. `bind` reads the stored keys' types and binds a filter or
 a report's keys, or refuses them. `filter` runs bound filters against real rows, against a
@@ -35,9 +35,8 @@ prefetched cache rather than a query per source. `pattern` is the shaping half's
 storage — the prefetch that reads a pattern's stored facts, and the place the context-supplied
 law is applied rather than merely stated. `selection` is the set of sources an operation
 reports over or acts on — it lives here rather than beside any one command because exploring
-and acting must resolve to the same set. `alias` is the half of alias expansion that needs the
-outside world: the rewriting rules are a domain concern, reading the file they rewrite from is
-this one. `value` reads a stored key's one value for a batch of sources, and any key's as an
+and acting must resolve to the same set. `alias` reads the aliases file, the first time a reading meets
+an alias, and hands its entries to the check. `value` reads a stored key's one value for a batch of sources, and any key's as an
 expression reads it (`fetch_named_values`, for `worklist --emit`).
 
 **`repo.rs`** — what the language needs read out of the database before it can be evaluated:
@@ -92,7 +91,20 @@ glob, both through `needs_quotes_problem`. `!~` reads as `NOT` of the glob. Pins
 `question_mark_takes_one_visible_character`, `the_matcher_stays_polynomial`.
 
 **Who reads through it**: binding (`--where`, `facts --key` and `--group-by`, a manifest's
-recorded query), the printing rule and alias sorting. Its tree is `domain/filter.rs`'s `Expr`.
+recorded query), the printing rule and the aliases file's check. Its tree is `domain/filter.rs`'s `Expr`.
+
+**An alias** is `@` and an alias name where a condition starts or a key stands; elsewhere `@`
+follows its position's rule. A command hands `ExpressionText` (its texts, and where their aliases
+come from); the file is loaded at the first use, which stops a reading made without it, and that
+text is read again with it. A
+filter alias reads as its value's tree, and only `AND`, `OR`, `)` or the end may follow it; a key
+alias reads as its key, the key grammar continuing where that key ended. A value is one key or one
+filter, with no alias (`read_alias_value`); the file check, `domain/alias.rs::check_aliases`,
+reads nothing from the library and draws no fix, and one broken entry refuses every use. Places
+inside an alias stay in the value's coordinates; drawing puts the caret under the use, prefixes
+"in alias `@x`: " and shows nothing that rewrites text (`BindCause::at_use`, pinned by
+`every_place_inside_an_alias_points_at_its_use`). The alias name has one spelling,
+`domain/alias.rs::alias_name_at`.
 
 ## Binding
 
@@ -147,19 +159,18 @@ modifier's part as a whole number, a bucket's label by equality.
 
 **Where it does not apply**: a pattern, which reads its keys through `parse_key_and_accessor`
 and meets a wrong-type modifier as a gap when `apply` evaluates it; a manifest's recorded query
-is bound like `--where`, read as specified with no aliases, its refusal's first line saying so
-(`ExpressionRefused::into_specified`). It holds what expansion produced, so it is read as expanded
-text: an `@name` where a key belongs is named as an alias by the reader, which also meets one
-left inside an alias's own value; after `=` an `@` needs quotes, and after `~` it is part of the
-glob. The alias name has one
-spelling, `domain/alias.rs::alias_name_at`.
+is bound like `--where`, read as specified with no aliases, its refusal's first line saying so,
+and an `@name` where an alias would stand refused by name. What a manifest records is
+`BoundFilters::recorded`, built in the reading that bound the filter: each use replaced by a
+filter alias's value in parentheses or a key alias's key, so the recorded query selects what the
+typed text selected (`the_recorded_text_selects_what_the_typed_text_selected`).
 
 ## The printing rule
 
 `domain/print.rs` writes a value or a key so that, typed into `--where`, it reads back as
 itself: bare where the reader reads the bare text back the same, double-quoted otherwise. The
-writer asks the reader — the filter reader (`reads_as_one_bare_value`, `reads_as_one_bare_key`),
-alias expansion's `@` test and the binder's bare-value class — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
+writer asks the reader — the filter reader (`reads_as_one_bare_value`, `reads_as_one_bare_key`)
+and the binder's bare-value class — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
 printable one- and two-character value checked against the reader). A refusal's clauses and
 ways out print through it. So does the statement that keys hold two types and its way out
 (`mixed_type_statement`, `mixed_type_way_out`), which `facts`' listing, `cluster`'s summary and

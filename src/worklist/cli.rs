@@ -4,13 +4,13 @@ use std::io::{self, Write};
 use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
-use crate::expr::{read_filters, ExpressionRefused};
+use crate::expr::{read_filters, ExpressionRefused, ExpressionText};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 pub fn run(
     db: &mut Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     include: &IncludeSet,
     unique_content: bool,
     emit_keys: &[String],
@@ -21,7 +21,7 @@ pub fn run(
     // refused, one refusal names every problem, the filter's first.
     let (emit_keys, filters) = match (
         crate::worklist::ops::read_emit_keys(emit_keys),
-        read_filters(conn, filter_strs),
+        read_filters(conn, filter_text),
     ) {
         (Ok(keys), Ok(filters)) => (keys, filters),
         (Err(names), Ok(_)) => return Err(names.into()),
@@ -100,7 +100,7 @@ mod tests {
                     run(
                         &mut db,
                         &[],
-                        &filters.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
+                        &ExpressionText::plain(filters),
                         &IncludeSet::default(),
                         false,
                         &["source.extension".to_string()],

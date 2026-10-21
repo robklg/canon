@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::compare::ops;
 use crate::core::domain::IncludeSet;
 use crate::core::repo::Db;
+use crate::expr::ExpressionText;
 
 pub struct CompareOptions {
     pub include: IncludeSet,
@@ -14,14 +15,14 @@ pub fn run(
     db: &mut Db,
     path_a: &Path,
     path_b: &Path,
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     options: &CompareOptions,
 ) -> Result<bool> {
     let run = ops::run_compare(
         db.conn_mut(),
         path_a,
         path_b,
-        filter_strs,
+        filter_text,
         &options.include,
         crate::user_zone(),
     )?;

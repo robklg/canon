@@ -5,7 +5,7 @@ use crate::core::testing::{
     insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
     setup_test_db,
 };
-use crate::expr::{read_filters, BoundFilters};
+use crate::expr::{read_filters, BoundFilters, ExpressionText};
 use crate::survey::domain::analysis::LocationKind;
 use crate::survey::ops::compute::{compute_survey, SurveyOutcome, SurveyParams};
 
@@ -561,7 +561,7 @@ fn test_affinity_basic() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -608,7 +608,7 @@ fn test_affinity_only_here_reduced() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -652,7 +652,7 @@ fn test_affinity_unhashed_excluded() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -756,7 +756,7 @@ fn test_classification_sort() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -800,7 +800,7 @@ fn test_selection_narrowed_by_filter() {
     insert_source(&conn, root, "photos/e.jpg", Some(obj5));
 
     let params = test_params();
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -831,7 +831,7 @@ fn test_same_root_complementary() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(
         &mut conn,
         &["/mnt/drive/photos"],
@@ -875,7 +875,7 @@ fn test_mirror_with_filters() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -922,7 +922,7 @@ fn test_other_basic() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let other = vec![("/mnt/backup/trip")];
     let outcome = run_compute(
         &mut conn,
@@ -1016,7 +1016,7 @@ fn test_affinity_never_reads_empty_files_as_complementary() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(
         &mut conn,
         &["/mnt/drive-a"],
@@ -1067,7 +1067,7 @@ fn test_other_zero_overlap() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let other = vec![("/mnt/backup")];
     let outcome = run_compute(
         &mut conn,
@@ -1155,7 +1155,7 @@ fn test_other_archive_root() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let other = vec![("/archive")];
     let outcome = run_compute(
         &mut conn,
@@ -1204,7 +1204,7 @@ fn test_brief_suppresses_affinity() {
 
     // affinity: true + brief: true → compute_affinity: false
     let params = test_params(); // compute_affinity defaults to false
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -1295,7 +1295,7 @@ fn test_other_with_brief() {
 
     // affinity: true + brief: true → compute_affinity: false
     let params = test_params();
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let other = vec![("/mnt/backup/trip")];
     let outcome = run_compute(
         &mut conn,
@@ -1339,7 +1339,7 @@ fn test_other_same_root_cross_scope() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let other = vec![("/mnt/drive/documents")];
     let outcome = run_compute(
         &mut conn,
@@ -1393,7 +1393,7 @@ fn test_detail_complement_paths() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -1429,7 +1429,7 @@ fn test_detail_complement_mirror_has_empty_paths() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -1599,7 +1599,7 @@ fn test_complement_paths_relative_to_location() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive-a"], &params, &filters, &[], None);
 
     match outcome {
@@ -1635,7 +1635,7 @@ fn test_complement_other_mode_zero_overlap_has_paths() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let other = vec![("/mnt/backup")];
     let outcome = run_compute(
         &mut conn,
@@ -1929,7 +1929,7 @@ fn test_orientation_with_filters() {
     insert_source(&conn, root_b, "trip/a.jpg", Some(obj1));
 
     let params = test_params();
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -2002,7 +2002,7 @@ fn test_affinity_brief_noop() {
 
     // affinity: true + brief: true → compute_affinity: false
     let params = test_params();
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -2093,7 +2093,7 @@ fn test_subset_classification() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {
@@ -2135,7 +2135,7 @@ fn test_subset_vs_mirror() {
         compute_affinity: true,
         ..test_params()
     };
-    let filters = read_filters(&conn, &["source.ext=jpg".to_string()]).unwrap();
+    let filters = read_filters(&conn, &ExpressionText::plain(&["source.ext=jpg"])).unwrap();
     let outcome = run_compute(&mut conn, &["/mnt/drive"], &params, &filters, &[], None);
 
     match outcome {

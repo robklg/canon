@@ -1,20 +1,23 @@
 //! **Binding, applied** — the binding law's owner: `read_filters` reads every `--where`
-//! string a command was given through the reader, reads the types of the stored keys they name
+//! string a command was given ([`ExpressionText`]) through the reader, its aliases from the
+//! aliases file the first time a use is met, reads the types of the stored keys they name
 //! once from all of each key's facts, and binds each condition through the pure binder. What
 //! comes back is either [`BoundFilters`] — the only thing [`super::filter::apply_filters`]
 //! accepts, so no command can run a filter that was not bound — or an [`ExpressionRefused`]
 //! naming every problem the reader met and every cause binding found, before any source is
 //! looked at. `read_report` is the same reading for everything a `facts` report names — its
-//! key, its grouping keys and its filters, every cause in one refusal. Reads only: no zone, no
-//! scope.
+//! key, its grouping keys and its filters, every cause in one refusal. Reads only — the
+//! database, and the aliases file where an alias is used: no zone, no scope.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::core::domain::fact::KeyTypes;
 use crate::core::repo::fact::key_types;
+use crate::expr::domain::alias::{recorded_text, CheckedAliases};
 use crate::expr::domain::bind::{
     bind_expr, bind_key, keep_quoted_name_with_facts, keep_ways_that_bind, known_type,
     quoted_name_key, stored_keys, BindCause, Bound, BoundKey, ExpressionRefused, Reads, Refused,
@@ -22,7 +25,60 @@ use crate::expr::domain::bind::{
 use crate::expr::domain::filter::UsedStatus;
 use crate::expr::domain::key::{InputKey, ParsedFactKey};
 use crate::expr::domain::problem::Problem;
-use crate::expr::domain::read::{read_filter, read_keys, Grammar};
+use crate::expr::domain::read::{read_filter, read_keys, AliasMode, AliasUse, Grammar, Reading};
+use crate::expr::ops::alias::{aliases_file, load_aliases};
+
+/// **A command's expression texts**: each `--where` string as given on the command line, or a
+/// manifest's recorded query as specified, with where an alias in them is read from. The one
+/// thing a command hands the facility to read its filters by; a report's `--key` and `--group-by`
+/// texts, typed on the same command line, are read with its filters' aliases.
+#[derive(Debug, Clone)]
+pub struct ExpressionText {
+    texts: Vec<String>,
+    aliases: AliasSource,
+}
+
+/// Where an `@name` in an expression text is read from.
+#[derive(Debug, Clone)]
+enum AliasSource {
+    /// Given on the command line: the aliases file at this path, read the first time a use is
+    /// met.
+    File(PathBuf),
+    /// A manifest's recorded query, which takes no alias.
+    NotAllowed,
+}
+
+impl ExpressionText {
+    /// Texts given on the command line, their aliases in the aliases file of `canon_home`.
+    pub fn given(texts: Vec<String>, canon_home: &Path) -> Self {
+        ExpressionText {
+            texts,
+            aliases: AliasSource::File(aliases_file(canon_home)),
+        }
+    }
+
+    /// A manifest's recorded query, as specified: no alias stands in it.
+    pub fn specified(texts: Vec<String>) -> Self {
+        ExpressionText {
+            texts,
+            aliases: AliasSource::NotAllowed,
+        }
+    }
+
+    /// The texts as typed.
+    pub fn typed(&self) -> &[String] {
+        &self.texts
+    }
+
+    /// Texts given with no aliases file, for a test: an alias in them is unknown.
+    #[cfg(test)]
+    pub fn plain(texts: &[&str]) -> Self {
+        ExpressionText {
+            texts: texts.iter().map(|t| t.to_string()).collect(),
+            aliases: AliasSource::File(PathBuf::new()),
+        }
+    }
+}
 
 /// Filters read and bound: every condition's key checked and every typed value read as its
 /// key's type. Made only by [`read_filters`] and [`read_report`], and only where nothing was
@@ -32,6 +88,8 @@ pub struct BoundFilters {
     /// Each `--where` string's bound tree; several are combined with AND.
     pub(super) trees: Vec<Bound>,
     pub(super) used_status: UsedStatus,
+    /// Each string as a manifest records it: every alias replaced by what it stands for.
+    recorded: Vec<String>,
 }
 
 impl BoundFilters {
@@ -42,28 +100,114 @@ impl BoundFilters {
         BoundFilters {
             trees: Vec::new(),
             used_status: UsedStatus::default(),
+            recorded: Vec::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.trees.is_empty()
     }
+
+    /// **The recorded text**: each string as read, every alias use replaced by what it stands
+    /// for ([`recorded_text`]) — built in the reading that bound it, so what a
+    /// manifest records selects what this run selected.
+    pub fn recorded(&self) -> &[String] {
+        &self.recorded
+    }
 }
 
-/// **Read and bind a command's `--where` strings**, as given: `--where` arrives alias-expanded,
-/// a manifest's recorded query as specified. Each string is read on its own, so a problem in one
-/// is reported beside the causes of the others; every problem and cause in the run is reported
-/// together, through an [`ExpressionRefused`] carried in the error. A string with any problem
-/// never runs, though what of it could be read is still bound, so its causes are named too.
-pub fn read_filters(conn: &Connection, given: &[String]) -> Result<BoundFilters> {
-    bind_filters(conn, given, 0)?.map_err(|causes| {
-        ExpressionRefused {
-            refused: Refused::Filter,
-            texts: given.to_vec(),
-            causes,
+/// **How one run reads its texts' aliases**: not at all (a manifest's query), or from the
+/// aliases file, loaded the first time a text uses an alias, that text then read again with it.
+/// It holds the run's typed texts, and each use takes the next of the refusal's texts after
+/// them, in the order met: the number a use's reading carries and its text in the refusal are
+/// counted here alone.
+struct AliasReading {
+    state: AliasState,
+    typed: Vec<String>,
+    uses: Vec<AliasUse>,
+}
+
+/// Where a run's aliases stand.
+enum AliasState {
+    /// A manifest's recorded query, which takes no alias.
+    NotAllowed,
+    /// Given on the command line: the aliases file at this path, not read yet.
+    NotLoaded(PathBuf),
+    /// The aliases file, read and checked.
+    Loaded(CheckedAliases),
+}
+
+impl AliasReading {
+    /// The aliases of a run reading `typed`, every text as typed, in the order read.
+    fn new(source: &AliasSource, typed: Vec<String>) -> Self {
+        let state = match source {
+            AliasSource::File(path) => AliasState::NotLoaded(path.clone()),
+            AliasSource::NotAllowed => AliasState::NotAllowed,
+        };
+        AliasReading {
+            state,
+            typed,
+            uses: Vec::new(),
         }
-        .into()
-    })
+    }
+
+    /// The mode a text, or a way out, is read in now.
+    fn mode(&self) -> AliasMode<'_> {
+        match &self.state {
+            AliasState::NotAllowed => AliasMode::NotAllowed,
+            AliasState::NotLoaded(_) => AliasMode::NotLoaded,
+            AliasState::Loaded(aliases) => AliasMode::Loaded {
+                aliases,
+                first_text: self.typed.len() + self.uses.len(),
+            },
+        }
+    }
+
+    /// **Read one typed text** with `read`: where it uses an alias with the file not read yet
+    /// (the one mode a reading waits in), the file is loaded and the text read again with it, so
+    /// no reading this returns skipped a use. An aliases file that cannot be read, or holds an
+    /// entry that does not read, is the error.
+    fn read<T>(&mut self, read: impl Fn(AliasMode) -> Reading<T>) -> Result<Reading<T>> {
+        let mut reading = read(self.mode());
+        if reading.waits_for_aliases {
+            if let AliasState::NotLoaded(path) = &self.state {
+                self.state = AliasState::Loaded(load_aliases(path)?);
+            }
+            reading = read(self.mode());
+        }
+        self.uses.extend_from_slice(&reading.alias_uses);
+        Ok(reading)
+    }
+
+    /// The refusal of this run's texts: a filter refused in a manifest's query says so, and
+    /// every use's alias value follows the typed texts, drawn where the use was typed.
+    fn refusal(self, refused: Refused, causes: Vec<BindCause>) -> ExpressionRefused {
+        let refused = match (refused, &self.state) {
+            (Refused::Filter, AliasState::NotAllowed) => Refused::RecordedQuery,
+            (other, _) => other,
+        };
+        let mut refusal = ExpressionRefused {
+            refused,
+            texts: self.typed,
+            typed_at: BTreeMap::new(),
+            causes,
+        };
+        refusal.push_alias_texts(&self.uses);
+        refusal
+    }
+}
+
+/// **Read and bind a command's `--where` strings**: given on the command line, each alias read
+/// from the aliases file, which is loaded only where a use is met; a manifest's recorded query
+/// as specified, with no alias. Each string is read on its own, so a problem in one is reported
+/// beside the causes of the others; every problem and cause in the run is reported together,
+/// through an [`ExpressionRefused`] carried in the error. A string with any problem never runs,
+/// though what of it could be read is still bound, so its causes are named too. An aliases file
+/// that cannot be read, or holds an entry that does not read, is the error instead.
+pub fn read_filters(conn: &Connection, text: &ExpressionText) -> Result<BoundFilters> {
+    let mut aliases = AliasReading::new(&text.aliases, text.texts.clone());
+    bind_filters(conn, &text.texts, 0, &mut aliases)?
+        .map_err(|causes| aliases.refusal(Refused::Filter, causes).into())
 }
 
 /// What a report reads: its key, its grouping keys and its filters.
@@ -76,35 +220,40 @@ pub struct ReportReading {
 /// **Read everything a report names** — `facts --key`, each `--group-by` value (a list of keys)
 /// and the `--where` strings — through the reader, the modifier table and binding, with every
 /// cause in one refusal: a wrong `--group-by` never hides a wrong `--where`. The texts are
-/// numbered in that order. A refusal holding a filter's cause carries the filter's first line,
-/// one of keys alone the key's.
+/// numbered in that order, and the key and grouping keys read aliases as the filters do. A
+/// refusal holding a filter's cause carries the filter's first line, one of keys alone the
+/// key's.
 pub fn read_report(
     conn: &Connection,
     key: Option<&str>,
     grouping: &[String],
-    filters: &[String],
+    filters: &ExpressionText,
 ) -> Result<ReportReading> {
-    let mut texts = Vec::new();
+    let mut typed: Vec<String> = key.iter().map(|text| text.to_string()).collect();
+    let first_grouping = typed.len();
+    typed.extend(grouping.iter().cloned());
+    let first_filter = typed.len();
+    typed.extend(filters.texts.iter().cloned());
+    let mut aliases = AliasReading::new(&filters.aliases, typed);
     let mut causes = Vec::new();
     let key = match key {
-        Some(text) => report_keys(conn, text, Grammar::Key, &mut texts, &mut causes)?
+        Some(text) => report_keys(conn, text, 0, Grammar::Key, &mut aliases, &mut causes)?
             .into_iter()
             .next(),
         None => None,
     };
     let mut grouping_keys = Vec::new();
-    for text in grouping {
+    for (i, text) in grouping.iter().enumerate() {
         grouping_keys.extend(report_keys(
             conn,
             text,
+            first_grouping + i,
             Grammar::KeyList,
-            &mut texts,
+            &mut aliases,
             &mut causes,
         )?);
     }
-    let first_filter = texts.len();
-    texts.extend(filters.iter().cloned());
-    let refused = match bind_filters(conn, filters, first_filter)? {
+    let refused = match bind_filters(conn, &filters.texts, first_filter, &mut aliases)? {
         Ok(bound) if causes.is_empty() => {
             return Ok(ReportReading {
                 key,
@@ -118,25 +267,24 @@ pub fn read_report(
             Refused::Filter
         }
     };
-    Err(ExpressionRefused {
-        refused,
-        texts,
-        causes,
-    }
-    .into())
+    Err(aliases.refusal(refused, causes).into())
 }
 
-/// Bind `--where` strings, numbered from `first`: the bound filters, or every problem and cause
-/// in the order met. Every string is read first, so the stored keys' types are read once.
+/// Bind `--where` strings, numbered from `first`, reading aliases with `aliases`: the bound
+/// filters, or every problem and cause in the order met. Every string is read first, so the
+/// stored keys' types are read once.
 fn bind_filters(
     conn: &Connection,
     given: &[String],
     first: usize,
+    aliases: &mut AliasReading,
 ) -> Result<std::result::Result<BoundFilters, Vec<BindCause>>> {
     let mut causes = Vec::new();
     let mut read = Vec::new();
+    let mut recorded = Vec::new();
     for (i, text) in given.iter().enumerate() {
-        let mut reading = read_filter(text, first + i);
+        let mut reading = aliases.read(|mode| read_filter(text, first + i, mode))?;
+        recorded.push(recorded_text(text, &reading.alias_uses));
         offer_quoted_names(conn, &mut reading.problems)?;
         causes.extend(reading.problems.into_iter().map(BindCause::Read));
         read.extend(reading.value);
@@ -149,7 +297,7 @@ fn bind_filters(
     let types = key_types(conn, &names)?;
     let trees: Vec<Bound> = read
         .iter()
-        .map(|expr| bind_expr(expr, &types, &mut causes))
+        .map(|expr| bind_expr(expr, &types, aliases.mode(), &mut causes))
         .collect();
     if !causes.is_empty() {
         return Ok(Err(causes));
@@ -158,7 +306,11 @@ fn bind_filters(
     for tree in &trees {
         tree.note_status(&mut used_status);
     }
-    Ok(Ok(BoundFilters { trees, used_status }))
+    Ok(Ok(BoundFilters {
+        trees,
+        used_status,
+        recorded,
+    }))
 }
 
 /// Keep each quoted name the reader offers only where it names a key with facts, the types read
@@ -180,22 +332,22 @@ fn offer_quoted_names(conn: &Connection, problems: &mut [Problem]) -> Result<()>
     Ok(())
 }
 
-/// Read one report text as `grammar` reads it, numbered next in `texts`, and bind each key it
-/// names: the keys that bind, every problem and cause added to `causes`.
+/// Read one report text as `grammar` reads it, its refusal's text number `index`, and bind each
+/// key it names: the keys that bind, every problem and cause added to `causes`.
 fn report_keys(
     conn: &Connection,
     text: &str,
+    index: usize,
     grammar: Grammar,
-    texts: &mut Vec<String>,
+    aliases: &mut AliasReading,
     causes: &mut Vec<BindCause>,
 ) -> Result<Vec<ParsedFactKey>> {
-    let mut reading = read_keys(text, texts.len(), grammar);
+    let mut reading = aliases.read(|mode| read_keys(text, index, grammar, mode))?;
     offer_quoted_names(conn, &mut reading.problems)?;
-    texts.push(text.to_string());
     causes.extend(reading.problems.into_iter().map(BindCause::Read));
     let mut keys = Vec::new();
     for key in reading.value.unwrap_or_default() {
-        match bind_report_key(conn, &key)? {
+        match bind_report_key(conn, &key, aliases.mode())? {
             Ok(key) => keys.push(key),
             Err(cause) => causes.push(cause),
         }
@@ -205,10 +357,12 @@ fn report_keys(
 
 /// **Check one key a report names** against the modifier table: a modifier that cannot apply to
 /// the key's type is its cause, and so is any modifier on a key of two types (a bare one reports
-/// both types' rows). A key with no facts reads as itself — there is nothing to report.
+/// both types' rows). A key with no facts reads as itself — there is nothing to report. A way
+/// out is read with the report's own aliases.
 fn bind_report_key(
     conn: &Connection,
     key: &InputKey,
+    aliases: AliasMode,
 ) -> Result<std::result::Result<ParsedFactKey, BindCause>> {
     let types = if known_type(&key.base).is_none() {
         key_types(conn, &[key.base.as_str()])?
@@ -227,7 +381,7 @@ fn bind_report_key(
         Err(mut cause) => {
             // A report's way out rewrites the key, so it is read the same way.
             keep_ways_that_bind(&mut cause, &|rewrite| {
-                let reading = read_keys(rewrite, 0, Grammar::Key);
+                let reading = read_keys(rewrite, 0, Grammar::Key, aliases);
                 reading.problems.is_empty()
                     && matches!(reading.value.as_deref(), Some([key]) if bind_as_report(key, &types).is_ok())
             });
@@ -248,7 +402,8 @@ fn bind_as_report(
 /// One `--where` string read and bound, for a test: it must bind.
 #[cfg(test)]
 pub(crate) fn bound(conn: &Connection, filter: &str) -> BoundFilters {
-    read_filters(conn, &[filter.to_string()]).unwrap_or_else(|e| panic!("{filter}: {e}"))
+    read_filters(conn, &ExpressionText::plain(&[filter]))
+        .unwrap_or_else(|e| panic!("{filter}: {e}"))
 }
 
 #[cfg(test)]
@@ -302,7 +457,7 @@ mod tests {
             (None, &["source.extension".to_string()]),
         ];
         for (key, grouping) in reports {
-            let Err(error) = read_report(&conn, key, grouping, &[]) else {
+            let Err(error) = read_report(&conn, key, grouping, &ExpressionText::plain(&[])) else {
                 panic!("{key:?} {grouping:?}: binds");
             };
             let refused = error.downcast::<ExpressionRefused>().expect("a refusal");
@@ -317,9 +472,11 @@ mod tests {
 
     /// One report key, read as `facts --key` reads it.
     fn read_key(conn: &Connection, key: &str) -> Result<ParsedFactKey> {
-        Ok(read_report(conn, Some(key), &[], &[])?
-            .key
-            .expect("a key was named"))
+        Ok(
+            read_report(conn, Some(key), &[], &ExpressionText::plain(&[]))?
+                .key
+                .expect("a key was named"),
+        )
     }
 
     /// One source per key type a refusal names, and a key of two types.
@@ -337,8 +494,7 @@ mod tests {
     }
 
     fn refusal(conn: &Connection, filters: &[&str]) -> ExpressionRefused {
-        let given: Vec<String> = filters.iter().map(|f| f.to_string()).collect();
-        let error = read_filters(conn, &given).expect_err("refused");
+        let error = read_filters(conn, &ExpressionText::plain(filters)).expect_err("refused");
         error
             .downcast::<ExpressionRefused>()
             .unwrap_or_else(|e| panic!("{filters:?}: not a refusal: {e}"))
@@ -403,8 +559,11 @@ mod tests {
         }
         // The typed fraction binds, and selects that point.
         let (mut conn, a) = world();
-        let filters = read_filters(&conn, &[r#"taken="2024-06-15 14:30:05.45""#.to_string()])
-            .expect("a typed fraction binds");
+        let filters = read_filters(
+            &conn,
+            &ExpressionText::plain(&[r#"taken="2024-06-15 14:30:05.45""#]),
+        )
+        .expect("a typed fraction binds");
         let selected = apply_filters(&mut conn, &[a], &filters, &UserZone::utc()).unwrap();
         assert_eq!(selected.source_ids, vec![a]);
     }
@@ -500,23 +659,22 @@ mod tests {
                 "{clause}"
             );
         }
-        // An alias left unexpanded where a key belongs — a manifest's line, or one inside an
-        // alias's own value — is named, in words true at either door; after `~` an `@` is part
-        // of the glob, and needs quotes there like any character a plain value cannot hold.
-        let text = refusal(&conn, &["@image OR source.ext = jpg"]).to_string();
-        assert!(
-            text.contains(
-                "'@image' is an alias, and aliases are not expanded here; write the filter it \
-                 stands for"
-            ),
-            "{text}"
-        );
+        // After `~` an `@` is part of the glob, and needs quotes there like any character a
+        // plain value cannot hold.
         assert!(refusal(&conn, &["source.rel_path ~ *@2x*"])
             .to_string()
             .contains("`@` needs quotes; quote that part, but not * ? [ ]"));
-        assert!(read_filters(&conn, &[r#"source.rel_path ~ *"@"2x*"#.to_string()]).is_ok());
+        assert!(read_filters(
+            &conn,
+            &ExpressionText::plain(&[r#"source.rel_path ~ *"@"2x*"#])
+        )
+        .is_ok());
         // A bare `?` followed by another condition is still the whole question.
-        assert!(read_filters(&conn, &["archived? AND source.ext?".to_string()]).is_ok());
+        assert!(read_filters(
+            &conn,
+            &ExpressionText::plain(&["archived? AND source.ext?"])
+        )
+        .is_ok());
     }
 
     /// A key's type is read from all of its facts — parked roots, files no longer present,
@@ -547,7 +705,7 @@ mod tests {
                 (format!("NOT {key}=2024"), vec![in_view]),
                 (format!("{key}|year=2024"), vec![]),
             ] {
-                let bound = read_filters(&conn, std::slice::from_ref(&filter))
+                let bound = read_filters(&conn, &ExpressionText::plain(&[filter.as_str()]))
                     .unwrap_or_else(|e| panic!("{filter}: {e}"));
                 let selected =
                     apply_filters(&mut conn, &[in_view], &bound, &UserZone::utc()).unwrap();
@@ -605,7 +763,7 @@ mod tests {
             &conn,
             Some("source.mtime|nonsense"),
             &["source.size|bogus".to_string()],
-            &["numtext<10".to_string()],
+            &ExpressionText::plain(&["numtext<10"]),
         )
         .err()
         .unwrap()
@@ -633,18 +791,25 @@ mod tests {
             "a b AND c?",
             "source.ext=jpg AND",
         ] {
-            let Err(error) = read_filters(&conn, &[filter.to_string()]) else {
+            let Err(error) = read_filters(&conn, &ExpressionText::plain(&[filter])) else {
                 panic!("{filter}: ran");
             };
             assert!(error.downcast::<ExpressionRefused>().is_ok(), "{filter}");
-            let Err(error) = read_report(&conn, None, &[], &[filter.to_string()]) else {
+            let Err(error) = read_report(&conn, None, &[], &ExpressionText::plain(&[filter]))
+            else {
                 panic!("{filter}: ran in a report");
             };
             assert!(error.downcast::<ExpressionRefused>().is_ok(), "{filter}");
         }
         // A report key read with a problem never runs either.
         let grouping = ["source.ext,,source.size".to_string()];
-        assert!(read_report(&conn, Some("source.ext"), &grouping, &[]).is_err());
+        assert!(read_report(
+            &conn,
+            Some("source.ext"),
+            &grouping,
+            &ExpressionText::plain(&[])
+        )
+        .is_err());
     }
 
     /// Several `--where` strings each echo their own text above their own problems.
@@ -701,12 +866,12 @@ mod tests {
             "content.XMP-dc:Subject|lowercase",
             "source.mtime|yearmonth",
         ] {
-            let filter = read_filter(&format!("{key}?"), 0);
+            let filter = read_filter(&format!("{key}?"), 0, AliasMode::NotLoaded);
             assert!(filter.problems.is_empty(), "{key}");
             let Some(Expr::Exists { key: in_filter, .. }) = filter.value else {
                 panic!("{key}: not a condition");
             };
-            let report = read_keys(key, 0, Grammar::Key);
+            let report = read_keys(key, 0, Grammar::Key, AliasMode::NotLoaded);
             assert!(report.problems.is_empty(), "{key}");
             let in_report = &report.value.unwrap()[0];
             let shape = |k: &InputKey| {
@@ -750,26 +915,38 @@ mod tests {
             let refused = error.downcast::<ExpressionRefused>().unwrap();
             refused.to_string().lines().next().unwrap().to_string()
         };
-        let filter = read_filters(&conn, &["numtext<10".to_string()]).unwrap_err();
+        let filter = read_filters(&conn, &ExpressionText::plain(&["numtext<10"])).unwrap_err();
         assert_eq!(first(filter), "cannot run the filter as given");
-        let key = read_report(&conn, Some("source.size|nonsense"), &[], &[])
-            .err()
-            .unwrap();
+        let key = read_report(
+            &conn,
+            Some("source.size|nonsense"),
+            &[],
+            &ExpressionText::plain(&[]),
+        )
+        .err()
+        .unwrap();
         assert_eq!(first(key), "cannot use the key as given");
-        let list = read_report(&conn, None, &["source.ext,".to_string()], &[])
-            .err()
-            .unwrap();
+        let list = read_report(
+            &conn,
+            None,
+            &["source.ext,".to_string()],
+            &ExpressionText::plain(&[]),
+        )
+        .err()
+        .unwrap();
         assert_eq!(first(list), "cannot use the key as given");
         let both = read_report(
             &conn,
             Some("source.size|nonsense"),
             &[],
-            &["numtext<10".to_string()],
+            &ExpressionText::plain(&["numtext<10"]),
         )
         .err()
         .unwrap();
         assert_eq!(first(both), "cannot run the filter as given");
-        let specified = refusal(&conn, &["numtext<10"]).into_specified().to_string();
+        let specified = read_filters(&conn, &ExpressionText::specified(vec!["numtext<10".into()]))
+            .expect_err("refused")
+            .to_string();
         assert!(
             specified.starts_with("cannot run the filter as specified\n"),
             "{specified}"
@@ -782,7 +959,13 @@ mod tests {
     fn group_by_reads_a_two_number_bucket_beside_another_key() {
         let (conn, _) = world();
         let grouping = ["source.ext, source.size|bucket(60,300)".to_string()];
-        let read = read_report(&conn, Some("source.ext"), &grouping, &[]).unwrap();
+        let read = read_report(
+            &conn,
+            Some("source.ext"),
+            &grouping,
+            &ExpressionText::plain(&[]),
+        )
+        .unwrap();
         let keys: Vec<(&str, Vec<Vec<f64>>)> = read
             .grouping
             .iter()
@@ -920,7 +1103,7 @@ mod tests {
         }
         let (mut quoted, mut pairs) = (0, 0);
         for clause in &clauses {
-            let Err(error) = read_filters(&conn, std::slice::from_ref(clause)) else {
+            let Err(error) = read_filters(&conn, &ExpressionText::plain(&[clause.as_str()])) else {
                 continue;
             };
             let refused = error.downcast::<ExpressionRefused>().expect("a refusal");
@@ -941,7 +1124,7 @@ mod tests {
                 };
                 for rewrite in shown {
                     assert!(
-                        read_filters(&conn, std::slice::from_ref(&rewrite)).is_ok(),
+                        read_filters(&conn, &ExpressionText::plain(&[rewrite.as_str()])).is_ok(),
                         "{clause}: the fix {rewrite} does not bind"
                     );
                 }
@@ -1185,7 +1368,7 @@ mod tests {
     fn a_quoted_name_with_a_space_is_offered_for_a_report_key() {
         let (conn, _) = world();
         let lines = |key: &str| {
-            read_report(&conn, Some(key), &[], &[])
+            read_report(&conn, Some(key), &[], &ExpressionText::plain(&[]))
                 .err()
                 .expect("refused")
                 .downcast::<ExpressionRefused>()
@@ -1207,5 +1390,236 @@ mod tests {
                 "           ^ `Such` cannot follow `content.No`",
             ]
         );
+    }
+
+    // =========================================================================
+    // Aliases
+    // =========================================================================
+
+    /// An aliases file holding `content` in a fresh directory, and texts given with it.
+    fn given(content: Option<&str>, texts: &[&str]) -> (tempfile::TempDir, ExpressionText) {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(content) = content {
+            std::fs::write(dir.path().join("aliases.toml"), content).unwrap();
+        }
+        let texts = texts.iter().map(|t| t.to_string()).collect();
+        let text = ExpressionText::given(texts, dir.path());
+        (dir, text)
+    }
+
+    fn refused_with(conn: &Connection, text: &ExpressionText) -> ExpressionRefused {
+        read_filters(conn, text)
+            .expect_err("refused")
+            .downcast::<ExpressionRefused>()
+            .unwrap_or_else(|e| panic!("not a refusal: {e:?}"))
+    }
+
+    /// No aliases file is no error for a filter with no alias; a use meets the unknown alias
+    /// sentence naming the path where the file would be.
+    #[test]
+    fn a_missing_file_is_no_error_until_an_alias_is_used() {
+        let (conn, _) = world();
+        let (_dir, text) = given(None, &["numtext? AND filename~*\"@\"*"]);
+        read_filters(&conn, &text).expect("no alias, no file read");
+        let (dir, text) = given(None, &["numtext? AND @x"]);
+        let path = dir.path().join("aliases.toml");
+        assert_eq!(
+            refused_with(&conn, &text).render(""),
+            [
+                "numtext? AND @x".to_string(),
+                format!(
+                    "             ^ `@x` is an unknown alias; there is no aliases file at {}",
+                    path.display()
+                ),
+            ]
+        );
+    }
+
+    /// A broken file refuses the run on its own: the file's refusal is the error, and nothing
+    /// the texts would have been refused for is drawn beside it. A run with no alias never
+    /// reads it.
+    #[test]
+    fn a_broken_file_is_refused_on_its_own() {
+        let (conn, _) = world();
+        let (_dir, text) = given(Some("x = \"Title=\"\n"), &["Nope=1"]);
+        assert_eq!(kind(&refused_with(&conn, &text).causes[0]), "unknown key");
+        let (_dir, text) = given(Some("x = \"Title=\"\n"), &["Nope=1", "@x"]);
+        let error = read_filters(&conn, &text).expect_err("refused");
+        assert!(
+            error.downcast_ref::<ExpressionRefused>().is_none(),
+            "{error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("has entries that are not valid"), "{text}");
+        assert!(!text.contains("Nope"), "{text}");
+    }
+
+    /// A cause binding finds inside a filter alias is drawn under the alias where it was typed,
+    /// with the alias named before binding's own sentence and no way out that rewrites the value.
+    #[test]
+    fn a_problem_inside_an_alias_is_drawn_under_its_use() {
+        let (conn, _) = world();
+        let (_dir, text) = given(
+            Some("x = \"numtext<10\"\n"),
+            &["source.size>1", "source.size>1 AND @x"],
+        );
+        let lines = refused_with(&conn, &text).render("");
+        assert_eq!(lines[0], "source.size>1 AND @x", "{lines:?}");
+        assert_eq!(
+            lines[1], "                  ^ in alias `@x`: numtext holds text; 10 is a number.",
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("numtext<")),
+            "a way out rewrote the alias's value: {lines:?}"
+        );
+    }
+
+    /// **A key alias compared wrongly is answered as the key written out is**, every name the
+    /// answer and its ways out use being the alias as typed, the conversion pointer naming the
+    /// key it stands for. The alias and the key share a length, so each line compares whole.
+    #[test]
+    fn a_key_alias_compared_wrongly_echoes_the_alias() {
+        let (conn, _) = world();
+        let alias = |text: &str| {
+            text.replace("numtext", "@numtxt")
+                .replace("taken", "@take")
+                .replace("textdate", "@txtdate")
+        };
+        for clause in [
+            "numtext<10",
+            "numtext=5.",
+            "taken=garbage",
+            "textdate>=2024-06",
+        ] {
+            let (_dir, text) = given(
+                Some("numtxt = \"numtext\"\ntake = \"taken\"\ntxtdate = \"textdate\"\n"),
+                &[&alias(clause)],
+            );
+            let written = refusal(&conn, &[clause]).render("");
+            let typed = refused_with(&conn, &text).render("");
+            // The conversion pointer names the key the alias stands for, as it always does.
+            let expected: Vec<String> = written
+                .iter()
+                .map(|line| {
+                    alias(line)
+                        .replace("content.@numtxt", "content.numtext")
+                        .replace("content.@take", "content.taken")
+                        .replace("content.@txtdate", "content.textdate")
+                })
+                .collect();
+            assert_eq!(typed, expected, "{clause}");
+        }
+    }
+
+    /// A way out that rewrites a clause holding an alias is bound with the same aliases, so it
+    /// is offered where the clause written out would be offered it — never dropped because the
+    /// rewrite, read with no aliases, names an alias it cannot read.
+    #[test]
+    fn a_fix_with_an_alias_binds_with_the_same_aliases() {
+        let (conn, _) = world();
+        let (_dir, text) = given(Some("tken = \"taken\"\n"), &["@tken|lowercase=a"]);
+        let typed = refused_with(&conn, &text).to_string();
+        let written = refusal(&conn, &["taken|lowercase=a"]).to_string();
+        assert!(written.contains("taken|datetime|lowercase=a"), "{written}");
+        assert_eq!(typed.replace("@tken", "taken"), written, "{typed}");
+        // A report's way out is bound as a key, with the report's aliases.
+        let report = |key: &str, filters: &ExpressionText| {
+            read_report(&conn, Some(key), &[], filters)
+                .err()
+                .unwrap()
+                .to_string()
+        };
+        let (_report_dir, keys) = given(Some("tken = \"taken\"\n"), &[]);
+        let typed = report("@tken|lowercase", &keys);
+        let written = report("taken|lowercase", &ExpressionText::plain(&[]));
+        assert!(written.contains("taken|datetime|lowercase"), "{written}");
+        assert_eq!(typed.replace("@tken", "taken"), written, "{typed}");
+    }
+
+    /// `--key` and `--group-by` read a key alias as the key it stands for, shown as typed, and
+    /// refuse a filter alias where a key stands.
+    #[test]
+    fn a_report_reads_key_aliases_in_key_and_group_by() {
+        let (conn, _) = world();
+        let (_dir, filters) = given(
+            Some("t = \"taken|year\"\nsz = \"source.size\"\nimage = \"numtext?\"\n"),
+            &["@image"],
+        );
+        let read = read_report(
+            &conn,
+            Some("@t"),
+            &["@sz, source.ext".to_string()],
+            &filters,
+        )
+        .expect("reads");
+        let key = read.key.unwrap();
+        assert_eq!(
+            (key.raw.as_str(), key.base_key.as_str()),
+            ("@t", "content.taken")
+        );
+        assert_eq!(key.modifiers.len(), 1);
+        let grouping: Vec<(&str, &str)> = read
+            .grouping
+            .iter()
+            .map(|k| (k.raw.as_str(), k.base_key.as_str()))
+            .collect();
+        assert_eq!(
+            grouping,
+            [("@sz", "source.size"), ("source.ext", "source.ext")]
+        );
+        let error = read_report(&conn, Some("@image"), &[], &filters)
+            .err()
+            .unwrap()
+            .downcast::<ExpressionRefused>()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("^ `@image` is a filter, not a key"),
+            "{error}"
+        );
+    }
+
+    /// **The recorded text's pin**: each filter as a manifest records it — a filter alias in
+    /// parentheses, a key alias's key as written, without the spaces around either — reads
+    /// back with no aliases and selects exactly what the typed text selected.
+    #[test]
+    fn the_recorded_text_selects_what_the_typed_text_selected() {
+        let (mut conn, a) = world();
+        let b = a + 1;
+        let (_dir, text) = given(
+            Some(
+                "big = \" source.size>0 OR numtext? \"\n\
+                 n = \"numtext\"\n\
+                 p = \"source.rel_path\"\n",
+            ),
+            &["NOT @big OR (@n=\"10\" AND @p[0]=\"2019\")", "@p~*.jpg"],
+        );
+        let bound = read_filters(&conn, &text).expect("binds");
+        assert_eq!(
+            bound.recorded(),
+            [
+                r#"NOT (source.size>0 OR numtext?) OR (numtext="10" AND source.rel_path[0]="2019")"#,
+                "source.rel_path~*.jpg",
+            ]
+        );
+        let again = read_filters(&conn, &ExpressionText::specified(bound.recorded().to_vec()))
+            .expect("the recorded text binds with no aliases");
+        let typed = apply_filters(&mut conn, &[a, b], &bound, &UserZone::utc()).unwrap();
+        let recorded = apply_filters(&mut conn, &[a, b], &again, &UserZone::utc()).unwrap();
+        assert_eq!(typed.source_ids, recorded.source_ids);
+        assert!(typed.source_ids.contains(&a), "{:?}", typed.source_ids);
+    }
+
+    /// **A use is never dropped from a tree that binds**: a text met after others with no alias
+    /// loads the file there and is read again with it, its condition kept and recorded.
+    #[test]
+    fn a_use_met_after_a_text_with_none_is_read_with_the_file() {
+        let (conn, _) = world();
+        let (_dir, text) = given(Some("n = \"numtext\"\n"), &["source.size>0", "@n=\"10\""]);
+        let bound = read_filters(&conn, &text).expect("binds");
+        assert_eq!(bound.trees.len(), 2);
+        assert_eq!(bound.recorded(), ["source.size>0", r#"numtext="10""#]);
     }
 }

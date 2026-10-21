@@ -1120,7 +1120,7 @@ fn run(cli: Cli) -> Result<()> {
             unique_content,
             emit,
         } => {
-            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::ExpressionText::given(filters, &canon_home);
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = scope::open_door(
@@ -1165,7 +1165,7 @@ fn run(cli: Cli) -> Result<()> {
             reverse,
             null_delim,
         } => {
-            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::ExpressionText::given(filters, &canon_home);
             let mut include = include_set_from(&include);
 
             let all_roots = core::repo::root::fetch_all(db.conn())?;
@@ -1230,7 +1230,7 @@ fn run(cli: Cli) -> Result<()> {
                     value_type,
                     yes,
                 }) => {
-                    let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+                    let filters = expr::ExpressionText::given(filters, &canon_home);
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved = scope::open_door(
                         core::ops::scope::resolve_scope(db.conn(), &paths, false, &all_roots)?,
@@ -1263,7 +1263,7 @@ fn run(cli: Cli) -> Result<()> {
                     )?;
                 }
                 None => {
-                    let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+                    let filters = expr::ExpressionText::given(filters, &canon_home);
                     let mut include = include_set_from(&include);
                     let all_roots = core::repo::root::fetch_all(db.conn())?;
                     let resolved = scope::open_door(
@@ -1334,7 +1334,7 @@ fn run(cli: Cli) -> Result<()> {
             include,
             compact,
         } => {
-            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::ExpressionText::given(filters, &canon_home);
             let mut include = include_set_from(&include);
             let all_roots = core::repo::root::fetch_all(db.conn())?;
             let resolved = scope::open_door(
@@ -1372,7 +1372,7 @@ fn run(cli: Cli) -> Result<()> {
             null_delim,
             verbose,
         } => {
-            let expanded = expr::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::ExpressionText::given(filters, &canon_home);
             let include = include_set_from(&include);
             // Survey has no archived-visibility axis to widen: its selection
             // side is source roots by construction and its outward side always
@@ -1400,7 +1400,6 @@ fn run(cli: Cli) -> Result<()> {
             );
             let scope_prefixes = resolved.prefixes.clone();
             let options = survey::SurveyOptions {
-                original_filters: filters,
                 include,
                 other_paths,
                 affinity,
@@ -1415,7 +1414,7 @@ fn run(cli: Cli) -> Result<()> {
             // instrument for, not an error: non-zero, no `Error:` prefix —
             // the shape compare uses for a non-identical result.
             if matches!(
-                survey::run(&mut db, &scope_prefixes, &expanded, &options)?,
+                survey::run(&mut db, &scope_prefixes, &filters, &options)?,
                 survey::SurveyExit::FrameRefused
             ) {
                 std::process::exit(1);
@@ -1428,13 +1427,7 @@ fn run(cli: Cli) -> Result<()> {
             include,
             verbose,
         } => {
-            // Compare is the one command whose filters are not expanded
-            // immediately before the call that consumes them — the two-path
-            // resolution below sits in between. These strings are already
-            // expanded; running them through expansion a second time would
-            // resolve alias references that a single pass deliberately
-            // leaves alone, since an alias may not refer to another alias.
-            let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+            let filters = expr::ExpressionText::given(filters, &canon_home);
             let include = include_set_from(&include);
             if include.includes_archived() {
                 bail!("--include archived is not valid for compare (valid values: excluded)");
@@ -1470,7 +1463,7 @@ fn run(cli: Cli) -> Result<()> {
                 no_edit,
                 global,
             } => {
-                let expanded = expr::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::ExpressionText::given(filters, &canon_home);
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved = scope::open_door(
                     core::ops::scope::resolve_scope(db.conn(), &paths, global, &all_roots)?,
@@ -1499,7 +1492,6 @@ fn run(cli: Cli) -> Result<()> {
                     &mut db,
                     &resolved.prefixes,
                     &filters,
-                    &expanded,
                     &dest,
                     &output_path,
                     &options,
@@ -1578,7 +1570,7 @@ fn run(cli: Cli) -> Result<()> {
                 global,
                 reason,
             } => {
-                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::ExpressionText::given(filters, &canon_home);
                 let options = exclude::SetOptions {
                     dry_run,
                     verbose: false,
@@ -1594,7 +1586,7 @@ fn run(cli: Cli) -> Result<()> {
                         cli.no_receipt,
                         reason.as_deref(),
                     )?;
-                } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
+                } else if paths.len() == 1 && filters.typed().is_empty() && paths[0].is_file() {
                     // Single file path with no filters: exclude exact file
                     exclude::set_by_path(
                         &mut db,
@@ -1633,7 +1625,7 @@ fn run(cli: Cli) -> Result<()> {
                 global,
                 reason,
             } => {
-                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::ExpressionText::given(filters, &canon_home);
                 let options = exclude::ClearOptions { dry_run, yes };
                 let all_roots = core::repo::root::fetch_all(db.conn())?;
                 let resolved = scope::open_door(
@@ -1661,7 +1653,7 @@ fn run(cli: Cli) -> Result<()> {
                 yes,
                 reason,
             } => {
-                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::ExpressionText::given(filters, &canon_home);
                 exclude::exclude_duplicates(
                     &mut db,
                     &prefer,
@@ -1684,7 +1676,7 @@ fn run(cli: Cli) -> Result<()> {
                 global,
                 reason,
             } => {
-                let filters = expr::expand_filter_strings(&filters, &canon_home)?;
+                let filters = expr::ExpressionText::given(filters, &canon_home);
                 let options = exclude::SetOptions {
                     dry_run: !yes,
                     verbose,
@@ -1700,7 +1692,7 @@ fn run(cli: Cli) -> Result<()> {
                         cli.no_receipt,
                         reason.as_deref(),
                     )?;
-                } else if paths.len() == 1 && filters.is_empty() && paths[0].is_file() {
+                } else if paths.len() == 1 && filters.typed().is_empty() && paths[0].is_file() {
                     // Single file path: exclude that file's object
                     exclude::set_object_by_file(
                         &mut db,
@@ -1719,7 +1711,7 @@ fn run(cli: Cli) -> Result<()> {
                         scope::DoorChannel::Stdout,
                     );
                     scope::print_scope_set_asides(&resolved, DoorVerb::Refused);
-                    if resolved.prefixes.is_empty() && filters.is_empty() {
+                    if resolved.prefixes.is_empty() && filters.typed().is_empty() {
                         anyhow::bail!("Provide a hash (--hash), file path, or filters (--where)");
                     }
                     exclude::set_objects_by_filter(

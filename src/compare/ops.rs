@@ -16,7 +16,7 @@ use crate::core::ops::scope::{
     classify_all, refuse_parked_locations, resolve_path, validate_sources_exist,
 };
 use crate::core::repo::{self, Connection};
-use crate::expr::{read_filters, BoundFilters};
+use crate::expr::{read_filters, BoundFilters, ExpressionText};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
 /// Result of comparing two locations by content.
@@ -45,11 +45,11 @@ pub fn run_compare(
     conn: &mut Connection,
     path_a: &Path,
     path_b: &Path,
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     include: &IncludeSet,
     zone: &UserZone,
 ) -> Result<CompareRun> {
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let all_roots = repo::root::fetch_all(conn)?;
     let cwd = std::env::current_dir()?;
@@ -201,7 +201,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b/nothing-here"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         );
@@ -222,7 +222,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -246,7 +246,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -269,7 +269,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -293,7 +293,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -316,7 +316,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -341,7 +341,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -364,7 +364,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &["excluded?".to_string()],
+            &ExpressionText::plain(&["excluded?"]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -385,7 +385,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/b"),
-            &["excluded?".to_string()],
+            &ExpressionText::plain(&["excluded?"]),
             &include_excluded,
             &UserZone::utc(),
         )
@@ -403,7 +403,7 @@ mod tests {
             &mut conn,
             Path::new("/not/a/root"),
             Path::new("/also/not/a/root"),
-            &["archived = true".to_string()],
+            &ExpressionText::plain(&["archived = true"]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )
@@ -427,7 +427,7 @@ mod tests {
             &mut conn,
             Path::new("/a"),
             Path::new("/nowhere"),
-            &[],
+            &ExpressionText::plain(&[]),
             &IncludeSet::default(),
             &UserZone::utc(),
         )

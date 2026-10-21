@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use crate::core::domain;
 use crate::core::domain::time::zone::UserZone;
-use crate::expr::read_filters;
+use crate::expr::{read_filters, ExpressionText};
 use crate::notes::SurveyNoteContext;
 use crate::survey::ops::compute::{
     compute_survey, group_by_archive_root, ArchiveScopeStatement, SurveyOutcome, SurveyParams,
@@ -67,12 +67,12 @@ pub struct SurveyRun {
 pub fn run_survey(
     conn: &mut Connection,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     orchestration: &SurveyOrchestration,
     params: &SurveyParams,
     zone: &UserZone,
 ) -> Result<SurveyRun> {
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let all_roots = crate::core::repo::root::fetch_all(conn)?;
 
@@ -252,7 +252,7 @@ mod tests {
                 "/archive/media/x".to_string(),
                 "/archive/media/y".to_string(),
             ],
-            &[],
+            &ExpressionText::plain(&[]),
             &orchestration(),
             &params(),
             &UserZone::utc(),
@@ -287,7 +287,7 @@ mod tests {
         let run = run_survey(
             &mut conn,
             &["/photos/2011".to_string(), "/archive/media".to_string()],
-            &[],
+            &ExpressionText::plain(&[]),
             &orchestration(),
             &params(),
             &UserZone::utc(),
@@ -325,7 +325,7 @@ mod tests {
         let archive_run = run_survey(
             &mut conn,
             &["/archive/media".to_string()],
-            &[],
+            &ExpressionText::plain(&[]),
             &orchestration(),
             &params(),
             &UserZone::utc(),
@@ -341,7 +341,7 @@ mod tests {
         let source_run = run_survey(
             &mut conn,
             &["/photos/2011".to_string()],
-            &[],
+            &ExpressionText::plain(&[]),
             &orchestration(),
             &params(),
             &UserZone::utc(),
@@ -362,7 +362,7 @@ mod tests {
         let run = run_survey(
             &mut conn,
             &["/archive/media".to_string()],
-            &[],
+            &ExpressionText::plain(&[]),
             &orchestration(),
             &params(),
             &UserZone::utc(),
@@ -390,7 +390,7 @@ mod tests {
         let result = run_survey(
             &mut conn,
             &["/photos/2011".to_string()],
-            &[],
+            &ExpressionText::plain(&[]),
             &orchestration,
             &params(),
             &UserZone::utc(),

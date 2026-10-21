@@ -357,8 +357,11 @@ fn lock_header(scope: &ScopeResolution, zone: &RecordedZone) -> LockHeader {
 pub struct ExecuteGenerateParams {
     pub lock_path: PathBuf,
     pub manifest_path: PathBuf,
-    pub expanded_filters: Vec<String>,
-    pub original_filters: Vec<String>,
+    /// The query a manifest records: each filter as read, every alias replaced by what it
+    /// stands for.
+    pub query: Vec<String>,
+    /// Each filter as given on the command line.
+    pub query_as_given: Vec<String>,
     /// The run's scope, already resolved against the known roots — what goes
     /// into `meta.scope`, what the measurement is taken from, and what the
     /// lock header records. One value, because it is one answer: two fields
@@ -480,7 +483,7 @@ pub fn execute_generate(
     let config = ManifestConfig {
         meta: ManifestMeta {
             version: CURRENT_MANIFEST_VERSION,
-            query: params.expanded_filters.clone(),
+            query: params.query.clone(),
             scope: params.scope.recorded().to_vec(),
             zone: Some(params.zone.name().to_string()),
             generated_at: current_timestamp(),
@@ -496,12 +499,12 @@ pub fn execute_generate(
         },
     };
 
-    // Inject "# Original:" comments when alias expansion changed the filter
+    // An "# Original:" comment for each filter given with an alias, as it was given
     let comment_lines: Vec<String> = params
-        .original_filters
+        .query_as_given
         .iter()
-        .zip(params.expanded_filters.iter())
-        .filter(|(orig, exp)| orig != exp)
+        .zip(params.query.iter())
+        .filter(|(orig, recorded)| orig != recorded)
         .map(|(orig, _)| format!("# Original: {orig}"))
         .collect();
 
@@ -729,8 +732,8 @@ pub fn placement_blocked_by_written_file(
 /// user's words with it — goes missing.
 ///
 /// `notes` is the Notes body as it follows the marker line, `#` markers intact.
-/// `original_comments` are the `# Original:` lines alias expansion leaves behind
-/// (generation only; a refresh re-emits the query it was given).
+/// `original_comments` are the `# Original:` lines for each filter given with an
+/// alias (generation only; a refresh re-emits the query it was given).
 fn assemble_manifest(
     plan: &ClusterGeneratePlan,
     config: &ManifestConfig,
@@ -1078,6 +1081,7 @@ mod tests {
         insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
         insert_time_fact, setup_test_db,
     };
+    use crate::expr::ExpressionText;
     use crate::expr::SourceFact;
     use crate::expr::Unmeasured;
 
@@ -1640,7 +1644,8 @@ base_dir = \"output\"\n";
 
         let plan = |conn: &mut Connection, filter: &str| {
             let params = ClusterGenerateParams {
-                filters: crate::expr::read_filters(conn, &[filter.to_string()]).unwrap(),
+                filters: crate::expr::read_filters(conn, &ExpressionText::plain(&[filter]))
+                    .unwrap(),
                 clock: recorded.clock().clone(),
                 ..default_params()
             };
@@ -1830,8 +1835,8 @@ base_dir = \"output\"\n";
         let params = ExecuteGenerateParams {
             lock_path: lock_path.clone(),
             manifest_path: manifest_path.clone(),
-            expanded_filters: vec![],
-            original_filters: vec![],
+            query: vec![],
+            query_as_given: vec![],
             scope: scope_of(&conn, &["/photos".to_string()]),
             roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
@@ -2175,8 +2180,8 @@ base_dir = \"output\"\n";
             &ExecuteGenerateParams {
                 lock_path: gen_lock.clone(),
                 manifest_path: dir.path().join("gen.toml"),
-                expanded_filters: vec![],
-                original_filters: vec![],
+                query: vec![],
+                query_as_given: vec![],
                 scope: scope(),
                 roots: roots.clone(),
                 archive_root_id: 1,
@@ -2230,8 +2235,8 @@ base_dir = \"output\"\n";
         let params = ExecuteGenerateParams {
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: dir.path().join("cluster.toml"),
-            expanded_filters: vec!["source.ext=jpg".to_string()],
-            original_filters: vec!["@image".to_string()],
+            query: vec!["(source.ext=jpg)".to_string()],
+            query_as_given: vec!["@image".to_string()],
             scope: scope_of(&conn, &["/photos".to_string()]),
             roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
@@ -2245,6 +2250,10 @@ base_dir = \"output\"\n";
 
         let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
         assert!(manifest.contains("# Original: @image"));
+        assert!(
+            manifest.contains(r#"query = ["(source.ext=jpg)"]"#),
+            "{manifest}"
+        );
     }
 
     // =========================================================================
@@ -2265,8 +2274,8 @@ base_dir = \"output\"\n";
         let params = ExecuteGenerateParams {
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
-            expanded_filters: vec![],
-            original_filters: vec![],
+            query: vec![],
+            query_as_given: vec![],
             scope: scope_of(&conn, &scope_prefixes),
             roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,
@@ -2373,8 +2382,8 @@ base_dir = \"output\"\n";
             &ExecuteGenerateParams {
                 lock_path: out.path().join("cluster.lock"),
                 manifest_path: manifest_path.clone(),
-                expanded_filters: vec![],
-                original_filters: vec![],
+                query: vec![],
+                query_as_given: vec![],
                 scope: scope_of(&conn, std::slice::from_ref(&scope)),
                 roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
                 archive_root_id: archive,
@@ -2474,8 +2483,8 @@ base_dir = \"output\"\n";
             &ExecuteGenerateParams {
                 lock_path: out.path().join("cluster.lock"),
                 manifest_path: manifest_path.clone(),
-                expanded_filters: vec![],
-                original_filters: vec![],
+                query: vec![],
+                query_as_given: vec![],
                 scope: scope_of(&conn, &scopes),
                 roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
                 archive_root_id: archive,
@@ -2752,8 +2761,8 @@ base_dir = \"output\"\n";
         let params = ExecuteGenerateParams {
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
-            expanded_filters: vec![],
-            original_filters: vec![],
+            query: vec![],
+            query_as_given: vec![],
             scope: scope_of(&conn, &[]),
             roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: 1,

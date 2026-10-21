@@ -8,10 +8,12 @@ use std::collections::HashMap;
 
 use unicode_normalization::char::is_combining_mark;
 
-use super::alias::alias_name_at;
+use super::alias::{alias_name_at, AliasValue, CheckedAliases};
 use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, STATUS_KEYWORDS};
 use super::glob::read_glob;
-use super::key::{follows_a_key_in_a_filter, is_name_char, read_key, InputKey, SCOPE_REL_PATH};
+use super::key::{
+    continue_key, follows_a_key_in_a_filter, is_name_char, read_key, InputKey, SCOPE_REL_PATH,
+};
 use super::problem::{cut, Fix, Place, Problem};
 
 /// **A space**, as the language reads one: a space, a tab or a line break.
@@ -28,22 +30,58 @@ pub(in crate::expr) enum Grammar {
     KeyList,
 }
 
+/// What `@` and an alias name read as where an alias may stand — where a condition starts or a
+/// key stands.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::expr) enum AliasMode<'a> {
+    /// The aliases file is not read yet: reading stops at a use, and the reading has no value
+    /// and waits for the file ([`Reading::waits_for_aliases`]).
+    NotLoaded,
+    /// The aliases file, read and checked: each use reads as its alias, and is recorded. Every
+    /// place in a use's reading sits in a text of its own, numbered from `first_text` in the
+    /// order this text's uses are met — in a refusal, the alias's value, after the typed texts.
+    Loaded {
+        aliases: &'a CheckedAliases,
+        first_text: usize,
+    },
+    /// An alias's own value, where no alias may stand.
+    InsideAlias,
+    /// A manifest's recorded query, which takes no alias.
+    NotAllowed,
+}
+
+/// An alias used where one may stand: where `@name` was typed, and the alias read there — its
+/// value as the aliases file writes it, and whether that value is a filter rather than a key.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::expr) struct AliasUse {
+    pub place: Place,
+    pub value: String,
+    pub is_filter: bool,
+}
+
 /// One text read once, front to back, by characters, so a position never falls inside one.
 pub(in crate::expr) struct Cursor<'t> {
     text: &'t str,
     index: usize,
     at: usize,
     problems: Vec<Problem>,
+    alias_uses: Vec<AliasUse>,
+    waits_for_aliases: bool,
     stopped: bool,
     /// Each `(` met so far, and the byte of the `)` that closes it, or `None` where none does.
     parens: HashMap<usize, Option<usize>>,
 }
 
-/// What a reading yields: what could be read, and every problem met on the way.
+/// What a reading yields: what could be read, every problem met on the way, and every alias
+/// used where one may stand.
 #[derive(Debug)]
 pub(in crate::expr) struct Reading<T> {
     pub value: Option<T>,
     pub problems: Vec<Problem>,
+    pub alias_uses: Vec<AliasUse>,
+    /// A use met with the aliases file not read yet ([`AliasMode::NotLoaded`]): reading stopped
+    /// there, so there is no value, and the text is to be read again with the file.
+    pub waits_for_aliases: bool,
 }
 
 impl<'t> Cursor<'t> {
@@ -54,6 +92,8 @@ impl<'t> Cursor<'t> {
             index,
             at: 0,
             problems: Vec::new(),
+            alias_uses: Vec::new(),
+            waits_for_aliases: false,
             stopped: false,
             parens: HashMap::new(),
         }
@@ -161,8 +201,120 @@ impl<'t> Cursor<'t> {
         self.stopped
     }
 
+    #[cfg(test)]
     pub(in crate::expr) fn into_problems(self) -> Vec<Problem> {
         self.problems
+    }
+
+    /// The reading: `value`, and every problem and alias use recorded; no value where reading
+    /// waits for the aliases file.
+    fn into_reading<T>(self, value: Option<T>) -> Reading<T> {
+        Reading {
+            value: value.filter(|_| !self.waits_for_aliases),
+            problems: self.problems,
+            alias_uses: self.alias_uses,
+            waits_for_aliases: self.waits_for_aliases,
+        }
+    }
+}
+
+/// What stands at an `@` where an alias may stand, the cursor past it.
+enum AliasAt {
+    /// A filter alias's reading, every place in it inside the alias.
+    Filter(Expr),
+    /// A key alias's key, continued by the key grammar from where the alias's key ended.
+    Key(InputKey),
+    /// Nothing to read on: a use recorded, or a problem.
+    Read,
+}
+
+/// **An alias where one may stand**: `@` and an alias name, read by `mode`. A filter alias
+/// where a key belongs (`at_key`) is refused. `@` with no alias name after it is refused,
+/// echoing the key-name characters that follow it.
+fn alias_at(cursor: &mut Cursor, mode: AliasMode, at_key: bool) -> AliasAt {
+    let at = cursor.at();
+    let after = cut(cursor.text(), at + 1, cursor.text().len());
+    let Some(name) = alias_name_at(after) else {
+        let run = after.find(|c| !is_name_char(c)).unwrap_or(after.len());
+        let end = at + 1 + run;
+        let echo = cursor.slice(at, end);
+        let sentence = format!(
+            "`{echo}` is not an alias name: alias names must start with a letter and contain \
+             only letters, digits, _ and -"
+        );
+        cursor.problem(at, end, sentence, None, Fix::None);
+        cursor.set_at(end);
+        return AliasAt::Read;
+    };
+    let end = at + 1 + name.len();
+    let place = cursor.place(at, end);
+    let typed = cursor.slice(at, end);
+    cursor.set_at(end);
+    let (aliases, first_text) = match mode {
+        AliasMode::NotLoaded => {
+            cursor.waits_for_aliases = true;
+            cursor.stop();
+            return AliasAt::Read;
+        }
+        AliasMode::InsideAlias => {
+            let sentence = "an alias cannot contain another alias";
+            cursor.problem(at, end, sentence, None, Fix::None);
+            return AliasAt::Read;
+        }
+        AliasMode::NotAllowed => {
+            let sentence =
+                format!("`{typed}` is an alias; a manifest's query cannot contain aliases");
+            cursor.problem(at, end, sentence, None, Fix::None);
+            return AliasAt::Read;
+        }
+        AliasMode::Loaded {
+            aliases,
+            first_text,
+        } => (aliases, first_text),
+    };
+    let Some((written, value)) = aliases.get(name) else {
+        let path = aliases.path().display();
+        let sentence = if aliases.exists() {
+            format!("`{typed}` is an unknown alias; the aliases file is {path}")
+        } else {
+            format!("`{typed}` is an unknown alias; there is no aliases file at {path}")
+        };
+        cursor.problem(at, end, sentence, None, Fix::None);
+        return AliasAt::Read;
+    };
+    // Each use of an alias is a text of its own in a refusal, numbered in the order met.
+    let text = first_text + cursor.alias_uses.len();
+    let mut inside = |p: &mut Place| p.text = text;
+    let used = AliasUse {
+        place,
+        value: written.to_string(),
+        is_filter: matches!(value, AliasValue::Filter(_)),
+    };
+    match value {
+        AliasValue::Filter(_) if at_key => {
+            let sentence = format!("`{typed}` is a filter, not a key");
+            cursor.problem(at, end, sentence, None, Fix::None);
+            AliasAt::Read
+        }
+        AliasValue::Filter(expr) => {
+            cursor.alias_uses.push(used);
+            let mut expr = expr.clone();
+            expr.each_place(&mut inside);
+            AliasAt::Filter(expr)
+        }
+        AliasValue::Key(own) => {
+            cursor.alias_uses.push(used);
+            let mut key = own.clone();
+            key.each_place(&mut inside);
+            key.written = Some(own.input_name.clone());
+            key.input_name = typed.to_string();
+            // An accessor follows a key's name straight on, so only a key that is its name alone.
+            let accessor_may_follow = own.input == own.input_name;
+            match continue_key(cursor, at, &mut key, accessor_may_follow) {
+                Some(()) => AliasAt::Key(key),
+                None => AliasAt::Read,
+            }
+        }
     }
 }
 
@@ -200,22 +352,20 @@ pub(in crate::expr) fn stored_fact_line(word: &str) -> String {
 /// **Report keys**: `--key` (`Grammar::Key`: one key, then the end) and `--group-by`
 /// (`Grammar::KeyList`: keys separated by `,`, spaces allowed around it, a comma inside
 /// `|bucket( … )` or a quoted name belonging to the key). A space at the start or end of the
-/// text or of an item is allowed, as in a filter. The keys read without a problem are the
-/// value.
+/// text or of an item is allowed, as in a filter. A key may be a key alias, read by `aliases`.
+/// The keys read without a problem are the value.
 pub(in crate::expr) fn read_keys(
     text: &str,
     index: usize,
     grammar: Grammar,
+    aliases: AliasMode,
 ) -> Reading<Vec<InputKey>> {
     let mut cursor = Cursor::new(text, index);
     let mut keys = Vec::new();
     cursor.skip_spaces();
     if cursor.at_end() {
         cursor.problem(0, 0, "the key is empty", None, Fix::None);
-        return Reading {
-            value: Some(keys),
-            problems: cursor.into_problems(),
-        };
+        return cursor.into_reading(Some(keys));
     }
     let list = grammar == Grammar::KeyList;
     let mut after_comma = false;
@@ -240,7 +390,14 @@ pub(in crate::expr) fn read_keys(
             break;
         }
         let before = cursor.problem_count();
-        let key = read_key(&mut cursor, grammar);
+        let key = if cursor.peek() == Some('@') {
+            match alias_at(&mut cursor, aliases, true) {
+                AliasAt::Key(key) => Some(key),
+                AliasAt::Filter(_) | AliasAt::Read => None,
+            }
+        } else {
+            read_key(&mut cursor, grammar)
+        };
         if cursor.stopped() {
             break;
         }
@@ -289,10 +446,7 @@ pub(in crate::expr) fn read_keys(
             break;
         }
     }
-    Reading {
-        value: Some(keys),
-        problems: cursor.into_problems(),
-    }
+    cursor.into_reading(Some(keys))
 }
 
 /// What a report key may not be, though the key grammar reads it: a status word, bare (a status
@@ -449,29 +603,41 @@ const AFTER_CONDITION: &str = "After a condition: AND, OR, ) or the end";
 /// start, `IN` and `NOT IN` after a key; anywhere else the word is what that position reads, a
 /// value or a key's name. After a problem in a value, reading resumes where the value ends;
 /// after any other problem, at the next `AND` or `OR` of the same group, or the `)` closing it.
-/// The tree contains every condition whose key reads without a problem.
-pub(in crate::expr) fn read_filter(text: &str, index: usize) -> Reading<Expr> {
-    let mut cursor = Cursor::new(text, index);
-    cursor.skip_spaces();
-    if cursor.at_end() {
-        cursor.problem(0, 0, "the filter is empty", None, Fix::None);
-        return Reading {
+/// The tree contains every condition whose key reads without a problem. Where a condition starts,
+/// `@` and an alias name is an alias, read by `aliases`.
+pub(in crate::expr) fn read_filter(text: &str, index: usize, aliases: AliasMode) -> Reading<Expr> {
+    let mut reader = FilterReader::new(text, index, aliases);
+    let value = reader.read();
+    reader.cursor.into_reading(value)
+}
+
+/// **The alias-value position**: an alias's value, read where a condition starts, with no alias
+/// in it. A key that starts the value and is followed by nothing but spaces is a key alias; a
+/// whole filter is a filter alias; any other value is a broken entry, its problems the
+/// reading's.
+pub(in crate::expr) fn read_alias_value(text: &str) -> Reading<AliasValue> {
+    let mut reader = FilterReader::new(text, 0, AliasMode::InsideAlias);
+    reader.alias_value = true;
+    let expr = reader.read();
+    let value = match reader.key_alias.take() {
+        Some(key) => Some(AliasValue::Key(key)),
+        None => expr.map(AliasValue::Filter),
+    };
+    let reading = reader.cursor.into_reading(value);
+    if reading.problems.is_empty() {
+        reading
+    } else {
+        Reading {
             value: None,
-            problems: cursor.into_problems(),
-        };
-    }
-    let mut reader = FilterReader { cursor };
-    let value = reader.or(0, None);
-    Reading {
-        value,
-        problems: reader.cursor.into_problems(),
+            ..reading
+        }
     }
 }
 
 /// Whether `text`, typed bare after `=`, is read back as one unquoted value with that same text
 /// and nothing about it to quote — the reader's half of the printing rule, asked of the reader.
 pub(in crate::expr) fn reads_as_one_bare_value(text: &str) -> bool {
-    let reading = read_filter(&format!("k={text}"), 0);
+    let reading = read_filter(&format!("k={text}"), 0, AliasMode::NotLoaded);
     reading.problems.is_empty()
         && matches!(
             reading.value,
@@ -480,9 +646,10 @@ pub(in crate::expr) fn reads_as_one_bare_value(text: &str) -> bool {
         )
 }
 
-/// Whether `key`, typed bare before `?`, is read back as one key with that same text.
+/// Whether `key`, typed bare before `?`, is read back as one key with that same text, and no
+/// alias: a use waits for the aliases file, so the reading has no value.
 pub(in crate::expr) fn reads_as_one_bare_key(key: &str) -> bool {
-    let reading = read_filter(&format!("{key}?"), 0);
+    let reading = read_filter(&format!("{key}?"), 0, AliasMode::NotLoaded);
     reading.problems.is_empty()
         && matches!(
             reading.value,
@@ -509,9 +676,34 @@ struct ValueRead {
 /// One filter text read once, front to back.
 struct FilterReader<'t> {
     cursor: Cursor<'t>,
+    aliases: AliasMode<'t>,
+    /// Reading an alias's value, where a key followed by nothing but spaces is a key alias.
+    alias_value: bool,
+    /// The key alias the value read as.
+    key_alias: Option<InputKey>,
 }
 
 impl<'t> FilterReader<'t> {
+    fn new(text: &'t str, index: usize, aliases: AliasMode<'t>) -> FilterReader<'t> {
+        FilterReader {
+            cursor: Cursor::new(text, index),
+            aliases,
+            alias_value: false,
+            key_alias: None,
+        }
+    }
+
+    /// The whole text: an empty one is a problem of its own.
+    fn read(&mut self) -> Option<Expr> {
+        self.cursor.skip_spaces();
+        if self.cursor.at_end() {
+            self.cursor
+                .problem(0, 0, "the filter is empty", None, Fix::None);
+            return None;
+        }
+        self.or(0, None)
+    }
+
     /// `and (OR and)*`. `after` is what was typed before a condition belongs, for "a condition is
     /// missing after `x`"; `None` at the start of the text.
     fn or(&mut self, depth: usize, after: Option<&'static str>) -> Option<Expr> {
@@ -625,35 +817,65 @@ impl<'t> FilterReader<'t> {
         inner
     }
 
-    /// An `@name` where a condition belongs. The filter reaches the reader with its aliases
-    /// expanded, so one left here was never expanded: it comes from a manifest's recorded query,
-    /// or from inside an alias's own value. An `@` not followed by an alias name is read as a key
-    /// would be.
+    /// An `@` where a condition belongs: a filter alias is one complete condition, a key alias
+    /// the key a condition starts with.
     fn alias(&mut self) -> Option<Expr> {
-        let at = self.cursor.at();
-        let after_at: Vec<char> = cut(self.cursor.rest(), 1, self.cursor.rest().len())
-            .chars()
-            .collect();
-        let Some(name) = alias_name_at(&after_at, 0) else {
-            return self.condition();
+        let start = self.cursor.at();
+        let before = self.cursor.problem_count();
+        match alias_at(&mut self.cursor, self.aliases, false) {
+            AliasAt::Filter(expr) => self.after_filter_alias(start, expr),
+            AliasAt::Key(key) => self.condition_from(start, before, key),
+            AliasAt::Read => {
+                self.resume();
+                None
+            }
+        }
+    }
+
+    /// **A filter alias is one complete condition**: what may follow a key — `|` or `[` straight
+    /// after it, then `?`, `IN`, `NOT IN` or an operator — cannot follow it, and is echoed as
+    /// typed. Anything else is what follows any condition.
+    fn after_filter_alias(&mut self, start: usize, expr: Expr) -> Option<Expr> {
+        let end = self.cursor.at();
+        let appended = match self.cursor.peek() {
+            Some(c @ ('|' | '[')) => Some((end, end + c.len_utf8())),
+            _ => {
+                self.cursor.skip_spaces();
+                let at = self.cursor.at();
+                let rest = self.cursor.rest();
+                if rest.starts_with('?') {
+                    Some((at, at + 1))
+                } else if self.at_keyword("IN") {
+                    Some((at, at + "IN".len()))
+                } else if self.eat_keyword("NOT") {
+                    self.cursor.skip_spaces();
+                    let not_in = self
+                        .at_keyword("IN")
+                        .then(|| (at, self.cursor.at() + "IN".len()));
+                    self.cursor.set_at(at);
+                    not_in
+                } else {
+                    operator_at(rest).map(|op| (at, at + op.typed.len()))
+                }
+            }
         };
-        let end = at + 1 + name.len();
-        self.cursor.problem(
-            at,
-            end,
-            format!(
-                "'@{name}' is an alias, and aliases are not expanded here; write the filter it \
-                 stands for"
-            ),
-            None,
-            Fix::None,
+        let Some((at, appended_end)) = appended else {
+            self.cursor.set_at(end);
+            return Some(expr);
+        };
+        let sentence = format!(
+            "`{}` is a filter, `{}` cannot be appended to it",
+            self.cursor.slice(start, end),
+            self.cursor.slice(at, appended_end)
         );
-        self.cursor.set_at(end);
+        self.cursor
+            .problem(at, appended_end, sentence, None, Fix::None);
+        self.cursor.set_at(appended_end);
         self.resume();
         None
     }
 
-    /// A condition, from its key. A status word, bare, is one only with `?` and nothing else.
+    /// A condition, from its key.
     fn condition(&mut self) -> Option<Expr> {
         let start = self.cursor.at();
         let before = self.cursor.problem_count();
@@ -661,6 +883,13 @@ impl<'t> FilterReader<'t> {
             self.resume();
             return None;
         };
+        self.condition_from(start, before, key)
+    }
+
+    /// A condition, after its key, which started at byte `start` of the text, `before` the count
+    /// of problems recorded when it did. A status word, bare, is one only with `?` and nothing
+    /// else.
+    fn condition_from(&mut self, start: usize, before: usize, key: InputKey) -> Option<Expr> {
         let key_end = self.cursor.at();
         let name = (key.name_place.start, key.name_place.end);
         if key.names(SCOPE_REL_PATH) {
@@ -713,6 +942,16 @@ impl<'t> FilterReader<'t> {
             self.cursor.set_at(not);
         }
         let Some(op) = operator_at(self.cursor.rest()) else {
+            // An alias's value that is one key, from its start to its end, is a key alias.
+            if self.alias_value
+                && key_read
+                && status.is_none()
+                && self.cursor.at_end()
+                && cut(self.cursor.text(), 0, start).chars().all(is_space)
+            {
+                self.key_alias = Some(key);
+                return None;
+            }
             if status.is_none() {
                 let at = self.cursor.at();
                 let fix = key
@@ -1116,7 +1355,7 @@ mod tests {
 
     /// What a filter reads as, and every problem met reading it.
     fn read(text: &str) -> (Option<Expr>, Vec<Said>) {
-        let reading = read_filter(text, 0);
+        let reading = read_filter(text, 0, AliasMode::NotLoaded);
         (reading.value, problems(&reading.problems))
     }
 
@@ -1399,7 +1638,7 @@ mod tests {
         );
         // In a report key, what cannot follow is named first, as in a filter.
         let said_keys = |text: &str| -> Vec<(usize, String)> {
-            read_keys(text, 0, Grammar::Key)
+            read_keys(text, 0, Grammar::Key, AliasMode::NotLoaded)
                 .problems
                 .into_iter()
                 .map(|p| (p.place.start, p.sentence))
@@ -1431,7 +1670,7 @@ mod tests {
     #[test]
     fn a_missing_separator_is_placed_under_the_space() {
         let places = |text: &str| -> Vec<(usize, usize, String)> {
-            read_filter(text, 0)
+            read_filter(text, 0, AliasMode::NotLoaded)
                 .problems
                 .into_iter()
                 .map(|p| (p.place.start, p.place.end, p.sentence))
@@ -1452,7 +1691,7 @@ mod tests {
     #[test]
     fn a_word_named_and_a_skip_end_at_the_same_place() {
         let places = |text: &str| -> Vec<(usize, usize, String)> {
-            read_filter(text, 0)
+            read_filter(text, 0, AliasMode::NotLoaded)
                 .problems
                 .into_iter()
                 .map(|p| (p.place.start, p.place.end, p.sentence))
@@ -1522,7 +1761,12 @@ mod tests {
         std::thread::spawn(move || {
             let open = "(".repeat(5000);
             let unclosed = said(&format!("a? f{open} AND b?"));
-            let report = read_keys(&format!("Make x{open}, Model"), 0, Grammar::KeyList);
+            let report = read_keys(
+                &format!("Make x{open}, Model"),
+                0,
+                Grammar::KeyList,
+                AliasMode::NotLoaded,
+            );
             let nested = said(&format!("a? f{open}x{} AND b?", ")".repeat(5000)));
             let _ = done.send((open, unclosed, report.problems.len(), nested.len()));
         });
@@ -1550,7 +1794,7 @@ mod tests {
         assert_eq!(said("%(a b)=1 AND c?"), at(0, "`%(a b)` is not a key"));
         assert_eq!(clauses(&read("%(a b)=1 AND c?").0.unwrap()), ["c?"]);
         assert_eq!(said("%('a b')?"), at(0, "`%('a b')` is not a key"));
-        let reading = read_keys("% 'x", 0, Grammar::Key);
+        let reading = read_keys("% 'x", 0, Grammar::Key, AliasMode::NotLoaded);
         assert_eq!(
             problems(&reading.problems)
                 .into_iter()
@@ -2052,24 +2296,295 @@ mod tests {
         assert_eq!(clauses(&runs(r#"Title="a"AND b?"#)), [r#"Title="a""#, "b?"]);
     }
 
-    #[test]
-    fn an_alias_where_a_condition_belongs_is_named_and_an_at_in_a_value_needs_quotes() {
-        let (value, problems) = read("@image AND x?");
-        assert_eq!(
-            problems,
-            [(
-                0,
-                "'@image' is an alias, and aliases are not expanded here; write the filter it \
-                 stands for"
-                    .to_string(),
-                None,
-                Fix::None
-            )]
+    // =========================================================================
+    // Aliases
+    // =========================================================================
+
+    use super::super::alias::{check_aliases, CheckedAliases};
+
+    /// The aliases the alias tests read with.
+    fn aliases() -> CheckedAliases {
+        CheckedAliases::of(&[
+            ("image", "Title=a OR Title=b"),
+            ("t", "taken"),
+            ("f", "source.rel_path"),
+            ("geo", "content.GPS"),
+            ("filename", "source.rel_path[0]"),
+            ("yr", "source.mtime|year"),
+        ])
+    }
+
+    /// A filter read with `aliases` loaded, its uses numbered from text 1.
+    fn read_with(aliases: &CheckedAliases, text: &str) -> Reading<Expr> {
+        let mode = AliasMode::Loaded {
+            aliases,
+            first_text: 1,
+        };
+        read_filter(text, 0, mode)
+    }
+
+    fn said_with(aliases: &CheckedAliases, text: &str) -> Vec<(usize, String)> {
+        read_with(aliases, text)
+            .problems
+            .into_iter()
+            .map(|p| (p.place.start, p.sentence))
+            .collect()
+    }
+
+    fn runs_with(text: &str) -> Expr {
+        let reading = read_with(&aliases(), text);
+        assert!(
+            reading.problems.is_empty(),
+            "{text}: {:?}",
+            reading.problems
         );
-        assert_eq!(clauses(&value.unwrap()), ["x?"]);
-        assert_eq!(said("@1"), at(0, "`@1` is not a key"));
-        let (_, _, value, _) = compare_of("filename=icon@2x.png");
-        assert_eq!(value.needs_quotes, Some(NeedsQuotes::Character(13)));
+        reading
+            .value
+            .unwrap_or_else(|| panic!("{text}: nothing read"))
+    }
+
+    /// Every place of an expression's keys, values and conditions: which text each sits in.
+    fn texts_of(expr: &Expr) -> Vec<usize> {
+        let mut texts = Vec::new();
+        expr.clone()
+            .each_place(&mut |place: &mut Place| texts.push(place.text));
+        texts
+    }
+
+    #[test]
+    fn an_alias_stands_only_where_a_condition_starts_or_a_key_stands() {
+        let aliases = aliases();
+        // Before the aliases file is read, reading stops at a use and waits for the file, with
+        // no value: nothing can be built from a text whose use was skipped.
+        for text in ["x? AND @image", "@image AND x?"] {
+            let reading = read_filter(text, 0, AliasMode::NotLoaded);
+            assert!(
+                reading.problems.is_empty(),
+                "{text}: {:?}",
+                reading.problems
+            );
+            assert!(reading.waits_for_aliases, "{text}");
+            assert!(reading.value.is_none(), "{text}");
+            assert!(reading.alias_uses.is_empty(), "{text}");
+        }
+        let reading = read_keys("Make, @t|year", 0, Grammar::KeyList, AliasMode::NotLoaded);
+        assert!(reading.waits_for_aliases && reading.value.is_none());
+        let reading = read_filter("x? AND y?", 0, AliasMode::NotLoaded);
+        assert!(!reading.waits_for_aliases);
+        assert_eq!(clauses(&reading.value.unwrap()), ["x?", "y?"]);
+        // In a value an `@` is a character that needs quotes, never an alias.
+        for (text, at) in [("filename=@image", 9), ("filename=icon@2x.png", 13)] {
+            let reading = read_with(&aliases, text);
+            assert!(reading.alias_uses.is_empty(), "{text}");
+            match reading.value {
+                Some(Expr::Compare { value, .. }) => {
+                    assert_eq!(
+                        value.needs_quotes,
+                        Some(NeedsQuotes::Character(at)),
+                        "{text}"
+                    )
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let reading = read_with(&aliases, "filename~a@b*");
+        assert!(reading.alias_uses.is_empty());
+        match reading.value {
+            Some(Expr::Glob { glob, .. }) => assert_eq!(glob.needs_quotes, [10]),
+            other => panic!("{other:?}"),
+        }
+        // A quoted key is a name, never an alias.
+        let reading = read_with(&aliases, r#""@image"?"#);
+        assert!(reading.alias_uses.is_empty());
+        match reading.value {
+            Some(Expr::Exists { key, .. }) => assert_eq!(key.base, "content.@image"),
+            other => panic!("{other:?}"),
+        }
+        // Where a key stands: a key alias reads, a filter alias is refused.
+        let keys = read_keys(
+            "@t|year",
+            0,
+            Grammar::Key,
+            AliasMode::Loaded {
+                aliases: &aliases,
+                first_text: 1,
+            },
+        );
+        assert!(keys.problems.is_empty(), "{:?}", keys.problems);
+        let key = &keys.value.unwrap()[0];
+        assert_eq!(
+            (key.base.as_str(), key.input.as_str()),
+            ("content.taken", "@t|year")
+        );
+        let keys = read_keys(
+            "@image",
+            0,
+            Grammar::Key,
+            AliasMode::Loaded {
+                aliases: &aliases,
+                first_text: 1,
+            },
+        );
+        assert_eq!(keys.problems[0].sentence, "`@image` is a filter, not a key");
+        // `@` with no alias name echoes the key-name characters after it, in every mode.
+        for (text, echo) in [
+            ("@1", "@1"),
+            ("@1abc AND x?", "@1abc"),
+            ("@_x", "@_x"),
+            ("@.x", "@.x"),
+            ("@ AND x?", "@"),
+            ("(@)", "@"),
+            (r#"@"x""#, "@"),
+            ("@", "@"),
+        ] {
+            let sentence = format!(
+                "`{echo}` is not an alias name: alias names must start with a letter and contain \
+                 only letters, digits, _ and -"
+            );
+            let caret = text.find('@').unwrap();
+            assert_eq!(said(text), at(caret, &sentence), "{text}");
+            assert_eq!(said_with(&aliases, text), at(caret, &sentence), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_filter_alias_is_one_complete_condition() {
+        // Its own OR stays one condition beside the typed AND.
+        match runs_with("@image AND x?") {
+            Expr::And(parts) => {
+                assert!(matches!(parts[0], Expr::Or(_)), "{parts:?}");
+                assert_eq!(clauses(&parts[0]), ["Title=a", "Title=b"]);
+                assert_eq!(texts_of(&parts[0]).into_iter().max(), Some(1));
+                assert_eq!(texts_of(&parts[0]).into_iter().min(), Some(1));
+                assert!(texts_of(&parts[1]).iter().all(|&t| t == 0));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            matches!(runs_with("NOT @image"), Expr::Not(inner) if matches!(*inner, Expr::Or(_)))
+        );
+        // Each use is a text of its own, numbered in the order met.
+        match runs_with("@image OR (x? AND @image)") {
+            Expr::Or(parts) => {
+                assert!(texts_of(&parts[0]).iter().all(|&t| t == 1));
+                assert!(texts_of(&parts[parts.len() - 1]).contains(&2), "{parts:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // What follows it is what follows any condition.
+        assert_eq!(
+            said_with(&aliases(), "@image x?"),
+            at(7, "AND or OR is missing before `x`")
+        );
+    }
+
+    #[test]
+    fn a_key_alias_continues_the_key_grammar_where_its_key_ended() {
+        match runs_with("@t|year=2024") {
+            Expr::Compare { key, clause, .. } => {
+                assert_eq!(key.base, "content.taken");
+                assert_eq!(key.input, "@t|year");
+                assert_eq!(key.input_name, "@t");
+                assert_eq!(key.written.as_deref(), Some("taken"));
+                assert_eq!(key.modifiers.len(), 1);
+                assert_eq!(clause, "@t|year=2024");
+            }
+            other => panic!("{other:?}"),
+        }
+        match runs_with("@f[0]=a") {
+            Expr::Compare { key, .. } => {
+                assert_eq!(key.accessor.map(|(a, _)| a), Some(PathAccessor::Index(0)))
+            }
+            other => panic!("{other:?}"),
+        }
+        match runs_with("@yr|lowercase?") {
+            Expr::Exists { key, .. } => assert_eq!(key.modifiers.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        // What its key cannot take meets the position's own sentence.
+        let aliases = aliases();
+        for (text, caret, typed) in [
+            ("@geo.lat=1", 4, "@geo"),
+            ("@filename[1]=a", 9, "@filename"),
+            ("@yr[0]=a", 3, "@yr"),
+        ] {
+            let sentence = format!("an operator is missing after `{typed}`");
+            assert_eq!(said_with(&aliases, text)[0], (caret, sentence), "{text}");
+        }
+    }
+
+    #[test]
+    fn every_operator_after_a_filter_alias_takes_one_sentence() {
+        let aliases = aliases();
+        for (after, appended) in [
+            (" = 1", "="),
+            (" != 1", "!="),
+            ("<1", "<"),
+            (" >= 1", ">="),
+            (" ~ a*", "~"),
+            ("!~a", "!~"),
+            ("?", "?"),
+            (" IN (1)", "IN"),
+            (" NOT IN (1)", "NOT IN"),
+            ("|year", "|"),
+            ("[0]", "["),
+        ] {
+            let text = format!("@image{after} AND x?");
+            let caret = text.find(appended).unwrap();
+            let sentence = format!("`@image` is a filter, `{appended}` cannot be appended to it");
+            assert_eq!(said_with(&aliases, &text), at(caret, &sentence), "{text}");
+        }
+        assert_eq!(
+            said_with(&aliases, "@image NOT @x"),
+            at(7, "AND or OR is missing before `NOT`")
+        );
+    }
+
+    #[test]
+    fn an_unknown_alias_names_the_aliases_file() {
+        let path = "/home/.canon/aliases.toml";
+        assert_eq!(
+            said_with(&aliases(), "x? AND @nope"),
+            at(
+                7,
+                &format!("`@nope` is an unknown alias; the aliases file is {path}")
+            )
+        );
+        let none = check_aliases(std::path::Path::new(path), false, Vec::new()).unwrap();
+        assert_eq!(
+            said_with(&none, "@nope"),
+            at(
+                0,
+                &format!("`@nope` is an unknown alias; there is no aliases file at {path}")
+            )
+        );
+        let keys = read_keys(
+            "@nope",
+            0,
+            Grammar::Key,
+            AliasMode::Loaded {
+                aliases: &none,
+                first_text: 1,
+            },
+        );
+        assert_eq!(
+            keys.problems[0].sentence,
+            format!("`@nope` is an unknown alias; there is no aliases file at {path}")
+        );
+    }
+
+    #[test]
+    fn a_manifest_query_refuses_an_alias_by_name() {
+        let sentence = "`@image` is an alias; a manifest's query cannot contain aliases";
+        let reading = read_filter("x? AND @image", 0, AliasMode::NotAllowed);
+        let found: Vec<(usize, String)> = reading
+            .problems
+            .into_iter()
+            .map(|p| (p.place.start, p.sentence))
+            .collect();
+        assert_eq!(found, at(7, sentence));
+        let keys = read_keys("@image", 0, Grammar::Key, AliasMode::NotAllowed);
+        assert_eq!(keys.problems[0].sentence, sentence);
     }
 
     #[test]

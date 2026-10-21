@@ -63,15 +63,15 @@ pub(in crate::expr) fn needs_quotes_sentence(c: char) -> String {
 }
 
 /// **The problem under a part's first character that needs quotes**: the character `rest`
-/// starts with, at byte `at` of the refusal's text number `text`, with no fix. One builder:
-/// binding words a glob that was read, the reader one where reading stopped.
-pub(in crate::expr) fn needs_quotes_problem(rest: &str, at: usize, text: usize) -> Problem {
+/// starts with, at byte `at` of the text `of` sits in, with no fix. One builder: binding words a glob that was read, the reader one where
+/// reading stopped.
+pub(in crate::expr) fn needs_quotes_problem(rest: &str, at: usize, of: Place) -> Problem {
     let c = rest.chars().next().unwrap_or_default();
     Problem {
         place: Place {
-            text,
             start: at,
             end: at + c.len_utf8(),
+            ..of
         },
         sentence: needs_quotes_sentence(c),
         rule_line: None,
@@ -172,7 +172,7 @@ fn quote_is_unclosed(cursor: &Cursor) -> bool {
 fn word_needs_quotes(cursor: &mut Cursor, needs_quotes: &[usize]) {
     for &at in needs_quotes {
         let rest = cut(cursor.text(), at, cursor.text().len());
-        let problem = needs_quotes_problem(rest, at, cursor.place(at, at).text);
+        let problem = needs_quotes_problem(rest, at, cursor.place(at, at));
         let Place { start, end, .. } = problem.place;
         let rule_line = problem.rule_line.as_deref();
         cursor.problem(start, end, problem.sentence, rule_line, problem.fix);

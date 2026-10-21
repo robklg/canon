@@ -16,7 +16,7 @@
 //! ```ignore
 //! use crate::expr::{read_report, resolve_fact_value};
 //!
-//! let key = read_report(conn, Some("source.mtime|year"), &[], &[])?.key.unwrap();
+//! let key = read_report(conn, Some("source.mtime|year"), &[], &filters)?.key.unwrap();
 //! let value = resolve_fact_value(&source, &key, &stored_facts, &zone)?;
 //! // value is Some("2024") or None if fact doesn't exist
 //! ```

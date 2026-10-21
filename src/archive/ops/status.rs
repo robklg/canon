@@ -650,8 +650,8 @@ mod tests {
         let params = ExecuteGenerateParams {
             lock_path: dir.path().join("cluster.lock"),
             manifest_path: manifest_path.clone(),
-            expanded_filters: vec![],
-            original_filters: vec![],
+            query: vec![],
+            query_as_given: vec![],
             scope: crate::core::domain::scope::ScopeResolution::from_outcomes(vec![]),
             roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
             archive_root_id: archive_root,

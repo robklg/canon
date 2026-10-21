@@ -81,7 +81,7 @@ canon worklist --emit content.DateTimeOriginal
 
 The entry's own `mtime` field is a number of seconds, as in every entry.
 
-`--emit` reads a key's name as `--where` does: a [source fact or built-in key](../../reference/builtins.md) emits its value for that source, and any other name is a content fact, so `--emit geo.lat` emits `content.geo.lat`. Each field is named as given. A source fact's time is an instant with no recorded offset, written with `-00:00`, and a file with no extension emits `""` for `source.ext`:
+`--emit` reads a key's name as `--where` does: a [source fact or built-in key](../../reference/builtins.md) emits its value for that source, and any other name is a content fact, so `--emit geo.lat` emits `content.geo.lat`. `--emit` takes a name, never an [alias](../../reference/filter.md#aliases): `--emit @taken` looks for a key named `@taken` and, where none has facts, emits `null` on every row. Each field is named as given. A source fact's time is an instant with no recorded offset, written with `-00:00`, and a file with no extension emits `""` for `source.ext`:
 
 ```bash
 canon worklist --emit Make --emit source.mtime --emit source.ext

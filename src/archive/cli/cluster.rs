@@ -29,7 +29,7 @@ use crate::core::ops::scope::{
     classify_all, no_sources_known, resolve_archive_path, resolve_recorded_scope,
 };
 use crate::core::repo::{self, Connection, Db};
-use crate::expr::read_filters;
+use crate::expr::{read_filters, ExpressionText};
 
 pub struct GenerateOptions {
     pub force: bool,
@@ -43,8 +43,7 @@ pub struct GenerateOptions {
 pub fn generate(
     db: &mut Db,
     scope_prefixes: &[String],
-    original_filters: &[String],
-    expanded_filters: &[String],
+    filters: &ExpressionText,
     dest: &Path,
     output_path: &Path,
     options: &GenerateOptions,
@@ -71,7 +70,7 @@ pub fn generate(
         .map_err(|u| anyhow::anyhow!(super::generate_machine_zone_refusal(&u)))?;
 
     // Require at least one of path scope or filters
-    if scope_prefixes.is_empty() && expanded_filters.is_empty() {
+    if scope_prefixes.is_empty() && filters.typed().is_empty() {
         bail!("At least one of path or --where filter is required");
     }
 
@@ -83,7 +82,8 @@ pub fn generate(
     // Resolve destination to archive root + relative subdir
     let (archive_root_id, _archive_root_path, base_dir) = resolve_archive_path(&all_roots, dest)?;
 
-    let parsed_filters = read_filters(conn, expanded_filters)?;
+    let parsed_filters = read_filters(conn, filters)?;
+    let query = parsed_filters.recorded().to_vec();
 
     // The scope this run settles on, through the very code a manifest's own
     // scope goes through: generate, refresh and apply resolve scope through
@@ -138,8 +138,8 @@ pub fn generate(
     let exec_params = ExecuteGenerateParams {
         lock_path: lock_path.clone(),
         manifest_path: output_path.to_path_buf(),
-        expanded_filters: expanded_filters.to_vec(),
-        original_filters: original_filters.to_vec(),
+        query,
+        query_as_given: filters.typed().to_vec(),
         scope: generate_scope.clone(),
         roots: all_roots.clone(),
         archive_root_id,
@@ -2524,8 +2524,7 @@ mod tests {
             &mut db,
             // Under a known root, and the index knows nothing beneath it.
             &["/photos/new-folder".to_string()],
-            &[],
-            &[],
+            &ExpressionText::plain(&[]),
             Path::new("/archive"),
             &out,
             &GenerateOptions {
@@ -3547,9 +3546,9 @@ mod tests {
 
     /// **An `@name` where a key belongs is named as an alias**, which a manifest's query takes
     /// none of — never as a stray character. After `~` an `@` is part of the glob, and needs
-    /// quotes there: a generated line holding one (an alias `retina = "source.rel_path ~ *@2x*"`,
-    /// recorded expanded) is refused for the character, never as an alias, and with the `@`
-    /// quoted it runs; after `=` it is a character that needs quotes, and quoted it runs.
+    /// quotes there: a hand-written line holding one is refused for the character, never as an
+    /// alias, and with the `@` quoted it runs; after `=` it is a character that needs quotes, and
+    /// quoted it runs.
     #[test]
     fn refresh_names_an_alias_in_the_recorded_query() {
         for (line, at) in [
@@ -3563,9 +3562,8 @@ mod tests {
             let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
             assert!(
                 err.starts_with(&format!(
-                    "cannot run the filter as specified\n  {line}\n  {}^ '@img' is an alias, and \
-                     aliases are not expanded here; write the filter it stands for\n`canon \
-                     cluster refresh --edit ",
+                    "cannot run the filter as specified\n  {line}\n  {}^ `@img` is an alias; a \
+                     manifest's query cannot contain aliases\n`canon cluster refresh --edit ",
                     " ".repeat(at)
                 )),
                 "{err}"
@@ -3917,8 +3915,7 @@ mod tests {
         generate(
             db,
             &["/photos".to_string()],
-            &[],
-            &[],
+            &ExpressionText::plain(&[]),
             Path::new("/archive"),
             out,
             &GenerateOptions {
@@ -4040,11 +4037,11 @@ mod tests {
             ),
         ));
         let conn = crate::core::repo::open_in_memory_for_test();
-        let refused = crate::expr::read_filters(&conn, &["source.ext =".to_string()])
+        let query = ExpressionText::specified(vec!["source.ext =".to_string()]);
+        let refused = crate::expr::read_filters(&conn, &query)
             .expect_err("a value is missing")
             .downcast::<crate::expr::ExpressionRefused>()
-            .unwrap()
-            .into_specified();
+            .unwrap();
         status.query_refusal = Some(refused);
         let text = String::from_utf8(state_lines(&status, Path::new("/m/c.toml"))).unwrap();
         let door = text.find("suspended").unwrap_or_else(|| panic!("{text}"));

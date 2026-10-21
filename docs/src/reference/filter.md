@@ -259,83 +259,144 @@ Operator precedence (highest to lowest): NOT, AND, OR. Use parentheses to overri
 
 ## Aliases
 
-You can define named aliases in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`). There are two kinds of aliases; Canon classifies each automatically by parsing its value:
+You can define named aliases in `$CANON_HOME/aliases.toml` (by default `~/.canon/aliases.toml`) and use one as `@name`. An alias stands where a condition starts or a key stands: in `--where`, and in `facts --key` and `--group-by`. Anywhere else `@` is a character and follows that position's rule: in a value or a part of a glob it needs quotes (`filename="icon@2x.png"`, `filename~*"@"2x*`), and in a glob's set it is a member (`filename~*[@]*`). A quoted word is never an alias.
 
-### Expression Aliases
+There are two kinds, by how the alias's value reads.
 
-Shorthand for complete filter predicates. These are values that contain an operator (like `=`, `>`, `IN`, etc.):
+### Filter Aliases
+
+A value that reads as one whole filter:
 
 ```toml
-image = "content.mime IN ('image/jpeg', 'image/png', 'image/gif', 'image/tiff', 'image/webp', 'image/heic')"
-video = "content.mime IN ('video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska')"
-tens = "source.mtime|year >= 2010 AND source.mtime|year < 2020"
+image = "source.ext IN (jpg, png, heic)"
+recent = "source.mtime|year >= 2020"
 large = "source.size > 10000000"
 ```
 
-Expression aliases are wrapped in parentheses when expanded, so boolean logic inside them composes safely:
+A filter alias is one complete condition. It combines with `AND`, `OR`, `NOT` and parentheses, and nothing else may follow it:
 
-```bash
-canon ls --where '@image AND @tens'
-# Expands to: (content.mime IN (...)) AND (source.mtime|year >= 2010 AND source.mtime|year < 2020)
+```
+$ canon ls --where '@image=1'
+Error: cannot run the filter as given
+  @image=1
+        ^ `@image` is a filter, `=` cannot be appended to it
 ```
 
 ### Key Aliases
 
-Shorthand for verbose key paths: accessors, modifiers, and namespaces. These are values that are just a key (no operator):
+A value that is one key, followed by nothing else:
 
 ```toml
 filename = "source.rel_path[-1]"
 parent = "source.rel_path[-2]"
-ext = "source.ext|lowercase"
 year = "source.mtime|year"
 taken = "content.DateTimeOriginal"
-yearmonth = "content.DateTimeOriginal|yearmonth"
 ```
 
-Key aliases are substituted literally and used with operators in your filter:
+A key alias stands where a key stands and takes what a key takes after it: an operator, `?`, modifiers, and an accessor where its key is a name alone, with no accessor or modifier of its own (`@path[0]` for `path = "source.rel_path"`, but not `@filename[0]` or `@year[0]`). An alias is one whole key: `@geo.lat` does not name `content.GPS.lat` for `geo = "content.GPS"`, so give each key its own alias.
 
-```bash
-canon ls --where '@filename = "photo.jpg"'
-# Expands to: source.rel_path[-1] = "photo.jpg"
-
-canon ls --where '@yearmonth >= 2023-01'
-# Expands to: content.DateTimeOriginal|yearmonth >= 2023-01
-
-canon ls --where '@ext = "jpg" AND @year >= 2020'
-# Expands to: source.ext|lowercase = "jpg" AND source.mtime|year >= 2020
+```
+$ canon ls --where '@geo.lat>50'
+Error: cannot run the filter as given
+  @geo.lat>50
+      ^ an operator is missing after `@geo`
+    After a key: =, !=, <, >, <=, >=, ~, !~, ?, IN or NOT IN
 ```
 
 ### Using Aliases
 
-Reference aliases with `@name` in any `--where` expression:
-
 ```bash
-# Expression alias standalone
+# A filter alias on its own
 canon ls --where '@image'
 
-# Compose expression aliases
-canon ls --where '@image OR @video'
+# Combine filter aliases
+canon ls --where '@image AND @recent'
 
-# Key alias with operator
+# A key alias with an operator, a glob, a modifier
 canon ls --where '@filename~IMG_*'
+canon ls --where '@taken|year=2024'
 
-# Mix both kinds
+# Both kinds together
 canon ls --where '@image AND @year >= 2020'
 
-# Negate an expression alias
+# Negate a filter alias
 canon ls --where 'NOT @large'
+
+# A key alias in a report
+canon facts --key @year
+canon facts --key source.ext --group-by @year
 ```
 
-### How Classification Works
+A report shows a key alias as typed, then the kind of the key it stands for:
 
-Canon reads each alias's value as a filter. A value that reads as a filter with no problem is an expression alias and gets wrapped in parentheses. Any other value, a key path such as `source.rel_path[-1]` among them, is substituted literally, and a value that does not read where it is used is rejected there, as part of the filter it was used in.
+```
+$ canon facts --key @year
+Facts: all roots
+Sources matching filters: 3
 
-**Rules:**
-- Alias names must start with a letter and can contain letters, digits, underscores, and hyphens
-- `@` inside quoted strings is treated as a literal character, not an alias reference
-- Nested aliases are not supported: an alias's value is substituted without being expanded again, so an `@name` where a key belongs in it gives an error naming it, and an `@` elsewhere in it is a character that needs quotes (`icon = 'filename="icon@2x.png"'`)
-- The aliases file is only loaded when `@` appears in a `--where` argument
-- If the file doesn't exist and no `@` aliases are used, no error is raised
+@year (source fact)                           Count   Coverage
+──────────────────────────────────────────────────────────────
+2026                                              3     100.0%
+```
+
+### The Aliases File
+
+- A name starts with a letter, then letters, digits, `_` and `-`, in any language. A name outside ASCII is quoted in TOML (`"foto_één" = "source.ext=jpg"`); `my.alias = "…"` is a TOML table, not a name.
+- A value holding `"` is written as a TOML literal string, in single quotes: `icon = 'filename="icon@2x.png"'`.
+- The file is read the first time an alias is used where one stands. A filter with no alias never reads it, and a missing file is no error until an alias is used.
+- When the file is read, each entry is checked: its name, and that its value reads as one key or one filter with no alias in it. Nothing is checked against your library: a key no source has yet, or a value that does not fit its key, shows where the alias is used. While any entry is broken, every alias use is refused, and every broken entry is shown with the line it starts on:
+
+```
+$ canon ls --where '@image'
+Error: the aliases file /Users/me/.canon/aliases.toml has entries that are not valid
+  line 3: @half: source.ext IN jpg
+                               ^ `(` is missing after IN
+  line 4: @nested: @image AND @taken?
+                   ^ an alias cannot contain another alias
+  line 4: @nested: @image AND @taken?
+                              ^ an alias cannot contain another alias
+  line 5: @my alias: source.size > 0
+             ^ `@my alias` is not an alias name: alias names must start with a letter and contain only letters, digits, _ and -
+```
+
+A file TOML cannot read shows TOML's own message:
+
+```
+$ canon ls --where '@image'
+Error: the aliases file /Users/me/.canon/aliases.toml cannot be read
+
+Caused by:
+    TOML parse error at line 1, column 9
+      |
+    1 | image = source.ext=jpg
+      |         ^
+    invalid string
+    expected `"`, `'`
+```
+
+### A Problem Inside an Alias
+
+A problem in an alias's value that binding finds is shown under the alias where you used it, with the alias named first and no fix, since the fix belongs in the file. A rule line and a `canon facts convert` line stay:
+
+```
+$ canon ls --where '@old'
+Error: cannot run the filter as given
+  @old
+  ^ in alias `@old`: `Model` is an unknown key
+    `canon facts` lists the keys
+```
+
+A problem in what you typed around a key alias names the alias, and its fixes do too:
+
+```
+$ canon ls --where '@parent=2024'
+Error: cannot run the filter as given
+  @parent=2024
+          ^ @parent gives text; 2024 is a number or a year.
+    As text: @parent="2024"     As numbers, if its values are numbers: @parent|number=2024     As dates, if its values are dates: @parent|year=2024
+```
+
+A manifest's query takes no alias: `cluster generate` records each one replaced by what it stands for (see [Cluster](../commands/archive/cluster.md)).
 
 ## Using Modifiers
 

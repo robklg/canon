@@ -125,7 +125,7 @@ pub(super) fn eprint_set_asides(header: &HeaderScope<'_>) {
 
 pub(super) fn print_survey_header(
     header: &HeaderScope<'_>,
-    original_filters: &[String],
+    filters: &[String],
     total: usize,
     unhashed: usize,
     hashed: usize,
@@ -137,8 +137,8 @@ pub(super) fn print_survey_header(
     write_archive_side_set_asides(&mut handle, header.archive_set_aside);
     drop(handle);
 
-    if !original_filters.is_empty() {
-        println!("  Filters: {}", original_filters.join(" AND "));
+    if !filters.is_empty() {
+        println!("  Filters: {}", filters.join(" AND "));
     }
 
     println!(

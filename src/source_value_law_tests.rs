@@ -14,7 +14,7 @@ use crate::core::repo::Connection;
 use crate::core::testing::*;
 use crate::expr::{
     apply_filters, evaluate, parse_pattern, prefetch_pattern_facts, read_filters, EvalContext,
-    ParsedFactKey,
+    ExpressionText, ParsedFactKey,
 };
 
 /// Three sources in one root. `two_rows` has content with `content.Make=Canon` and holds
@@ -53,7 +53,7 @@ fn filtered(conn: &mut Connection, ids: &[i64], clause: &str) -> Vec<i64> {
     apply_filters(
         conn,
         ids,
-        &read_filters(conn, &[clause.to_string()]).unwrap(),
+        &read_filters(conn, &ExpressionText::plain(&[clause])).unwrap(),
         &UserZone::utc(),
     )
     .unwrap()

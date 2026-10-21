@@ -19,7 +19,9 @@ use rusqlite::Connection;
 
 use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
 use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, ZoneNameError};
-use crate::expr::{read_filters, BoundFilters, ExpressionRefused, Pattern, Unmeasured};
+use crate::expr::{
+    read_filters, BoundFilters, ExpressionRefused, ExpressionText, Pattern, Unmeasured,
+};
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
 /// This prevents race conditions when opening the file in an editor
@@ -70,16 +72,16 @@ pub(super) fn write_lock_file(
 /// query can never be selected on.
 /// `cluster refresh` refuses on the causes, all in one run; `cluster status` names them as what
 /// would stop that refresh. Every cause reading and binding refuse the recorded text for is
-/// collected here, before anything runs; the text is read as written, so an `@name` in it is
-/// not expanded.
+/// collected here, before anything runs; the text is read as specified, so an `@name` in it is
+/// refused as an alias a manifest's query cannot contain.
 pub fn parse_recorded_query(
     conn: &Connection,
     lines: &[String],
 ) -> Result<std::result::Result<BoundFilters, ExpressionRefused>> {
-    match read_filters(conn, lines) {
+    match read_filters(conn, &ExpressionText::specified(lines.to_vec())) {
         Ok(bound) => Ok(Ok(bound)),
         Err(error) => match error.downcast::<ExpressionRefused>() {
-            Ok(refused) => Ok(Err(refused.into_specified())),
+            Ok(refused) => Ok(Err(refused)),
             Err(other) => Err(other),
         },
     }

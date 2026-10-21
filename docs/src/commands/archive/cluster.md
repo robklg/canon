@@ -189,7 +189,7 @@ Error: cannot run the filter as specified
 Refresh aborted — manifest.toml and its lock file are unchanged.
 ```
 
-The query is used as it is written in the manifest, with no aliases. To copy a fix into the manifest, paste it between `'''` and `'''`, which holds both quote marks and backslashes as written: `query = ['''filename="a%b.jpg"''']`.
+The query is used as it is written in the manifest, and an `@name` in it is refused ("`@image` is an alias; a manifest's query cannot contain aliases"). `cluster generate` records each [alias](../../reference/filter.md#aliases) replaced: a filter alias as its value in parentheses, a key alias as its key, with the filter as given on an `# Original:` line above the query. To copy a fix into the manifest, paste it between `'''` and `'''`, which holds both quote marks and backslashes as written: `query = ['''filename="a%b.jpg"''']`.
 
 **What "the same on any machine" rests on.** Zone rules come from each machine's own time zone data. Two machines put a file in the same folder when their data agree for the manifest's zone. `apply --dry-run` on the machine that applies shows the destinations that run will use.
 

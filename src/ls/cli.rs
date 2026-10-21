@@ -7,13 +7,13 @@ use crate::core::domain::IncludeSet;
 use crate::core::ops::scope::classify_all;
 use crate::core::repo::Db;
 use crate::expr::read_filters;
-use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{select_sources, ExpressionText, RolePolicy, SelectionParams};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     db: &mut Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     include: &IncludeSet,
     use_relative_paths: bool,
     long_format: bool,
@@ -29,7 +29,7 @@ pub fn run(
     }
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let scopes = classify_all(scope_prefixes);
 
@@ -163,14 +163,14 @@ fn status_indicator(source: &Source) -> &'static str {
 pub fn show_duplicates(
     db: &mut Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     include: &IncludeSet,
     use_relative_paths: bool,
 ) -> Result<()> {
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let scopes = classify_all(scope_prefixes);
 

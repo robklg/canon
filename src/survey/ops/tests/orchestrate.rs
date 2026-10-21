@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::core::testing::{insert_note, insert_object, insert_root, insert_source, setup_test_db};
+use crate::expr::ExpressionText;
 use crate::survey::ops::compute::SurveyOutcome;
 use crate::survey::ops::orchestrate::{run_survey, SurveyOrchestration};
 
@@ -31,7 +32,7 @@ fn run_survey_returns_note_context_for_single_prefix_scope() {
     let run = run_survey(
         &mut conn,
         &["/mnt/drive/photos".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -63,7 +64,7 @@ fn run_survey_omits_note_context_for_multi_prefix_scope() {
             "/mnt/drive/a.jpg".to_string(),
             "/mnt/drive/b.jpg".to_string(),
         ],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -91,7 +92,7 @@ fn run_survey_note_context_survives_empty_outcome() {
     let run = run_survey(
         &mut conn,
         &["/mnt/drive/other".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -117,7 +118,7 @@ fn run_survey_note_context_survives_all_unhashed_outcome() {
     let run = run_survey(
         &mut conn,
         &["/mnt/drive".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -149,7 +150,7 @@ fn run_survey_rejects_other_identical_to_scope() {
     let err = match run_survey(
         &mut conn,
         &["/mnt/drive".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -182,7 +183,7 @@ fn run_survey_sets_archive_label_from_archive_spec() {
     let run = run_survey(
         &mut conn,
         &["/mnt/drive".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -213,7 +214,7 @@ fn run_survey_archive_spec_rejects_non_archive_root() {
     let err = match run_survey(
         &mut conn,
         &["/mnt/drive".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -249,7 +250,7 @@ fn run_survey_computes_location_note_counts_when_requested() {
     let run = run_survey(
         &mut conn,
         &["/mnt/drive-a".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),
@@ -290,7 +291,7 @@ fn run_survey_skips_location_note_counts_when_not_requested() {
     let run = run_survey(
         &mut conn,
         &["/mnt/drive-a".to_string()],
-        &[],
+        &ExpressionText::plain(&[]),
         &orchestration,
         &params,
         &crate::core::domain::time::zone::UserZone::utc(),

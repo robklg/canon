@@ -1630,8 +1630,8 @@ mod tests {
             &ExecuteGenerateParams {
                 lock_path: out.path().join("cluster.lock"),
                 manifest_path: manifest.clone(),
-                expanded_filters: vec![],
-                original_filters: vec![],
+                query: vec![],
+                query_as_given: vec![],
                 scope,
                 roots: all_roots,
                 archive_root_id: archive_id,

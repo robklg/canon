@@ -5,9 +5,9 @@
 //! the one thing here that still speaks SQL itself. Selection — the set of
 //! sources an operation reports over or acts on — is the language applied
 //! within a scope, and it lives here rather than beside any one command because
-//! exploring and acting must resolve to the same set. Alias expansion is the
-//! half of that story that needs the outside world: the rewriting rules are a
-//! domain concern, reading the file they rewrite from is this one. Reading a
+//! exploring and acting must resolve to the same set. Aliases are read by the
+//! reader and checked as pure logic; reading the file they come from is this
+//! layer's, the first time a reading meets one. Reading a
 //! stored key's one value per source is the fourth: the rule that picks it is
 //! domain, the trip to storage is here.
 

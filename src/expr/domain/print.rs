@@ -12,9 +12,8 @@ use crate::core::domain::format::{format_count, shell_quote};
 use crate::core::domain::number::read_number;
 use crate::core::domain::time::reading::read_time;
 
-use super::alias::has_alias_references;
 use super::bind::{bare_class, BareClass};
-use super::read::{read_keys, reads_as_one_bare_key, reads_as_one_bare_value, Grammar};
+use super::read::{read_keys, reads_as_one_bare_key, reads_as_one_bare_value, AliasMode, Grammar};
 
 /// A value as Canon prints it for the reader of `read_as`: bare where the bare text reads
 /// back as the same value of that type, otherwise double-quoted.
@@ -44,8 +43,7 @@ pub(in crate::expr) fn printed_word(text: &str) -> String {
 /// A full stored key as Canon prints it: bare where the bare text reads back as that same
 /// key, otherwise double-quoted (`"content.File Size"`).
 pub fn printed_key(key: &str) -> String {
-    let same_key =
-        reads_as_one_bare_key(key) && !has_alias_references(key) && is_its_own_base_key(key);
+    let same_key = reads_as_one_bare_key(key) && is_its_own_base_key(key);
     if same_key {
         key.to_string()
     } else {
@@ -56,7 +54,7 @@ pub fn printed_key(key: &str) -> String {
 /// Whether `key`, read as a report reads a key, is one key with no accessor and no modifier
 /// whose base key is `key` itself.
 fn is_its_own_base_key(key: &str) -> bool {
-    let reading = read_keys(key, 0, Grammar::Key);
+    let reading = read_keys(key, 0, Grammar::Key, AliasMode::NotLoaded);
     reading.problems.is_empty()
         && matches!(reading.value.as_deref(),
             Some([read]) if !read.has_transforms() && read.base == key)
@@ -106,10 +104,9 @@ pub fn mixed_type_way_out(keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// The reader's half: one bare value with the same text, and nothing alias expansion
-/// would rewrite.
+/// The reader's half: one bare value with the same text.
 fn reads_back_bare(text: &str) -> bool {
-    !text.is_empty() && !has_alias_references(text) && reads_as_one_bare_value(text)
+    !text.is_empty() && reads_as_one_bare_value(text)
 }
 
 /// Double quotes, an inner `"` doubled.
@@ -133,7 +130,7 @@ mod tests {
             KeyTypes::from_counts([(t, 1)]).unwrap(),
         )]);
         let text = format!("k={printed}");
-        let reading = read_filter(&text, 0);
+        let reading = read_filter(&text, 0, AliasMode::NotLoaded);
         assert!(
             reading.problems.is_empty(),
             "{text}: {:?}",
@@ -143,7 +140,7 @@ mod tests {
             .value
             .unwrap_or_else(|| panic!("{text}: nothing read"));
         let mut causes = Vec::new();
-        match bind_expr(&expr, &types, &mut causes) {
+        match bind_expr(&expr, &types, AliasMode::NotLoaded, &mut causes) {
             Bound::Compare { test, .. } if causes.is_empty() => test,
             other => panic!("{text}: {other:?} {causes:?}"),
         }
@@ -225,37 +222,28 @@ mod tests {
             ("content.icon@2x", r#""content.icon@2x""#),
         ] {
             assert_eq!(printed_key(key), printed, "{key}");
-            let reading = read_keys(&printed_key(key), 0, Grammar::Key);
+            let reading = read_keys(&printed_key(key), 0, Grammar::Key, AliasMode::NotLoaded);
             assert!(reading.problems.is_empty(), "{key}");
             let read = &reading.value.unwrap()[0];
             assert_eq!((read.base.as_str(), read.has_transforms()), (key, false));
         }
     }
 
-    /// Whether the reader itself — alias expansion, the filter reader and the binder —
-    /// reads `text` as written, against a text key: the oracle the writer must agree with.
+    /// Whether the reader itself — the filter reader and the binder — reads `text` as
+    /// written, against a text key: the oracle the writer must agree with.
     fn reader_reads_bare(text: &str) -> bool {
         let filter = format!("k={text}");
-        let no_aliases = std::collections::HashMap::new();
-        let expanded = crate::expr::domain::alias::expand_aliases(
-            &filter,
-            &no_aliases,
-            std::path::Path::new("aliases.toml"),
-        );
-        if !expanded.is_ok_and(|e| e == filter) {
-            return false;
-        }
         let types = HashMap::from([(
             "content.k".to_string(),
             KeyTypes::from_counts([(FactType::Text, 1)]).unwrap(),
         )]);
-        let reading = read_filter(&filter, 0);
+        let reading = read_filter(&filter, 0, AliasMode::NotLoaded);
         let (true, Some(expr)) = (reading.problems.is_empty(), reading.value) else {
             return false;
         };
         let mut causes = Vec::new();
         matches!(
-            bind_expr(&expr, &types, &mut causes),
+            bind_expr(&expr, &types, AliasMode::NotLoaded, &mut causes),
             Bound::Compare { test: Test::Text(t), .. } if causes.is_empty() && t == text
         )
     }

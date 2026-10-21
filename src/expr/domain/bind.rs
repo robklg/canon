@@ -11,7 +11,7 @@
 //! problem the reader met and every cause binding finds, each drawn under the typed line it
 //! sits in, its ways out rewriting only what they change, so following one binds.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use strum::IntoEnumIterator;
@@ -29,7 +29,7 @@ use super::print::{
     convert_command, mixed_type_way_out, printed_key, printed_value, printed_word, quoted,
 };
 use super::problem::{caret_block, cut, Fix, Place, Problem};
-use super::read::{is_space, read_filter, read_keys, Grammar};
+use super::read::{is_space, read_filter, read_keys, AliasMode, AliasUse, Grammar};
 use super::transform::{
     is_magnitude_bucket_label, threshold_bucket_labels, Modifier, ModifierCall, ModifierCategory,
     PathAccessor,
@@ -181,6 +181,7 @@ pub(in crate::expr) fn check_read_as(
         return Err(ExpressionRefused {
             refused,
             texts: Vec::new(),
+            typed_at: BTreeMap::new(),
             causes: vec![BindCause::TypeChanged {
                 key: key.to_string(),
                 had_no_facts: read_as == ReadAs::Absent,
@@ -298,17 +299,19 @@ fn types_of(base: &str, types: &HashMap<String, KeyTypes>) -> Option<KeyTypes> {
 /// read as the type its key gives. Every cause is collected; where there is one, the
 /// returned tree is not to be run.
 ///
-/// Each cause's ways out are bound against the same key types before the refusal is shown,
-/// and one that would be refused again is dropped ([`keep_ways_that_bind`]).
+/// Each cause's ways out are bound against the same key types, read with the same `aliases`,
+/// before the refusal is shown, and one that would be refused again is dropped
+/// ([`keep_ways_that_bind`]).
 pub(in crate::expr) fn bind_expr(
     expr: &Expr,
     types: &HashMap<String, KeyTypes>,
+    aliases: AliasMode,
     causes: &mut Vec<BindCause>,
 ) -> Bound {
     let before = causes.len();
     let bound = bind_clauses(expr, types, causes);
     let binds = |rewrite: &str| {
-        let reading = read_filter(rewrite, 0);
+        let reading = read_filter(rewrite, 0, aliases);
         reading.problems.is_empty()
             && reading.value.is_some_and(|expr| {
                 let mut again = Vec::new();
@@ -347,7 +350,7 @@ pub(in crate::expr) fn quoted_name_key(problem: &Problem) -> Option<InputKey> {
     let Fix::KeyName { rewrite } = &problem.fix else {
         return None;
     };
-    let reading = read_keys(rewrite, 0, Grammar::Key);
+    let reading = read_keys(rewrite, 0, Grammar::Key, AliasMode::NotLoaded);
     match reading.value {
         Some(mut keys) if reading.problems.is_empty() && keys.len() == 1 => keys.pop(),
         Some(_) | None => None,
@@ -495,7 +498,7 @@ fn bind_glob(
             .iter()
             .map(|&at| {
                 let rest = cut(&glob.input, at - glob.place.start, glob.input.len());
-                BindCause::Read(needs_quotes_problem(rest, at, glob.place.text))
+                BindCause::Read(needs_quotes_problem(rest, at, glob.place))
             })
             .collect()),
         Gives::Number
@@ -550,7 +553,7 @@ pub(in crate::expr) fn bind_key(
         BindCause::UnknownKey(Entry::new(
             clause,
             key.name_place,
-            format!("`{}` is an unknown key", key.input_name),
+            format!("`{}` is an unknown key", key.name_for(key.name_place)),
             vec![UNKNOWN_KEY_RULE.to_string()],
         ))
     };
@@ -622,7 +625,7 @@ fn mixed_type(key: &InputKey, clause: &str, key_types: &KeyTypes, reads: Reads) 
         entry: Entry::new(
             clause,
             key.place,
-            format!("{} holds {types}; {reader}.", key.input_name),
+            format!("{} holds {types}; {reader}.", key.name_for(key.place)),
             vec![format!(
                 "{counted}   (every fact of the key, on every root)"
             )],
@@ -644,7 +647,7 @@ fn walk(key: &InputKey, base_type: FactType, clause: &str) -> Result<Chain, Bind
                     *place,
                     format!(
                         "an accessor ([…]) works on paths or text; {} holds {}.",
-                        key.input_name,
+                        key.name_for(*place),
                         gives.words()
                     ),
                     vec![applicable.clone()],
@@ -754,7 +757,7 @@ fn wrong_modifier(
     let name: &'static str = modifier.into();
     let subject = match previous {
         Some(p) => format!("|{} gives", <&'static str>::from(p)),
-        None => format!("{} holds", key.input_name),
+        None => format!("{} holds", key.name_for(place)),
     };
     // A time of day is a time, so "works on times" would not say why: say what is missing.
     let statement = if *gives == Gives::TimeOfDay && modifier.category() == ModifierCategory::Time {
@@ -1280,16 +1283,16 @@ impl Site<'_> {
         value: &InputValue,
     ) -> Result<Test, BindCause> {
         if op != CompareOp::Eq {
-            let itself = self.key_without_last_modifier();
+            let itself = self.key_without_last_modifier().map(|itself| {
+                format!("To order the values, compare {itself} itself with >, >=, < or <=")
+            });
             return Err(BindCause::BucketOrdered(self.entry(
                 value,
                 format!(
                     "a bucket is compared with =, !=, IN or NOT IN; {} gives bucket ranges.",
                     self.key.input
                 ),
-                vec![format!(
-                    "To order the values, compare {itself} itself with >, >=, < or <="
-                )],
+                itself.into_iter().collect(),
             )));
         }
         let text = value.text.as_str();
@@ -1336,12 +1339,12 @@ impl Site<'_> {
             .modifiers
             .last()
             .map_or("", |(call, _)| call.modifier.into());
-        let rewrite =
-            self.with_key_and_values(&self.key_replacing_last(modifier), value, value_as_asked);
-        let lines = if all_times {
-            vec![vec![Way::to(how, rewrite)]]
-        } else {
-            Vec::new()
+        let lines = match self.key_replacing_last(modifier) {
+            Some(key) if all_times => {
+                let rewrite = self.with_key_and_values(&key, value, value_as_asked);
+                vec![vec![Way::to(how, rewrite)]]
+            }
+            Some(_) | None => Vec::new(),
         };
         BindCause::TooFine(self.entry_with(
             value,
@@ -1419,26 +1422,29 @@ impl Site<'_> {
     }
 
     /// The key with its last written modifier replaced by `modifier`.
-    fn key_replacing_last(&self, modifier: Modifier) -> String {
-        format!(
-            "{}|{}",
-            self.key_without_last_modifier(),
-            <&'static str>::from(modifier)
-        )
+    fn key_replacing_last(&self, modifier: Modifier) -> Option<String> {
+        self.key_without_last_modifier()
+            .map(|key| format!("{key}|{}", <&'static str>::from(modifier)))
     }
 
-    /// The key as typed, without its last modifier.
-    fn key_without_last_modifier(&self) -> String {
+    /// The key as typed, without its last modifier; `None` where that modifier sits inside an
+    /// alias, which a way out never rewrites.
+    fn key_without_last_modifier(&self) -> Option<String> {
+        if let Some((_, place)) = self.key.modifiers.last() {
+            if place.text != self.key.place.text {
+                return None;
+            }
+        }
         let name_len = self.key.input_name.len();
         let tail = self.key.input.get(name_len..).unwrap_or_default();
-        match tail.rfind('|') {
+        Some(match tail.rfind('|') {
             Some(at) => format!(
                 "{}{}",
                 self.key.input_name,
                 tail.get(..at).unwrap_or_default()
             ),
             None => self.key.input.clone(),
-        }
+        })
     }
 
     /// The clause with every bare number- or time-shaped value quoted, so it reads as text —
@@ -1727,6 +1733,11 @@ impl Entry {
         self.lines.retain(|line| !line.is_empty());
     }
 
+    /// Leave out every way out that rewrites text; a line left with no way goes.
+    fn keep_ways_without_rewrite(&mut self) {
+        self.keep_ways_that_bind(&|_| false);
+    }
+
     /// The clauses or keys this entry's ways out rewrite to, as shown.
     #[cfg(test)]
     pub(in crate::expr) fn rewrites(&self) -> Vec<String> {
@@ -1854,6 +1865,50 @@ impl BindCause {
         }
     }
 
+    /// **The cause drawn at an alias's use**, its place being inside the alias's value: the
+    /// caret under the alias where it was typed (`name`), the sentence after "in alias
+    /// `name`: ", and nothing shown that rewrites text — a problem's fix and every way out
+    /// with a rewrite left out, the lines that rewrite nothing kept, and a wrong modifier left
+    /// with none naming the modifiers that apply. A key of two types is told as the alias
+    /// typed, its clause the alias's name.
+    fn at_use(&self, place: Place, name: &str) -> BindCause {
+        let inside = |sentence: &str| format!("in alias `{name}`: {sentence}");
+        let mut drawn = self.clone();
+        match &mut drawn {
+            BindCause::Read(problem) => {
+                problem.place = place;
+                problem.sentence = inside(&problem.sentence);
+                problem.fix = Fix::None;
+            }
+            BindCause::MixedType { entry, .. } => {
+                entry.clause = name.to_string();
+                entry.place = place;
+            }
+            BindCause::WrongModifier { entry, fallback } => {
+                entry.place = place;
+                entry.statement = inside(&entry.statement);
+                entry.keep_ways_without_rewrite();
+                if entry.lines.is_empty() && !fallback.is_empty() {
+                    entry.lines.push(vec![Way::hint(fallback.clone())]);
+                }
+            }
+            BindCause::UnknownKey(entry)
+            | BindCause::Unreadable(entry)
+            | BindCause::TypeMismatch(entry)
+            | BindCause::OutOfRange(entry)
+            | BindCause::GlobNotText(entry)
+            | BindCause::NotABucketLabel(entry)
+            | BindCause::BucketOrdered(entry)
+            | BindCause::TooFine(entry) => {
+                entry.place = place;
+                entry.statement = inside(&entry.statement);
+                entry.keep_ways_without_rewrite();
+            }
+            BindCause::UnknownName(_) | BindCause::TypeChanged { .. } => {}
+        }
+        drawn
+    }
+
     /// The cause as it stands in a refusal whose texts begin `by` texts further on.
     fn moved_by(mut self, by: usize) -> BindCause {
         if let BindCause::Read(problem) = &mut self {
@@ -1916,6 +1971,9 @@ pub(in crate::expr) enum Refused {
 pub struct ExpressionRefused {
     pub(in crate::expr) refused: Refused,
     pub(in crate::expr) texts: Vec<String>,
+    /// Where each alias's value among the texts was typed, by the text's number: the place of
+    /// `@name`. A text typed as it stands has no entry.
+    pub(in crate::expr) typed_at: BTreeMap<usize, Place>,
     pub(in crate::expr) causes: Vec<BindCause>,
 }
 
@@ -1932,6 +1990,7 @@ impl ExpressionRefused {
         ExpressionRefused {
             refused: Refused::Key,
             texts: Vec::new(),
+            typed_at: BTreeMap::new(),
             causes: names.into_iter().map(BindCause::UnknownName).collect(),
         }
     }
@@ -1944,28 +2003,71 @@ impl ExpressionRefused {
         }
         let by = self.texts.len();
         self.texts.extend(other.texts);
+        self.typed_at
+            .extend(other.typed_at.into_iter().map(|(text, at)| {
+                (
+                    text + by,
+                    Place {
+                        text: at.text + by,
+                        ..at
+                    },
+                )
+            }));
         self.causes
             .extend(other.causes.into_iter().map(|cause| cause.moved_by(by)));
         self
     }
 
-    /// The refusal of a filter a manifest specified: its first line says so.
-    pub fn into_specified(mut self) -> Self {
-        if self.refused == Refused::Filter {
-            self.refused = Refused::RecordedQuery;
+    /// One more text for each use of an alias, in the order the uses were met — the alias's
+    /// value, typed where the use was. The uses were read with their first text numbered as
+    /// the refusal's next ([`AliasMode::Loaded`]).
+    pub(in crate::expr) fn push_alias_texts(&mut self, uses: &[AliasUse]) {
+        for used in uses {
+            self.typed_at.insert(self.texts.len(), used.place);
+            self.texts.push(used.value.clone());
         }
-        self
+    }
+
+    /// Where the text a place sits in was typed, where it is an alias's value.
+    fn typed_at(&self, place: Place) -> Option<Place> {
+        self.typed_at.get(&place.text).copied()
     }
 
     /// Every cause at `indent`, without the first line: in order of text and position, each
-    /// drawn under the typed line it sits in.
+    /// drawn under the typed line it sits in — a cause inside an alias's value under the alias
+    /// where it was typed ([`BindCause::at_use`]), in order of the use and then of its place
+    /// in the value. A key of two types is told once per clause.
     pub fn render(&self, indent: &str) -> Vec<String> {
-        let mut causes: Vec<&BindCause> = self.causes.iter().collect();
-        causes.sort_by_key(|cause| {
-            cause
-                .place()
-                .map_or((usize::MAX, usize::MAX), |place| (place.text, place.start))
-        });
+        let mut causes: Vec<((usize, usize, usize), BindCause)> = self
+            .causes
+            .iter()
+            .map(|cause| match cause.place() {
+                None => ((usize::MAX, usize::MAX, 0), cause.clone()),
+                Some(place) => match self.typed_at(place) {
+                    None => ((place.text, place.start, 0), cause.clone()),
+                    Some(at) => {
+                        let typed = self.texts.get(at.text).map_or("", String::as_str);
+                        let drawn = cause.at_use(at, cut(typed, at.start, at.end));
+                        ((at.text, at.start, place.start), drawn)
+                    }
+                },
+            })
+            .collect();
+        causes.sort_by_key(|(order, _)| *order);
+        let mut told: Vec<(&str, &str)> = Vec::new();
+        let causes: Vec<&BindCause> = causes
+            .iter()
+            .map(|(_, cause)| cause)
+            .filter(|cause| {
+                let BindCause::MixedType { entry, .. } = cause else {
+                    return true;
+                };
+                let clause = (entry.clause.as_str(), entry.statement.as_str());
+                let new = !told.contains(&clause);
+                told.push(clause);
+                new
+            })
+            .collect();
         // Keys of two types alone share one way-out block at the end; beside any other cause,
         // each one's way out sits under its own entry, so none reads as the entry's above it.
         let only_two_types = causes
@@ -2024,6 +2126,7 @@ impl std::error::Error for ExpressionRefused {}
 
 #[cfg(test)]
 mod tests {
+    use super::super::alias::CheckedAliases;
     use super::*;
     use crate::core::domain::time::value::TimeForm;
 
@@ -2053,13 +2156,13 @@ mod tests {
     /// One filter read and bound against [`types`]: every problem the reader met and every
     /// cause binding found, or the bound tree.
     fn bind(text: &str) -> Result<Bound, Vec<BindCause>> {
-        let reading = read_filter(text, 0);
+        let reading = read_filter(text, 0, AliasMode::NotLoaded);
         let mut causes: Vec<BindCause> =
             reading.problems.into_iter().map(BindCause::Read).collect();
         let Some(expr) = reading.value else {
             return Err(causes);
         };
-        let bound = bind_expr(&expr, &types(), &mut causes);
+        let bound = bind_expr(&expr, &types(), AliasMode::NotLoaded, &mut causes);
         if causes.is_empty() {
             Ok(bound)
         } else {
@@ -2069,7 +2172,7 @@ mod tests {
 
     /// One filter as the reader reads it, which must read with no problem.
     fn read(text: &str) -> Expr {
-        let reading = read_filter(text, 0);
+        let reading = read_filter(text, 0, AliasMode::NotLoaded);
         assert!(
             reading.problems.is_empty(),
             "{text}: {:?}",
@@ -2095,6 +2198,7 @@ mod tests {
         ExpressionRefused {
             refused: Refused::Filter,
             texts: vec![text.to_string()],
+            typed_at: BTreeMap::new(),
             causes: causes(text),
         }
         .to_string()
@@ -2746,6 +2850,7 @@ mod tests {
         let refused = ExpressionRefused {
             refused: Refused::Filter,
             texts: Vec::new(),
+            typed_at: BTreeMap::new(),
             causes: [
                 causes(r#""content.File Size">1"#),
                 causes("Width>1"),
@@ -2765,6 +2870,7 @@ mod tests {
         let mixed = ExpressionRefused {
             refused: Refused::Filter,
             texts: Vec::new(),
+            typed_at: BTreeMap::new(),
             causes: [causes("Width>1"), causes("source.size=x")].concat(),
         };
         assert!(!mixed.is_answer());
@@ -2941,7 +3047,7 @@ mod tests {
             )]);
             let expr = read(clause);
             let mut causes = Vec::new();
-            bind_expr(&expr, &types, &mut causes);
+            bind_expr(&expr, &types, AliasMode::NotLoaded, &mut causes);
             causes.is_empty()
         };
         let values = [
@@ -2978,10 +3084,11 @@ mod tests {
                     KeyTypes::from_counts([(t, 1)]).unwrap(),
                 )]);
                 let mut causes = Vec::new();
-                bind_expr(&read(clause), &types, &mut causes);
+                bind_expr(&read(clause), &types, AliasMode::NotLoaded, &mut causes);
                 let offered = ExpressionRefused {
                     refused: Refused::Filter,
                     texts: vec![clause.clone()],
+                    typed_at: BTreeMap::new(),
                     causes,
                 }
                 .to_string()
@@ -3121,6 +3228,7 @@ mod tests {
                 let shown = ExpressionRefused {
                     refused: Refused::Filter,
                     texts: vec![clause.clone()],
+                    typed_at: BTreeMap::new(),
                     causes: vec![cause.clone()],
                 }
                 .to_string();
@@ -3229,5 +3337,290 @@ mod tests {
             had_no_facts: false,
         }
         .is_answer());
+    }
+
+    // ------------------------------------------------------------------
+    // Inside an alias
+    // ------------------------------------------------------------------
+
+    /// A filter read with `aliases` loaded and bound against [`types`], drawn whole: each use's
+    /// value one more text of the refusal, typed where the use was.
+    fn alias_refusal(aliases: &[(&str, &str)], text: &str) -> String {
+        alias_refused(aliases, text).to_string()
+    }
+
+    /// The refusal of `text` read with `aliases`, one text typed.
+    fn alias_refused(aliases: &[(&str, &str)], text: &str) -> ExpressionRefused {
+        let aliases = CheckedAliases::of(aliases);
+        let mode = AliasMode::Loaded {
+            aliases: &aliases,
+            first_text: 1,
+        };
+        let reading = read_filter(text, 0, mode);
+        let mut causes: Vec<BindCause> =
+            reading.problems.into_iter().map(BindCause::Read).collect();
+        if let Some(expr) = &reading.value {
+            bind_expr(expr, &types(), mode, &mut causes);
+        }
+        assert!(!causes.is_empty(), "{text} bound");
+        let mut refused = ExpressionRefused {
+            refused: Refused::Filter,
+            texts: vec![text.to_string()],
+            typed_at: BTreeMap::new(),
+            causes,
+        };
+        refused.push_alias_texts(&reading.alias_uses);
+        refused
+    }
+
+    /// Two refusals joined keep each alias's value under the place it was typed: the second's
+    /// texts and where they were typed move past the first's together.
+    #[test]
+    fn a_joined_refusal_keeps_each_alias_under_its_use() {
+        let aliases = [("x", "numtext<10")];
+        let joined = alias_refused(&aliases, "@x").join(alias_refused(&aliases, "Title=a OR @x"));
+        let lines = joined.render("");
+        assert_eq!(
+            lines,
+            [
+                "@x",
+                "^ in alias `@x`: numtext holds text; 10 is a number.",
+                "  `canon facts convert content.numtext` to see what it holds and change its type",
+                "Title=a OR @x",
+                "           ^ in alias `@x`: numtext holds text; 10 is a number.",
+                "  `canon facts convert content.numtext` to see what it holds and change its type",
+            ],
+            "{joined}"
+        );
+    }
+
+    fn drawn(lines: &[&str]) -> String {
+        lines.join("\n")
+    }
+
+    #[test]
+    fn binding_names_what_it_found_inside_an_alias() {
+        let one = |value: &str| alias_refusal(&[("x", value)], "Title=a AND @x");
+        let under = |sentence: &str| {
+            drawn(&[
+                "cannot run the filter as given",
+                "  Title=a AND @x",
+                &format!("              ^ in alias `@x`: {sentence}"),
+            ])
+        };
+        assert_eq!(
+            one("filename=a%b"),
+            under("`%` needs quotes around the value")
+        );
+        assert_eq!(
+            one("filename=IMG*"),
+            under("`*` is a wildcard, but `=` does not take wildcards")
+        );
+        assert_eq!(
+            one("size~1*"),
+            under("`~` works on text; size is of type number")
+        );
+        assert_eq!(
+            one("filename~a%*"),
+            under("`%` needs quotes; quote that part, but not * ? [ ]")
+        );
+    }
+
+    #[test]
+    fn every_place_inside_an_alias_points_at_its_use() {
+        // Each use draws its own problem under itself, in the order of the typed text.
+        assert_eq!(
+            alias_refusal(&[("x", "filename=a%b")], "@x AND FNumber=abc AND @x"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @x AND FNumber=abc AND @x",
+                "  ^ in alias `@x`: `%` needs quotes around the value",
+                "  @x AND FNumber=abc AND @x",
+                r#"                 ^ FNumber holds numbers; "abc" is not a number."#,
+                "    Type a number: 1024, -5, 3.14, 1e20",
+                "  @x AND FNumber=abc AND @x",
+                "                         ^ in alias `@x`: `%` needs quotes around the value",
+            ])
+        );
+        // A key alias's own accessor sits in the alias; the line naming what applies stays.
+        let text = alias_refusal(&[("t", "taken[0]")], "Title=a OR @t?");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "cannot run the filter as given",
+                "  Title=a OR @t?",
+                "             ^ in alias `@t`: an accessor ([…]) works on paths or text; taken holds times.",
+                &format!("    {}", applicable_line(&Gives::Time, false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn inside_an_alias_nothing_that_rewrites_text_is_shown_and_pointers_stay() {
+        // A wrong type's ways out rewrite the clause and are left out; the convert pointer stays.
+        assert_eq!(
+            alias_refusal(&[("x", "numtext<10")], "@x"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @x",
+                "  ^ in alias `@x`: numtext holds text; 10 is a number.",
+                "    `canon facts convert content.numtext` to see what it holds and change its type",
+            ])
+        );
+        // A rule line stays.
+        assert_eq!(
+            alias_refusal(&[("x", "Nope=1")], "@x"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @x",
+                "  ^ in alias `@x`: `Nope` is an unknown key",
+                "    `canon facts` lists the keys",
+            ])
+        );
+        // A wrong modifier whose way out rewrites names the modifiers that apply instead.
+        assert_eq!(
+            alias_refusal(&[("x", "taken|lowercase=a")], "@x"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @x",
+                "  ^ in alias `@x`: |lowercase works on text, paths or another modifier's result; \
+                 taken holds times.",
+                &format!("    {}", applicable_line(&Gives::Time, false)),
+            ])
+        );
+        // A problem's fix is left out, its rule line kept.
+        let refused = ExpressionRefused {
+            refused: Refused::Filter,
+            texts: vec!["@x".to_string(), "content.Foo%Bar=1".to_string()],
+            typed_at: BTreeMap::from([(
+                1,
+                Place {
+                    text: 0,
+                    start: 0,
+                    end: 2,
+                },
+            )]),
+            causes: vec![BindCause::Read(Problem {
+                place: Place {
+                    text: 1,
+                    start: 11,
+                    end: 12,
+                },
+                sentence: "an operator is missing after `content.Foo`".to_string(),
+                rule_line: Some("After a key: =, !=, <, >, <=, >=, ~, !~, ?, IN or NOT IN".into()),
+                fix: Fix::KeyName {
+                    rewrite: "\"content.Foo%Bar\"".to_string(),
+                },
+            })],
+        };
+        assert_eq!(
+            refused.to_string(),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @x",
+                "  ^ in alias `@x`: an operator is missing after `content.Foo`",
+                "    After a key: =, !=, <, >, <=, >=, ~, !~, ?, IN or NOT IN",
+            ])
+        );
+        // A way out that replaces a key alias's own last modifier would rewrite the alias: none
+        // is offered. Typed in full, the same clause keeps it.
+        assert_eq!(
+            alias_refusal(&[("d", "taken|yearmonth")], "@d=2024-07-23"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @d=2024-07-23",
+                "     ^ |yearmonth gives months; 2024-07-23 is finer than a month.",
+            ])
+        );
+        assert_eq!(
+            refusal("taken|yearmonth=2024-07-23").lines().last(),
+            Some("    To compare by day: taken|date=2024-07-23")
+        );
+        assert_eq!(
+            alias_refusal(&[("b", "FNumber|bucket")], "@b>5"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @b>5",
+                "     ^ a bucket is compared with =, !=, IN or NOT IN; @b gives bucket ranges.",
+            ])
+        );
+        assert_eq!(
+            refusal("FNumber|bucket>5").lines().last(),
+            Some("    To order the values, compare FNumber itself with >, >=, < or <=")
+        );
+    }
+
+    #[test]
+    fn a_sentence_names_the_key_by_where_its_cause_sits() {
+        // The key alias's own key, unknown, by its name as the alias writes it.
+        assert_eq!(
+            alias_refusal(&[("t", "content.DateTimeOriginal")], "@t=2024"),
+            drawn(&[
+                "cannot run the filter as given",
+                "  @t=2024",
+                "  ^ in alias `@t`: `content.DateTimeOriginal` is an unknown key",
+                "    `canon facts` lists the keys",
+            ])
+        );
+        // Its wrong value, and the way out, by the alias as typed.
+        let text = alias_refusal(&[("taken", "taken")], "@taken=garbage");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[..3],
+            [
+                "cannot run the filter as given",
+                "  @taken=garbage",
+                r#"         ^ @taken holds times; "garbage" is not a time."#,
+            ]
+        );
+        assert!(
+            lines[3].starts_with("    Type a year, month, day"),
+            "{text}"
+        );
+        let text = alias_refusal(&[("n", "numtext")], "@n<10");
+        assert_eq!(
+            text,
+            drawn(&[
+                "cannot run the filter as given",
+                "  @n<10",
+                "     ^ @n holds text; 10 is a number.",
+                r#"    As text: @n<"10"     As numbers, if its values are numbers: @n|number<10"#,
+                "    `canon facts convert content.numtext` to see what it holds and change its type",
+            ])
+        );
+        // Its two types by the alias as typed; a filter alias's by its own key.
+        assert!(alias_refusal(&[("w", "Width")], "@w=2024")
+            .starts_with("@w=2024: @w holds numbers and times; a filter compares one type only."));
+        assert!(alias_refusal(&[("old", "Width=5")], "@old")
+            .starts_with("@old: Width holds numbers and times; a filter compares one type only."));
+    }
+
+    #[test]
+    fn the_two_types_answer_starts_with_the_clause_as_typed() {
+        let answer = drawn(&[
+            "@old: Width holds numbers and times; a filter compares one type only.",
+            "  numbers: 2 facts   times: 1 fact   (every fact of the key, on every root)",
+            "To inspect it and learn how to convert it to one type:",
+            "  `canon facts convert content.Width`",
+        ]);
+        assert_eq!(alias_refusal(&[("old", "Width=5")], "@old"), answer);
+        // The same clause twice is told once.
+        assert_eq!(
+            alias_refusal(&[("old", "Width=5")], "@old OR (@old AND Title=a)"),
+            answer
+        );
+        // A key alias's clause is the typed clause.
+        assert_eq!(
+            alias_refusal(&[("w", "Width")], "@w=2024 OR @w=2025"),
+            drawn(&[
+                "@w=2024: @w holds numbers and times; a filter compares one type only.",
+                "  numbers: 2 facts   times: 1 fact   (every fact of the key, on every root)",
+                "@w=2025: @w holds numbers and times; a filter compares one type only.",
+                "  numbers: 2 facts   times: 1 fact   (every fact of the key, on every root)",
+                "To inspect it and learn how to convert it to one type:",
+                "  `canon facts convert content.Width`",
+            ])
+        );
     }
 }

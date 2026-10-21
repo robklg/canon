@@ -26,7 +26,7 @@ use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
     ObjectSourceInfo, ReceiptDestination,
 };
-use crate::expr::read_filters;
+use crate::expr::{read_filters, ExpressionText};
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
 /// their roots (the one funnel). Pass an empty slice for a global decision. A
@@ -125,7 +125,7 @@ pub struct ClearOptions {
 pub fn set(
     db: &mut Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     options: &SetOptions,
     command_line: &str,
     config: &LedgerConfig,
@@ -135,7 +135,7 @@ pub fn set(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_set(
@@ -198,7 +198,7 @@ pub fn set(
 pub fn clear(
     db: &mut Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     options: &ClearOptions,
     command_line: &str,
     config: &LedgerConfig,
@@ -208,7 +208,7 @@ pub fn clear(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_clear(
@@ -391,7 +391,7 @@ pub fn exclude_duplicates(
     db: &mut Db,
     prefer_path: &Path,
     scope_path: Option<&Path>,
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     dry_run: bool,
     yes: bool,
     command_line: &str,
@@ -402,7 +402,7 @@ pub fn exclude_duplicates(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     // Resolve paths (soft resolution: matches known roots, falls back to fs)
     let all_roots = crate::core::repo::root::fetch_all(conn)?;
@@ -685,7 +685,7 @@ pub fn set_object_by_file(
 pub fn set_objects_by_filter(
     db: &mut Db,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     options: &SetOptions,
     command_line: &str,
     config: &LedgerConfig,
@@ -695,7 +695,7 @@ pub fn set_objects_by_filter(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let scopes = classify_all_indexed(conn, scope_prefixes)?;
     let plan = plan_set_objects(
@@ -958,7 +958,7 @@ mod tests {
             &mut db,
             Path::new("/archive/nothing-here"),
             Some(Path::new("/photos")),
-            &[],
+            &ExpressionText::plain(&[]),
             true,
             true,
             "test",
@@ -1176,8 +1176,8 @@ mod tests {
 
                 let result = set_objects_by_filter(
                     &mut db,
-                    &[], // no scope restriction
-                    &[], // no filters
+                    &[],                         // no scope restriction
+                    &ExpressionText::plain(&[]), // no filters
                     &options,
                     "test",
                     &LedgerConfig::default(),
@@ -1215,7 +1215,7 @@ mod tests {
                 let result = set_objects_by_filter(
                     &mut db,
                     &[],
-                    &[],
+                    &ExpressionText::plain(&[]),
                     &options,
                     "test",
                     &LedgerConfig::default(),
@@ -1257,7 +1257,7 @@ mod tests {
                 let result = set(
                     &mut db,
                     &[],
-                    &[],
+                    &ExpressionText::plain(&[]),
                     &options,
                     "test",
                     &LedgerConfig::default(),
@@ -1300,7 +1300,7 @@ mod tests {
                     &mut db,
                     Path::new("/archive"),
                     Some(Path::new("/source")),
-                    &[],
+                    &ExpressionText::plain(&[]),
                     false,
                     false, // yes=false, but count=1 so no prompt
                     "test",

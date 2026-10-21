@@ -112,6 +112,43 @@ pub(in crate::expr) enum Expr {
     },
 }
 
+impl Expr {
+    /// Every place the tree holds, for a copy that stands elsewhere: a filter alias's reading
+    /// at its use.
+    pub(in crate::expr) fn each_place(&mut self, f: &mut impl FnMut(&mut Place)) {
+        match self {
+            Expr::And(all) | Expr::Or(all) => all.iter_mut().for_each(|e| e.each_place(f)),
+            Expr::Not(inner) => inner.each_place(f),
+            Expr::Exists { key, place, .. } => {
+                key.each_place(f);
+                f(place);
+            }
+            Expr::Compare {
+                key, value, place, ..
+            } => {
+                key.each_place(f);
+                f(&mut value.place);
+                f(place);
+            }
+            Expr::In {
+                key, values, place, ..
+            } => {
+                key.each_place(f);
+                values.iter_mut().for_each(|v| f(&mut v.place));
+                f(place);
+            }
+            Expr::Glob {
+                key, glob, place, ..
+            } => {
+                key.each_place(f);
+                f(&mut glob.place);
+                f(place);
+            }
+            Expr::Status { place, .. } => f(place),
+        }
+    }
+}
+
 /// Result of applying filters, including metadata about which status predicates were used.
 pub struct FilterResult {
     pub source_ids: Vec<i64>,

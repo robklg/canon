@@ -2,7 +2,7 @@
 //! of facts, and everything that applies it.
 //!
 //! One vocabulary, two halves — filters ask, patterns shape — plus the pieces
-//! that turn either half into an answer: resolving a key to a value, expanding
+//! that turn either half into an answer: resolving a key to a value, reading
 //! the `@name` shorthands a filter may be written with, and selection, the
 //! language applied within a scope. A language rule is spoken once, here; the
 //! rest of the engine consumes finished results rather than re-deriving them.
@@ -23,20 +23,18 @@ mod repo;
 // name in at least one consumer outside the facility.
 // ---------------------------------------------------------------------------
 
-// The asking half: `--where` strings read and bound — or refused, with every reason —
-// before anything runs; a bound filter, run, and what the run reports about itself. The key
-// `facts --key` and `--group-by` name is read the same way.
+// The asking half: `--where` strings, as given or as a manifest specified them, read and
+// bound — or refused, with every reason — before anything runs; a bound filter, run, and what
+// the run reports about itself. The key `facts --key` and `--group-by` name is read the same
+// way, its aliases with the filters'.
 pub use domain::bind::ExpressionRefused;
 pub use domain::filter::UsedStatus;
-pub use ops::bind::{read_filters, read_report, BoundFilters};
+pub use ops::bind::{read_filters, read_report, BoundFilters, ExpressionText};
 pub use ops::filter::apply_filters;
 
 // The language applied within a scope — the selector every command resolves
 // through, so that what is acted on is what was seen.
 pub use ops::selection::{select_sources, RolePolicy, SelectionParams};
-
-// Alias expansion, which runs before anything else parses a filter.
-pub use ops::alias::expand_filter_strings;
 
 // The shaping half: a pattern, parsed, inspected for the keys it needs, read
 // for the placement it commits to, and evaluated against a source — together

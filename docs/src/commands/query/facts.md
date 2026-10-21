@@ -60,6 +60,9 @@ canon facts --key source.ext --by-root --group-by 'content.Make'
 
 # Group by several keys, as a list
 canon facts --key content.Make --group-by 'content.Model, source.size|bucket(1e6,1e7)'
+
+# A key alias, in either place
+canon facts --key @taken --group-by @year
 ```
 
 The output begins with a scope header showing what's being queried (`Facts: /path` or `Facts: all roots`). It is printed whether or not anything matched, so a report of nothing says where Canon looked:
@@ -142,7 +145,7 @@ DateTimeOriginal|month                        Count   Coverage
 (no value)                                        1      25.0%
 ```
 
-`--group-by` takes one key or a list of keys separated by commas, with or without spaces around them. A comma inside `|bucket(…)` or inside a quoted name belongs to the key. `--group-by` can be given more than once.
+`--group-by` takes one key or a list of keys separated by commas, with or without spaces around them. A comma inside `|bucket(…)` or inside a quoted name belongs to the key. `--group-by` can be given more than once. `--key` and `--group-by` take a key [alias](../../reference/filter.md#key-aliases), shown as typed; a filter alias is refused there.
 
 A key or modifier Canon cannot use as given is rejected before anything is counted, every cause in `--key`, `--group-by` and `--where` at once, in the [layout a filter's problems use](../../reference/filter.md#when-a-filter-is-rejected). Each names a rewritten key where one works (`source.size|lowercase` names `source.size|number|lowercase`), and otherwise the modifiers that do apply to the key's type:
 

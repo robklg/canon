@@ -13,7 +13,7 @@ use crate::core::domain::IncludeSet;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
-use crate::expr::{read_filters, read_report};
+use crate::expr::{read_filters, read_report, ExpressionText};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 use crate::expr::{Key, KeyKind, Listing, ParsedFactKey, SourceFact};
 use crate::facts::domain::{delete_key, names_the_root};
@@ -43,7 +43,7 @@ pub fn run(
     db: &mut Db,
     key_arg: Option<&str>,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     limit: usize,
     show_all: bool,
     include: &IncludeSet,
@@ -65,7 +65,7 @@ pub fn run(
         .into_iter()
         .chain(group_by.iter().cloned())
         .collect();
-    let reading = read_report(conn, key_arg, &grouping, filter_strs)?;
+    let reading = read_report(conn, key_arg, &grouping, filter_text)?;
     let (main_key, grouping_keys, filters) = (reading.key, reading.grouping, reading.filters);
 
     let scopes = classify_all(scope_prefixes);
@@ -149,7 +149,7 @@ pub fn run(
         display_root_distribution(&result);
     } else {
         let result = compute_all_keys(conn, &source_ids, show_all)?;
-        display_all_keys(&result, show_all, filter_strs.is_empty());
+        display_all_keys(&result, show_all, filter_text.typed().is_empty());
     }
 
     if !include.includes_excluded() && sel.excluded_count > 0 {
@@ -507,7 +507,7 @@ pub fn delete_facts(
     db: &mut Db,
     key: &str,
     scope_prefixes: &[String],
-    filter_strs: &[String],
+    filter_text: &ExpressionText,
     options: &DeleteOptions,
     command_line: &str,
     config: &LedgerConfig,
@@ -525,7 +525,7 @@ pub fn delete_facts(
     let conn = db.conn_mut();
 
     // Parse filters
-    let filters = read_filters(conn, filter_strs)?;
+    let filters = read_filters(conn, filter_text)?;
 
     let scopes = classify_all(scope_prefixes);
 
@@ -1016,7 +1016,7 @@ mod tests {
                     &mut db,
                     "content.Make",
                     &[],
-                    &[],
+                    &ExpressionText::plain(&[]),
                     &options,
                     "canon facts delete content.Make --on source --yes",
                     &LedgerConfig::default(),
@@ -1065,7 +1065,7 @@ mod tests {
                     &mut db,
                     "source.size",
                     &[],
-                    &["source.size = 987654321".to_string()],
+                    &ExpressionText::plain(&["source.size = 987654321"]),
                     &options,
                     "canon facts delete source.size",
                     &LedgerConfig::default(),

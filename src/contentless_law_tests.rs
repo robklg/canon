@@ -264,7 +264,7 @@ fn compare_counts_the_empty_files_it_sets_aside() {
         &mut c.conn,
         std::path::Path::new("/r"),
         std::path::Path::new("/archive"),
-        &[],
+        &crate::expr::ExpressionText::plain(&[]),
         &Default::default(),
         &crate::core::domain::time::zone::UserZone::utc(),
     )

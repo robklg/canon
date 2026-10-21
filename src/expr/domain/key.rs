@@ -482,7 +482,7 @@ impl Key {
 /// ```ignore
 /// use crate::expr::read_report;
 ///
-/// let key = read_report(conn, Some("source.mtime|year"), &[], &[])?.key.unwrap();
+/// let key = read_report(conn, Some("source.mtime|year"), &[], &filters)?.key.unwrap();
 /// assert_eq!(key.base_key, "source.mtime");
 /// assert!(key.has_transforms());
 /// ```
@@ -515,7 +515,8 @@ impl ParsedFactKey {
     /// other name is read under `content.` (`Make` becomes `content.Make`).
     #[cfg(test)]
     pub fn parse(key: &str) -> Result<Self> {
-        let reading = super::read::read_keys(key, 0, Grammar::Key);
+        let reading =
+            super::read::read_keys(key, 0, Grammar::Key, super::read::AliasMode::NotLoaded);
         let (true, Some([read])) = (reading.problems.is_empty(), reading.value.as_deref()) else {
             anyhow::bail!("not one key: {key}: {:?}", reading.problems);
         };
@@ -656,7 +657,9 @@ fn builtin_name(key: BuiltinKey) -> &'static str {
 /// A key as typed, and what it reads as: the whole key and its name part as typed (quotes
 /// included), where each sits, the key its name reads as (`read_key_name(..).in_expression()`;
 /// `None` for a `source.` name that is no source fact), the base key a value is read from, its
-/// accessor and its modifiers, each with its place.
+/// accessor and its modifiers, each with its place. A key alias's key is typed as `@name`: its
+/// `input` and `input_name` are what was typed, its own name, accessor and modifiers sit in the
+/// alias's value, and `written` is its name as written there.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::expr) struct InputKey {
     pub input: String,
@@ -667,9 +670,32 @@ pub(in crate::expr) struct InputKey {
     pub base: String,
     pub accessor: Option<(PathAccessor, Place)>,
     pub modifiers: Vec<(ModifierCall, Place)>,
+    pub written: Option<String>,
 }
 
 impl InputKey {
+    /// **The name a sentence uses follows where its cause sits**: inside a key alias's value —
+    /// a text other than the one the key was typed in — the name as written there; anywhere
+    /// else, the name as typed.
+    pub(in crate::expr) fn name_for(&self, place: Place) -> &str {
+        match &self.written {
+            Some(written) if place.text != self.place.text => written,
+            _ => &self.input_name,
+        }
+    }
+
+    /// Every place the key holds, for a copy that stands elsewhere.
+    pub(in crate::expr) fn each_place(&mut self, f: &mut impl FnMut(&mut Place)) {
+        f(&mut self.place);
+        f(&mut self.name_place);
+        if let Some((_, place)) = &mut self.accessor {
+            f(place);
+        }
+        for (_, place) in &mut self.modifiers {
+            f(place);
+        }
+    }
+
     /// Whether the key reads its base through an accessor or a modifier.
     pub(in crate::expr) fn has_transforms(&self) -> bool {
         self.accessor.is_some() || !self.modifiers.is_empty()
@@ -714,7 +740,7 @@ impl InputKey {
     ) -> Option<String> {
         // A key ending past its name has an accessor or a modifier typed after it; a built-in
         // key's own reading (`hash_short` as `|short`) is no such text.
-        if self.is_quoted() || end != self.name_place.end {
+        if self.is_quoted() || self.written.is_some() || end != self.name_place.end {
             return None;
         }
         let rest = cut(text, end, text.len());
@@ -835,36 +861,49 @@ pub(in crate::expr) fn read_key(cursor: &mut Cursor, grammar: Grammar) -> Option
     };
     let name_end = cursor.at();
     let name_place = cursor.place(start, name_end);
-
-    let accessor = if cursor.peek() == Some('[') {
-        Some(read_accessor(cursor)?)
-    } else {
-        None
-    };
-
     let (base, leading) = read_base_key(&name);
     let mut modifiers = Vec::new();
     if let Some(leading) = leading {
         let call = parse_modifier(leading).expect("a built-in key's reading names a modifier");
         modifiers.push((call, name_place));
     }
-    while cursor.peek() == Some('|') {
-        if let Some(modifier) = read_modifier(cursor) {
-            modifiers.push(modifier);
-        }
-    }
-
-    let end = cursor.at();
-    Some(InputKey {
-        input: cursor.slice(start, end).to_string(),
+    let mut key = InputKey {
+        input: cursor.slice(start, name_end).to_string(),
         input_name: cursor.slice(start, name_end).to_string(),
-        place: cursor.place(start, end),
+        place: name_place,
         name_place,
         key: Key::read(&name),
         base,
-        accessor: accessor.flatten(),
+        accessor: None,
         modifiers,
-    })
+        written: None,
+    };
+    continue_key(cursor, start, &mut key, true)?;
+    Some(key)
+}
+
+/// **The key grammar after a name**, from the cursor: one `[…]` straight after the name, where
+/// `accessor_may_follow` (nothing but the name read so far), then modifiers; `key`'s text and
+/// place then run from byte `start` to where the key ends. A key alias's key continues here,
+/// after its `@name`. `None` where reading stopped.
+pub(in crate::expr) fn continue_key(
+    cursor: &mut Cursor,
+    start: usize,
+    key: &mut InputKey,
+    accessor_may_follow: bool,
+) -> Option<()> {
+    if accessor_may_follow && cursor.peek() == Some('[') {
+        key.accessor = read_accessor(cursor)?;
+    }
+    while cursor.peek() == Some('|') {
+        if let Some(modifier) = read_modifier(cursor) {
+            key.modifiers.push(modifier);
+        }
+    }
+    let end = cursor.at();
+    key.input = cursor.slice(start, end).to_string();
+    key.place = cursor.place(start, end);
+    Some(())
 }
 
 /// `[n]` or `[a:b]`, from the `[`: whole numbers, an optional leading `-`, no `+`, no spaces,
@@ -1038,6 +1077,7 @@ fn read_bucket_numbers(cursor: &mut Cursor) -> Option<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::read::AliasMode;
     use super::super::transform::Modifier;
     use super::*;
 
@@ -1222,7 +1262,7 @@ mod tests {
                 matches!(Key::read(target), Some(Key::ContentFact(_))),
                 "{name} reads as {target}, which has a reading of its own"
             );
-            let filter = super::super::read::read_keys(name, 0, Grammar::Key)
+            let filter = super::super::read::read_keys(name, 0, Grammar::Key, AliasMode::NotLoaded)
                 .value
                 .unwrap()
                 .remove(0);
@@ -1387,7 +1427,7 @@ mod tests {
 
     /// Each key read without a problem, as typed, and every problem.
     fn read(text: &str, grammar: Grammar) -> (Vec<String>, Vec<Said>) {
-        let reading = read_keys(text, 0, grammar);
+        let reading = read_keys(text, 0, grammar, AliasMode::NotLoaded);
         let keys = reading.value.unwrap_or_default();
         (
             keys.into_iter().map(|k| k.input).collect(),
@@ -1446,7 +1486,7 @@ mod tests {
             "source.size|bucket(60,300)",
             "source.size|bucket( 60 , 300 )",
         ] {
-            let reading = read_keys(text, 0, Grammar::Key);
+            let reading = read_keys(text, 0, Grammar::Key, AliasMode::NotLoaded);
             assert!(reading.problems.is_empty(), "{text}");
             let keys = reading.value.unwrap();
             assert_eq!(keys[0].modifiers[0].0.args, vec![60.0, 300.0], "{text}");
@@ -1492,7 +1532,7 @@ mod tests {
                 vec![]
             )
         );
-        let reading = read_keys(r#""a,b",Make"#, 0, Grammar::KeyList);
+        let reading = read_keys(r#""a,b",Make"#, 0, Grammar::KeyList, AliasMode::NotLoaded);
         assert!(reading.problems.is_empty());
         let keys = reading.value.unwrap();
         assert_eq!(keys[0].input, r#""a,b""#);
@@ -1528,7 +1568,7 @@ mod tests {
                 "{text:?}"
             );
         }
-        let reading = read_keys("", 0, Grammar::Key);
+        let reading = read_keys("", 0, Grammar::Key, AliasMode::NotLoaded);
         assert_eq!(reading.problems[0].render("", "  "), ["  the key is empty"]);
         assert_eq!(
             read("Make,", Grammar::KeyList),
@@ -1555,7 +1595,12 @@ mod tests {
 
     #[test]
     fn a_name_with_a_dash_reads_bare() {
-        let reading = read_keys("content.XMP-dc:Subject", 0, Grammar::Key);
+        let reading = read_keys(
+            "content.XMP-dc:Subject",
+            0,
+            Grammar::Key,
+            AliasMode::NotLoaded,
+        );
         assert!(reading.problems.is_empty());
         let key = &reading.value.unwrap()[0];
         assert_eq!(key.base, "content.XMP-dc:Subject");
@@ -1640,11 +1685,11 @@ mod tests {
                 )
             )
         );
-        let reading = read_keys(r#""archived""#, 0, Grammar::Key);
+        let reading = read_keys(r#""archived""#, 0, Grammar::Key, AliasMode::NotLoaded);
         assert!(reading.problems.is_empty());
         assert_eq!(reading.value.unwrap()[0].base, "content.archived");
         // A built-in key's reading is a leading modifier.
-        let reading = read_keys("hash_short", 0, Grammar::Key);
+        let reading = read_keys("hash_short", 0, Grammar::Key, AliasMode::NotLoaded);
         let key = &reading.value.unwrap()[0];
         assert_eq!(key.base, CONTENT_HASH);
         assert_eq!(key.modifiers[0].0.modifier, Modifier::Short);
