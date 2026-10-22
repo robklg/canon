@@ -16,7 +16,7 @@ use crate::archive::domain::{
     extract_notes_raw, LockEntry, LockHeader, LockScope, ManifestConfig, ManifestMeta,
     ManifestOptions, ManifestOutput, CURRENT_LOCK_VERSION, CURRENT_MANIFEST_VERSION,
 };
-use crate::core::domain::fact::{FactType, FactValue, KeyTypes};
+use crate::core::domain::fact::{FactType, FactValue, KeyTypes, SourceFacts};
 use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
@@ -25,7 +25,6 @@ use crate::core::domain::source::Source;
 use crate::core::domain::time::now_epoch_secs;
 use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::{RecordedZone, UserZone};
-use crate::core::domain::FactEntry;
 use crate::core::repo::{self, Connection};
 use crate::expr::BoundFilters;
 use crate::expr::{
@@ -282,11 +281,11 @@ impl ClusterGeneratePlan {
 
     /// The full-coverage keys whose facts hold more than one type — keys a pattern cannot
     /// use until they are converted — in key order.
-    pub fn mixed_keys(&self) -> Vec<&str> {
+    pub fn mixed_keys(&self) -> Vec<(&str, &KeyTypes)> {
         self.full_coverage_facts
             .iter()
             .filter(|fact| fact.types.is_mixed())
-            .map(|fact| fact.key.as_str())
+            .map(|fact| (fact.key.as_str(), &fact.types))
             .collect()
     }
 }
@@ -833,7 +832,7 @@ pub struct FullCoverageFact {
 /// the grain noted is the grain of a value a pattern reads.
 fn full_coverage_keys(
     entries: &[LockEntry],
-    all_facts: &HashMap<i64, Vec<FactEntry>>,
+    all_facts: &HashMap<i64, SourceFacts>,
 ) -> Vec<(String, Option<(Precision, usize)>)> {
     if entries.is_empty() {
         return Vec::new();
@@ -1012,9 +1011,9 @@ fn generate_fact_help(
                 desc_part,
                 coarse_part
             ));
-            // A key holding two types is offered with its way out, where the pattern is edited.
+            // A key of mixed type is offered with its way out, where the pattern is edited.
             if fact.types.is_mixed() {
-                for line in mixed_type_way_out(&[fact.key.as_str()]) {
+                for line in mixed_type_way_out(&[(fact.key.as_str(), &fact.types)]) {
                     help.push_str(&format!("#     {line}\n"));
                 }
             }
@@ -1500,7 +1499,8 @@ mod tests {
     fn the_coverage_comment_states_the_key_type_not_the_scoped_type() {
         let (mut conn, params) = second_type_outside_the_selection();
         let plan = plan_generate(&mut conn, &params).unwrap();
-        assert_eq!(plan.mixed_keys(), vec!["content.Width"]);
+        let keys: Vec<&str> = plan.mixed_keys().iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, ["content.Width"]);
 
         let help = generate_fact_help(2, &[], &plan.full_coverage_facts, false);
         let lines: Vec<&str> = help.lines().collect();
@@ -1517,7 +1517,7 @@ mod tests {
             lines[width..width + 3],
             [
                 "#   content.Width      mixed ",
-                "#     To inspect it and learn how to convert it to one type:",
+                "#     To see its values and convert it to one type:",
                 "#       `canon facts convert content.Width`",
             ]
         );
@@ -1530,7 +1530,8 @@ mod tests {
     fn cluster_refresh_writes_the_mixed_key_comment_and_plans_its_warning() {
         let (mut conn, params) = second_type_outside_the_selection();
         let mut plan = plan_generate(&mut conn, &params).unwrap();
-        assert_eq!(plan.mixed_keys(), vec!["content.Width"]);
+        let keys: Vec<&str> = plan.mixed_keys().iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, ["content.Width"]);
 
         let old_content = "\
 # === Notes ===\n\
@@ -1560,7 +1561,7 @@ base_dir = \"output\"\n";
         assert!(
             manifest.contains(
                 "#   content.Width      mixed \n\
-                 #     To inspect it and learn how to convert it to one type:\n\
+                 #     To see its values and convert it to one type:\n\
                  #       `canon facts convert content.Width`\n"
             ),
             "{manifest}"

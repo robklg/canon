@@ -13,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::domain::cache::FactCache;
 use super::domain::filter::{StatusPredicate, UsedStatus};
-use super::domain::key::Key;
+use super::domain::key::{Key, CONTENT_HASH};
 use super::domain::value::SourceAttributes;
-use crate::core::domain::fact::{FactEntry, FactValue};
+use crate::core::domain::fact::{FactEntry, FactValue, Stored};
 use crate::core::repo::db::populate_temp_sources;
 use crate::core::repo::fact::{fact_value_at, fact_value_columns_of};
 
@@ -23,8 +23,8 @@ use crate::core::repo::fact::{fact_value_at, fact_value_columns_of};
 // Fact Prefetching
 // ============================================================================
 
-/// A fact row: the entity it hangs off, and its value where it has one Canon can read.
-type FactRow = (i64, Option<FactValue>);
+/// A fact row: the entity it hangs off, and its value, or that Canon cannot read it.
+type FactRow = (i64, Stored<FactValue>);
 
 /// Prefetch facts for a batch of sources and keys
 pub fn prefetch_facts(
@@ -95,8 +95,9 @@ pub fn prefetch_facts(
             .query_map([*key], |row| Ok((row.get(0)?, fact_value_at(row, 1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
 
+        // A value Canon cannot read on the source is no row there.
         for (source_id, value) in facts {
-            if let Some(fv) = value {
+            if let Stored::Readable(fv) = value {
                 cache.on_sources.insert((source_id, (*key).clone()), fv);
             }
         }
@@ -136,10 +137,9 @@ pub fn prefetch_facts(
                 .query_map([*key], |row| Ok((row.get(0)?, fact_value_at(row, 1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
 
+            // On the content it is kept: it decides the source's value, which is none.
             for (object_id, value) in facts {
-                if let Some(fv) = value {
-                    cache.on_objects.insert((object_id, (*key).clone()), fv);
-                }
+                cache.on_objects.insert((object_id, (*key).clone()), value);
             }
         }
 
@@ -235,14 +235,14 @@ pub fn prefetch_status_data(
                     .prepare(
                         "SELECT DISTINCT ts.id FROM temp_sources ts
                          JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id
-                             AND f.key != 'content.hash.sha256'
+                             AND f.key != ?1
                          UNION
                          SELECT DISTINCT s.id FROM temp_sources ts
                          JOIN sources s ON s.id = ts.id
                          JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id
-                             AND f.key != 'content.hash.sha256'",
+                             AND f.key != ?1",
                     )?
-                    .query_map([], |row| row.get(0))?
+                    .query_map([CONTENT_HASH], |row| row.get(0))?
                     .collect::<Result<HashSet<_>, _>>()?;
                 conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
                 cache.enriched_sources = Some(enriched);
@@ -300,11 +300,12 @@ pub fn fetch_source_row(conn: &Connection, source_id: i64) -> Result<Option<Sour
 /// everything the rule that picks a source's value reads.
 pub(super) struct KeyRowsOf {
     pub on_source: Option<FactEntry>,
-    pub on_content: Option<FactEntry>,
+    pub on_content: Option<Stored<FactEntry>>,
 }
 
 /// A key's rows for a batch of sources. A source holding neither row is absent from the
-/// map, and so is a stored value Canon cannot read: it is no row.
+/// map. A stored value Canon cannot read is no row on the source, and on the content an
+/// unreadable row, which decides the source has no value.
 pub(super) fn fetch_key_rows(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -342,25 +343,25 @@ pub(super) fn fetch_key_rows(
             let entity_type: String = row.get(2)?;
             let entity_id: i64 = row.get(3)?;
             let value = fact_value_at(row, 4)?;
-            Ok(value.map(|value| {
-                (
-                    source_id,
-                    FactEntry::new(key, value, entity_type, entity_id),
-                )
-            }))
+            Ok((source_id, key, entity_type, entity_id, value))
         })?;
         for row in fetched {
-            let Some((source_id, entry)) = row? else {
-                continue;
+            let (source_id, key, entity_type, entity_id, value) = row?;
+            let on_source = FactEntry::sits_on_source(&entity_type);
+            let entry = match value {
+                Stored::Readable(value) => {
+                    Stored::Readable(FactEntry::new(key, value, entity_type, entity_id))
+                }
+                Stored::Unreadable if on_source => continue,
+                Stored::Unreadable => Stored::Unreadable,
             };
             let of = rows.entry(source_id).or_insert(KeyRowsOf {
                 on_source: None,
                 on_content: None,
             });
-            if entry.is_on_source() {
-                of.on_source = Some(entry);
-            } else {
-                of.on_content = Some(entry);
+            match entry {
+                Stored::Readable(entry) if on_source => of.on_source = Some(entry),
+                content => of.on_content = Some(content),
             }
         }
     }
@@ -385,6 +386,55 @@ mod tests {
         }
     }
 
+    /// The content row's text, where it is readable.
+    fn content_text(entry: &Option<Stored<FactEntry>>) -> Option<&str> {
+        match entry {
+            Some(Stored::Readable(entry)) => {
+                text(&Some(entry.clone())).map(|_| match &entry.value {
+                    FactValue::Text(s) => s.as_str(),
+                    other => panic!("expected text, got {other:?}"),
+                })
+            }
+            Some(Stored::Unreadable) => panic!("an unreadable content row"),
+            None => None,
+        }
+    }
+
+    /// **`enriched?` names the content hash once**: the query that answers it binds the key's
+    /// one spelling (`CONTENT_HASH`) rather than writing the name out, so the two cannot drift
+    /// — and a source whose only fact is the content hash, on the source or on its content, is
+    /// not enriched, while any other fact makes it so.
+    #[test]
+    fn enriched_names_the_content_hash_once() {
+        let production = include_str!("repo.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            !production.contains(&format!("'{CONTENT_HASH}'")),
+            "the facility's SQL spells the content hash's name"
+        );
+
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/root", "source", false);
+        let obj = insert_object(&conn, "abc", false);
+        let on_content = insert_source(&conn, root, "a.jpg", Some(obj));
+        let on_source = insert_source(&conn, root, "b.jpg", None);
+        let other = insert_source(&conn, root, "c.jpg", None);
+        insert_object_fact(&conn, obj, CONTENT_HASH, "abc");
+        insert_fact(&conn, on_source, CONTENT_HASH, "def");
+        insert_fact(&conn, other, CONTENT_HASH, "ghi");
+        insert_fact(&conn, other, "content.Make", "Canon");
+        let ids = [on_content, on_source, other];
+        let mut cache = FactCache::new();
+        let used = UsedStatus {
+            enriched: true,
+            ..UsedStatus::default()
+        };
+        prefetch_status_data(&mut conn, &ids, &used, &mut cache).unwrap();
+        assert_eq!(cache.enriched_sources, Some(HashSet::from([other])));
+    }
+
     #[test]
     fn fetch_key_rows_empty_ids() {
         let mut conn = setup_test_db();
@@ -404,9 +454,9 @@ mod tests {
 
         let rows = fetch_key_rows(&mut conn, &[source], "content.Make").unwrap();
         let of = &rows[&source];
-        assert_eq!(text(&of.on_content), Some("Canon"));
+        assert_eq!(content_text(&of.on_content), Some("Canon"));
         assert_eq!(text(&of.on_source), Some("Nikon"));
-        assert_eq!(of.on_content.as_ref().unwrap().key, "content.Make");
+        assert!(matches!(&of.on_content, Some(Stored::Readable(e)) if e.key == "content.Make"));
     }
 
     #[test]
@@ -429,13 +479,14 @@ mod tests {
         insert_object_fact(&conn, obj, "content.Make", "Canon");
 
         let rows = fetch_key_rows(&mut conn, &[hashed, unhashed], "content.Make").unwrap();
-        assert_eq!(text(&rows[&hashed].on_content), Some("Canon"));
+        assert_eq!(content_text(&rows[&hashed].on_content), Some("Canon"));
         assert!(rows[&hashed].on_source.is_none());
         assert!(!rows.contains_key(&unhashed));
     }
 
     /// A stored time Canon cannot read — a clock reading stored as a second
-    /// in year 10000 — is no row for that key, and the fetch over it completes.
+    /// in year 10000 — is no row for that key on the source, an unreadable row on the content,
+    /// and the fetch over it completes.
     #[test]
     fn a_stored_time_outside_the_readable_line_is_no_row_and_the_key_fetch_completes() {
         let mut conn = setup_test_db();
@@ -451,8 +502,20 @@ mod tests {
         )
         .unwrap();
 
-        let rows = fetch_key_rows(&mut conn, &[a, b], "content.T").unwrap();
+        let obj = insert_object(&conn, "abc", false);
+        let c = insert_source(&conn, root, "c.jpg", Some(obj));
+        insert_fact(&conn, c, "content.T", "own");
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision, observed_at, observed_basis_rev)
+             VALUES ('object', ?1, 'content.T', 253402315200, 'clock', 'second', 0, NULL)",
+            [obj],
+        )
+        .unwrap();
+
+        let rows = fetch_key_rows(&mut conn, &[a, b, c], "content.T").unwrap();
         assert!(!rows.contains_key(&a), "the unreadable time is no row");
         assert!(rows[&b].on_source.is_some());
+        assert!(matches!(rows[&c].on_content, Some(Stored::Unreadable)));
+        assert_eq!(text(&rows[&c].on_source), Some("own"));
     }
 }

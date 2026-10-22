@@ -23,7 +23,11 @@ Facts are key-value metadata attached to [sources](source.md) or [objects](objec
 
 When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`. A name that is a [built-in key](../reference/builtins.md#built-in-keys), such as `size`, `filename` or `id`, reads as that key instead, so a content fact imported under such a name is reached only by its full name, `content.size`.
 
-A source has one value for each key. A content fact can be stored on the source as well as on its content; filters, `canon facts`, patterns and `canon worklist` all read the fact stored on the content, and the one stored on the source only where the content has none.
+A source has one value for each key. A content fact can be stored on the source as well as on its content; filters, `canon facts`, patterns and `canon worklist` all read the fact stored on the content, and the one stored on the source only where the content has none. A fact stored on the content whose value Canon cannot read still counts as the content's: the source then has no value for the key, and the one stored on the source is not used instead.
+
+### An empty value and no value
+
+A stored empty text (`""`) is a value: `content.Make=""` selects it, and a text modifier keeps it (`content.Make|lowercase` of `""` is `""`). A value Canon works out has no value where it would be empty: the extension of a file with none (`README`, `.bashrc`, `trail.`), `|ext` of text with no dot, and a path segment `[n]` past the end. So `NOT source.ext?` selects the files with no extension, and `source.ext=""` selects nothing. A modifier that reads text as a number or a time has no value for `""`. A slice `[a:b]` always has a value, possibly a path with no segments: `source.rel_path[:-1]` of a file at the top of its root is one, and `source.rel_path[:-1]=""` selects such files.
 
 ## Value Types
 
@@ -32,7 +36,7 @@ Canon stores facts as:
 - **Numbers**: Integers or decimals like `1024` or `3.14`; compared as numbers (`>1000`); enable the `|bucket` modifier
 - **Times**: Points or spans of time on one timeline, like a capture date or a save time; compared as spans of time in your local time; enable the time modifiers (`|year`, `|month`). See [Times](#times) below
 
-A key's type is determined from all of its facts, on every root, so it is the same whatever the scope. A value you type in a [filter](../reference/filter.md#values-and-types) is interpreted as the key's type: against a text key, `2019` is rejected until you say whether you mean the text `"2019"` or the year. A key whose facts hold more than one type lists as `mixed` in [`canon facts`](../commands/query/facts.md); a filter cannot compare its values until it is converted to one type.
+A key's type is determined from all of its facts, on every root, so it is the same whatever the scope. A value you type in a [filter](../reference/filter.md#values-and-types) is interpreted as the key's type: against a text key, `2019` is rejected until you say whether you mean the text `"2019"` or the year. A key whose facts hold more than one type is of mixed type, and lists as `mixed` in [`canon facts`](../commands/query/facts.md); a filter cannot compare its values until it is converted to one type.
 
 Type hints can be provided during import to ensure correct parsing. See [Enriching](../commands/enrich/index.md) for details.
 

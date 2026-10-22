@@ -12,7 +12,8 @@ use super::alias::{alias_name_at, AliasValue, CheckedAliases};
 use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, STATUS_KEYWORDS};
 use super::glob::read_glob;
 use super::key::{
-    continue_key, follows_a_key_in_a_filter, is_name_char, read_key, InputKey, SCOPE_REL_PATH,
+    continue_key, follows_a_key_in_a_filter, is_name_char, read_key, InputKey, Written,
+    SCOPE_REL_PATH,
 };
 use super::problem::{cut, Fix, Place, Problem};
 
@@ -306,7 +307,10 @@ fn alias_at(cursor: &mut Cursor, mode: AliasMode, at_key: bool) -> AliasAt {
             cursor.alias_uses.push(used);
             let mut key = own.clone();
             key.each_place(&mut inside);
-            key.written = Some(own.input_name.clone());
+            key.written = Some(Written {
+                name: own.input_name.clone(),
+                input: own.input.clone(),
+            });
             key.input_name = typed.to_string();
             // An accessor follows a key's name straight on, so only a key that is its name alone.
             let accessor_may_follow = own.input == own.input_name;
@@ -1405,6 +1409,32 @@ mod tests {
                              yearmonth, week, weekday, quarter, stem, ext, short, lowercase, \
                              uppercase, capitalize, bucket, number";
 
+    /// A number inside `|bucket(…)` is read as a number key's value is: written as a number,
+    /// then held exactly as written or refused, whatever the reason it cannot be held.
+    #[test]
+    fn a_bucket_number_that_does_not_read_back_is_refused() {
+        for (text, number) in [
+            ("source.size|bucket(1e-400)=x", "1e-400"),
+            ("source.size|bucket(1e400)=x", "1e400"),
+            (
+                "source.size|bucket(10, 1.0000000000000001)=x",
+                "1.0000000000000001",
+            ),
+        ] {
+            assert_eq!(
+                read(text).1,
+                vec![(
+                    text.find(number).unwrap(),
+                    format!("`{number}` cannot be represented exactly"),
+                    None,
+                    Fix::None
+                )],
+                "{text}"
+            );
+        }
+        assert!(read("source.size|bucket(0.1, 1e20)=x").1.is_empty());
+    }
+
     /// One row per position of the grammar, each with its sentence and rule line as the
     /// language states them, the caret byte counted by hand.
     #[test]
@@ -2485,7 +2515,7 @@ mod tests {
                 assert_eq!(key.base, "content.taken");
                 assert_eq!(key.input, "@t|year");
                 assert_eq!(key.input_name, "@t");
-                assert_eq!(key.written.as_deref(), Some("taken"));
+                assert_eq!(key.written.as_ref().map(|w| w.name.as_str()), Some("taken"));
                 assert_eq!(key.modifiers.len(), 1);
                 assert_eq!(clause, "@t|year=2024");
             }

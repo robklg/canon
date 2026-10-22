@@ -86,6 +86,8 @@ Extract segments from path values using Python-style indexing:
 | `key[1:3]` | Slice segments 1 and 2 |
 | `key[:-1]` | All but last segment |
 
+An index past the end has no value. A slice always has one, its bounds cut to the segments there are: past the end it is a path with no segments. A slice of an absolute path that starts at the first segment keeps the leading `/` (`source.path[:3]` of `/photos/2024/trip/a.jpg` → `/photos/2024/trip`).
+
 Examples with `source.rel_path = "photos/2024/vacation/IMG_001.jpg"`:
 
 ```
@@ -124,7 +126,7 @@ A pattern has no value for a source in four cases:
 
 - **The source does not carry the fact.** Filter such sources out during generation, `--where 'DateTimeOriginal?'`, or import the missing facts via the [enrichment pipeline](../commands/enrich/index.md).
 - **A modifier asks for a finer part than the time carries**, such as `{content.DateTimeOriginal|month}` on a time known only to `2024`. The reason given is `content.DateTimeOriginal|month has no value: the time is known only to the year`. `--where 'content.DateTimeOriginal|month?'` leaves such sources out, and `--where 'NOT content.DateTimeOriginal|month?'` lists them. In a manifest, use a coarser modifier in the pattern, which takes effect at the next apply, or add `content.DateTimeOriginal|month?` to the query and refresh. A second manifest can take those sources into [year folders](../commands/archive/cluster.md).
-- **Text the modifier cannot use**: `{content.Title|number}` on `Canon`, or a time modifier on text that is not a time. The reason given is `content.Title has no value: the text is not a number`. `--where 'content.Title|number?'` and `--where 'content.Title|datetime?'` keep only the sources where the text is a number or a time; add one to the manifest's query and refresh. An accessor that finds no segment, such as `[5]` on a path with three, has no value the same way.
+- **Text the modifier cannot use**: `{content.Title|number}` on `Canon`, or a time modifier on text that is not a time. The reason given is `content.Title|number has no value: the text is not a number`, naming the expression as the pattern specifies it. `--where 'content.Title|number?'` and `--where 'content.Title|datetime?'` keep only the sources where the text is a number or a time; add one to the manifest's query and refresh. An index that finds no segment, such as `[5]` on a path with three, has no value the same way; so has `{source.ext}` or `|ext` for a name with no extension (`source.ext has no value`, `filename|ext has no value`), and plain `|bucket` for a number below zero (`content.Offset|bucket has no value: |bucket groups numbers from 0 up`).
 - **The file's save time is one Canon cannot read**, at the edge of the years 0000–9999 or beyond ([Save times](../concepts/facts.md#save-times)). This is not a missing fact, and no import supplies it. The reason given is `Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond`. `--where 'NOT source.mtime?'` finds such files; add `source.mtime?` to the manifest's query to leave them out, or correct the file's save time and scan again; either takes effect at the next `canon cluster refresh`.
 
 ## Common Patterns

@@ -12,8 +12,8 @@ use super::key::{
     SCOPE_REL_PATH,
 };
 use super::transform::{
-    apply_chain, parse_modifier, rendered, InstantRecord, Modified, Modifier, ModifierCall,
-    NoValueCause, PathAccessor,
+    apply_chain, no_value_sentence, parse_modifier, rendered, InstantRecord, Modified, Modifier,
+    ModifierCall, NoValueCause, PathAccessor,
 };
 use super::value::{source_row_value, SourceAttributes};
 use crate::core::domain::fact::{FactEntry, FactValue};
@@ -37,12 +37,14 @@ pub enum PatternSegment {
     Expr(PatternExpr),
 }
 
-/// A parsed expression from within `{...}`
+/// A parsed expression from within `{...}`, and the expression as the pattern specifies it,
+/// which a sentence about its value names.
 #[derive(Debug, Clone)]
 pub struct PatternExpr {
     pub key: String,
     pub accessor: Option<PathAccessor>,
     pub modifiers: Vec<ModifierCall>,
+    pub written: String,
 }
 
 /// The facts fetched for a run of pattern evaluation, keyed by source.
@@ -193,7 +195,7 @@ impl std::fmt::Display for PatternNoValue {
                     precision: *precision,
                 };
                 let chain = self.too_coarse_chain().unwrap_or_default();
-                write!(f, "{chain} has no value: {cause}")
+                f.write_str(&no_value_sentence(&chain, cause))
             }
         }
     }
@@ -265,9 +267,10 @@ impl<'a> EvalContext<'a> {
         self.unmeasured = unmeasured;
     }
 
-    /// Whether an evaluation through this context read an instant on its clock
-    /// (`domain::transform::reads_an_instant`): a pattern that used a save time or an
-    /// instant fact, printed or modified. A clock reading reads the same in any time zone.
+    /// Whether an evaluation through this context read an instant on its clock (each chain's
+    /// own answer, `domain::transform::Chained`): a pattern that used a save time or an instant
+    /// fact, printed or modified, or text a time modifier read as an instant. A clock reading
+    /// reads the same in any time zone.
     pub fn read_an_instant(&self) -> bool {
         self.instant_read.read()
     }
@@ -311,14 +314,14 @@ pub fn parse_pattern(pattern: &str) -> Result<Pattern> {
                 bail!("Unclosed '{{' in pattern");
             }
 
-            // Check for alias expansion
-            let expr_str = if let Some(expanded) = expand_alias(&expr_str) {
-                expanded.to_string()
-            } else {
-                expr_str
+            // Check for alias expansion; the expression keeps its text as specified.
+            let expr = match expand_alias(&expr_str) {
+                Some(expanded) => PatternExpr {
+                    written: expr_str.clone(),
+                    ..parse_expr(expanded)?
+                },
+                None => parse_expr(&expr_str)?,
             };
-
-            let expr = parse_expr(&expr_str)?;
             segments.push(PatternSegment::Expr(expr));
         } else {
             literal.push(c);
@@ -359,6 +362,7 @@ fn parse_expr(s: &str) -> Result<PatternExpr> {
         key,
         accessor,
         modifiers,
+        written: s.to_string(),
     })
 }
 
@@ -514,19 +518,17 @@ fn normalize_pattern_result(path: &str) -> String {
 
 /// Evaluate a single expression
 fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
-    let value = get_value(&expr.key, ctx)?;
-    ctx.instant_read
-        .note(&value, expr.accessor.as_ref(), &expr.modifiers);
-
-    // for_display: false since patterns are used for paths
-    match apply_chain(
+    let value = get_value(&expr.key, &expr.written, ctx)?;
+    let chained = apply_chain(
         value,
         expr.accessor.as_ref(),
         &expr.modifiers,
         &expr.key,
-        false,
         ctx.clock,
-    )? {
+    )?;
+    ctx.instant_read.note(chained.read_an_instant);
+
+    match chained.value {
         Modified::Value(result) => Ok(rendered(
             expr.modifiers.last().map(|call| call.modifier),
             &result,
@@ -541,14 +543,18 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
             precision,
         }
         .into()),
-        // Text that is not a time or a number, and an accessor finding no
-        // segment, leave a pattern the way a fact the source does not carry does; their own
-        // statement is a pattern hazard's to make.
+        // Text that is not a time or a number, an index finding no segment, a name with no
+        // extension and a number below zero under plain `|bucket` leave a pattern the way a
+        // fact the source does not carry does; their own statement is a pattern hazard's to
+        // make. The sentence names the expression as specified, since the key alone may well
+        // have a value.
         Modified::NoValue(
             cause @ (NoValueCause::NotATime { .. }
             | NoValueCause::NotANumber
-            | NoValueCause::NoSegment),
-        ) => bail!("{} has no value: {cause}", expr.key),
+            | NoValueCause::NoSegment
+            | NoValueCause::NoExtension
+            | NoValueCause::BelowZero),
+        ) => bail!("{}", no_value_sentence(&expr.written, cause)),
     }
 }
 
@@ -562,7 +568,7 @@ fn evaluate_expr(expr: &PatternExpr, ctx: &EvalContext) -> Result<String> {
 /// asks for a key this function answers, so the facts map cannot hold one
 /// (`PatternFacts`), and the precedence here is a second lock on a door that
 /// is already shut.
-fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
+fn get_value(key: &str, written: &str, ctx: &EvalContext) -> Result<FactValue> {
     // The scope-relative path is answered from the context rather than looked
     // up: it is not a fact and carries no built-in key. It is also not
     // *derived* here any more — it was measured when the selection was
@@ -607,11 +613,14 @@ fn get_value(key: &str, ctx: &EvalContext) -> Result<FactValue> {
             .source
             .as_ref()
             .ok_or_else(|| anyhow!("{key} is not available: no source in context"))?;
-        // The one computed key that can have no value is a save time outside the
-        // years Canon reads; that cause is its own, never a fact not carried.
+        // A computed key has no value for two reasons of its own, never a fact not carried:
+        // a save time outside the years Canon reads, and a name with no extension.
         return source_row_value(source, &computed).ok_or_else(|| {
             match computed.as_source_fact() {
                 Some(SourceFact::Mtime) => PatternNoValue::UnreadableSaveTime.into(),
+                Some(SourceFact::Ext) => {
+                    anyhow!("{}", no_value_sentence(written, NoValueCause::NoExtension))
+                }
                 _ => anyhow!("{key} is not available"),
             }
         });
@@ -832,6 +841,41 @@ mod tests {
         assert_eq!(result, "2024");
     }
 
+    /// **One printed form for a bucket**: the label a pattern places as a directory is the
+    /// label a `facts` report counts and the label a rejection lists as one of the ranges.
+    #[test]
+    fn a_bucket_label_is_the_same_in_a_report_a_rejection_and_a_directory() {
+        use crate::expr::domain::key::ParsedFactKey;
+        use crate::expr::domain::print::threshold_bucket_labels;
+        let zone = UserZone::utc();
+        let mut ctx = EvalContext::new(&zone);
+        ctx.set_source(at("photos/image.jpg")); // 1,024,000 bytes
+        for (key, label) in [
+            ("source.size|bucket", "1M-to-10M"),
+            ("source.size|bucket(1000,1000000)", "1000000-and-up"),
+            ("source.size|bucket(2000000)", "under-2000000"),
+        ] {
+            let pattern = parse_pattern(&format!("{{{key}}}/{{filename}}")).unwrap();
+            assert_eq!(
+                evaluate(&pattern, &ctx).unwrap(),
+                format!("{label}/image.jpg"),
+                "{key}"
+            );
+            let reported = ParsedFactKey::parse(key)
+                .unwrap()
+                .report_value(FactValue::Num(1_024_000.0), &zone)
+                .unwrap();
+            let Modified::Value(reported) = reported else {
+                panic!("{key}: no value")
+            };
+            assert_eq!(rendered(Some(Modifier::Bucket), &reported, &zone), label);
+        }
+        // A rejection lists the same labels as its ranges.
+        assert!(
+            threshold_bucket_labels(&[1000.0, 1_000_000.0]).contains(&"1000000-and-up".to_string())
+        );
+    }
+
     /// A text modifier after a part reads the part's printed form, so a pattern places the
     /// folders it always placed: `monday/`, `q2/`, `06/`.
     #[test]
@@ -890,7 +934,7 @@ mod tests {
         let result = evaluate(&pattern, &ctx);
         assert_eq!(
             result.unwrap_err().to_string(),
-            "source.rel_path has no value: the path has no such segment"
+            "source.rel_path[10] has no value: the path has no such segment"
         );
     }
 
@@ -1057,17 +1101,55 @@ mod tests {
         assert!(!err.contains("hash_short"), "{err}");
     }
 
-    /// A source at its own root's top has no filename and so no extension.
-    /// The resolver answers with an empty string rather than refusing —
-    /// consistent with the asking half, where `resolve_source_ext_no_extension`
-    /// pins the same behaviour.
+    /// A name with no extension has no value for `{source.ext}`, so the pattern places the
+    /// file nowhere, where it once placed it with the directory level left out.
     #[test]
-    fn a_source_at_its_root_yields_an_empty_extension() {
-        let pattern = parse_pattern("photos/{source.ext}").unwrap();
+    fn a_name_with_no_extension_has_no_place_under_its_extension() {
+        let pattern = parse_pattern("photos/{source.ext}/{filename}").unwrap();
+        let zone = UserZone::utc();
+        for rel in ["", "README", ".bashrc", "trail."] {
+            let mut ctx = EvalContext::new(&zone);
+            ctx.set_source(at(rel));
+            let err = evaluate(&pattern, &ctx).unwrap_err().to_string();
+            assert_eq!(err, "source.ext has no value", "{rel:?}");
+        }
+        let mut ctx = EvalContext::new(&zone);
+        ctx.set_source(at("a/photo.JPG"));
+        assert_eq!(evaluate(&pattern, &ctx).unwrap(), "photos/JPG/photo.JPG");
+    }
+
+    /// **A pattern's no-value sentence names the expression as specified** — an alias as
+    /// written, never its expansion — and never the key alone, which may well have a value:
+    /// `{filename|ext}` and `{ext}` of `README`, `{content.Neg|bucket}` of -50,
+    /// `{content.Title|number}` of `Canon`, each with its reason where it has one.
+    #[test]
+    fn a_no_value_sentence_names_the_expression_as_specified() {
         let zone = UserZone::utc();
         let mut ctx = EvalContext::new(&zone);
-        ctx.set_source(at(""));
-        assert_eq!(evaluate(&pattern, &ctx).unwrap(), "photos");
+        ctx.set_source(at("a/README"));
+        ctx.set_fact("content.Neg", FactValue::Num(-50.0));
+        ctx.set_fact("content.Title", FactValue::Text("Canon".into()));
+        for (pattern, said) in [
+            ("{filename|ext}/{filename}", "filename|ext has no value"),
+            ("{ext}/{filename}", "ext has no value"),
+            ("{ext|lowercase}/{filename}", "ext|lowercase has no value"),
+            ("{source.ext}/{filename}", "source.ext has no value"),
+            (
+                "{content.Neg|bucket}/{filename}",
+                "content.Neg|bucket has no value: |bucket groups numbers from 0 up",
+            ),
+            (
+                "{content.Title|number}/{filename}",
+                "content.Title|number has no value: the text is not a number",
+            ),
+            (
+                "{source.rel_path[5]}/{filename}",
+                "source.rel_path[5] has no value: the path has no such segment",
+            ),
+        ] {
+            let err = evaluate(&parse_pattern(pattern).unwrap(), &ctx).unwrap_err();
+            assert_eq!(err.to_string(), said, "{pattern}");
+        }
     }
 
     #[test]

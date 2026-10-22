@@ -26,7 +26,7 @@ use crate::expr::domain::filter::{
     compare_numbers, compare_text, period_op, CompareOp, FilterResult, StatusPredicate,
 };
 use crate::expr::domain::glob::Glob;
-use crate::expr::domain::key::{Key, SourceFact, CONTENT_HASH};
+use crate::expr::domain::key::{Key, SourceFact};
 use crate::expr::domain::transform::{apply_chain, InstantRecord, Modified};
 use crate::expr::domain::value::source_row_value;
 use crate::expr::ops::bind::BoundFilters;
@@ -275,13 +275,12 @@ fn through_chain(
     record: &InstantRecord,
 ) -> Result<Option<FactValue>> {
     let (accessor, modifiers) = (key.accessor.as_ref(), &key.modifiers);
-    record.note(&value, accessor, modifiers);
-    Ok(
-        match apply_chain(value, accessor, modifiers, &key.input, true, zone)? {
-            Modified::Value(v) => Some(v),
-            Modified::NoValue(_) => None,
-        },
-    )
+    let chained = apply_chain(value, accessor, modifiers, &key.input, zone)?;
+    record.note(chained.read_an_instant);
+    Ok(match chained.value {
+        Modified::Value(v) => Some(v),
+        Modified::NoValue(_) => None,
+    })
 }
 
 /// A computed key's value for one source row, through the resolver that owns it — `None`
@@ -300,9 +299,9 @@ fn row_value(row: &SourceRow, key: &Key) -> Option<FactValue> {
 /// sources a report shows under `(no value)` for `K`. Read through the key's accessor and
 /// modifiers — `K|month?` is false for a time known only to the year, and `K|year?` for text
 /// that is not a time. A bare `K?` reads no value, so it reads no clock and checks
-/// no type. The content hash, which the hash keys are read as, exists where the cache holds
-/// a value or the source is linked to content; a computed key where its resolver answers
-/// (`?` reads a NULL device or inode as 0, as `facts` reports it).
+/// no type. Every key alike — the content hash, which the hash keys are read as, included —
+/// exists where it has a value; a computed key where its resolver answers (`?` reads a NULL
+/// device or inode as 0, as `facts` reports it).
 fn check_exists(
     conn: &Connection,
     source_id: i64,
@@ -314,10 +313,6 @@ fn check_exists(
     let value = match Key::read(base) {
         Some(computed) if computed.is_computed() => fetch_source_row(conn, source_id)?
             .and_then(|row| source_row_value(&row.attributes, &computed)),
-        _ if base == CONTENT_HASH => match cache.value(source_id, base) {
-            Some(v) => Some(v.clone()),
-            None => return Ok(cache.get_object_id(source_id).is_some()),
-        },
         _ => match key.read_as {
             ReadAs::Any => cache.value(source_id, base).cloned(),
             ReadAs::Absent | ReadAs::One(_) => base_value(conn, source_id, key, cache)?,
@@ -344,6 +339,7 @@ mod tests {
     use crate::core::repo::open_in_memory_for_test;
     use crate::core::testing::insert_time_fact;
     use crate::expr::domain::filter::STATUS_KEYWORDS;
+    use crate::expr::domain::key::CONTENT_HASH;
     use crate::expr::domain::print::printed_value;
     use crate::expr::domain::read::{AliasMode, Grammar};
     use crate::expr::domain::value::SourceAttributes;
@@ -427,20 +423,76 @@ mod tests {
         assert_eq!(result.source_ids, vec![s2]);
     }
 
+    /// A slice past the end is the path with no segments, which is a value: `?` is true for
+    /// it, `=""` selects it, and a glob that needs a segment does not match it.
     #[test]
-    fn filter_out_of_bounds_slice_is_non_match() {
+    fn filter_an_out_of_bounds_slice_is_a_path_with_no_segments() {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos");
-
-        // 1-segment path: [2:4] is out of bounds
         let s1 = insert_source(&conn, root, "image.jpg");
-        // 4-segment path: [2:4] = "c/d"
         let s2 = insert_source(&conn, root, "a/b/c/d");
+        let run = |conn: &mut RawConnection, filter: &str| {
+            let filter = bound(conn, filter);
+            apply_filters(conn, &[s1, s2], &filter, &UserZone::utc())
+                .unwrap()
+                .source_ids
+        };
+        assert_eq!(run(&mut conn, "source.rel_path[2:4]~c*"), vec![s2]);
+        assert_eq!(run(&mut conn, "source.rel_path[2:4]?"), vec![s1, s2]);
+        assert_eq!(run(&mut conn, r#"source.rel_path[2:4]="""#), vec![s1]);
+        assert_eq!(run(&mut conn, r#"source.rel_path[:-1]="""#), vec![s1]);
+        assert_eq!(run(&mut conn, "source.rel_path[:-1]?"), vec![s1, s2]);
+    }
 
-        let filter = bound(&conn, "source.rel_path[2:4]~c*");
-        let result = apply_filters(&mut conn, &[s1, s2], &filter, &UserZone::utc()).unwrap();
+    /// **A file with no extension has no value for it**: `NOT source.ext?` selects such files,
+    /// `source.ext=""` selects nothing, and `source.ext!=""` includes them, as `!=` is `NOT =`.
+    #[test]
+    fn a_file_with_no_extension_is_selected_by_not_ext_exists() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let none: Vec<i64> = ["README", "dir/.bashrc", "trail."]
+            .iter()
+            .map(|rel| insert_source(&conn, root, rel))
+            .collect();
+        let jpg = insert_source(&conn, root, "a.jpg");
+        let all: Vec<i64> = none.iter().copied().chain([jpg]).collect();
+        let run = |conn: &mut RawConnection, filter: &str| {
+            let filter = bound(conn, filter);
+            apply_filters(conn, &all, &filter, &UserZone::utc())
+                .unwrap()
+                .source_ids
+        };
+        assert_eq!(run(&mut conn, "NOT source.ext?"), none);
+        assert_eq!(run(&mut conn, "NOT ext?"), none);
+        assert_eq!(run(&mut conn, "NOT filename|ext?"), none);
+        assert_eq!(run(&mut conn, r#"source.ext="""#), Vec::<i64>::new());
+        assert_eq!(run(&mut conn, r#"source.ext!="""#), all);
+        assert_eq!(run(&mut conn, "source.ext?"), vec![jpg]);
+    }
 
-        assert_eq!(result.source_ids, vec![s2]);
+    /// **A stored empty text stays a value**: `Make=""` selects it and `Make?` is true for it,
+    /// through a text modifier too; `|ext`, a number or a time read from it has no value.
+    #[test]
+    fn an_empty_stored_text_stays_a_value() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let empty = insert_source(&conn, root, "a.jpg");
+        let other = insert_source(&conn, root, "b.jpg");
+        insert_fact_entry(&conn, "source", empty, "content.Make", "");
+        insert_fact_entry(&conn, "source", other, "content.Make", "Canon");
+        let run = |conn: &mut RawConnection, filter: &str| {
+            let filter = bound(conn, filter);
+            apply_filters(conn, &[empty, other], &filter, &UserZone::utc())
+                .unwrap()
+                .source_ids
+        };
+        assert_eq!(run(&mut conn, r#"Make="""#), vec![empty]);
+        assert_eq!(run(&mut conn, "Make?"), vec![empty, other]);
+        assert_eq!(run(&mut conn, r#"Make|lowercase="""#), vec![empty]);
+        assert_eq!(run(&mut conn, "Make|short?"), vec![empty, other]);
+        assert_eq!(run(&mut conn, "Make|ext?"), Vec::<i64>::new());
+        assert_eq!(run(&mut conn, "Make|number?"), Vec::<i64>::new());
+        assert_eq!(run(&mut conn, "Make|year?"), Vec::<i64>::new());
     }
 
     #[test]
@@ -614,21 +666,30 @@ mod tests {
         assert_eq!(result.source_ids, vec![s1]);
     }
 
+    /// `hashed?` answers whether a source is linked to content; `content.hash.sha256?` whether
+    /// the content hash has a value — the same where Canon stored the hash it computed, apart
+    /// where a source is linked to content with no stored hash.
     #[test]
-    fn filter_hashed_equivalence() {
-        // hashed? and content.hash.sha256? should produce identical results
+    fn filter_hashed_and_a_stored_hash_answer_their_own_questions() {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/src");
         let obj = insert_object(&conn, "hash_d");
         let s1 = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
         let s2 = insert_source_with_object(&conn, root, "b.jpg", None);
         let ids = [s1, s2];
-
-        let f1 = bound(&conn, "hashed?");
-        let f2 = bound(&conn, "content.hash.sha256?");
-        let r1 = apply_filters(&mut conn, &ids, &f1, &UserZone::utc()).unwrap();
-        let r2 = apply_filters(&mut conn, &ids, &f2, &UserZone::utc()).unwrap();
-        assert_eq!(r1.source_ids, r2.source_ids);
+        let run = |conn: &mut RawConnection, clause: &str| {
+            let filter = bound(conn, clause);
+            apply_filters(conn, &ids, &filter, &UserZone::utc())
+                .unwrap()
+                .source_ids
+        };
+        assert_eq!(run(&mut conn, "hashed?"), vec![s1]);
+        assert_eq!(run(&mut conn, "content.hash.sha256?"), Vec::<i64>::new());
+        insert_fact_entry(&conn, "object", obj, CONTENT_HASH, "hash_d");
+        assert_eq!(
+            run(&mut conn, "content.hash.sha256?"),
+            run(&mut conn, "hashed?")
+        );
     }
 
     #[test]
@@ -672,6 +733,7 @@ mod tests {
         };
         let subject = insert(root_a, "2024/IMG_001.JPG", 1000, 1704067200, 7, 11);
         let other = insert(root_b, "b.png", 2000, 1710000000, 8, 12);
+        let readme = insert(root_a, "README", 10, 1704067200, 9, 13);
         let attributes = SourceAttributes {
             id: subject,
             root_id: root_a,
@@ -707,6 +769,36 @@ mod tests {
                 );
             }
         }
+
+        // A source a computed key has no value for — a name with no extension — is answered
+        // as the resolver answers it: `?` false, `NOT …?` true.
+        let readme_attributes = SourceAttributes {
+            id: readme,
+            rel_path: "README".to_string(),
+            size: 10,
+            device: 9,
+            inode: 13,
+            ..attributes
+        };
+        let mut without = 0;
+        for key in Key::all().filter(Key::is_computed) {
+            let name = key.name();
+            let has = source_row_value(&readme_attributes, &key).is_some();
+            without += usize::from(!has);
+            let filter = bound(&conn, &format!("{name}?"));
+            let matched = apply_filters(&mut conn, &[readme], &filter, &UserZone::utc())
+                .unwrap()
+                .source_ids;
+            assert_eq!(
+                matched == vec![readme],
+                has,
+                "{name}? must answer as the resolver does"
+            );
+        }
+        assert!(
+            without >= 2,
+            "the extension, by both its names, has no value for README"
+        );
     }
 
     /// The other half of the keeper above: a built-in key the source row cannot
@@ -802,14 +894,19 @@ mod tests {
         assert_eq!(result.source_ids, vec![s1]);
     }
 
+    /// A built-in key exists exactly where it has a value: a computed one where its resolver
+    /// answers, the hash keys where the content hash is stored.
     #[test]
-    fn a_built_in_exists_when_the_resolver_answers_it_or_the_source_is_linked_to_an_object() {
+    fn a_built_in_exists_exactly_where_it_has_a_value() {
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/src");
-        let obj = insert_object(&conn, "hash_exists");
-        let hashed = insert_source_with_object(&conn, root, "a.jpg", Some(obj));
-        let unhashed = insert_source_with_object(&conn, root, "b.jpg", None);
-        let ids = [hashed, unhashed];
+        let stored = insert_object(&conn, "hash_stored");
+        let bare = insert_object(&conn, "hash_bare");
+        let with_hash = insert_source_with_object(&conn, root, "a.jpg", Some(stored));
+        let linked = insert_source_with_object(&conn, root, "b.jpg", Some(bare));
+        let unhashed = insert_source_with_object(&conn, root, "c.jpg", None);
+        insert_fact_entry(&conn, "object", stored, CONTENT_HASH, "abc");
+        let ids = [with_hash, linked, unhashed];
 
         for key in Key::all().chain([Key::ContentFact(CONTENT_HASH.to_string())]) {
             let name = key.name();
@@ -818,12 +915,50 @@ mod tests {
                 .unwrap()
                 .source_ids;
             let expected = if key.is_computed() {
-                vec![hashed, unhashed]
+                vec![with_hash, linked, unhashed]
             } else {
-                vec![hashed]
+                vec![with_hash]
             };
             assert_eq!(matched, expected, "{name}? disagrees with the resolver");
         }
+    }
+
+    /// **`?` means "has a value" for the hash keys too**: true only where the content hash is
+    /// stored, read through the key's modifiers like any key's — never for a source linked to
+    /// content with no stored hash.
+    #[test]
+    fn hash_exists_only_where_there_is_a_value() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/src");
+        let stored = insert_object(&conn, "hash_stored");
+        let bare = insert_object(&conn, "hash_bare");
+        let with_hash = insert_source_with_object(&conn, root, "a.jpg", Some(stored));
+        let linked = insert_source_with_object(&conn, root, "b.jpg", Some(bare));
+        insert_fact_entry(&conn, "object", stored, CONTENT_HASH, "2cf24dba5fb0");
+        let ids = [with_hash, linked];
+        let run = |conn: &mut RawConnection, clause: &str| {
+            let filter = bound(conn, clause);
+            apply_filters(conn, &ids, &filter, &UserZone::utc())
+                .unwrap()
+                .source_ids
+        };
+        for clause in [
+            "hash?",
+            "hash_short?",
+            "content.hash.sha256?",
+            "hash|uppercase?",
+            "hash_short|short?",
+        ] {
+            assert_eq!(run(&mut conn, clause), vec![with_hash], "{clause}");
+            assert_eq!(
+                run(&mut conn, &format!("NOT {clause}")),
+                vec![linked],
+                "{clause}"
+            );
+        }
+        // Its modifiers are read: a hash that is no number has no number.
+        assert_eq!(run(&mut conn, "hash|number?"), Vec::<i64>::new());
+        assert_eq!(run(&mut conn, "hashed?"), vec![with_hash, linked]);
     }
 
     #[test]
@@ -1151,7 +1286,7 @@ mod tests {
             assert!(refused.is_answer(), "{filter}");
             assert_eq!(
                 refused.to_string(),
-                "content.Kind's type changed while this ran; run it again."
+                "content.Kind's type changed while this ran; run it again"
             );
         }
     }
@@ -1174,7 +1309,7 @@ mod tests {
         assert!(refused.is_answer());
         assert_eq!(
             refused.to_string(),
-            "content.New gained facts while this ran; run it again."
+            "content.New gained facts while this ran; run it again"
         );
     }
 
@@ -1288,19 +1423,14 @@ mod tests {
                 let printed: Vec<(i64, Option<String>)> = corpus
                     .iter()
                     .map(|(id, value)| {
-                        let shown = match apply_chain(
-                            value.clone(),
-                            None,
-                            &calls,
-                            "content.taken",
-                            true,
-                            &zone,
-                        )
-                        .unwrap()
-                        {
-                            Modified::Value(v) => Some(rendered(last, &v, &zone)),
-                            Modified::NoValue(_) => None,
-                        };
+                        let shown =
+                            match apply_chain(value.clone(), None, &calls, "content.taken", &zone)
+                                .unwrap()
+                                .value
+                            {
+                                Modified::Value(v) => Some(rendered(last, &v, &zone)),
+                                Modified::NoValue(_) => None,
+                            };
                         (*id, shown)
                     })
                     .collect();
@@ -1420,13 +1550,18 @@ mod tests {
         );
         // `source.size` is 1000 for every source here: a bucket's labels select it.
         for written in [
-            r#"source.size|bucket(60,300)=">300""#,
-            "source.size|bucket=1K-10K",
+            "source.size|bucket(60,300)=300-and-up",
+            "source.size|bucket=1K-to-10K",
         ] {
             assert_eq!(selected(&mut conn, &ids, written, &zone), ids, "{written}");
         }
         assert_eq!(
-            selected(&mut conn, &ids, "source.size|bucket(60,300)=60-300", &zone),
+            selected(
+                &mut conn,
+                &ids,
+                "source.size|bucket(60,300)=60-to-300",
+                &zone
+            ),
             Vec::<i64>::new()
         );
     }

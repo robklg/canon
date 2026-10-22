@@ -81,14 +81,14 @@ canon worklist --emit content.DateTimeOriginal
 
 The entry's own `mtime` field is a number of seconds, as in every entry.
 
-`--emit` reads a key's name as `--where` does: a [source fact or built-in key](../../reference/builtins.md) emits its value for that source, and any other name is a content fact, so `--emit geo.lat` emits `content.geo.lat`. `--emit` takes a name, never an [alias](../../reference/filter.md#aliases): `--emit @taken` looks for a key named `@taken` and, where none has facts, emits `null` on every row. Each field is named as given. A source fact's time is an instant with no recorded offset, written with `-00:00`, and a file with no extension emits `""` for `source.ext`:
+`--emit` reads a key's name as `--where` does: a [source fact or built-in key](../../reference/builtins.md) emits its value for that source, and any other name is a content fact, so `--emit geo.lat` emits `content.geo.lat`. `--emit` takes a name, never an [alias](../../reference/filter.md#aliases): `--emit @taken` looks for a key named `@taken` and, where none has facts, emits `null` on every row. Each field is named as given. A source fact's time is an instant with no recorded offset, written with `-00:00`, and a file with no extension emits `null` for `source.ext`, which has no value for it:
 
 ```bash
 canon worklist --emit Make --emit source.mtime --emit source.ext
 ```
 
 ```json
-{"source_id":1,"path":"/photos/README","root_id":1,"size":5,"mtime":1792271246,"basis_rev":0,"facts":{"Make":null,"source.mtime":"2026-10-17T21:07:26-00:00","source.ext":""}}
+{"source_id":1,"path":"/photos/README","root_id":1,"size":5,"mtime":1792271246,"basis_rev":0,"facts":{"Make":null,"source.mtime":"2026-10-17T21:07:26-00:00","source.ext":null}}
 {"source_id":2,"path":"/photos/trip/IMG_0125.jpg","root_id":1,"size":3,"mtime":1792271246,"basis_rev":0,"facts":{"Make":"Canon","source.mtime":"2026-10-17T21:07:26-00:00","source.ext":"jpg"}}
 ```
 

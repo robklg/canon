@@ -97,7 +97,7 @@ In a shell, wrap the whole filter in single quotes and use double quotes inside 
 --where 'content.Title="say ""hi"""'      # the title: say "hi"
 --where 'content.Title="it'\''s"'          # the title: it's
 --where '"content.File Size">1000000'    # a key with a space
---where '"content.File Size"|bucket(1e6)=">1000000"'
+--where '"content.File Size"|bucket(1e6)=1000000-and-up'
 ```
 
 A quoted key is the same key: quoting changes how it is parsed, never which key it names. Modifiers and accessors follow the closing quote.
@@ -108,18 +108,20 @@ Every key has a [type](../concepts/facts.md#value-types): text, number, time, or
 
 | Key type | A value you type is interpreted as |
 |----------|------------------------------|
-| Number | A number: `1024`, `-5`, `3.14`, `1e6`. Quoted or bare, the same number |
+| Number | A number: `1024`, `-5`, `3.14`, `1e6`. Quoted or bare, the same number, held exactly as written |
 | Time | A year, a month, a day, a minute, a second or a point within a second, in your local time. See [Times](#times) |
 | Text | Text, exactly as typed |
 | Path | Text, compared with the path |
 
-**Text is text.** Against a text key, a bare value that looks like a number or a time (`2019`, `0500`, `2024-06-15`, `18:00`) gives an error, because Canon cannot tell which you meant. Quoted, it is text (`content.Model="2019"`). To ask a number or a date question of text, say so with a modifier: `content.numtext|number>=10`, `content.textdate|year=2024`. Words such as `Canon` or `IMG_0001.jpg` are text without quotes.
+**Text is text.** Against a text or path key, a bare value that reads as a number, a time or a time of day (`2019`, `0500`, `1e400`, `2024-06-15`, `18:00`) gives an error, because Canon cannot tell which you meant. Quoted, it is text (`content.Model="2019"`). To ask a number or a date question of text, say so with a modifier: `content.numtext|number>=10`, `content.textdate|year=2024`. Anything else is text without quotes, however it looks: `Canon`, `IMG_0001.jpg`, `2024e`, `12:3`, `2024-06-15_beach.jpg`.
 
-Canon's message prints each value and key so that, copied back into a filter, it means the same: text that looks like a number or a time is shown there in quotes. A row of [`canon facts`](../commands/query/facts.md) prints text as it is, so text such as `2019` appears bare there; put it in quotes when you copy it into a filter.
+**Numbers are compared exactly.** `content.Rating=0.3` selects a stored `0.3` and not a value that only rounds to it. A number Canon cannot hold exactly as written (`1e-400`, `1e400`, `1.0000000000000001`) gives an error.
+
+Canon's message prints each value and key so that, copied back into a filter, it means the same: text that reads as a number or a time is shown there in quotes. A row of [`canon facts`](../commands/query/facts.md) prints text as it is, so text such as `2019` appears bare there; put it in quotes when you copy it into a filter.
 
 **Text is compared exactly as stored.** An accented letter stored as one character and the same letter stored as a letter followed by a separate accent mark are two different texts to `=`, `!=`, `IN` and the ordering operators. A path typed as an argument, such as a scope, is found in either stored form; a value in `--where` is not.
 
-**A key's type belongs to the key.** It is determined from every fact the key holds, on every root, so it does not change with the scope or the filter. A key with no facts has no type: `key?` is false everywhere, and anything else asked of it is rejected as an unknown key.
+**A key's type belongs to the key.** It is determined from every fact the key holds, on every root, so it does not change with the scope or the filter. A key with no facts has no type: `key?` and `key|year?` are false everywhere, a modifier no value could reach is still rejected (`key|year|time?`), and anything else asked of it is rejected as an unknown key.
 
 ## Times
 
@@ -137,7 +139,9 @@ A stored value coarser than the time you typed is in none of `<`, `=` and `>`: a
 
 **A time with an offset** (`Z`, `+02:00`, `-05:00`) is translated to your local time: for a user in Amsterdam, `"2023-12-31 21:00 -05:00"` is the minute 03:00 on 1 January 2024. The offset goes straight after the time or after one space; a date alone with an offset (`2023-12-31-05:00`) gives an error.
 
-**A time finer than a modifier's result** gives an error. Where every value in the clause is a time, the error names the modifier that holds them: `|yearmonth=2024-06-15` names `|date=2024-06-15`, and `|date="2024-06-15 14:30"` names `|datetime="2024-06-15 14:30"`.
+**A time finer than a modifier's result** gives an error: `|yearmonth=2024-06-15` is finer than a month.
+
+**A time of day alone** (`source.mtime=14:30`) gives an error against a time key, since it has no date; `|time` gives a time's time of day (see [Facts](facts.md#modifiers)).
 
 ## Everything Else
 
@@ -158,7 +162,7 @@ Error: cannot run the filter as given
   filename=a%b.jpg AND Rating=big
             ^ `%` needs quotes around the value: filename="a%b.jpg"
   filename=a%b.jpg AND Rating=big
-                              ^ Rating holds numbers; "big" is not a number.
+                              ^ Rating is of type number; `big` is not a number
     Type a number: 1024, -5, 3.14, 1e20
 ```
 
@@ -166,9 +170,12 @@ A fix shows how Canon's rules read what was typed, to copy and judge against wha
 
 | What was typed | The fix |
 |----------------|---------|
-| A character that needs quotes, in a value after `=`, `!=`, `<`, `>`, `<=` or `>=`, or in an `IN` list | The value in quotes, with `'` where the value holds a `"` and no `'`. A list gets one fix, with every item that needs quotes in quotes |
+| A character that needs quotes, in a value after `=`, `!=`, `<`, `>`, `<=` or `>=`, or in an `IN` list | The value in quotes, with `'` where the value holds a `"` and no `'` |
 | `*`, `?` or `[` in a value after `=` or `!=` | Both readings: the glob with `~`, and the exact text in quotes |
+| A value that reads as a number, a time or a time of day, after `=` or `!=` or in an `IN` list, for a key of type text or path | The value in quotes, after the key's type: `For a text key:` or `For a path key:` |
 | A character that needs quotes in a key name | The name in quotes, for a key that has facts |
+
+A list gets one fix, under its first item that needs quotes, with every item that needs quotes for either reason in quotes: `filename IN (2024, a%b)` gets `For a text key: filename IN ("2024", "a%b")`.
 
 ```
 Error: cannot run the filter as given
@@ -186,22 +193,23 @@ Error: cannot run the filter as given
 
 A fix keeps where the rules end each part and adds only quotes. In `Title=O'Brien was here` the value ends at the space, so the fix is `Title="O'Brien"`, and the space is named on its own: a space separates values.
 
-A value that cannot be read as its key's type is named with the ways to write what you meant. A rewrite is offered only where the rewritten clause runs:
+A value that cannot be read as its key's type is named with what the key is and what the value is. No other filter is offered as what you may have meant. For a key of type text, one line at the bottom of the message says where the other reading of such a value lives:
 
 ```
 Error: cannot run the filter as given
   Model=2019
-        ^ Model holds text; 2019 is a number or a year.
-    As text: Model="2019"     As numbers, if its values are numbers: Model|number=2019     As dates, if its values are dates: Model|year=2019
-    `canon facts convert content.Model` to see what it holds and change its type
+        ^ Model is of type text, and `2019` is a number. For a text key: Model="2019"
+  Type conversion: in the filter with a modifier such as |number or |year; for the stored type, `canon facts convert`.
 ```
 
-A key whose facts hold two types cannot be compared or modified, since a filter compares one type only. That is an answer about the key, not an error, so it prints without `Error:`, and asking whether the key exists (`Model?`) still works:
+The line is printed once however many values it applies to. It names `canon facts convert` where any of them is a stored key compared with no modifier or accessor, and leaves it out otherwise (`filename`, `Model|lowercase`); a path key gets no line.
+
+A key of mixed type, whose facts hold more than one type, cannot be compared or modified: a filter supports one type only. That is an answer about the key, not an error, so it prints without `Error:`, and asking whether the key exists (`Model?`) still works:
 
 ```
-Model=EOS: Model holds text and numbers; a filter compares one type only.
+Model=EOS: Model is of mixed type (text and number); a filter supports one type only
   text: 1 fact   numbers: 1 fact   (every fact of the key, on every root)
-To inspect it and learn how to convert it to one type:
+To see its values and convert it to one type:
   `canon facts convert content.Model`
 ```
 
@@ -240,7 +248,7 @@ canon ls --include excluded --where 'excluded?'
 **Key distinctions:**
 
 - `archived?` vs `content.hash.sha256?`: `archived?` asks whether the content is in an archive; `content.hash.sha256?` asks whether that fact value exists. `archived?` is the canonical way to check archive status.
-- `hashed?` vs `content.hash.sha256?`: Equivalent results, different paths. `hashed?` is the idiomatic form.
+- `hashed?` vs `content.hash.sha256?`: `hashed?` asks whether a source's content has been identified; `content.hash.sha256?` whether its content hash is stored as a fact, the same `?` every key has. They differ only where identified content has no stored hash. `hashed?` is the idiomatic form.
 - `NOT archived?` includes unhashed sources (they are not archived). Use `NOT archived? AND hashed?` to exclude unhashed sources.
 - The set of status predicates is closed: these four, not extensible by users.
 
@@ -392,8 +400,8 @@ A problem in what you typed around a key alias names the alias, and its fixes do
 $ canon ls --where '@parent=2024'
 Error: cannot run the filter as given
   @parent=2024
-          ^ @parent gives text; 2024 is a number or a year.
-    As text: @parent="2024"     As numbers, if its values are numbers: @parent|number=2024     As dates, if its values are dates: @parent|year=2024
+          ^ @parent is of type text, and `2024` is a number. For a text key: @parent="2024"
+  Type conversion: in the filter with a modifier such as |number or |year.
 ```
 
 A manifest's query takes no alias: `cluster generate` records each one replaced by what it stands for (see [Cluster](../commands/archive/cluster.md)).

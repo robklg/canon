@@ -72,7 +72,7 @@ pub fn fetch_named_values(
     for (id, entry) in fetch_source_values(conn, &ids, &stored)? {
         let value = match entry {
             Some(entry) => {
-                match apply_chain(entry.value, None, &modifiers, key.name(), false, zone)? {
+                match apply_chain(entry.value, None, &modifiers, key.name(), zone)?.value {
                     Modified::Value(value) => Some(value),
                     Modified::NoValue(_) => None,
                 }

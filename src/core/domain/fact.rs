@@ -123,7 +123,6 @@ impl KeyTypes {
     }
 
     /// Each type the key's facts hold and how many hold it.
-    #[allow(dead_code)] // read only by tests so far
     pub fn counts(&self) -> &[(FactType, u64)] {
         &self.counts
     }
@@ -159,6 +158,42 @@ impl FactValue {
     }
 }
 
+/// **A stored value as Canon reads it**: readable, or a row whose value Canon cannot read (a
+/// stored time outside the years every zone reads). An unreadable row is still a row: on the
+/// content it decides a source's value, which is then none (the expression facility's
+/// `source_value` takes it in its signature), so the source's own fact never stands in for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Stored<T> {
+    Readable(T),
+    Unreadable,
+}
+
+impl<T> Stored<T> {
+    /// The value, where it is readable.
+    pub fn readable(self) -> Option<T> {
+        match self {
+            Stored::Readable(value) => Some(value),
+            Stored::Unreadable => None,
+        }
+    }
+
+    pub fn as_ref(&self) -> Stored<&T> {
+        match self {
+            Stored::Readable(value) => Stored::Readable(value),
+            Stored::Unreadable => Stored::Unreadable,
+        }
+    }
+}
+
+/// A source's facts as one batch fetch reads them: every readable row, on the source and on its
+/// content, and the keys whose row on the content Canon cannot read — which decide that the
+/// source has no value for them.
+#[derive(Debug, Clone, Default)]
+pub struct SourceFacts {
+    pub entries: Vec<FactEntry>,
+    pub unreadable_on_content: Vec<String>,
+}
+
 /// A single fact entry associated with a source.
 ///
 /// Facts are stored in the database on either sources or objects, but for query
@@ -188,7 +223,13 @@ pub struct FactEntry {
 impl FactEntry {
     /// Whether the fact is stored on the source itself rather than on its content.
     pub fn is_on_source(&self) -> bool {
-        self.entity_type == "source"
+        Self::sits_on_source(&self.entity_type)
+    }
+
+    /// Whether a row of this entity type sits on the source rather than on its content — for a
+    /// reader holding a row whose value it did not read.
+    pub fn sits_on_source(entity_type: &str) -> bool {
+        entity_type == "source"
     }
 
     /// Create a new FactEntry.
@@ -277,7 +318,7 @@ mod tests {
     }
 
     // =========================================================================
-    // The type words, a key's types, and the two-type statement
+    // The type words, a key's types, and the mixed-type statement
     // =========================================================================
 
     #[test]

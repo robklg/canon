@@ -19,7 +19,7 @@ use crate::core::domain::fact::KeyTypes;
 use crate::core::repo::fact::key_types;
 use crate::expr::domain::alias::{recorded_text, CheckedAliases};
 use crate::expr::domain::bind::{
-    bind_expr, bind_key, keep_quoted_name_with_facts, keep_ways_that_bind, known_type,
+    bind_expr, bind_key, keep_fix_that_binds, keep_quoted_name_with_facts, known_type,
     quoted_name_key, stored_keys, BindCause, Bound, BoundKey, ExpressionRefused, Reads, Refused,
 };
 use crate::expr::domain::filter::UsedStatus;
@@ -151,7 +151,7 @@ impl AliasReading {
         }
     }
 
-    /// The mode a text, or a way out, is read in now.
+    /// The mode a text, or a fix, is read in now.
     fn mode(&self) -> AliasMode<'_> {
         match &self.state {
             AliasState::NotAllowed => AliasMode::NotAllowed,
@@ -356,9 +356,9 @@ fn report_keys(
 }
 
 /// **Check one key a report names** against the modifier table: a modifier that cannot apply to
-/// the key's type is its cause, and so is any modifier on a key of two types (a bare one reports
-/// both types' rows). A key with no facts reads as itself — there is nothing to report. A way
-/// out is read with the report's own aliases.
+/// the key's type is its cause, and so is any modifier on a key of mixed type (a bare one reports
+/// every type's rows). A key with no facts has its chain checked, and reads as itself — there is
+/// nothing to report. A fix is read with the report's own aliases.
 fn bind_report_key(
     conn: &Connection,
     key: &InputKey,
@@ -379,8 +379,8 @@ fn bind_report_key(
             read_as: bound.read_as,
         }),
         Err(mut cause) => {
-            // A report's way out rewrites the key, so it is read the same way.
-            keep_ways_that_bind(&mut cause, &|rewrite| {
+            // A report's fix rewrites the key, so it is read the same way.
+            keep_fix_that_binds(&mut cause, &|rewrite| {
                 let reading = read_keys(rewrite, 0, Grammar::Key, aliases);
                 reading.problems.is_empty()
                     && matches!(reading.value.as_deref(), Some([key]) if bind_as_report(key, &types).is_ok())
@@ -390,7 +390,7 @@ fn bind_report_key(
     })
 }
 
-/// Bind a key as a report reads it: the one reading the report's own key and every way out
+/// Bind a key as a report reads it: the one reading the report's own key and every fix
 /// offered for it go through.
 fn bind_as_report(
     key: &InputKey,
@@ -479,7 +479,7 @@ mod tests {
         )
     }
 
-    /// One source per key type a refusal names, and a key of two types.
+    /// One source per key type a refusal names, and a key of mixed type.
     fn world() -> (Connection, i64) {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
@@ -506,14 +506,14 @@ mod tests {
             BindCause::UnknownName(_) => "unknown name",
             BindCause::UnknownKey(_) => "unknown key",
             BindCause::Unreadable(_) => "unreadable",
-            BindCause::TypeMismatch(_) => "type mismatch",
+            BindCause::TypeMismatch { .. } => "type mismatch",
             BindCause::OutOfRange(_) => "out of range",
-            BindCause::WrongModifier { .. } => "wrong modifier",
+            BindCause::WrongModifier(_) => "wrong modifier",
             BindCause::GlobNotText(_) => "glob not text",
             BindCause::NotABucketLabel(_) => "not a bucket label",
             BindCause::BucketOrdered(_) => "bucket ordered",
             BindCause::TooFine(_) => "too fine",
-            BindCause::MixedType { .. } => "two types",
+            BindCause::MixedType(_) => "mixed type",
             BindCause::TypeChanged { .. } => "type changed",
         }
     }
@@ -546,16 +546,32 @@ mod tests {
             ("source.rel_path[0]=2019", "type mismatch"),
             ("stem=18:00", "type mismatch"),
             ("textdate>=2024-06", "type mismatch"),
-            ("numtext=.5", "unreadable"),
-            ("numtext=1-2", "unreadable"),
-            ("stem=5.", "unreadable"),
-            (r#""content.File Size">1000"#, "two types"),
+            ("numtext=1e400", "type mismatch"),
+            ("source.size=1e-400", "unreadable"),
+            ("source.size=1e400", "unreadable"),
+            ("source.size=1.0000000000000001", "unreadable"),
+            ("source.mtime=14:30", "unreadable"),
+            ("content.nothing|year|time?", "wrong modifier"),
+            ("NOT content.nothing|bucket|year?", "wrong modifier"),
+            ("source.size|bucket|year?", "wrong modifier"),
+            (r#""content.File Size">1000"#, "mixed type"),
         ];
         for (filter, expected) in table {
             let refused = refusal(&conn, &[filter]);
             let kinds: Vec<&str> = refused.causes.iter().map(kind).collect();
             assert_eq!(kinds, [expected], "{filter}");
-            assert_eq!(refused.is_answer(), expected == "two types", "{filter}");
+            assert_eq!(refused.is_answer(), expected == "mixed type", "{filter}");
+        }
+        // A value that reads as no number, time or time of day is text, however it looks.
+        for filter in [
+            "numtext=.5",
+            "numtext=1-2",
+            "stem=5.",
+            "numtext=2024e",
+            "numtext=12:3",
+        ] {
+            read_filters(&conn, &ExpressionText::plain(&[filter]))
+                .unwrap_or_else(|e| panic!("{filter}: {e}"));
         }
         // The typed fraction binds, and selects that point.
         let (mut conn, a) = world();
@@ -607,9 +623,9 @@ mod tests {
         assert_eq!(said[2], "this quote is unclosed");
         assert_eq!(
             said[3],
-            r#"source.size holds numbers; "garbage" is not a number."#
+            "source.size is of type number; `garbage` is not a number"
         );
-        assert_eq!(said[4], r#"taken holds times; "yesterday" is not a time."#);
+        assert_eq!(said[4], "taken is of type time; `yesterday` is not a time");
         assert!(
             said[5].starts_with("`|nonsense` is not a modifier — Modifiers: "),
             "{}",
@@ -626,9 +642,9 @@ mod tests {
         assert_eq!(said.len(), 3, "{refused}");
         assert_eq!(
             said[1],
-            r#"source.size holds numbers; "garbage" is not a number."#
+            "source.size is of type number; `garbage` is not a number"
         );
-        assert_eq!(said[2], "numtext holds text; 10 is a number.");
+        assert_eq!(said[2], "numtext is of type text, and `10` is a number");
         // A status word asked with an operator is its own condition's problem too.
         let refused = refusal(&conn, &["source.size|nonsense=1 AND archived=1"]);
         let said: Vec<String> = blocks(&refused).into_iter().map(|(_, s)| s).collect();
@@ -654,7 +670,7 @@ mod tests {
                 said,
                 [
                     format!("AND or OR is missing before `{word}`"),
-                    "numtext holds text; 10 is a number.".to_string()
+                    "numtext is of type text, and `10` is a number".to_string()
                 ],
                 "{clause}"
             );
@@ -716,7 +732,8 @@ mod tests {
 
     /// `facts --key` and `--group-by` read their key through the one key reader and the
     /// modifier table: a wrong-type modifier is refused (no "skipped N values" report), a
-    /// modifier on a key of two types is refused as an answer, and the bare key runs.
+    /// modifier on a key of mixed type is refused as an answer, and the bare key runs. A key with
+    /// no facts has its chain checked like any other.
     #[test]
     fn a_report_key_is_read_and_checked_like_a_filter_key() {
         let (conn, _) = world();
@@ -734,23 +751,19 @@ mod tests {
         assert!(bucket_on_text
             .to_string()
             .starts_with("cannot use the key as given\n"));
-        let two_types = refused(r#""content.File Size"|number"#);
-        assert!(two_types.is_answer());
+        let mixed = refused(r#""content.File Size"|number"#);
+        assert!(mixed.is_answer());
         assert!(
-            two_types
+            mixed
                 .to_string()
-                .contains("a modifier works on one type only"),
-            "{two_types}"
+                .contains("a modifier supports one type only"),
+            "{mixed}"
         );
         assert!(!refused("source.size|nonsense").is_answer());
-        // A report's way out is bound as a key: one refused again is not offered, and the
-        // modifiers that apply are named instead.
+        // No other key is offered: the modifiers that apply are named.
         let tail = refused("source.size|lowercase|bucket").to_string();
-        assert!(!tail.contains("|number|lowercase|bucket"), "{tail}");
+        assert!(!tail.contains("|number|lowercase"), "{tail}");
         assert!(tail.contains("Modifiers for numbers"), "{tail}");
-        assert!(refused("source.size|lowercase")
-            .to_string()
-            .contains("To use its printed form as text: source.size|number|lowercase"));
 
         let read = read_key(&conn, r#""content.File Size""#).unwrap();
         assert_eq!(read.base_key, "content.File Size");
@@ -777,6 +790,14 @@ mod tests {
             .to_string()
             .starts_with("cannot run the filter as given\n"));
         assert!(read_key(&conn, "content.nothing|year").is_ok());
+        assert_eq!(
+            refused("content.nothing|year|time")
+                .causes
+                .iter()
+                .map(kind)
+                .collect::<Vec<_>>(),
+            ["wrong modifier"]
+        );
     }
 
     /// **A text with a problem the reader met never runs**: what of it could be read is still
@@ -826,8 +847,9 @@ mod tests {
                 "               ^ a space separates values",
                 "    After a value: AND, OR, ) or the end",
                 "  numtext<10",
-                "          ^ numtext holds text; 10 is a number.",
-                r#"    As text: numtext<"10"     As numbers, if its values are numbers: numtext|number<10"#,
+                "          ^ numtext is of type text, and `10` is a number",
+                "  Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`.",
             ]
         );
     }
@@ -845,7 +867,7 @@ mod tests {
             [
                 (
                     texts[0].to_string(),
-                    "numtext holds text; 10 is a number.".to_string()
+                    "numtext is of type text, and `10` is a number".to_string()
                 ),
                 (texts[0].to_string(), "a space separates values".to_string()),
                 (texts[1].to_string(), "this quote is unclosed".to_string()),
@@ -1025,7 +1047,7 @@ mod tests {
             (
                 "source.size=1%",
                 12,
-                r#"source.size holds numbers; "1%" is not a number."#,
+                "source.size is of type number; `1%` is not a number",
             ),
             ("Rating=a%b", 0, "`Rating` is an unknown key"),
         ] {
@@ -1053,11 +1075,12 @@ mod tests {
     }
 
     /// **Every fix shown reads back and binds**: over clauses holding every character a value
-    /// cannot hold bare, against keys of each type and under each operator, every quoted value
-    /// and every glob and exact pair a refusal shows is read and bound again as a filter of its
-    /// own, and binds. It fails if a fix is shown that would be refused again (`filename=a*'b`
-    /// gives a glob that does not read; `Title IN (a%b, c*)` a list that still holds a
-    /// wildcard).
+    /// cannot hold bare, and values that read as a number, a time or a time of day, against
+    /// keys of each type and under each operator, every quoted value, every glob and exact pair
+    /// and every value quoted for the key's type a refusal shows is read and bound again as a
+    /// filter of its own, and binds. It fails if a fix is shown that would be refused again
+    /// (`filename=a*'b` gives a glob that does not read; `Title IN (a%b, c*)` a list that still
+    /// holds a wildcard; `filename IN (2024, a%b)` a list that still holds a `%`).
     #[test]
     fn every_fix_shown_reads_back_and_binds() {
         let conn = world_with_text(&["content.Title"]);
@@ -1089,6 +1112,12 @@ mod tests {
             "a@b*",
             "a\\b*",
             "[abc",
+            "2024",
+            "1e400",
+            "2024-06",
+            "2024:07:23",
+            "12:30",
+            "2024-06-15T14:30:05.45+02:00",
         ];
         let mut clauses = Vec::new();
         for key in keys {
@@ -1101,14 +1130,14 @@ mod tests {
                 clauses.push(format!("{key} IN ({value} was, x)"));
             }
         }
-        let (mut quoted, mut pairs) = (0, 0);
+        let (mut quoted, mut pairs, mut for_type) = (0, 0, 0);
         for clause in &clauses {
             let Err(error) = read_filters(&conn, &ExpressionText::plain(&[clause.as_str()])) else {
                 continue;
             };
             let refused = error.downcast::<ExpressionRefused>().expect("a refusal");
             for cause in &refused.causes {
-                let BindCause::Read(problem) = cause else {
+                let Some(problem) = cause.problem() else {
                     continue;
                 };
                 let shown = match &problem.fix {
@@ -1120,6 +1149,10 @@ mod tests {
                         pairs += 1;
                         vec![glob.clone(), exact.clone()]
                     }
+                    Fix::ForKeyType { rewrite, .. } => {
+                        for_type += 1;
+                        vec![rewrite.clone()]
+                    }
                     Fix::None | Fix::KeyName { .. } => Vec::new(),
                 };
                 for rewrite in shown {
@@ -1130,7 +1163,10 @@ mod tests {
                 }
             }
         }
-        assert!(quoted >= 20 && pairs >= 5, "{quoted} quoted, {pairs} pairs");
+        assert!(
+            quoted >= 20 && pairs >= 5 && for_type >= 20,
+            "{quoted} quoted, {pairs} pairs, {for_type} for the key's type"
+        );
         // The glob half is read by the glob reader: where it cannot be read, neither fix shows.
         for clause in [
             "filename=O'Brien*",
@@ -1455,7 +1491,7 @@ mod tests {
     }
 
     /// A cause binding finds inside a filter alias is drawn under the alias where it was typed,
-    /// with the alias named before binding's own sentence and no way out that rewrites the value.
+    /// with the alias named before binding's own sentence and no fix that rewrites the value.
     #[test]
     fn a_problem_inside_an_alias_is_drawn_under_its_use() {
         let (conn, _) = world();
@@ -1466,18 +1502,19 @@ mod tests {
         let lines = refused_with(&conn, &text).render("");
         assert_eq!(lines[0], "source.size>1 AND @x", "{lines:?}");
         assert_eq!(
-            lines[1], "                  ^ in alias `@x`: numtext holds text; 10 is a number.",
+            lines[1],
+            "                  ^ in alias `@x`: numtext is of type text, and `10` is a number",
             "{lines:?}"
         );
         assert!(
             !lines.iter().any(|line| line.contains("numtext<")),
-            "a way out rewrote the alias's value: {lines:?}"
+            "a fix rewrote the alias's value: {lines:?}"
         );
     }
 
     /// **A key alias compared wrongly is answered as the key written out is**, every name the
-    /// answer and its ways out use being the alias as typed, the conversion pointer naming the
-    /// key it stands for. The alias and the key share a length, so each line compares whole.
+    /// answer and its fix use being the alias as typed. The alias and the key share a length,
+    /// so each line compares whole.
     #[test]
     fn a_key_alias_compared_wrongly_echoes_the_alias() {
         let (conn, _) = world();
@@ -1488,7 +1525,7 @@ mod tests {
         };
         for clause in [
             "numtext<10",
-            "numtext=5.",
+            "numtext=2024-06",
             "taken=garbage",
             "textdate>=2024-06",
         ] {
@@ -1498,43 +1535,25 @@ mod tests {
             );
             let written = refusal(&conn, &[clause]).render("");
             let typed = refused_with(&conn, &text).render("");
-            // The conversion pointer names the key the alias stands for, as it always does.
-            let expected: Vec<String> = written
-                .iter()
-                .map(|line| {
-                    alias(line)
-                        .replace("content.@numtxt", "content.numtext")
-                        .replace("content.@take", "content.taken")
-                        .replace("content.@txtdate", "content.textdate")
-                })
-                .collect();
+            let expected: Vec<String> = written.iter().map(|line| alias(line)).collect();
             assert_eq!(typed, expected, "{clause}");
         }
     }
 
-    /// A way out that rewrites a clause holding an alias is bound with the same aliases, so it
-    /// is offered where the clause written out would be offered it — never dropped because the
+    /// A fix that rewrites a clause holding an alias is bound with the same aliases, so it is
+    /// offered where the clause written out would be offered it — never dropped because the
     /// rewrite, read with no aliases, names an alias it cannot read.
     #[test]
     fn a_fix_with_an_alias_binds_with_the_same_aliases() {
         let (conn, _) = world();
-        let (_dir, text) = given(Some("tken = \"taken\"\n"), &["@tken|lowercase=a"]);
+        let (_dir, text) = given(Some("numtxt = \"numtext\"\n"), &["@numtxt=10"]);
         let typed = refused_with(&conn, &text).to_string();
-        let written = refusal(&conn, &["taken|lowercase=a"]).to_string();
-        assert!(written.contains("taken|datetime|lowercase=a"), "{written}");
-        assert_eq!(typed.replace("@tken", "taken"), written, "{typed}");
-        // A report's way out is bound as a key, with the report's aliases.
-        let report = |key: &str, filters: &ExpressionText| {
-            read_report(&conn, Some(key), &[], filters)
-                .err()
-                .unwrap()
-                .to_string()
-        };
-        let (_report_dir, keys) = given(Some("tken = \"taken\"\n"), &[]);
-        let typed = report("@tken|lowercase", &keys);
-        let written = report("taken|lowercase", &ExpressionText::plain(&[]));
-        assert!(written.contains("taken|datetime|lowercase"), "{written}");
-        assert_eq!(typed.replace("@tken", "taken"), written, "{typed}");
+        let written = refusal(&conn, &["numtext=10"]).to_string();
+        assert!(
+            written.contains(r#"For a text key: numtext="10""#),
+            "{written}"
+        );
+        assert_eq!(typed.replace("@numtxt", "numtext"), written, "{typed}");
     }
 
     /// `--key` and `--group-by` read a key alias as the key it stands for, shown as typed, and

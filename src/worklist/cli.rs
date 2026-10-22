@@ -110,8 +110,8 @@ mod tests {
                 };
                 assert_eq!(
                     refused(&["Rating=big"]),
-                    "cannot run the filter as given\n  Rating=big\n         ^ Rating holds \
-                     numbers; \"big\" is not a number.\n    Type a number: 1024, -5, 3.14, \
+                    "cannot run the filter as given\n  Rating=big\n         ^ Rating is of \
+                     type number; `big` is not a number\n    Type a number: 1024, -5, 3.14, \
                      1e20\n  `source.extension` is an unknown key\n    `canon facts` lists the keys"
                 );
                 assert_eq!(

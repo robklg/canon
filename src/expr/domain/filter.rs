@@ -154,7 +154,7 @@ pub struct FilterResult {
     pub source_ids: Vec<i64>,
     pub used_status: UsedStatus,
     /// Whether any comparison read an instant on the clock
-    /// (`domain::transform::reads_an_instant`).
+    /// (each chain's own answer, `domain::transform::Chained`).
     pub read_an_instant: bool,
 }
 
@@ -204,11 +204,11 @@ pub(in crate::expr) fn compare_text(stored: &str, op: CompareOp, value: &str) ->
     }
 }
 
-/// Compare numbers by `op`; equality keeps a tolerance for numbers that differ only by
-/// rounding.
+/// Compare numbers by `op`, exactly: a typed number is refused where Canon cannot hold it as
+/// written, so equality needs no tolerance.
 pub(in crate::expr) fn compare_numbers(stored: f64, op: CompareOp, value: f64) -> bool {
     match op {
-        CompareOp::Eq => (stored - value).abs() < f64::EPSILON,
+        CompareOp::Eq => stored == value,
         CompareOp::Gt => stored > value,
         CompareOp::Ge => stored >= value,
         CompareOp::Lt => stored < value,
@@ -224,5 +224,21 @@ pub(in crate::expr) fn period_op(op: CompareOp) -> PeriodOp {
         CompareOp::Gt => PeriodOp::StartsAtOrAfterEnd,
         CompareOp::Le => PeriodOp::EndsByEnd,
         CompareOp::Lt => PeriodOp::EndsByStart,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Numbers compare exactly: no source is both `= 0` and `> 0`, and two numbers that differ
+    /// only past what a tolerance would see are two numbers.
+    #[test]
+    fn equal_numbers_compare_exactly() {
+        assert!(!compare_numbers(1e-300, CompareOp::Eq, 0.0));
+        assert!(compare_numbers(1e-300, CompareOp::Gt, 0.0));
+        assert!(!compare_numbers(0.1 + 0.2, CompareOp::Eq, 0.3));
+        assert!(compare_numbers(0.1, CompareOp::Eq, 0.1));
+        assert!(compare_numbers(-0.0, CompareOp::Eq, 0.0));
     }
 }

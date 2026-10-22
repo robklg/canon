@@ -23,7 +23,7 @@ put through. `pattern` parses and evaluates the shaping half, and `vantage` owns
 that half cannot answer per source — see The scope vantage below. `filter` is the asking
 half: the syntax tree the reader builds and the comparisons it reduces to. `glob` is a glob's
 own grammar and its matcher. `bind` reads each clause's value as its key's type — the modifier table, the
-bare-value classes, the refusal and its ways out — and `print` is the printing rule. `cache`
+input types, the refusal — and `print` is the printing rule. `cache`
 is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
 because putting a return type in the layer above the function that returns it is a
 repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` checks
@@ -117,8 +117,10 @@ reads a `facts` report's `--key`, `--group-by` and `--where` the same way. A tex
 the reader met never runs, though what of it could be read is bound, so its causes are named too
 (`a_filter_with_a_reading_problem_never_runs`). A key's type is read
 from all its rows (`core::repo::fact::key_types`), so parking, scope and presence never move it.
-**Text is text**: against a text key, a bare value shaped like a number or a time is refused, and
-quoted it is text; against a number or time key, a quoted value means the same as a bare one.
+**Text is text**: against a text or path key, a bare value that reads as a number, a time or a time
+of day is refused, and quoted it is text — what it reads as, never how it looks (`input_type`);
+against a number or time key, a quoted value means the same as a bare one. A typed number is read
+form first, fit second (`core::domain::number`): held exactly as written, or refused.
 A `source.` name that is no source fact is an unknown key wherever a key stands, `?` and report
 keys included (`a_source_name_that_is_no_source_fact_is_an_unknown_key_wherever_it_stands`).
 Pins: `a_value_that_cannot_mean_anything_is_refused_before_selection` (the verifier),
@@ -134,28 +136,26 @@ and `a_key_that_gains_its_first_facts_mid_run_refuses_the_run`, on the report by
 `a_type_that_changes_mid_report_refuses_the_report`.
 
 What a modifier reads and gives is one table, `result_of`, read by binding and agreeing with the
-chain. Every problem and cause is collected into one `ExpressionRefused`, its causes matched with
-no `_` arm (a command's refused key names join it, the filter's first line leading:
-`unknown_keys`, `join`), and each is drawn under the typed line it sits in, a caret under the value, the
-key's name, the `|` of a modifier or the `[` of an accessor; a key of two types keeps its
-`clause: statement` line. Where the key gives text, an unquoted value's character that needs
-quotes, or a wildcard after `=`, `!=` or in a list, is binding's sentence; any other type reads
-the value as that type. A glob binds only where the key gives text or a path; for any other
-result its one cause is the key's type statement (`Gives::statement`, one writer), so no
-comparison meets a glob. Ways out rewrite only what they change. **A way out makes what it rewrites bind**: a way out is one value, `Way` — what it
-does and what it rewrites to — and every one that rewrites is bound before it is shown, a
-filter's as a clause, a report's as a key, and dropped if it would be refused again
-(`keep_ways_that_bind`). Pinned at the filter by `every_way_out_binds_the_whole_clause`, at the
-report by `a_report_key_is_read_and_checked_like_a_filter_key`. A fix from the closed list
-(`Fix`) is checked the same way: the quoted value, or the glob and the exact text, both or
-neither, read back and bound before it is shown; a quoted name only where it names a key with
-facts (`every_fix_shown_reads_back_and_binds`, `a_quoted_name_is_offered_only_for_a_key_with_facts`). **Held by discipline**: a builder
-offers a rewrite through `Way::to`, never as hint text, and a new caller of `bind_key` calls the
-check. The conversion pointer rewrites nothing and is gated where it is built. A cause about what a key is — two types, or a
-type that changed, or a key that gained its first facts, while the run read it — is an answer and prints without `Error:`
-(`ExpressionRefused::is_answer`); every other cause is input Canon cannot read. Evaluation compares
-text by code point, a glob through its matcher, numbers with a tolerance, times through the time noun's period table, a
-modifier's part as a whole number, a bucket's label by equality.
+chain; a key with no facts walks it too, its first step from any type. Every problem and cause is
+collected into one `ExpressionRefused`, its causes matched with no `_` arm (`unknown_keys` and
+`join` add a command's refused names). Each is a `Problem` drawn under its typed line, a caret under
+the value, the key's name, a modifier's `|` or an accessor's `[`: one sentence naming the key as
+typed up to the problem (`Gives::statement`, one writer), the rule line, and a fix from the closed
+list (`Fix`); a key of mixed type keeps its `clause: statement` line and its counts. Where the key
+gives text, a character that needs quotes, or a wildcard after `=`, `!=` or in a list, is binding's
+sentence; any other type reads the value as that type. A glob binds only where the key gives text
+or a path, its one cause otherwise the type statement. **A fix shown reads back and binds**: each
+fix is read back and bound before it is shown, a filter's as a clause, a report's as a key
+(`keep_fix_that_binds`); a quoted name only where it names a key with facts
+(`every_fix_shown_reads_back_and_binds`, `a_quoted_name_is_offered_only_for_a_key_with_facts`). No
+other filter is ever offered. A type mismatch on a key of type text carries the bottom line
+(`Conversion`), printed once, last, in the strongest form the refusal holds
+(`the_conversion_line_is_printed_once_in_its_strongest_form`). **Held by discipline**: a new caller
+of `bind_key` calls the check. A cause about what a key is — mixed type, a type that changed or a
+key that gained its first facts while the run read it — is an answer, printed without `Error:`
+(`ExpressionRefused::is_answer`). Evaluation compares text by code point, a glob through its matcher, numbers
+exactly, times through the time noun's period table, a modifier's part as a whole number, a bucket's
+label by equality.
 
 **Where it does not apply**: a pattern, which reads its keys through `parse_key_and_accessor`
 and meets a wrong-type modifier as a gap when `apply` evaluates it; a manifest's recorded query
@@ -170,13 +170,16 @@ typed text selected (`the_recorded_text_selects_what_the_typed_text_selected`).
 `domain/print.rs` writes a value or a key so that, typed into `--where`, it reads back as
 itself: bare where the reader reads the bare text back the same, double-quoted otherwise. The
 writer asks the reader — the filter reader (`reads_as_one_bare_value`, `reads_as_one_bare_key`)
-and the binder's bare-value class — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
-printable one- and two-character value checked against the reader). A refusal's clauses and
-ways out print through it. So does the statement that keys hold two types and its way out
-(`mixed_type_statement`, `mixed_type_way_out`), which `facts`' listing, `cluster`'s summary and
-a manifest's comments read: the key prints through the rule, and its `canon facts convert`
-command is quoted again for the shell. **Where it does not apply**: a `facts` row and a pattern's
-folder name print text as it is, number- or time-shaped text bare.
+and the binder's input type — and keeps no character list (`every_printed_value_reads_back_as_itself`, and every
+printable one- and two-character value checked against the reader). A refusal's rule lines print
+through it. So does the statement that keys are of mixed type, with their types, and its way out
+(`mixed_type_statement`, `mixed_type_way_out`), which a refused filter, `facts`' listing,
+`cluster`'s summary and a manifest's comments read: the key prints through the rule, and its
+`canon facts convert` command names the full stored key, quoted for the shell only
+(`the_convert_command_is_quoted_for_the_shell_only`). Every bucket label is spelled and recognized
+here (`bucket_label`, `is_plain_bucket_label`, `threshold_bucket_labels`), the modifier handing over
+only a `BucketRange`, so a report, a rejection and a directory name say one label. **Where it does
+not apply**: a `facts` row and a pattern's directory name print text as it is, bare.
 
 ## The scope vantage
 
@@ -334,17 +337,17 @@ Pinned by `one_source_one_value_in_filter_report_pattern_and_worklist`, which as
 surfaces, an empty file among its sources; `cluster generate`'s facts comment by its own
 `the_coverage_comment_reads_one_value_per_source`.
 
-Where it does **not** apply: a key's type (`core::repo::fact::key_types` reads every row); `?` on a
-hash key, true too for a source linked to content with no stored hash; a computed key, never
-read from the facts table.
+A content row Canon cannot read still decides, so the source has no value. Where it does **not**
+apply: a key's type (`core::repo::fact::key_types` reads every row); a
+computed key, never read from the facts table.
 
 ## The clock is a parameter
 
 Times read through the frame rule on the clock the facility is handed — `SelectionParams.clock`,
 `EvalContext`'s `clock`, the display and report functions' `zone` — never the machine's; a
 manifest's run is handed the zone the manifest or its lock records. A modifier answers `Modified`: a value, or
-no value and its `NoValueCause` (too coarse, text reading as no time or number, no segment),
-which every reader treats as a missing fact, `?` included; a pattern refuses a too-coarse
+no value and its `NoValueCause`, which every reader treats as a missing fact, `?` included; a slice
+always has a value; a pattern refuses a too-coarse
 time with `PatternNoValue`, a typed cause the archive's remedy reads, never its sentence. A typed
 `--where` time is translated to that zone's local time once per run.
 
@@ -360,9 +363,10 @@ that day (`the_table_and_the_chain_agree_on_a_time_of_day`). A text modifier aft
 reads its printed form, so `|time|lowercase|year` reads text and has no value.
 
 **A run says whether it read an instant on the clock** (`Selection.read_an_instant`,
-`EvalContext::read_an_instant`), by one rule, `domain/transform.rs::reads_an_instant`: an
-instant compared or printed bare or through a time modifier, text a time modifier reads as one,
-and a typed time with an offset; never a clock reading, a number, an accessor or a modifier refusing a time. Pinned by
+`EvalContext::read_an_instant`), and the chain answers it at the step that reads
+(`apply_chain`'s `Chained`): an instant compared or printed with no transform, a time modifier
+given an instant or text that reads as one — after an accessor or another modifier too — and a
+typed time with an offset; never a clock reading or a number. Pinned by
 `the_instant_rule_reads_only_what_reads_a_clock`; a facility answer, with no roster row.
 
 ## Mechanics

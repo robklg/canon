@@ -151,3 +151,76 @@ fn one_source_one_value_in_filter_report_pattern_and_worklist() {
         Some(FactValue::Text(s)) if s == "Canon"
     ));
 }
+
+/// **An unreadable content value is no value**: where the content's row for a key holds a
+/// value Canon cannot read (a stored time past the last year it reads), the content's row still
+/// decides, so the source has no value for the key on every surface — the source's own fact
+/// never stands in for it.
+#[test]
+fn an_unreadable_content_value_is_no_value() {
+    let mut w = world();
+    let (two_rows, own_only) = (w.two_rows, w.own_only);
+    let all = [two_rows, own_only];
+    insert_time_fact(&w.conn, two_rows, "content.Taken", "2024-06-15");
+    insert_time_fact(&w.conn, own_only, "content.Taken", "2023-01-02");
+    // The content of `two_rows` holds the key too, as a second in year 10000.
+    w.conn
+        .execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision, observed_at)
+             SELECT 'object', object_id, 'content.Taken', 253402315200, 'clock', 'second', 0
+             FROM sources WHERE id = ?1",
+            [two_rows],
+        )
+        .unwrap();
+
+    assert_eq!(
+        filtered(&mut w.conn, &all, "content.Taken?"),
+        vec![own_only]
+    );
+    assert_eq!(
+        filtered(&mut w.conn, &all, "NOT content.Taken?"),
+        vec![two_rows]
+    );
+    assert!(filtered(&mut w.conn, &all, "content.Taken|year=2024").is_empty());
+
+    let key = ParsedFactKey::parse("content.Taken").unwrap();
+    let report =
+        crate::facts::compute_distribution(&mut w.conn, &all, &key, 100, &UserZone::utc()).unwrap();
+    let counted: Vec<(String, i64)> = report
+        .entries
+        .into_iter()
+        .map(|entry| (entry.value, entry.count))
+        .collect();
+    assert_eq!(counted, [("2023-01-02".to_string(), 1)], "facts --key");
+
+    let zone = UserZone::utc();
+    let facts =
+        prefetch_pattern_facts(&mut w.conn, &[two_rows], &["content.Taken".to_string()]).unwrap();
+    assert!(
+        facts.for_source(two_rows).is_empty(),
+        "a pattern reads no value"
+    );
+    let mut ctx = EvalContext::new(&zone);
+    for fact in facts.for_source(two_rows) {
+        ctx.set_fact(&fact.key, fact.value.clone());
+    }
+    assert!(evaluate(&parse_pattern("{content.Taken|year}").unwrap(), &ctx).is_err());
+
+    let sources: Vec<Source> = vec![fetch_by_id(&w.conn, two_rows).unwrap().unwrap()];
+    let keys = [(
+        "content.Taken".to_string(),
+        crate::expr::Key::read("content.Taken").unwrap(),
+    )];
+    let result =
+        crate::worklist::build_entries(&mut w.conn, &sources, false, &keys, &zone).unwrap();
+    let emitted = result.entries[0].facts.as_ref().unwrap();
+    assert_eq!(
+        emitted["content.Taken"],
+        serde_json::Value::Null,
+        "worklist --emit"
+    );
+
+    // `cluster generate`'s coverage comment reads the facts it already holds the same way.
+    let held = crate::core::repo::fact::batch_fetch_for_sources(&mut w.conn, &[two_rows]).unwrap();
+    assert!(!crate::expr::source_values(&held[&two_rows]).contains_key("content.Taken"));
+}

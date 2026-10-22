@@ -34,6 +34,19 @@ pub(in crate::expr) enum Fix {
     KeyName {
         rewrite: String,
     },
+    /// A value that reads as a number or a time, for a key of type text or path: the clause with
+    /// every such value quoted, after the sentence and the key's type.
+    ForKeyType {
+        key_type: TextOrPath,
+        rewrite: String,
+    },
+}
+
+/// The type a [`Fix::ForKeyType`] names: the key's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::expr) enum TextOrPath {
+    Text,
+    Path,
 }
 
 /// The rule a bare name breaks where a quoted name is the fix; the fix follows it after a colon.
@@ -51,13 +64,28 @@ pub(in crate::expr) struct Problem {
 }
 
 impl Problem {
-    /// **A fix shown reads back and binds**: drop the quoted value, or the glob and exact pair,
-    /// unless every filter it shows `binds` — both of a pair, or neither is shown. A quoted name
-    /// is a key, not a filter, and is kept or dropped by whether it names a key with facts.
+    /// A problem with no fix.
+    pub(in crate::expr) fn new(
+        place: Place,
+        sentence: String,
+        rule_line: Option<String>,
+    ) -> Problem {
+        Problem {
+            place,
+            sentence,
+            rule_line,
+            fix: Fix::None,
+        }
+    }
+
+    /// **A fix shown reads back and binds**: drop the quoted value, the glob and exact pair, or
+    /// the value quoted for the key's type, unless every filter it shows `binds` — both of a
+    /// pair, or neither is shown. A quoted name is a key, not a filter, and is kept or dropped by
+    /// whether it names a key with facts.
     pub(in crate::expr) fn keep_fix_that_binds(&mut self, binds: &dyn Fn(&str) -> bool) {
         let keep = match &self.fix {
             Fix::None | Fix::KeyName { .. } => true,
-            Fix::Quoted { rewrite } => binds(rewrite),
+            Fix::Quoted { rewrite } | Fix::ForKeyType { rewrite, .. } => binds(rewrite),
             Fix::GlobOrExact { glob, exact } => binds(glob) && binds(exact),
         };
         if !keep {
@@ -66,7 +94,8 @@ impl Problem {
     }
 
     /// The problem's block, `text` being the text it was found in: the typed line and the
-    /// caret line with the sentence (a quoted value after `: `, the glob and exact text after `. `),
+    /// caret line with the sentence (a quoted value after `: `, the glob and exact text or the
+    /// value for the key's type after `. `),
     /// then the rule line and the key-name line, two spaces further in. A text with nothing but spaces in it has no line
     /// to point into, so the sentence stands alone ("the filter is empty").
     pub(in crate::expr) fn render(&self, text: &str, indent: &str) -> Vec<String> {
@@ -76,6 +105,13 @@ impl Problem {
                 "{}. As a glob: {glob}   As exact text: {exact}",
                 self.sentence
             ),
+            Fix::ForKeyType { key_type, rewrite } => {
+                let key_type = match key_type {
+                    TextOrPath::Text => "text",
+                    TextOrPath::Path => "path",
+                };
+                format!("{}. For a {key_type} key: {rewrite}", self.sentence)
+            }
             Fix::None | Fix::KeyName { .. } => self.sentence.clone(),
         };
         let mut lines = if text.trim_matches(is_space).is_empty() {

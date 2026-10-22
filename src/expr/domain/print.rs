@@ -7,20 +7,21 @@
 //! grammar reads back as the text inside. No character list lives here, so the writer cannot
 //! drift from the reader.
 
-use crate::core::domain::fact::FactType;
+use crate::core::domain::fact::{FactType, KeyTypes};
 use crate::core::domain::format::{format_count, shell_quote};
-use crate::core::domain::number::read_number;
+use crate::core::domain::number::{number_form, spelled};
 use crate::core::domain::time::reading::read_time;
 
-use super::bind::{bare_class, BareClass};
+use super::bind::{input_type, InputType};
 use super::read::{read_keys, reads_as_one_bare_key, reads_as_one_bare_value, AliasMode, Grammar};
+use super::transform::BucketRange;
 
 /// A value as Canon prints it for the reader of `read_as`: bare where the bare text reads
 /// back as the same value of that type, otherwise double-quoted.
 pub fn printed_value(text: &str, read_as: FactType) -> String {
     let same_value = match read_as {
-        FactType::Text | FactType::Path => bare_class(text) == BareClass::Word,
-        FactType::Num => read_number(text).is_ok(),
+        FactType::Text | FactType::Path => input_type(text) == InputType::Text,
+        FactType::Num => number_form(text).is_some_and(|form| form.exact().is_ok()),
         FactType::Time => read_time(text).is_ok(),
     };
     if same_value && reads_back_bare(text) {
@@ -60,48 +61,156 @@ fn is_its_own_base_key(key: &str) -> bool {
             Some([read]) if !read.has_transforms() && read.base == key)
 }
 
-/// The command that inspects a key and converts it to one type, as printed: backticked, the
-/// key as Canon prints it and quoted again for the shell, so it runs as pasted
-/// (`` `canon facts convert '"content.File Size"'` ``).
+/// The command that shows a key's values and converts it to one type, as printed: backticked,
+/// the full stored key quoted for the shell only, so it runs as pasted
+/// (`` `canon facts convert 'content.File Size'` ``).
 pub(in crate::expr) fn convert_command(key: &str) -> String {
-    format!("`canon facts convert {}`", shell_quote(&printed_key(key)))
+    format!("`canon facts convert {}`", shell_quote(key))
 }
 
-/// The statement that keys are of mixed type — what is wrong and what it costs. One key is
-/// named as Canon prints it; several are counted. Spoken here once, beside the printing rule
-/// its keys print through, for the surfaces that list such keys: `facts`' listing and
-/// `cluster`'s summary. A refused filter states its own line per clause and reads only the
-/// way out. Empty for no keys.
-pub fn mixed_type_statement(keys: &[&str]) -> Vec<String> {
-    let first = match keys {
-        [] => return Vec::new(),
-        [key] => format!(
-            "{} is of mixed type, so filters and patterns cannot use its values:",
-            printed_key(key)
-        ),
-        keys => format!(
-            "{} keys are of mixed type, so filters and patterns cannot use their values:",
+/// The types a key of mixed type holds, in the words the type column uses, the most common
+/// first: `text and number`; `text, number and time`.
+pub(in crate::expr) fn mixed_types(types: &KeyTypes) -> String {
+    let mut counts = types.counts().to_vec();
+    counts.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    let words: Vec<&str> = counts.iter().map(|(t, _)| t.as_str()).collect();
+    match words.split_last() {
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+/// The statement that keys are of mixed type, with their types. One key is named as Canon
+/// prints it; several are counted, then named one per line. Spoken here once, beside the
+/// printing rule its keys print through, for the surfaces that list such keys: `facts`'
+/// listing and `cluster`'s summary. A refused filter states its own line per clause and reads
+/// only the way out. Empty for no keys.
+pub fn mixed_type_statement(keys: &[(&str, &KeyTypes)]) -> Vec<String> {
+    match keys {
+        [] => Vec::new(),
+        [(key, types)] => vec![format!(
+            "{} is of mixed type ({}); filters and patterns support one type only.",
+            printed_key(key),
+            mixed_types(types)
+        )],
+        keys => std::iter::once(format!(
+            "{} keys are of mixed type; filters and patterns support one type only:",
             format_count(keys.len())
-        ),
-    };
-    vec![
-        first,
-        "only values of one type can be compared or formatted correctly.".to_string(),
-    ]
+        ))
+        .chain(
+            keys.iter()
+                .map(|(key, types)| format!("  {} ({})", printed_key(key), mixed_types(types))),
+        )
+        .collect(),
+    }
 }
 
 /// The way out of a mixed type: a header, then one command per key ([`convert_command`]),
 /// indented under the header; empty for no keys. A manifest writes these lines into its
 /// comments, and the terminal prints them.
-pub fn mixed_type_way_out(keys: &[&str]) -> Vec<String> {
+pub fn mixed_type_way_out(keys: &[(&str, &KeyTypes)]) -> Vec<String> {
     let header = match keys {
         [] => return Vec::new(),
-        [_] => "To inspect it and learn how to convert it to one type:",
-        _ => "To inspect each and learn how to convert to one type:",
+        [_] => "To see its values and convert it to one type:",
+        _ => "To see their values and convert each to one type:",
     };
     std::iter::once(header.to_string())
-        .chain(keys.iter().map(|key| format!("  {}", convert_command(key))))
+        .chain(
+            keys.iter()
+                .map(|(key, _)| format!("  {}", convert_command(key))),
+        )
         .collect()
+}
+
+/// **A bucket's label**, the one printed form of its range in a report, a rejection and a
+/// directory: letters, digits, `-` and `.` only, so every drive holds it as a name and a filter
+/// reads it bare. Plain `|bucket`: `0`, then powers of ten joined by `-to-` (`1-to-10`,
+/// `1K-to-10K`, `0.00001-to-0.0001`); `|bucket(a,b,…)`: `under-a`, `a-to-b`, `b-and-up`, each
+/// threshold spelled as a number is and a number below zero written with `minus-`, so no label
+/// starts with `-` and `-` never means both.
+pub(in crate::expr) fn bucket_label(range: &BucketRange) -> String {
+    match range {
+        BucketRange::Zero => "0".to_string(),
+        BucketRange::PowerOfTen(e) => {
+            format!(
+                "{}-to-{}",
+                power_of_ten_bound(*e),
+                power_of_ten_bound(e + 1)
+            )
+        }
+        BucketRange::Below(t) => format!("under-{}", threshold(*t)),
+        BucketRange::Between(a, b) => format!("{}-to-{}", threshold(*a), threshold(*b)),
+        BucketRange::From(t) => format!("{}-and-up", threshold(*t)),
+    }
+}
+
+/// Every label `|bucket(a,b,…)` gives, in order.
+pub(in crate::expr) fn threshold_bucket_labels(thresholds: &[f64]) -> Vec<String> {
+    let (Some(&first), Some(&last)) = (thresholds.first(), thresholds.last()) else {
+        return Vec::new();
+    };
+    std::iter::once(BucketRange::Below(first))
+        .chain(
+            thresholds
+                .windows(2)
+                .map(|pair| BucketRange::Between(pair[0], pair[1])),
+        )
+        .chain(std::iter::once(BucketRange::From(last)))
+        .map(|range| bucket_label(&range))
+        .collect()
+}
+
+/// Whether `label` is one plain `|bucket` gives: its lower bound read, its range spelled, and
+/// the two the same.
+pub(in crate::expr) fn is_plain_bucket_label(label: &str) -> bool {
+    if label == "0" {
+        return true;
+    }
+    let Some((lower, _)) = label.split_once("-to-") else {
+        return false;
+    };
+    let exponent = match lower.strip_prefix("0.") {
+        Some(fraction) => match fraction.strip_suffix('1') {
+            Some(zeros) if zeros.bytes().all(|b| b == b'0') => -(fraction.len() as i64),
+            Some(_) | None => return false,
+        },
+        None => {
+            let (digits, suffix) = match lower.char_indices().last() {
+                Some((at, 'K')) => (lower.get(..at), 3),
+                Some((at, 'M')) => (lower.get(..at), 6),
+                Some((at, 'G')) => (lower.get(..at), 9),
+                _ => (Some(lower), 0),
+            };
+            match digits.and_then(|d| d.strip_prefix('1')) {
+                Some(zeros) if zeros.bytes().all(|b| b == b'0') => zeros.len() as i64 + suffix,
+                Some(_) | None => return false,
+            }
+        }
+    };
+    i32::try_from(exponent).is_ok_and(|e| bucket_label(&BucketRange::PowerOfTen(e)) == label)
+}
+
+/// A power of ten as a bucket bound: below 1 as a decimal (`0.0001`), 1 to 999 as digits, then
+/// `K`, `M` and `G`, `G` growing past a thousand (`1000G`).
+fn power_of_ten_bound(e: i32) -> String {
+    let ones = |n: i32| format!("1{}", "0".repeat(n.max(0) as usize));
+    match e {
+        e if e < 0 => format!("0.{}1", "0".repeat((-e - 1) as usize)),
+        0..=2 => ones(e),
+        3..=5 => format!("{}K", ones(e - 3)),
+        6..=8 => format!("{}M", ones(e - 6)),
+        e => format!("{}G", ones(e - 9)),
+    }
+}
+
+/// A threshold as a label writes it: the number's own spelling, `minus-` for a leading `-`.
+fn threshold(t: f64) -> String {
+    let spelled = spelled(t);
+    match spelled.strip_prefix('-') {
+        Some(magnitude) => format!("minus-{magnitude}"),
+        None => spelled,
+    }
 }
 
 /// The reader's half: one bare value with the same text.
@@ -120,6 +229,7 @@ mod tests {
 
     use super::*;
     use crate::core::domain::fact::KeyTypes;
+    use crate::core::domain::number::read_number;
     use crate::expr::domain::bind::{bind_expr, Bound, Test};
     use crate::expr::domain::read::read_filter;
 
@@ -168,9 +278,19 @@ mod tests {
             ("2024-06-15", r#""2024-06-15""#),
             ("0500", r#""0500""#),
             ("18:00", r#""18:00""#),
+            ("1e400", r#""1e400""#),
             ("2019:05:04 10:12:00", r#""2019:05:04 10:12:00""#),
         ];
-        let bare_text = ["DMC-FZ38", "IMG_0001.jpg", "AND"];
+        // A value that reads as no number, time or time of day prints bare, however it looks.
+        let bare_text = [
+            "DMC-FZ38",
+            "IMG_0001.jpg",
+            "AND",
+            "2024e",
+            "1.2.3",
+            "12:3",
+            "2024-06-15_beach.jpg",
+        ];
         for (value, printed) in quoted_text {
             assert_eq!(printed_value(value, FactType::Text), printed, "{value:?}");
         }
@@ -229,6 +349,71 @@ mod tests {
         }
     }
 
+    /// Plain `|bucket`'s labels, each bound spelled exactly: below 1 as a decimal, then digits,
+    /// then `K`, `M`, `G`, `G` growing past a thousand; and every label is read back as one.
+    #[test]
+    fn every_plain_bucket_label_spells_its_bounds_exactly() {
+        use crate::expr::domain::transform::bucket_range;
+        let label = |n: f64| bucket_label(&bucket_range(n, &[]).unwrap());
+        let tiny = format!("0.{}1-to-0.{}1", "0".repeat(299), "0".repeat(298));
+        for (n, expected) in [
+            (0.0, "0"),
+            (0.00005, "0.00001-to-0.0001"),
+            (0.5, "0.1-to-1"),
+            (1.0, "1-to-10"),
+            (1000.0, "1K-to-10K"),
+            (2e8, "100M-to-1G"),
+            (5e12, "1000G-to-10000G"),
+            (1e-300, tiny.as_str()),
+        ] {
+            assert_eq!(label(n), expected, "{n}");
+            assert!(is_plain_bucket_label(expected), "{expected}");
+        }
+        for not_a_label in [
+            "1-10",
+            "1K-10K",
+            "0-0",
+            "2-to-20",
+            "1-to-100",
+            "-10-to-100",
+            "0.0-to-0.1",
+            "01-to-10",
+            "1K-to-10M",
+            "minus-1-to-0",
+            "",
+        ] {
+            assert!(!is_plain_bucket_label(not_a_label), "{not_a_label}");
+        }
+    }
+
+    /// Thresholds read `under-`, `-to-` and `-and-up`, a number below zero written `minus-`, so
+    /// no label starts with `-`.
+    #[test]
+    fn threshold_labels_say_under_to_and_up() {
+        assert_eq!(
+            threshold_bucket_labels(&[-90.0, 0.0, 90.0]),
+            ["under-minus-90", "minus-90-to-0", "0-to-90", "90-and-up"]
+        );
+        assert_eq!(
+            threshold_bucket_labels(&[10.0, 100.0]),
+            ["under-10", "10-to-100", "100-and-up"]
+        );
+        assert_eq!(
+            threshold_bucket_labels(&[0.5, 1e6]),
+            ["under-0.5", "0.5-to-1000000", "1000000-and-up"]
+        );
+        for label in threshold_bucket_labels(&[-90.0, -0.5, 0.0, 90.0]) {
+            assert_eq!(printed_word(&label), label, "{label} prints bare");
+            assert!(
+                label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'),
+                "{label}"
+            );
+            assert!(!label.starts_with('-'), "{label}");
+        }
+    }
+
     /// Whether the reader itself — the filter reader and the binder — reads `text` as
     /// written, against a text key: the oracle the writer must agree with.
     fn reader_reads_bare(text: &str) -> bool {
@@ -277,50 +462,98 @@ mod tests {
         }
     }
 
-    /// The statement and the way out, word for word, for one key (named) and for several
-    /// (counted); a key the language reads only quoted prints quoted, and its command is
-    /// quoted again for the shell, so it runs as pasted.
+    /// The statement and the way out, word for word, for one key (named, with its types) and
+    /// for several (counted, then each named with its types); a key the language reads only
+    /// quoted prints quoted, and its command is quoted for the shell alone.
     #[test]
-    fn the_two_type_statement_reads_as_decided() {
-        let one = ["content.CreateDate"];
+    fn the_mixed_type_statement_reads_as_decided() {
+        use FactType::{Num, Text, Time};
+        let create_date = KeyTypes::from_counts([(Text, 1), (Time, 9)]).unwrap();
+        let file_size = KeyTypes::from_counts([(Text, 2), (Num, 5)]).unwrap();
+        let one = [("content.CreateDate", &create_date)];
         assert_eq!(
             mixed_type_statement(&one),
-            [
-                "content.CreateDate is of mixed type, so filters and patterns cannot use its values:",
-                "only values of one type can be compared or formatted correctly.",
-            ]
+            ["content.CreateDate is of mixed type (time and text); filters and patterns support \
+              one type only."]
         );
         assert_eq!(
             mixed_type_way_out(&one),
             [
-                "To inspect it and learn how to convert it to one type:",
+                "To see its values and convert it to one type:",
                 "  `canon facts convert content.CreateDate`",
             ]
         );
 
-        let two = ["content.CreateDate", "content.File Size"];
+        let two = [
+            ("content.CreateDate", &create_date),
+            ("content.File Size", &file_size),
+        ];
         assert_eq!(
             mixed_type_statement(&two),
             [
-                "2 keys are of mixed type, so filters and patterns cannot use their values:",
-                "only values of one type can be compared or formatted correctly.",
+                "2 keys are of mixed type; filters and patterns support one type only:",
+                "  content.CreateDate (time and text)",
+                r#"  "content.File Size" (number and text)"#,
             ]
         );
         assert_eq!(
             mixed_type_way_out(&two),
             [
-                "To inspect each and learn how to convert to one type:",
+                "To see their values and convert each to one type:",
                 "  `canon facts convert content.CreateDate`",
-                r#"  `canon facts convert '"content.File Size"'`"#,
+                "  `canon facts convert 'content.File Size'`",
             ]
         );
 
         assert_eq!(
-            mixed_type_statement(&["content.File Size"])[0],
-            r#""content.File Size" is of mixed type, so filters and patterns cannot use its values:"#
+            mixed_type_statement(&[("content.File Size", &file_size)])[0],
+            r#""content.File Size" is of mixed type (number and text); filters and patterns support one type only."#
         );
 
         assert!(mixed_type_statement(&[]).is_empty());
         assert!(mixed_type_way_out(&[]).is_empty());
+    }
+
+    /// The types are named in the type column's words, the most common first, a tie in the
+    /// column's own order; three or more read as a list.
+    #[test]
+    fn a_mixed_key_names_its_types_most_common_first() {
+        use FactType::{Num, Path, Text, Time};
+        for (counts, said) in [
+            (vec![(Text, 1), (Num, 5)], "number and text"),
+            (vec![(Text, 3), (Num, 3)], "text and number"),
+            (
+                vec![(Time, 1), (Text, 2), (Num, 3)],
+                "number, text and time",
+            ),
+            (
+                vec![(Path, 4), (Time, 1), (Text, 2), (Num, 3)],
+                "path, number, text and time",
+            ),
+        ] {
+            let types = KeyTypes::from_counts(counts).unwrap();
+            assert_eq!(mixed_types(&types), said);
+        }
+    }
+
+    /// The convert command names the full stored key and quotes it for the shell only: never
+    /// in the double quotes a filter reads, which the command would take as part of the name.
+    #[test]
+    fn the_convert_command_is_quoted_for_the_shell_only() {
+        for (key, command) in [
+            ("content.Model", "`canon facts convert content.Model`"),
+            (
+                "content.File Size",
+                "`canon facts convert 'content.File Size'`",
+            ),
+            (
+                "content.O'Brien",
+                r"`canon facts convert 'content.O'\''Brien'`",
+            ),
+            ("content.Make#2", "`canon facts convert 'content.Make#2'`"),
+        ] {
+            assert_eq!(convert_command(key), command, "{key}");
+            assert!(!convert_command(key).contains('"'), "{key}");
+        }
     }
 }

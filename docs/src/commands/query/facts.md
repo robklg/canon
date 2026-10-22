@@ -96,14 +96,15 @@ content.mime                     text      34692     100.0%
 ...
 ```
 
-Type is the key's type, determined from all of its facts: `text`, `number`, `time`, or `path`. Count and Coverage are for the sources in scope. A key whose facts hold more than one type lists as `mixed`, and each such key is listed under the table, with the command to convert it:
+Type is the key's type, determined from all of its facts: `text`, `number`, `time`, or `path`. Count and Coverage are for the sources in scope. A key whose facts hold more than one type lists as `mixed`, and each such key is listed under the table with its types, then the command to convert it, the key quoted for the shell where it needs quotes:
 
 ```
-2 keys are of mixed type, so filters and patterns cannot use their values:
-only values of one type can be compared or formatted correctly.
-To inspect each and learn how to convert to one type:
-  `canon facts convert content.CreateDate`
-  `canon facts convert '"content.File Size"'`
+2 keys are of mixed type; filters and patterns support one type only:
+  "content.File Size" (text and number)
+  content.Model (text and number)
+To see their values and convert each to one type:
+  `canon facts convert 'content.File Size'`
+  `canon facts convert content.Model`
 ```
 
 Example grouped output (`--by-root`):
@@ -147,12 +148,12 @@ DateTimeOriginal|month                        Count   Coverage
 
 `--group-by` takes one key or a list of keys separated by commas, with or without spaces around them. A comma inside `|bucket(…)` or inside a quoted name belongs to the key. `--group-by` can be given more than once. `--key` and `--group-by` take a key [alias](../../reference/filter.md#key-aliases), shown as typed; a filter alias is refused there.
 
-A key or modifier Canon cannot use as given is rejected before anything is counted, every cause in `--key`, `--group-by` and `--where` at once, in the [layout a filter's problems use](../../reference/filter.md#when-a-filter-is-rejected). Each names a rewritten key where one works (`source.size|lowercase` names `source.size|number|lowercase`), and otherwise the modifiers that do apply to the key's type:
+A key or modifier Canon cannot use as given is rejected before anything is counted, every cause in `--key`, `--group-by` and `--where` at once, in the [layout a filter's problems use](../../reference/filter.md#when-a-filter-is-rejected). A modifier the key's type cannot take names the modifiers that do apply:
 
 ```
 Error: cannot use the key as given
   source.size|year
-             ^ |year works on times or text; source.size holds numbers.
+             ^ |year works on times or text; source.size is of type number
     Modifiers for numbers: |bucket, |number
 ```
 
@@ -167,7 +168,7 @@ Error: cannot use the key as given
 
 Where the `--where` filter has a problem too, the first line is the filter's: `Error: cannot run the filter as given`.
 
-A modifier on a key whose facts hold two types is rejected the same way, without `Error:`, since that is an answer about the key; the bare key still reports both types' rows.
+A modifier on a key of mixed type is rejected the same way, without `Error:`, since that is an answer about the key ("a modifier supports one type only"); the bare key still reports every type's rows. A file with no extension has no value for `source.ext`, so `--key source.ext` counts it under `(no value)`.
 
 `--key source.mtime` groups save times by year in your local time. A save time at the edge of the years 0000–9999 or beyond has no value: it is counted under `(no value)` there, and left out of the `source.mtime` count in the overview ([Save times](../../concepts/facts.md#save-times)).
 

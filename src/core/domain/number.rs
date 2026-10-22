@@ -4,9 +4,14 @@
 //!
 //! **The grammar** is `-?digits(.digits)?([eE][+-]?digits)?` — ASCII digits, an optional
 //! leading minus, an optional fraction, an optional exponent — and nothing else: no `inf` or
-//! `nan`, no leading `+`, no hexadecimal, no `_` separators, no spaces. A number too large to
-//! hold (`1e400`) does not read either. The grammar is checked first; the standard library
-//! then reads the accepted text, so the value is the nearest `f64`, exactly as Rust reads it.
+//! `nan`, no leading `+`, no hexadecimal, no `_` separators, no spaces.
+//!
+//! **Form first, fit second.** Whether text is written as a number is the grammar's answer
+//! alone ([`number_form`]); whether Canon can hold it is asked after. [`read_number`] holds the
+//! nearest `f64`, exactly as Rust reads the accepted text, and refuses only a number too large
+//! to hold (`1e400`). [`NumberForm::exact`] asks more: that the number, held and spelled again,
+//! is the same decimal number as written — so `1e400`, `1e-400` and `1.0000000000000001` fail
+//! it alike, while `0.1`, `0.10` and `1e20` hold.
 //!
 //! **The spelling** is the shortest plain decimal that reads back as the same `f64`: never an
 //! exponent, never a trailing `.0`, and `-0` written `0`.
@@ -30,15 +35,89 @@ impl std::fmt::Display for NumberReadError {
 
 impl std::error::Error for NumberReadError {}
 
-/// Read text as a number through Canon's grammar (see the module doc).
+/// Read text as a number through Canon's grammar, as the nearest `f64` (see the module doc).
 pub fn read_number(text: &str) -> Result<f64, NumberReadError> {
-    if !in_grammar(text.as_bytes()) {
-        return Err(NumberReadError::NotANumber);
+    number_form(text)
+        .and_then(|form| form.nearest())
+        .ok_or(NumberReadError::NotANumber)
+}
+
+/// Text written as a number in Canon's grammar, before anything asks whether Canon can hold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumberForm<'a> {
+    text: &'a str,
+}
+
+/// A number written in the grammar that Canon cannot hold exactly as written: too large to
+/// hold, too small, or with more digits than a held number keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotExact;
+
+/// **The form**: whether `text` is written as a number, by the grammar alone.
+pub fn number_form(text: &str) -> Option<NumberForm<'_>> {
+    in_grammar(text.as_bytes()).then_some(NumberForm { text })
+}
+
+impl NumberForm<'_> {
+    /// The nearest `f64`, where it is finite.
+    fn nearest(&self) -> Option<f64> {
+        self.text.parse::<f64>().ok().filter(|n| n.is_finite())
     }
-    match text.parse::<f64>() {
-        Ok(n) if n.is_finite() => Ok(n),
-        _ => Err(NumberReadError::NotANumber),
+
+    /// **The fit**: the number, where Canon holds it exactly as written — held, then spelled
+    /// again ([`spelled`]), it is the same decimal number.
+    pub fn exact(&self) -> Result<f64, NotExact> {
+        match self.nearest() {
+            Some(n) if same_decimal(self.text, &spelled(n)) => Ok(n),
+            Some(_) | None => Err(NotExact),
+        }
     }
+}
+
+/// Whether two texts in the grammar are the same decimal number, whatever their spelling
+/// (`1e20` and `100000000000000000000`, `0.10` and `0.1`, `-0` and `0`).
+fn same_decimal(a: &str, b: &str) -> bool {
+    decimal(a) == decimal(b)
+}
+
+/// A number in the grammar as its sign, its significant digits and the power of ten of the
+/// last one; zero as no digits and no sign.
+fn decimal(text: &str) -> (bool, String, i128) {
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (mantissa, exponent) = match rest.find(['e', 'E']) {
+        Some(at) => (
+            rest.get(..at).unwrap_or_default(),
+            rest.get(at + 1..).unwrap_or_default(),
+        ),
+        None => (rest, ""),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let exponent: i128 = {
+        let (sign, digits) = match exponent.strip_prefix('-') {
+            Some(d) => (-1, d),
+            None => (1, exponent.strip_prefix('+').unwrap_or(exponent)),
+        };
+        // An exponent past what `i128` holds saturates; no `f64` reaches one, so the fit has
+        // already refused such a number before it is compared.
+        let magnitude = digits.bytes().fold(0i128, |acc, d| {
+            acc.saturating_mul(10).saturating_add(i128::from(d - b'0'))
+        });
+        sign * magnitude
+    };
+    let digits = format!("{whole}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    let trimmed = significant.trim_end_matches('0');
+    if trimmed.is_empty() {
+        return (false, String::new(), 0);
+    }
+    let trailing = (significant.len() - trimmed.len()) as i128;
+    let power = exponent
+        .saturating_sub(fraction.len() as i128)
+        .saturating_add(trailing);
+    (negative, trimmed.to_string(), power)
 }
 
 /// The one spelling of a number: the shortest plain decimal that reads back as the same
@@ -118,6 +197,56 @@ mod tests {
         }
     }
 
+    /// **Form first, fit second**: every spelling in the grammar has the form, whatever its
+    /// size; only one that holds as written has the fit.
+    #[test]
+    fn a_number_that_does_not_read_back_is_refused() {
+        for text in ["1e400", "1e-400", "1.0000000000000001", "-1e400"] {
+            let form = number_form(text).unwrap_or_else(|| panic!("{text}: no form"));
+            assert_eq!(form.exact(), Err(NotExact), "{text}");
+        }
+        for (text, n) in [
+            ("0.1", 0.1),
+            ("2.75", 2.75),
+            ("1e20", 1e20),
+            ("0.10", 0.1),
+            ("-0", 0.0),
+            ("007", 7.0),
+        ] {
+            assert_eq!(number_form(text).map(|f| f.exact()), Some(Ok(n)), "{text}");
+        }
+        assert!(number_form("3.14").is_some_and(|f| f.exact().is_ok()));
+        for text in ["big", "+5", "1e", ""] {
+            assert_eq!(number_form(text), None, "{text:?}");
+        }
+        // Import's reading is the nearest number: only a number too large to hold is refused.
+        assert_eq!(read_number("1e-400"), Ok(0.0));
+        assert_eq!(read_number("1.0000000000000001"), Ok(1.0));
+    }
+
+    #[test]
+    fn same_decimal_compares_values_not_spellings() {
+        for (a, b) in [
+            ("1e20", "100000000000000000000"),
+            ("0.10", "0.1"),
+            ("-0", "0"),
+            ("0.0e5", "0"),
+            ("1.5E+3", "1500"),
+            ("150e-1", "15"),
+            ("007.50", "7.5"),
+        ] {
+            assert!(same_decimal(a, b), "{a} {b}");
+        }
+        for (a, b) in [
+            ("1", "-1"),
+            ("1e-400", "0"),
+            ("1.0000000000000001", "1"),
+            ("15", "1.5"),
+        ] {
+            assert!(!same_decimal(a, b), "{a} {b}");
+        }
+    }
+
     #[test]
     fn a_number_is_spelled_as_the_shortest_plain_decimal() {
         let cases = [
@@ -156,6 +285,12 @@ mod tests {
             let text = spelled(n);
             let back = read_number(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
             assert_eq!(back.to_bits(), (n + 0.0).to_bits(), "{n} spelled {text}");
+            // And it is held exactly as spelled, so a printed number typed back is never refused.
+            assert_eq!(
+                number_form(&text).map(|f| f.exact()),
+                Some(Ok(back)),
+                "{text}"
+            );
         }
     }
 }

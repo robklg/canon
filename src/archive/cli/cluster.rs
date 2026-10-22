@@ -762,8 +762,8 @@ fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) 
     }
 }
 
-/// The statement naming the full-coverage keys that hold two types, and the way out — empty
-/// when there are none.
+/// The statement naming the full-coverage keys of mixed type, and the way out — empty when
+/// there are none.
 fn mixed_key_lines(plan: &ClusterGeneratePlan) -> Vec<String> {
     use crate::expr::{mixed_type_statement, mixed_type_way_out};
 
@@ -1442,10 +1442,11 @@ mod tests {
         plan
     }
 
-    /// Generate and refresh name a full-coverage key of mixed type through the two-type
-    /// statement and its way out — one key named, several counted, a key with a space quoted
-    /// so the command runs as printed — and say nothing when every key holds one type. No
-    /// remedy deletes facts, no type is called a minority, and no type word is printed.
+    /// Generate and refresh name a full-coverage key of mixed type through the mixed-type
+    /// statement and its way out — one key named with its types, several counted and each
+    /// named, a key with a space quoted for the shell so the command runs as printed — and say
+    /// nothing when every key holds one type. No remedy deletes facts and no type is called a
+    /// minority.
     #[test]
     fn cluster_generate_names_a_mixed_key_through_the_statement() {
         use FactType::{Num, Text};
@@ -1456,9 +1457,9 @@ mod tests {
         assert_eq!(
             mixed_key_lines(&one),
             [
-                "content.Width is of mixed type, so filters and patterns cannot use its values:",
-                "only values of one type can be compared or formatted correctly.",
-                "To inspect it and learn how to convert it to one type:",
+                "content.Width is of mixed type (number and text); filters and patterns support \
+                 one type only.",
+                "To see its values and convert it to one type:",
                 "  `canon facts convert content.Width`",
             ]
         );
@@ -1470,15 +1471,16 @@ mod tests {
         assert_eq!(
             mixed_key_lines(&two),
             [
-                "2 keys are of mixed type, so filters and patterns cannot use their values:",
-                "only values of one type can be compared or formatted correctly.",
-                "To inspect each and learn how to convert to one type:",
-                r#"  `canon facts convert '"content.File Size"'`"#,
+                "2 keys are of mixed type; filters and patterns support one type only:",
+                r#"  "content.File Size" (text and number)"#,
+                "  content.Width (number and text)",
+                "To see their values and convert each to one type:",
+                "  `canon facts convert 'content.File Size'`",
                 "  `canon facts convert content.Width`",
             ]
         );
         let all = mixed_key_lines(&two).join("\n");
-        for gone in ["facts delete", "minority", "num"] {
+        for gone in ["facts delete", "minority", "num "] {
             assert!(!all.contains(gone), "{gone:?} in {all}");
         }
 

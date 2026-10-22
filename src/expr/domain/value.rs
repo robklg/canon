@@ -26,9 +26,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::key::{BuiltinKey, Key, ParsedFactKey, SourceFact};
-use super::transform::{self, Modified};
+use super::transform::{self, extension, Modified};
 use crate::core::domain::fact::FactEntry;
 use crate::core::domain::fact::FactValue;
+use crate::core::domain::fact::{SourceFacts, Stored};
 use crate::core::domain::source::Source;
 use crate::core::domain::time::value::TimeValue;
 use crate::core::domain::time::zone::UserZone;
@@ -189,14 +190,7 @@ pub fn source_row_value(source: &SourceAttributes, key: &Key) -> Option<FactValu
 /// A source fact's value, read from what the scanner recorded.
 fn source_fact_value(source: &SourceAttributes, fact: SourceFact) -> Option<FactValue> {
     match fact {
-        SourceFact::Ext => {
-            let ext = std::path::Path::new(&source.rel_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_string)
-                .unwrap_or_default();
-            Some(FactValue::Text(ext))
-        }
+        SourceFact::Ext => extension(&source.rel_path).map(|ext| FactValue::Text(ext.to_string())),
         SourceFact::Size => Some(FactValue::Num(source.size as f64)),
         // A save time outside the years every zone reads in 0000–9999 has no value.
         SourceFact::Mtime => TimeValue::from_epoch_secs(source.mtime)
@@ -218,16 +212,10 @@ fn apply_transforms(
     key: &ParsedFactKey,
     zone: &UserZone,
 ) -> Result<Option<String>> {
-    // for_display: true since this is for facts output
     Ok(
-        match transform::apply_chain(
-            value,
-            key.accessor.as_ref(),
-            &key.modifiers,
-            &key.raw,
-            true,
-            zone,
-        )? {
+        match transform::apply_chain(value, key.accessor.as_ref(), &key.modifiers, &key.raw, zone)?
+            .value
+        {
             Modified::Value(v) => Some(transform::rendered(
                 key.modifiers.last().map(|call| call.modifier),
                 &v,
@@ -239,26 +227,35 @@ fn apply_transforms(
 }
 
 /// A source's value for a key: its content's fact, and its own only where the content has
-/// none. Every reader of a stored key's value per source asks this, so a filter, a report, a
-/// pattern and a worklist cannot see two different values for one source.
+/// none. A content row Canon cannot read is the content's fact all the same, so the source has
+/// no value and its own does not stand in. Every reader of a stored key's value per source asks
+/// this, so a filter, a report, a pattern and a worklist cannot see two different values for
+/// one source.
 ///
 /// Generic over what it holds: the filter's cache holds references, the fetch owned entries.
-pub fn source_value<T>(on_source: Option<T>, on_content: Option<T>) -> Option<T> {
-    on_content.or(on_source)
+pub fn source_value<T>(on_source: Option<T>, on_content: Option<Stored<T>>) -> Option<T> {
+    match on_content {
+        Some(content) => content.readable(),
+        None => on_source,
+    }
 }
 
 /// A source's one value for each stored key it holds, from all of its facts on the source and
 /// on its content, each picked by `source_value` — for a reader that already holds every fact
 /// of a source and needs no second fetch.
-pub fn source_values(facts: &[FactEntry]) -> HashMap<&str, &FactValue> {
-    let mut rows: HashMap<&str, (Option<&FactValue>, Option<&FactValue>)> = HashMap::new();
-    for fact in facts {
+pub fn source_values(facts: &SourceFacts) -> HashMap<&str, &FactValue> {
+    type Rows<'f> = (Option<&'f FactValue>, Option<Stored<&'f FactValue>>);
+    let mut rows: HashMap<&str, Rows> = HashMap::new();
+    for fact in &facts.entries {
         let pair = rows.entry(fact.key.as_str()).or_default();
         if fact.is_on_source() {
             pair.0 = Some(&fact.value);
         } else {
-            pair.1 = Some(&fact.value);
+            pair.1 = Some(Stored::Readable(&fact.value));
         }
+    }
+    for key in &facts.unreadable_on_content {
+        rows.entry(key.as_str()).or_default().1 = Some(Stored::Unreadable);
     }
     rows.into_iter()
         .filter_map(|(key, (on_source, on_content))| {
@@ -274,7 +271,8 @@ mod tests {
     use crate::core::domain::fact::FactValue;
 
     /// A source's facts in hand give one value per key, picked by the same rule: the
-    /// content's where both rows hold the key, the source's where only it does.
+    /// content's where both rows hold the key, the source's where only it does, and none where
+    /// the content's row cannot be read.
     #[test]
     fn a_sources_facts_in_hand_give_one_value_per_key() {
         let fact = |on: &str, key: &str, value: &str| FactEntry {
@@ -283,12 +281,16 @@ mod tests {
             entity_type: on.to_string(),
             entity_id: 1,
         };
-        let facts = [
-            fact("source", "content.Make", "Nikon"),
-            fact("object", "content.Make", "Canon"),
-            fact("source", "content.Lens", "50mm"),
-            fact("object", "content.Model", "R5"),
-        ];
+        let facts = SourceFacts {
+            entries: vec![
+                fact("source", "content.Make", "Nikon"),
+                fact("object", "content.Make", "Canon"),
+                fact("source", "content.Lens", "50mm"),
+                fact("object", "content.Model", "R5"),
+                fact("source", "content.Taken", "2024"),
+            ],
+            unreadable_on_content: vec!["content.Taken".to_string()],
+        };
         let text = |values: HashMap<&str, &FactValue>| {
             let mut out: Vec<(String, String)> = values
                 .into_iter()
@@ -315,16 +317,20 @@ mod tests {
         );
     }
 
-    /// Every combination of a fact on the source and a fact on its content.
+    /// Every combination of a fact on the source and a fact on its content, readable or not:
+    /// the content's row decides wherever there is one.
     #[test]
     fn a_source_reads_its_contents_fact_first() {
         let source = Some("source");
-        let content = Some("content");
+        let content = Some(Stored::Readable("content"));
+        let unreadable = Some(Stored::Unreadable);
         for (on_source, on_content, expected) in [
-            (source, content, content),
+            (source, content, Some("content")),
             (source, None, source),
-            (None, content, content),
+            (None, content, Some("content")),
             (None, None, None),
+            (source, unreadable, None),
+            (None, unreadable, None),
         ] {
             assert_eq!(
                 source_value(on_source, on_content),
@@ -479,13 +485,29 @@ mod tests {
         assert_eq!(result, Some("jpg".to_string()));
     }
 
+    /// A name with no extension — none at all, a leading dot alone, a trailing dot, no name —
+    /// has no value for the extension, by either of its names and through `|ext` of the name.
     #[test]
     fn resolve_source_ext_no_extension() {
         let mut source = make_source();
-        source.rel_path = "Makefile".to_string();
+        for rel in ["Makefile", "a/.bashrc", "trail.", ""] {
+            source.rel_path = rel.to_string();
+            for key in [
+                "source.ext",
+                "ext",
+                "filename|ext",
+                "source.rel_path[-1]|ext",
+            ] {
+                let key = ParsedFactKey::parse(key).unwrap();
+                let result =
+                    resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
+                assert_eq!(result, None, "{rel:?} {}", key.raw);
+            }
+        }
+        source.rel_path = "a/archive.tar.gz".to_string();
         let key = ParsedFactKey::parse("source.ext").unwrap();
         let result = resolve_fact_value(&source, &key, &HashMap::new(), &UserZone::utc()).unwrap();
-        assert_eq!(result, Some("".to_string()));
+        assert_eq!(result, Some("gz".to_string()));
     }
 
     #[test]

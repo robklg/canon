@@ -26,7 +26,7 @@ use super::transform::{
     apply_chain, parse_modifier, Modified, Modifier, ModifierCall, PathAccessor,
 };
 use crate::core::domain::fact::{FactType, FactValue};
-use crate::core::domain::number::read_number;
+use crate::core::domain::number::number_form;
 use crate::core::domain::time::zone::UserZone;
 
 // ============================================================================
@@ -539,14 +539,14 @@ impl ParsedFactKey {
     /// the report ran stops it as that answer, never as a modifier failing.
     pub fn report_value(&self, value: FactValue, zone: &UserZone) -> Result<Modified> {
         self.check_type(&value)?;
-        apply_chain(
+        Ok(apply_chain(
             value,
             self.accessor.as_ref(),
             &self.modifiers,
             &self.raw,
-            true,
             zone,
-        )
+        )?
+        .value)
     }
 
     /// Whether a stored value is what the key was read as ([`check_read_as`]): a key with an
@@ -659,7 +659,7 @@ fn builtin_name(key: BuiltinKey) -> &'static str {
 /// `None` for a `source.` name that is no source fact), the base key a value is read from, its
 /// accessor and its modifiers, each with its place. A key alias's key is typed as `@name`: its
 /// `input` and `input_name` are what was typed, its own name, accessor and modifiers sit in the
-/// alias's value, and `written` is its name as written there.
+/// alias's value, and `written` is how that value writes it.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::expr) struct InputKey {
     pub input: String,
@@ -670,7 +670,14 @@ pub(in crate::expr) struct InputKey {
     pub base: String,
     pub accessor: Option<(PathAccessor, Place)>,
     pub modifiers: Vec<(ModifierCall, Place)>,
-    pub written: Option<String>,
+    pub written: Option<Written>,
+}
+
+/// A key alias's key as its value writes it: the name, and the whole key from the name on.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::expr) struct Written {
+    pub name: String,
+    pub input: String,
 }
 
 impl InputKey {
@@ -679,8 +686,22 @@ impl InputKey {
     /// else, the name as typed.
     pub(in crate::expr) fn name_for(&self, place: Place) -> &str {
         match &self.written {
-            Some(written) if place.text != self.place.text => written,
+            Some(written) if place.text != self.place.text => &written.name,
             _ => &self.input_name,
+        }
+    }
+
+    /// **The key as typed up to a problem at `place`**, which a sentence names as its subject:
+    /// the key's text before the problem — inside a key alias's value, as the value writes it,
+    /// following [`InputKey::name_for`].
+    pub(in crate::expr) fn up_to(&self, place: Place) -> &str {
+        match &self.written {
+            Some(written) if place.text != self.place.text => cut(
+                &written.input,
+                0,
+                place.start.saturating_sub(self.name_place.start),
+            ),
+            _ => cut(&self.input, 0, place.start.saturating_sub(self.place.start)),
         }
     }
 
@@ -1045,22 +1066,29 @@ fn read_bucket_numbers(cursor: &mut Cursor) -> Option<Vec<f64>> {
             let at = cursor.at();
             cursor.problem(at, at + 1, sentence, Some(BUCKET_RULE), Fix::None);
         } else {
-            match read_number(item) {
-                Err(_) => cursor.problem(
+            match number_form(item).map(|form| form.exact()) {
+                None => cursor.problem(
                     item_start,
                     item_end,
                     format!("`{item}` is not a number"),
                     Some(BUCKET_RULE),
                     Fix::None,
                 ),
-                Ok(n) if numbers.last().is_some_and(|&last| n <= last) => cursor.problem(
+                Some(Err(_)) => cursor.problem(
+                    item_start,
+                    item_end,
+                    format!("`{item}` cannot be represented exactly"),
+                    None,
+                    Fix::None,
+                ),
+                Some(Ok(n)) if numbers.last().is_some_and(|&last| n <= last) => cursor.problem(
                     item_start,
                     item_end,
                     "each number of |bucket must be larger than the one before",
                     Some(BUCKET_RULE),
                     Fix::None,
                 ),
-                Ok(n) => numbers.push(n),
+                Some(Ok(n)) => numbers.push(n),
             }
         }
         first = false;

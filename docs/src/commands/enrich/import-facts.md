@@ -53,7 +53,7 @@ Wrap values in an object with `value` and `type`:
 |------|--------|-----------|
 | `datetime` | A string in a form Canon accepts as a time; a whole year from 1900 to 2100 as a JSON number | A time, in the form and at the precision it was written |
 | `duration` | `"1:23:45"`, `"5:30"`, or seconds as number | Seconds (number) |
-| *(none)* | Strings as text, numbers as numbers | As-is |
+| *(none)* | Strings as text, numbers and `true`/`false` as numbers | As-is; `true` as `1` and `false` as `0`, so a filter asks `Flag=1` |
 
 ### Common Pitfalls
 

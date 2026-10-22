@@ -8,7 +8,7 @@ Read from what the scanner records. The set is fixed; a source fact is never imp
 
 | Key | Type | Description |
 |------|------|-------------|
-| `source.ext` | text | File extension (no dot); `""` for a file with none |
+| `source.ext` | text | File extension (no dot); no value for a file with none (`README`, `.bashrc`, `trail.`) |
 | `source.size` | number | File size in bytes |
 | `source.mtime` | time | File modification time |
 | `source.path` | path | Full absolute path |

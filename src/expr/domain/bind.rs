@@ -6,10 +6,11 @@
 //!
 //! Three things are spoken here once. **The modifier table** ([`result_of`]): what each
 //! modifier accepts and gives, read by binding for every key a filter or a report names.
-//! **The bare-value classes** ([`bare_class`]): a bare value is number-shaped, time-shaped or
-//! a word, and against text only a word is text. **The refusal** ([`ExpressionRefused`]): every
+//! **The input types** ([`input_type`]): a typed value is a number, a time or a time of day
+//! where it reads as one, and text otherwise; against text, only text is text. **The refusal** ([`ExpressionRefused`]): every
 //! problem the reader met and every cause binding finds, each drawn under the typed line it
-//! sits in, its ways out rewriting only what they change, so following one binds.
+//! sits in: one sentence, the line that states the rule, and a fix only from the closed list,
+//! read back and bound before it is shown.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -18,22 +19,22 @@ use strum::IntoEnumIterator;
 
 use crate::core::domain::fact::{FactType, FactValue, KeyTypes};
 use crate::core::domain::format::format_count;
-use crate::core::domain::number::read_number;
-use crate::core::domain::time::reading::{read_time, read_time_of_day, EXAMPLE_FORMS};
+use crate::core::domain::number::number_form;
+use crate::core::domain::time::reading::{
+    read_time, read_time_of_day, TimeReadError, EXAMPLE_FORMS,
+};
 use crate::core::domain::time::value::{Precision, TimeValue};
 
 use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, StatusPredicate, UsedStatus};
 use super::glob::{needs_quotes_problem, Glob, InputGlob};
-use super::key::{InputKey, Key, CONTENT_HASH};
+use super::key::{InputKey, Key};
 use super::print::{
-    convert_command, mixed_type_way_out, printed_key, printed_value, printed_word, quoted,
+    is_plain_bucket_label, mixed_type_way_out, mixed_types, printed_key, printed_value,
+    printed_word, quoted, threshold_bucket_labels,
 };
-use super::problem::{caret_block, cut, Fix, Place, Problem};
+use super::problem::{cut, Fix, Place, Problem, TextOrPath};
 use super::read::{is_space, read_filter, read_keys, AliasMode, AliasUse, Grammar};
-use super::transform::{
-    is_magnitude_bucket_label, threshold_bucket_labels, Modifier, ModifierCall, ModifierCategory,
-    PathAccessor,
-};
+use super::transform::{Modifier, ModifierCall, ModifierCategory, PathAccessor};
 
 // ============================================================================
 // What a key gives, and what a typed value reads as
@@ -299,9 +300,9 @@ fn types_of(base: &str, types: &HashMap<String, KeyTypes>) -> Option<KeyTypes> {
 /// read as the type its key gives. Every cause is collected; where there is one, the
 /// returned tree is not to be run.
 ///
-/// Each cause's ways out are bound against the same key types, read with the same `aliases`,
-/// before the refusal is shown, and one that would be refused again is dropped
-/// ([`keep_ways_that_bind`]).
+/// Each cause's fix is bound against the same key types, read with the same `aliases`, before
+/// the refusal is shown, and one that would be refused again is dropped
+/// ([`keep_fix_that_binds`]).
 pub(in crate::expr) fn bind_expr(
     expr: &Expr,
     types: &HashMap<String, KeyTypes>,
@@ -320,27 +321,19 @@ pub(in crate::expr) fn bind_expr(
             })
     };
     for cause in &mut causes[before..] {
-        keep_ways_that_bind(cause, &binds);
+        keep_fix_that_binds(cause, &binds);
     }
     bound
 }
 
-/// **A way out makes what it rewrites bind**: drop every way out of `cause` that `binds`
-/// refuses — a filter's clause bound as a clause, a report's key as a key. A wrong modifier
-/// left with no way out names the modifiers that apply. It holds for a way out offered through
-/// [`Way::to`] at a door that calls this — today both doors that bind a key (`bind_expr`,
-/// `bind_report_key`). Both halves are discipline, not the type: a hint is free text, and a
-/// third caller of `bind_key` must call this too.
-pub(in crate::expr) fn keep_ways_that_bind(cause: &mut BindCause, binds: &dyn Fn(&str) -> bool) {
-    if let BindCause::WrongModifier { entry, fallback } = cause {
-        entry.keep_ways_that_bind(binds);
-        if entry.lines.is_empty() {
-            entry.lines.push(vec![Way::hint(std::mem::take(fallback))]);
-        }
-    } else if let BindCause::Read(problem) = cause {
+/// **A fix shown reads back and binds**: drop `cause`'s fix where `binds` refuses what it
+/// rewrites to — a filter's clause bound as a clause, a report's key as a key. Every fix is a
+/// [`Fix`], from the closed list, so no rewrite can be shown outside this check at a door that
+/// calls it — today both doors that bind a key (`bind_expr`, `bind_report_key`); a third
+/// caller of `bind_key` must call it too.
+pub(in crate::expr) fn keep_fix_that_binds(cause: &mut BindCause, binds: &dyn Fn(&str) -> bool) {
+    if let Some(problem) = cause.problem_mut() {
         problem.keep_fix_that_binds(binds);
-    } else if let Some(entry) = cause.entry_mut() {
-        entry.keep_ways_that_bind(binds);
     }
 }
 
@@ -371,7 +364,7 @@ pub(in crate::expr) fn keep_quoted_name_with_facts(
     }
 }
 
-/// Bind every clause of `expr`, collecting causes with their ways out as built.
+/// Bind every clause of `expr`, collecting causes with their fixes as built.
 fn bind_clauses(
     expr: &Expr,
     types: &HashMap<String, KeyTypes>,
@@ -483,8 +476,8 @@ fn operator_as_typed<'c>(clause: &'c str, key: &InputKey, value_start: usize) ->
 /// **A glob binds where the key's result is text or a path**, and holds nothing that needs
 /// quotes: each part that does is one problem, its caret under the part's first such character.
 /// For any other result the one cause is the type statement, the operator named as typed, with
-/// no way out — and a character that needs quotes is not reported, since quoting it would only
-/// meet the type refusal.
+/// no fix — and a character that needs quotes is not reported, since quoting it would only meet
+/// the type refusal.
 fn bind_glob(
     key: &InputKey,
     glob: &InputGlob,
@@ -508,11 +501,10 @@ fn bind_glob(
         | Gives::Part(_)
         | Gives::Bucket(_) => {
             let op = operator_as_typed(clause, key, glob.place.start).trim_matches(is_space);
-            Err(vec![BindCause::GlobNotText(Entry::new(
-                clause,
+            Err(vec![BindCause::GlobNotText(Problem::new(
                 glob.place,
                 format!("`{op}` works on text; {}", gives.statement(&key.input)),
-                Vec::new(),
+                None,
             ))])
         }
     }
@@ -528,21 +520,20 @@ pub(in crate::expr) enum Reads {
     Report,
 }
 
-/// What a key's chain gives, and whether a modifier gave it.
+/// What a key's chain gives.
 #[derive(Debug, Clone)]
 pub(in crate::expr) struct Chain {
     gives: Gives,
-    from_modifier: bool,
-    /// The full stored key, where a conversion pointer can be owed: a stored key read with no
-    /// accessor and no modifier. Whether it is owed is the pointer's own gate.
-    convertible: Option<String>,
+    /// Whether the key is a stored key read with no accessor and no modifier, whose stored type
+    /// a conversion could change ([`Conversion::WithStoredType`]).
+    convertible: bool,
 }
 
 /// Check a key: its type from all its facts, then its accessor and modifiers through the
-/// table. A key with no facts binds only for `?` (it has no value anywhere); a key of two
-/// types binds only for a bare `?`, which reads no value. A name with no reading in an
-/// expression — a `source.` name that is no source fact — names no key, and is refused
-/// wherever it stands.
+/// table. A key with no facts binds only where no value is compared (`?`, a report's key), its
+/// chain checked from any type ([`walk`]); a key of mixed type binds only for a bare `?`, which
+/// reads no value. A name with no reading in an expression — a `source.` name that is no source
+/// fact — names no key, and is refused wherever it stands.
 pub(in crate::expr) fn bind_key(
     key: &InputKey,
     clause: &str,
@@ -550,47 +541,42 @@ pub(in crate::expr) fn bind_key(
     types: &HashMap<String, KeyTypes>,
 ) -> Result<(BoundKey, Chain), BindCause> {
     let unknown = || {
-        BindCause::UnknownKey(Entry::new(
-            clause,
+        BindCause::UnknownKey(Problem::new(
             key.name_place,
             format!("`{}` is an unknown key", key.name_for(key.name_place)),
-            vec![UNKNOWN_KEY_RULE.to_string()],
+            Some(UNKNOWN_KEY_RULE.to_string()),
         ))
     };
     if Key::read(&key.base).is_none() {
         return Err(unknown());
     }
     let bare_existence = reads != Reads::Value && !key.has_transforms();
-    let unbound = |gives, read_as| {
+    let unbound = |read_as| {
         Ok((
             BoundKey::of(key, read_as),
             Chain {
-                gives,
-                from_modifier: false,
-                convertible: None,
+                gives: Gives::Text,
+                convertible: false,
             },
         ))
     };
     let Some(key_types) = types_of(&key.base, types) else {
         return match reads {
-            Reads::Existence | Reads::Report => unbound(
-                Gives::Text,
-                if key.has_transforms() {
-                    ReadAs::Absent
-                } else {
-                    ReadAs::Any
-                },
-            ),
+            Reads::Existence | Reads::Report if key.has_transforms() => {
+                let chain = walk(key, None)?;
+                Ok((BoundKey::of(key, ReadAs::Absent), chain))
+            }
+            Reads::Existence | Reads::Report => unbound(ReadAs::Any),
             Reads::Value => Err(unknown()),
         };
     };
     let Some(base_type) = key_types.single() else {
         if bare_existence {
-            return unbound(Gives::Text, ReadAs::Any);
+            return unbound(ReadAs::Any);
         }
-        return Err(mixed_type(key, clause, &key_types, reads));
+        return Err(mixed_type(key, clause, key_types, reads));
     };
-    let chain = walk(key, base_type, clause)?;
+    let chain = walk(key, Some(base_type))?;
     let read_as = if bare_existence {
         ReadAs::Any
     } else {
@@ -599,92 +585,91 @@ pub(in crate::expr) fn bind_key(
     Ok((BoundKey::of(key, read_as), chain))
 }
 
-/// The two-type answer: the key as typed, its types and their counts on every root.
-fn mixed_type(key: &InputKey, clause: &str, key_types: &KeyTypes, reads: Reads) -> BindCause {
+/// The mixed-type answer: the key as typed, its types and their counts on every root.
+fn mixed_type(key: &InputKey, clause: &str, key_types: KeyTypes, reads: Reads) -> BindCause {
     let reader = match reads {
-        Reads::Report => "a modifier works on one type only",
-        Reads::Existence | Reads::Value => "a filter compares one type only",
+        Reads::Report => "a modifier supports one type only",
+        Reads::Existence | Reads::Value => "a filter supports one type only",
     };
     let mut counts = key_types.counts().to_vec();
     counts.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-    let plural = |t: FactType| Gives::of(t).words();
-    let types = counts
-        .iter()
-        .map(|&(t, _)| plural(t))
-        .collect::<Vec<_>>()
-        .join(" and ");
     let counted = counts
         .iter()
         .map(|&(t, n)| {
             let facts = if n == 1 { "fact" } else { "facts" };
-            format!("{}: {} {facts}", plural(t), format_count(n))
+            format!("{}: {} {facts}", Gives::of(t).words(), format_count(n))
         })
         .collect::<Vec<_>>()
         .join("   ");
-    BindCause::MixedType {
-        entry: Entry::new(
-            clause,
-            key.place,
-            format!("{} holds {types}; {reader}.", key.name_for(key.place)),
-            vec![format!(
-                "{counted}   (every fact of the key, on every root)"
-            )],
+    BindCause::MixedType(Box::new(MixedType {
+        clause: clause.to_string(),
+        place: key.place,
+        sentence: format!(
+            "{} is of mixed type ({}); {reader}",
+            key.name_for(key.place),
+            mixed_types(&key_types)
         ),
+        counts: format!("{counted}   (every fact of the key, on every root)"),
         key: key.base.clone(),
-    }
+        types: key_types,
+    }))
 }
 
-/// Walk a key's accessor and modifiers through the table.
-fn walk(key: &InputKey, base_type: FactType, clause: &str) -> Result<Chain, BindCause> {
-    let mut gives = Gives::of(base_type);
-    let stored = known_type(&key.base).is_none();
+/// Walk a key's accessor and modifiers through the table, from its base type — or, for a key
+/// with no facts (`None`), from any type: its first step gives what it gives on whichever input
+/// takes it (an index text, a slice a path, a modifier its own result), the most permissive
+/// reading, so a chain is refused only where no key could pass a value through it.
+fn walk(key: &InputKey, base_type: Option<FactType>) -> Result<Chain, BindCause> {
+    let mut gives = base_type.map(Gives::of);
     if let Some((accessor, place)) = &key.accessor {
-        if !matches!(gives, Gives::Text | Gives::Path) {
-            let applicable = applicable_line(&gives, false);
-            return Err(BindCause::WrongModifier {
-                entry: Entry::new(
-                    clause,
-                    *place,
-                    format!(
-                        "an accessor ([…]) works on paths or text; {} holds {}.",
-                        key.name_for(*place),
-                        gives.words()
-                    ),
-                    vec![applicable.clone()],
+        if let Some(input) = gives
+            .as_ref()
+            .filter(|g| !matches!(g, Gives::Text | Gives::Path))
+        {
+            return Err(BindCause::WrongModifier(Problem::new(
+                *place,
+                format!(
+                    "an accessor `[…]` works on paths or text; {}",
+                    input.statement(key.up_to(*place))
                 ),
-                fallback: applicable,
-            });
+                Some(applicable_line(input, false)),
+            )));
         }
-        gives = match accessor {
+        gives = Some(match accessor {
             PathAccessor::Index(_) => Gives::Text,
             PathAccessor::Slice { .. } => Gives::Path,
-        };
+        });
     }
     let mut from_modifier = false;
-    let mut previous: Option<Modifier> = None;
     for (call, place) in &key.modifiers {
-        match result_of(&gives, from_modifier, call) {
-            Some(next) => {
-                gives = next;
+        let next = match &gives {
+            Some(input) => result_of(input, from_modifier, call),
+            None => [Gives::Text, Gives::Number]
+                .iter()
+                .find_map(|input| result_of(input, true, call)),
+        };
+        match (next, &gives) {
+            (Some(next), _) => {
+                gives = Some(next);
                 from_modifier = true;
-                previous = Some(call.modifier);
             }
-            None => {
+            (None, Some(input)) => {
                 return Err(wrong_modifier(
                     key,
-                    clause,
                     *place,
-                    &gives,
-                    previous,
+                    input,
+                    from_modifier,
                     call.modifier,
                 ))
             }
+            (None, None) => unreachable!("every modifier takes text or a number"),
         }
     }
     Ok(Chain {
-        gives,
-        from_modifier,
-        convertible: (stored && !key.has_transforms()).then(|| key.base.clone()),
+        gives: gives.unwrap_or(Gives::Text),
+        convertible: base_type.is_some()
+            && known_type(&key.base).is_none()
+            && !key.has_transforms(),
     })
 }
 
@@ -692,18 +677,17 @@ fn walk(key: &InputKey, base_type: FactType, clause: &str) -> Result<Chain, Bind
 /// apply. One exhaustive match, read by binding for filters and reports alike. A text
 /// modifier reads text, a path, a bucket's label, or any modifier's result in its printed
 /// form; never a stored number or time directly — the user says which printed form they mean
-/// (`|number`, `|datetime`).
+/// (`|number`, `|datetime`). A time modifier reads a time or text, never a bucket's range.
 pub(in crate::expr) fn result_of(
     input: &Gives,
     from_modifier: bool,
     call: &ModifierCall,
 ) -> Option<Gives> {
     // A time of day carries an hour, a minute and a second, and no date: what it is read on
-    // is a reference day, which no modifier may read back as a date.
-    let reads_as_time = matches!(
-        input,
-        Gives::Time | Gives::TimeAt(_) | Gives::Text | Gives::Bucket(_)
-    ) || (*input == Gives::TimeOfDay && call.modifier.reads_a_time_of_day());
+    // is a reference day, which no modifier may read back as a date. A bucket's range is never
+    // a time.
+    let reads_as_time = matches!(input, Gives::Time | Gives::TimeAt(_) | Gives::Text)
+        || (*input == Gives::TimeOfDay && call.modifier.reads_a_time_of_day());
     match call.modifier {
         Modifier::Year
         | Modifier::Month
@@ -725,12 +709,14 @@ pub(in crate::expr) fn result_of(
         .then_some(Gives::Number),
         Modifier::Bucket => matches!(input, Gives::Number | Gives::Part(_))
             .then(|| Gives::Bucket(call.args.clone())),
-        Modifier::Stem
-        | Modifier::Ext
-        | Modifier::Short
-        | Modifier::Lowercase
-        | Modifier::Uppercase
-        | Modifier::Capitalize => (input.is_text() || from_modifier).then_some(Gives::Text),
+        Modifier::Stem | Modifier::Ext | Modifier::Short => {
+            (input.is_text() || from_modifier).then_some(Gives::Text)
+        }
+        // A case modifier keeps a path a path.
+        Modifier::Lowercase | Modifier::Uppercase | Modifier::Capitalize => match input {
+            Gives::Path => Some(Gives::Path),
+            _ => (input.is_text() || from_modifier).then_some(Gives::Text),
+        },
     }
 }
 
@@ -746,71 +732,29 @@ fn reads_words(modifier: Modifier) -> &'static str {
     }
 }
 
+/// A modifier the chain's result cannot take: what the modifier works on, and the key as typed
+/// up to it; for a time modifier on a time of day, the date it has none of. The rule line names
+/// the modifiers that apply.
 fn wrong_modifier(
     key: &InputKey,
-    clause: &str,
     place: Place,
     gives: &Gives,
-    previous: Option<Modifier>,
+    from_modifier: bool,
     modifier: Modifier,
 ) -> BindCause {
     let name: &'static str = modifier.into();
-    let subject = match previous {
-        Some(p) => format!("|{} gives", <&'static str>::from(p)),
-        None => format!("{} holds", key.name_for(place)),
-    };
+    let subject = gives.statement(key.up_to(place));
     // A time of day is a time, so "works on times" would not say why: say what is missing.
-    let statement = if *gives == Gives::TimeOfDay && modifier.category() == ModifierCategory::Time {
-        format!("|{name} needs a date; {subject} a time of day, which has none.")
+    let sentence = if *gives == Gives::TimeOfDay && modifier.category() == ModifierCategory::Time {
+        format!("|{name} needs a date; {subject}, which has none")
     } else {
-        format!(
-            "|{name} works on {}; {subject} {}.",
-            reads_words(modifier),
-            gives.words()
-        )
+        format!("|{name} works on {}; {subject}", reads_words(modifier))
     };
-    let tail = key.input.get(key.input_name.len()..).unwrap_or_default();
-    let way = match (modifier.category(), gives, previous) {
-        // A text modifier directly on a stored number or time: say which printed form.
-        (ModifierCategory::String, Gives::Number | Gives::Time, None) => {
-            let reader = if *gives == Gives::Number {
-                "number"
-            } else {
-                "datetime"
-            };
-            let new_key = format!("{}|{reader}{tail}", key.input_name);
-            Way::to(
-                "To use its printed form as text",
-                rewrite_key(clause, key, &new_key),
-            )
-        }
-        // `|number` reads one segment of a path, never the whole path.
-        (ModifierCategory::Numeric, Gives::Path, _) if modifier == Modifier::Number => {
-            let after_accessor = match tail.strip_prefix('[') {
-                Some(rest) => rest.split_once(']').map_or("", |(_, r)| r),
-                None => tail,
-            };
-            let new_key = format!("{}[0]{after_accessor}", key.input_name);
-            Way::to(
-                "|number works on one segment of a path",
-                rewrite_key(clause, key, &new_key),
-            )
-        }
-        _ => Way::hint(applicable_line(gives, previous.is_some())),
-    };
-    BindCause::WrongModifier {
-        entry: Entry::with_lines(clause, place, statement, vec![vec![way]]),
-        fallback: applicable_line(gives, previous.is_some()),
-    }
-}
-
-/// The number `true` or `false` is stored as.
-fn stored_boolean(text: &str) -> Option<&'static str> {
-    match text {
-        "true" => Some("1"),
-        "false" => Some("0"),
-        _ => None,
-    }
+    BindCause::WrongModifier(Problem::new(
+        place,
+        sentence,
+        Some(applicable_line(gives, from_modifier)),
+    ))
 }
 
 /// The modifiers that apply to a result, read off the table itself.
@@ -855,91 +799,30 @@ fn applicable_line(gives: &Gives, from_modifier: bool) -> String {
 // Reading a typed value
 // ============================================================================
 
-/// The bare-value classes: what a bare value looks like, before anything reads it.
+/// **The input type** of a typed value: what it reads as, never how it looks.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::expr) enum BareClass {
-    /// Only digits, `+`, `-`, `.`, `e`, `E`, starting with a digit, `+`, `-` or `.` —
-    /// `2024-06` among them, which reads as a month: the class catches, the reading decides.
-    NumberShaped,
-    /// Begins with a date (`YYYY-MM-DD`, `YYYY:MM:DD`), is digit groups joined by `:`, or is
-    /// any spelling the one time reading reads.
-    TimeShaped,
-    /// Anything else.
-    Word,
+pub(in crate::expr) enum InputType {
+    /// Written as a number, whether or not Canon can hold it exactly (`1e400` included).
+    Number,
+    /// Read by the one time reading: `2024`, `2024-06-15`, `2024-06-15T14:30+02:00`.
+    Time,
+    /// A time of day: `14:30`, `14:30:05`.
+    TimeOfDay,
+    /// Anything else, however it looks (`2024e`, `12:3`, `2024-06-15_beach.jpg`).
+    Text,
 }
 
-/// **The bare-value class** of a value typed bare.
-pub(in crate::expr) fn bare_class(text: &str) -> BareClass {
-    let b = text.as_bytes();
-    let digits = |r: std::ops::Range<usize>| {
-        b.get(r)
-            .is_some_and(|s| !s.is_empty() && s.iter().all(u8::is_ascii_digit))
-    };
-    let begins_with_date = digits(0..4)
-        && digits(5..7)
-        && digits(8..10)
-        && matches!(
-            (b.get(4), b.get(7)),
-            (Some(b'-'), Some(b'-')) | (Some(b':'), Some(b':'))
-        );
-    let colon_groups = text.contains(':')
-        && text
-            .split(':')
-            .all(|g| !g.is_empty() && g.bytes().all(|c| c.is_ascii_digit()));
-    let number_chars = b
-        .iter()
-        .all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E'));
-    let starts = b
-        .first()
-        .is_some_and(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.'));
-    if number_chars && starts {
-        BareClass::NumberShaped
-    } else if begins_with_date || colon_groups || read_time(text).is_ok() {
-        BareClass::TimeShaped
+/// **The input type** of `text`: a number by its written form, else a time, else a time of
+/// day, else text.
+pub(in crate::expr) fn input_type(text: &str) -> InputType {
+    if number_form(text).is_some() {
+        InputType::Number
+    } else if read_time(text).is_ok() {
+        InputType::Time
+    } else if read_time_of_day(text).is_ok() {
+        InputType::TimeOfDay
     } else {
-        BareClass::Word
-    }
-}
-
-/// What a shaped value reads as: a number, a time, a time of day — any that apply.
-struct Readings {
-    number: Option<f64>,
-    time: Option<TimeValue>,
-    time_of_day: bool,
-}
-
-impl Readings {
-    fn of(text: &str) -> Readings {
-        Readings {
-            number: read_number(text).ok(),
-            time: read_time(text).ok(),
-            time_of_day: read_time_of_day(text).is_ok(),
-        }
-    }
-
-    /// Four digits: a number, and a year.
-    fn is_year_number(&self) -> bool {
-        self.number.is_some() && self.time.is_some_and(|t| t.precision() == Precision::Year)
-    }
-
-    fn any(&self) -> bool {
-        self.number.is_some() || self.time.is_some() || self.time_of_day
-    }
-
-    fn what(&self) -> &'static str {
-        if self.is_year_number() {
-            return "a number or a year";
-        }
-        if self.number.is_some() {
-            return "a number";
-        }
-        match self.time.map(|t| t.precision()) {
-            Some(Precision::Year) => "a year",
-            Some(Precision::Month) => "a month",
-            Some(Precision::Day) => "a date",
-            Some(_) => "a date and time",
-            None => "a time of day",
-        }
+        InputType::Text
     }
 }
 
@@ -948,7 +831,7 @@ struct Site<'a> {
     key: &'a InputKey,
     clause: &'a str,
     chain: &'a Chain,
-    /// The values of an `IN` list, for a way out that rewrites one of them.
+    /// The values of an `IN` list, for a fix that rewrites the list.
     list: Option<&'a [InputValue]>,
 }
 
@@ -961,21 +844,22 @@ impl Site<'_> {
             }
         }
         match &self.chain.gives {
-            Gives::Text | Gives::Path => self.read_text(value),
+            Gives::Text | Gives::Path => self.read_text(op, value),
             Gives::Number => self.read_number(value),
             Gives::Time | Gives::TimeAt(_) | Gives::TimeOfDay => self.read_time(value),
-            Gives::Part(m) => self.read_part(*m, value),
+            Gives::Part(m) => self.read_part(*m, op, value),
             Gives::Bucket(args) => self.read_bucket(args, op, value),
         }
     }
 
-    /// An entry about `value`, its caret under the value.
-    fn entry(&self, value: &InputValue, statement: String, hints: Vec<String>) -> Entry {
-        Entry::new(self.clause, value.place, statement, hints)
+    /// **The type statement for this clause**, the key as typed: "filename is of type text".
+    fn statement(&self) -> String {
+        self.chain.gives.statement(&self.key.input)
     }
 
-    fn entry_with(&self, value: &InputValue, statement: String, lines: Vec<Vec<Way>>) -> Entry {
-        Entry::with_lines(self.clause, value.place, statement, lines)
+    /// A problem about `value`, its caret under the value, with no fix.
+    fn problem(&self, value: &InputValue, sentence: String, rule_line: Option<String>) -> Problem {
+        Problem::new(value.place, sentence, rule_line)
     }
 
     /// An unquoted value with a character that keeps it from standing bare, where the key gives
@@ -985,7 +869,7 @@ impl Site<'_> {
     /// the value quoted; in a list one fix for the clause, every item that needs quotes quoted,
     /// shown with the first; a wildcard after `=` or `!=` the glob and the exact text; a
     /// wildcard in a list, none. Whether it is shown is decided when it is read back
-    /// ([`keep_ways_that_bind`]).
+    /// ([`keep_fix_that_binds`]).
     fn needs_quotes(&self, value: &InputValue, needs: NeedsQuotes) -> BindCause {
         let (at, wildcard) = match needs {
             NeedsQuotes::Character(at) => (at, false),
@@ -1004,12 +888,13 @@ impl Site<'_> {
                 operator_as_typed(self.clause, self.key, value.place.start).trim_matches(is_space);
             format!("`{c}` is a wildcard, but `{op}` does not take wildcards")
         };
+        let quote = |v: &InputValue| self.needs_quoting(v);
         let fix = match (wildcard, self.list) {
             (false, None) => Fix::Quoted {
                 rewrite: self.with_value(value, &quoted_as_typed(&value.text)),
             },
-            (false, Some(values)) if self.first_to_quote(values, value) => Fix::Quoted {
-                rewrite: self.with_items_quoted(values),
+            (false, Some(values)) if first_of(values, value, quote) => Fix::Quoted {
+                rewrite: self.with_items_quoted(values, quote),
             },
             (true, None) => match self.as_glob(value) {
                 Some(glob) => Fix::GlobOrExact {
@@ -1032,23 +917,30 @@ impl Site<'_> {
         })
     }
 
-    /// Whether `value` is the first item of `values` that needs quotes, which carries the
-    /// list's one fix.
-    fn first_to_quote(&self, values: &[InputValue], value: &InputValue) -> bool {
-        values
-            .iter()
-            .find(|v| matches!(v.needs_quotes, Some(NeedsQuotes::Character(_))))
-            .is_some_and(|first| std::ptr::eq(first, value))
+    /// **Whether a list item needs quotes**, for either reason: a character that keeps it from
+    /// standing bare, or — for a key of type text or path — reading as a number, a time or a
+    /// time of day. A list's one quoting fix quotes every such item, so a list needing both
+    /// still gets a fix that binds.
+    fn needs_quoting(&self, v: &InputValue) -> bool {
+        let character = matches!(v.needs_quotes, Some(NeedsQuotes::Character(_)));
+        let another_type = matches!(self.chain.gives, Gives::Text | Gives::Path)
+            && !v.quoted
+            && input_type(&v.text) != InputType::Text;
+        character || another_type
     }
 
-    /// The clause as typed, with every list item that needs quotes quoted in its place, so
-    /// whatever else was typed in the list stays where it was.
-    fn with_items_quoted(&self, values: &[InputValue]) -> String {
+    /// The clause as typed, with every list item `quote` picks quoted in its place, so whatever
+    /// else was typed in the list stays where it was.
+    fn with_items_quoted(
+        &self,
+        values: &[InputValue],
+        quote: impl Fn(&InputValue) -> bool,
+    ) -> String {
         let start = self.key.place.start;
         let mut out = String::new();
         let mut from = 0;
         for v in values {
-            if matches!(v.needs_quotes, Some(NeedsQuotes::Character(_))) {
+            if quote(v) {
                 out.push_str(cut(self.clause, from, v.place.start - start));
                 out.push_str(&quoted_as_typed(&v.text));
                 from = v.place.end - start;
@@ -1070,209 +962,164 @@ impl Site<'_> {
         Some(format!("{}{glob}{}", self.key.input, value.input))
     }
 
-    /// The statement's subject: the key as typed, and whether it holds or gives.
-    fn subject(&self) -> String {
-        let verb = if self.key.has_transforms() {
-            "gives"
-        } else {
-            "holds"
+    /// A value for a key of type text or path: quoted, or reading as no number, time or time of
+    /// day, it is text. Otherwise it could mean that other type, and is refused naming both;
+    /// after `=`, `!=` or `IN` the fix quotes it for the key's type (in a list, the one fix of
+    /// `needs_quoting`, when this item is the first needing quotes), and a key of type text
+    /// carries the bottom line.
+    fn read_text(&self, op: CompareOp, value: &InputValue) -> Result<Test, BindCause> {
+        let reads_as = |v: &InputValue| (!v.quoted).then(|| input_type(&v.text));
+        let what = match reads_as(value) {
+            None | Some(InputType::Text) => return Ok(Test::Text(value.text.clone())),
+            Some(InputType::Number) => "a number",
+            Some(InputType::Time) => "a time",
+            Some(InputType::TimeOfDay) => "a time of day",
         };
-        format!("{} {verb} {}", self.key.input, self.chain.gives.words())
+        let quote = |v: &InputValue| self.needs_quoting(v);
+        let key_type = match self.chain.gives {
+            Gives::Path => TextOrPath::Path,
+            _ => TextOrPath::Text,
+        };
+        let fix = match self.list {
+            _ if op != CompareOp::Eq => Fix::None,
+            None => Fix::ForKeyType {
+                key_type,
+                rewrite: self.with_value(value, &quoted_as_typed(&value.text)),
+            },
+            Some(values) if first_of(values, value, quote) => Fix::ForKeyType {
+                key_type,
+                rewrite: self.with_items_quoted(values, quote),
+            },
+            Some(_) => Fix::None,
+        };
+        let conversion = match (key_type, self.chain.convertible) {
+            (TextOrPath::Path, _) => None,
+            (TextOrPath::Text, true) => Some(Conversion::WithStoredType),
+            (TextOrPath::Text, false) => Some(Conversion::InFilterOnly),
+        };
+        Err(BindCause::TypeMismatch {
+            problem: Problem {
+                fix,
+                ..self.problem(
+                    value,
+                    format!("{}, and `{}` is {what}", self.statement(), value.input),
+                    None,
+                )
+            },
+            conversion,
+        })
     }
 
-    fn read_text(&self, value: &InputValue) -> Result<Test, BindCause> {
-        if value.quoted || bare_class(&value.text) == BareClass::Word {
-            return Ok(Test::Text(value.text.clone()));
-        }
-        let readings = Readings::of(&value.text);
-        let as_text = Way::to("As text", self.with_shaped_values_quoted(value));
-        if !readings.any() {
-            return Err(BindCause::Unreadable(self.entry_with(
+    /// A number as written, held exactly or refused: what is not written as a number is not
+    /// one, and what is written as one but cannot be held as written cannot be represented.
+    fn read_number(&self, value: &InputValue) -> Result<Test, BindCause> {
+        let Some(form) = number_form(&value.text) else {
+            return Err(BindCause::Unreadable(self.problem(
+                value,
+                format!("{}; `{}` is not a number", self.statement(), value.input),
+                Some("Type a number: 1024, -5, 3.14, 1e20".to_string()),
+            )));
+        };
+        form.exact().map(Test::Number).map_err(|_| {
+            BindCause::Unreadable(self.problem(
                 value,
                 format!(
-                    "{}; {} looks like a number or a time but is neither.",
-                    self.subject(),
-                    value.text
+                    "{}; `{}` cannot be represented exactly",
+                    self.statement(),
+                    value.input
                 ),
-                vec![vec![as_text]],
-            )));
-        }
-        let mut ways = vec![as_text];
-        let all_read = |reads: &dyn Fn(&Readings) -> bool| {
-            self.list
-                .unwrap_or(std::slice::from_ref(value))
-                .iter()
-                .all(|v| reads(&Readings::of(&v.text)))
-        };
-        // A content hash holds hex text, never a number or a date: quoting is its one way out.
-        let hash = self.key.base == CONTENT_HASH;
-        // A way out rewrites the whole clause, so each is decided over every value of it, never
-        // the one being read: every cause of one clause offers the same ways out.
-        if !hash && all_read(&|r| r.number.is_some()) {
-            if let Some(key) = self.key_with(Modifier::Number) {
-                ways.push(Way::to("As numbers, if its values are numbers", key));
-            }
-        }
-        let date_modifier = if hash {
-            None
-        } else if all_read(&|r| r.is_year_number()) {
-            Some(Modifier::Year)
-        } else if all_read(&|r| r.time.is_some()) {
-            let finest = self
-                .list
-                .unwrap_or(std::slice::from_ref(value))
-                .iter()
-                .filter_map(|v| read_time(&v.text).ok())
-                .map(|t| t.precision())
-                .max()
-                .unwrap_or(Precision::Year);
-            Some(match finest {
-                Precision::Year => Modifier::Year,
-                Precision::Month => Modifier::YearMonth,
-                Precision::Day => Modifier::Date,
-                _ => Modifier::DateTime,
-            })
-        } else {
-            None
-        };
-        if let Some(modifier) = date_modifier.filter(|m| self.applies(*m)) {
-            // A date the user typed in another of Canon's spellings (`2024:07:23`) is shown in
-            // the one form Canon shows a time (`2024-07-23`); one with an offset stays as
-            // typed, since only the user's clock can print it.
-            let new_key = format!("{}|{}", self.key.input, <&'static str>::from(modifier));
-            let clause = self.with_key_and_values(&new_key, value, value_as_asked);
-            ways.push(Way::to("As dates, if its values are dates", clause));
-        }
-        let mut lines = vec![ways];
-        lines.extend(self.pointer(value).map(|p| vec![Way::hint(p)]));
-        Err(BindCause::TypeMismatch(self.entry_with(
-            value,
-            format!("{}; {} is {}.", self.subject(), value.text, readings.what()),
-            lines,
-        )))
-    }
-
-    fn read_number(&self, value: &InputValue) -> Result<Test, BindCause> {
-        if let Ok(n) = read_number(&value.text) {
-            return Ok(Test::Number(n));
-        }
-        let mut lines = vec![vec![Way::hint("Type a number: 1024, -5, 3.14, 1e20")]];
-        if let Some(n) = stored_boolean(&value.text) {
-            // Every `true` and `false` of the clause becomes its number, so the way out
-            // rewrites the whole clause, as every way out does.
-            lines.push(vec![Way::to(
-                format!(
-                    "{} is stored as {n}",
-                    printed_value(&value.text, FactType::Num)
-                ),
-                self.with_booleans_as_numbers(value),
-            )]);
-        }
-        Err(BindCause::Unreadable(self.entry_with(
-            value,
-            format!(
-                "{}; {} is not a number.",
-                self.subject(),
-                printed_value(&value.text, FactType::Num)
-            ),
-            lines,
-        )))
+                None,
+            ))
+        })
     }
 
     fn read_time(&self, value: &InputValue) -> Result<Test, BindCause> {
-        let printed = printed_value(&value.text, FactType::Time);
         if self.chain.gives == Gives::TimeOfDay {
             return read_time_of_day(&value.text)
                 .map(Test::TimeOfDay)
                 .map_err(|_| {
-                    BindCause::Unreadable(self.entry(
+                    BindCause::Unreadable(self.problem(
                         value,
-                        format!("{}; {printed} is not a time of day.", self.subject()),
-                        vec!["Type a time of day: 14:30, 14:30:05".to_string()],
+                        format!(
+                            "{}; `{}` is not a time of day",
+                            self.statement(),
+                            value.input
+                        ),
+                        Some("Type a time of day: 14:30, 14:30:05".to_string()),
                     ))
                 });
         }
-        match read_time(&value.text) {
-            Ok(tv) => match self.chain.gives {
-                Gives::TimeAt(grain) if tv.precision() > grain => Err(self.too_fine(grain, value)),
-                _ => Ok(Test::Period(tv)),
-            },
-            Err(error) => {
-                let reason = if read_number(&value.text).is_ok() {
-                    ": a year is four digits, and a number never means seconds since 1970"
-                        .to_string()
-                } else {
-                    match error {
-                        crate::core::domain::time::reading::TimeReadError::NotInList => {
-                            String::new()
-                        }
-                        other => format!(": {other}"),
+        let error = match read_time(&value.text) {
+            Ok(tv) => {
+                return match self.chain.gives {
+                    Gives::TimeAt(grain) if tv.precision() > grain => {
+                        Err(self.too_fine(grain, value))
                     }
-                };
-                let forms = EXAMPLE_FORMS
-                    .iter()
-                    .map(|f| printed_value(f, FactType::Time))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut lines = vec![vec![Way::hint(format!(
-                    "Type a year, month, day, minute or second: {forms}"
-                ))]];
-                // `|time` rewrites the whole clause, so every value must be a time of day.
-                let all_times_of_day = self
-                    .list
-                    .unwrap_or(std::slice::from_ref(value))
-                    .iter()
-                    .all(|v| read_time_of_day(&v.text).is_ok());
-                if all_times_of_day && self.chain.gives == Gives::Time {
-                    if let Some(key) = self.key_with(Modifier::Time) {
-                        lines.push(vec![Way::to(
-                            "A time of day is compared through |time",
-                            key,
-                        )]);
-                    }
+                    _ => Ok(Test::Period(tv)),
                 }
-                Err(BindCause::Unreadable(self.entry_with(
-                    value,
-                    format!("{}; {printed} is not a time{reason}.", self.subject()),
-                    lines,
-                )))
             }
-        }
+            Err(error) => error,
+        };
+        let what = if read_time_of_day(&value.text).is_ok() {
+            "has no date".to_string()
+        } else if number_form(&value.text).is_some() {
+            "is not a time: a year is four digits, and a number never means seconds since 1970"
+                .to_string()
+        } else {
+            match error {
+                TimeReadError::NotInList => "is not a time".to_string(),
+                other => format!("is not a time: {other}"),
+            }
+        };
+        let forms = EXAMPLE_FORMS
+            .iter()
+            .map(|f| printed_value(f, FactType::Time))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(BindCause::Unreadable(self.problem(
+            value,
+            format!("{}; `{}` {what}", self.statement(), value.input),
+            Some(format!(
+                "Type a year, month, day, minute or second: {forms}"
+            )),
+        )))
     }
 
-    fn read_part(&self, modifier: Modifier, value: &InputValue) -> Result<Test, BindCause> {
+    /// A part's value: one of its words, or a whole number written as digits of any length (a
+    /// year four), read without overflow. Only `=`, `!=` and `IN` refuse a number outside the
+    /// part's range, which could never match; ordered, any whole number means something.
+    fn read_part(
+        &self,
+        modifier: Modifier,
+        op: CompareOp,
+        value: &InputValue,
+    ) -> Result<Test, BindCause> {
         let rule = part_rule(modifier);
         let text = value.text.as_str();
         if let Some(at) = rule.words.iter().position(|w| *w == text) {
             return Ok(Test::Part(at as i64 + 1));
         }
-        let digits =
-            !text.is_empty() && text.len() <= 9 && text.bytes().all(|b| b.is_ascii_digit());
+        let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
         let four = modifier != Modifier::Year || text.len() == 4;
         if digits && four {
-            let n: i64 = text.parse().unwrap_or(-1);
-            if (rule.low..=rule.high).contains(&n) {
+            // A number past what an `i64` holds is past every part's range, and orders above
+            // every value, so it stands as the largest.
+            let n = text.bytes().fold(0i64, |acc, d| {
+                acc.saturating_mul(10).saturating_add(i64::from(d - b'0'))
+            });
+            if op != CompareOp::Eq || (rule.low..=rule.high).contains(&n) {
                 return Ok(Test::Part(n));
             }
-            return Err(BindCause::OutOfRange(self.entry(
+            return Err(BindCause::OutOfRange(self.problem(
                 value,
-                format!(
-                    "|{} gives {}; {text} is outside it.",
-                    <&'static str>::from(modifier),
-                    rule.range
-                ),
-                Vec::new(),
+                format!("{}; `{}` is outside it", self.statement(), value.input),
+                None,
             )));
         }
-        Err(BindCause::Unreadable(self.entry(
+        Err(BindCause::Unreadable(self.problem(
             value,
-            format!(
-                "|{} gives {}; {} is not one.",
-                <&'static str>::from(modifier),
-                rule.range,
-                printed_value(text, FactType::Num)
-            ),
-            vec![format!("Type {}", rule.forms)],
+            format!("{}; `{}` is not one", self.statement(), value.input),
+            Some(format!("Type {}", rule.forms)),
         )))
     }
 
@@ -1283,244 +1130,74 @@ impl Site<'_> {
         value: &InputValue,
     ) -> Result<Test, BindCause> {
         if op != CompareOp::Eq {
-            let itself = self.key_without_last_modifier().map(|itself| {
-                format!("To order the values, compare {itself} itself with >, >=, < or <=")
-            });
-            return Err(BindCause::BucketOrdered(self.entry(
+            return Err(BindCause::BucketOrdered(self.problem(
                 value,
                 format!(
-                    "a bucket is compared with =, !=, IN or NOT IN; {} gives bucket ranges.",
-                    self.key.input
+                    "a bucket is compared with =, !=, IN or NOT IN; {}",
+                    self.statement()
                 ),
-                itself.into_iter().collect(),
+                None,
             )));
         }
         let text = value.text.as_str();
-        if args.is_empty() {
-            if is_magnitude_bucket_label(text) {
-                return Ok(Test::Bucket(text.to_string()));
-            }
-            return Err(BindCause::NotABucketLabel(self.entry(value,
-                format!(
-                    "{} is not a range |bucket gives.",
-                    printed_word(text)
-                ),
-                vec!["Its ranges are powers of ten, as facts prints them: 0, 1-10, 10-100, 1K-10K, 1M-10M".to_string()],
-            )));
-        }
-        let labels = threshold_bucket_labels(args);
-        if labels.iter().any(|l| l == text) {
+        let (is_a_range, ranges) = if args.is_empty() {
+            (
+                is_plain_bucket_label(text),
+                "Its ranges are powers of ten, as facts prints them: 0, 1-to-10, 10-to-100, \
+                 1K-to-10K, …"
+                    .to_string(),
+            )
+        } else {
+            let labels = threshold_bucket_labels(args);
+            let printed: Vec<String> = labels.iter().map(|l| printed_word(l)).collect();
+            (
+                labels.iter().any(|l| l == text),
+                format!("Its ranges: {}", printed.join(", ")),
+            )
+        };
+        if is_a_range {
             return Ok(Test::Bucket(text.to_string()));
         }
-        let printed: Vec<String> = labels.iter().map(|l| printed_word(l)).collect();
-        Err(BindCause::NotABucketLabel(self.entry(
+        Err(BindCause::NotABucketLabel(self.problem(
             value,
-            format!("{} is not one of the bucket's ranges.", printed_word(text)),
-            vec![format!("Its ranges: {}", printed.join(", "))],
+            format!("{}; `{}` is not one of them", self.statement(), value.input),
+            Some(ranges),
         )))
     }
 
     fn too_fine(&self, grain: Precision, value: &InputValue) -> BindCause {
-        // The rewrite replaces the modifier for the whole clause, so it is offered only where
-        // every value reads as a time; the finest decides which modifier holds them all.
-        let values = self.list.unwrap_or(std::slice::from_ref(value));
-        let all_times = values.iter().all(|v| read_time(&v.text).is_ok());
-        let typed = values
-            .iter()
-            .filter_map(|v| read_time(&v.text).ok())
-            .map(|t| t.precision())
-            .max();
-        let (modifier, how) = match (grain, typed) {
-            (Precision::Month, Some(Precision::Day)) => (Modifier::Date, "To compare by day"),
-            _ => (Modifier::DateTime, "To compare at the precision typed"),
-        };
-        let last: &'static str = self
-            .key
-            .modifiers
-            .last()
-            .map_or("", |(call, _)| call.modifier.into());
-        let lines = match self.key_replacing_last(modifier) {
-            Some(key) if all_times => {
-                let rewrite = self.with_key_and_values(&key, value, value_as_asked);
-                vec![vec![Way::to(how, rewrite)]]
-            }
-            Some(_) | None => Vec::new(),
-        };
-        BindCause::TooFine(self.entry_with(
+        BindCause::TooFine(self.problem(
             value,
             format!(
-                "|{last} gives {}; {} is finer than a {}.",
-                self.chain.gives.words(),
-                printed_value(&value.text, FactType::Time),
+                "{}; `{}` is finer than a {}",
+                self.statement(),
+                value.input,
                 grain.word()
             ),
-            lines,
+            None,
         ))
     }
 
-    /// The conversion pointer: only for a stored text key with no accessor and no modifier,
-    /// and only where one other type reads every value of the clause, so that after the
-    /// conversion the same clause binds. A number reads through the number reading, a time
-    /// through the list of spellings; a time of day alone reads as neither.
-    ///
-    /// Never for a number or time key: a value such a key cannot read points at the value,
-    /// never at the key. The conversion leads it nowhere — number to time and time to number
-    /// are refused, and as text a number- or time-shaped value is refused again, while a
-    /// clause that binds can match no value the key holds. Never for a path: the conversion
-    /// has no path type.
-    fn pointer(&self, value: &InputValue) -> Option<String> {
-        let values = self.list.unwrap_or(std::slice::from_ref(value));
-        let as_number = values.iter().all(|v| read_number(&v.text).is_ok());
-        let as_time = values.iter().all(|v| read_time(&v.text).is_ok());
-        let another_type_reads_them = match self.chain.gives {
-            Gives::Text => as_number || as_time,
-            Gives::Path => false,
-            Gives::Number | Gives::Time | Gives::TimeAt(_) | Gives::TimeOfDay => false,
-            Gives::Part(_) | Gives::Bucket(_) => false,
-        };
-        if !another_type_reads_them {
-            return None;
-        }
-        self.chain.convertible.as_ref().map(|full| {
-            format!(
-                "{} to see what it holds and change its type",
-                convert_command(full)
-            )
-        })
-    }
-
-    /// The clause with the key's chain extended by `modifier` — where the table lets it
-    /// apply, so the way out binds.
-    fn key_with(&self, modifier: Modifier) -> Option<String> {
-        self.applies(modifier).then(|| {
-            let new_key = format!("{}|{}", self.key.input, <&'static str>::from(modifier));
-            rewrite_key(self.clause, self.key, &new_key)
-        })
-    }
-
-    /// Whether the table lets `modifier` follow the key's chain.
-    fn applies(&self, modifier: Modifier) -> bool {
-        let call = ModifierCall {
-            modifier,
-            args: Vec::new(),
-        };
-        result_of(&self.chain.gives, self.chain.from_modifier, &call).is_some()
-    }
-
-    /// The clause with its key replaced by `new_key` and each value written by `value`.
-    fn with_key_and_values(
-        &self,
-        new_key: &str,
-        current: &InputValue,
-        value: impl Fn(&InputValue) -> String,
-    ) -> String {
-        let values_rewritten = match self.list {
-            Some(values) => self.with_items(values.iter().map(&value).collect()),
-            None => self.with_value(current, &value(current)),
-        };
-        rewrite_key(&values_rewritten, self.key, new_key)
-    }
-
-    /// The key with its last written modifier replaced by `modifier`.
-    fn key_replacing_last(&self, modifier: Modifier) -> Option<String> {
-        self.key_without_last_modifier()
-            .map(|key| format!("{key}|{}", <&'static str>::from(modifier)))
-    }
-
-    /// The key as typed, without its last modifier; `None` where that modifier sits inside an
-    /// alias, which a way out never rewrites.
-    fn key_without_last_modifier(&self) -> Option<String> {
-        if let Some((_, place)) = self.key.modifiers.last() {
-            if place.text != self.key.place.text {
-                return None;
-            }
-        }
-        let name_len = self.key.input_name.len();
-        let tail = self.key.input.get(name_len..).unwrap_or_default();
-        Some(match tail.rfind('|') {
-            Some(at) => format!(
-                "{}{}",
-                self.key.input_name,
-                tail.get(..at).unwrap_or_default()
-            ),
-            None => self.key.input.clone(),
-        })
-    }
-
-    /// The clause with every bare number- or time-shaped value quoted, so it reads as text —
-    /// in an `IN` list every such item, so the way out meets no second mismatch.
-    fn with_shaped_values_quoted(&self, value: &InputValue) -> String {
-        let as_text = |v: &InputValue| {
-            if v.quoted || bare_class(&v.text) == BareClass::Word {
-                v.input.clone()
-            } else {
-                printed_value(&v.text, FactType::Text)
-            }
-        };
-        match self.list {
-            Some(values) => self.with_items(values.iter().map(as_text).collect()),
-            None => self.with_value(value, &as_text(value)),
-        }
-    }
-
-    /// The clause with every `true` and `false` written as the number it is stored as, the
-    /// other values as typed.
-    fn with_booleans_as_numbers(&self, value: &InputValue) -> String {
-        let as_number = |v: &InputValue| {
-            stored_boolean(&v.text).map_or_else(|| v.input.clone(), str::to_string)
-        };
-        match self.list {
-            Some(values) => self.with_items(values.iter().map(as_number).collect()),
-            None => self.with_value(value, &as_number(value)),
-        }
-    }
-
-    /// An `IN` clause with its items replaced, the key and operator as typed.
-    fn with_items(&self, items: Vec<String>) -> String {
-        let after_key = self.clause.get(self.key.input.len()..).unwrap_or_default();
-        let head = after_key
-            .find('(')
-            .map_or(after_key, |at| after_key.get(..at).unwrap_or_default());
-        format!("{}{head}({})", self.key.input, items.join(", "))
-    }
-
-    /// The clause with one value replaced (in an `IN` list, that item), the rest as typed.
+    /// The clause, not a list, with its value replaced by `new`, the rest as typed.
     fn with_value(&self, value: &InputValue, new: &str) -> String {
-        match self.list {
-            Some(values) => self.with_items(
-                values
-                    .iter()
-                    .map(|v| {
-                        if std::ptr::eq(v, value) {
-                            new.to_string()
-                        } else {
-                            v.input.clone()
-                        }
-                    })
-                    .collect(),
-            ),
-            None => match self.clause.strip_suffix(value.input.as_str()) {
-                Some(prefix) => format!("{prefix}{new}"),
-                None => format!("{}={new}", self.key.input),
-            },
+        match self.clause.strip_suffix(value.input.as_str()) {
+            Some(prefix) => format!("{prefix}{new}"),
+            None => format!("{}={new}", self.key.input),
         }
     }
 }
 
-/// **How a way out reprints a typed date**: a date or time the user typed in another of
-/// Canon's spellings (`2024:07:23`) in the one form Canon shows a time, named back as asked (a
-/// typed fraction kept); `None` for text that is no time and for a time with an offset,
-/// which only the user's clock can print — each caller keeps those as it has them.
-fn as_asked(text: &str) -> Option<String> {
-    read_time(text)
-        .ok()
-        .and_then(|tv| tv.printed_clock_reading_as_asked())
-        .map(|printed| printed_value(&printed, FactType::Time))
-}
-
-/// A typed value as a way out writes it: reprinted by [`as_asked`], otherwise as typed.
-fn value_as_asked(value: &InputValue) -> String {
-    as_asked(&value.text).unwrap_or_else(|| value.input.clone())
+/// Whether `value` is the first item of `values` that `picks`, which carries the list's one
+/// fix.
+fn first_of(
+    values: &[InputValue],
+    value: &InputValue,
+    picks: impl Fn(&InputValue) -> bool,
+) -> bool {
+    values
+        .iter()
+        .find(|v| picks(v))
+        .is_some_and(|first| std::ptr::eq(first, value))
 }
 
 /// **A value quoted for a fix**: in `"…"`, or in `'…'` where the text holds a `"` and no `'`,
@@ -1531,14 +1208,6 @@ fn quoted_as_typed(text: &str) -> String {
     } else {
         quoted(text)
     }
-}
-
-/// The clause with its key replaced, the rest as typed.
-fn rewrite_key(clause: &str, key: &InputKey, new_key: &str) -> String {
-    format!(
-        "{new_key}{}",
-        clause.get(key.input.len()..).unwrap_or_default()
-    )
 }
 
 /// A number part's range and words.
@@ -1657,145 +1326,73 @@ fn part_rule(modifier: Modifier) -> PartRule {
 // The refusal
 // ============================================================================
 
-/// What sets two ways out apart on one line.
-const WAYS_APART: &str = "     ";
-
-/// One way out: what it does, and — where it rewrites — the clause or key it rewrites to.
-/// One value, so what is shown and what is checked cannot part.
-#[derive(Debug, Clone, PartialEq)]
-pub(in crate::expr) struct Way {
-    label: String,
-    rewrite: Option<String>,
-}
-
-impl Way {
-    /// A line that names no rewrite: the forms to type, the modifiers that apply.
-    fn hint(text: impl Into<String>) -> Way {
-        Way {
-            label: text.into(),
-            rewrite: None,
-        }
-    }
-
-    /// A rewrite, shown as `<label>: <rewrite>`.
-    fn to(label: impl Into<String>, rewrite: String) -> Way {
-        Way {
-            label: label.into(),
-            rewrite: Some(rewrite),
-        }
-    }
-
-    fn shown(&self) -> String {
-        match &self.rewrite {
-            Some(rewrite) => format!("{}: {rewrite}", self.label),
-            None => self.label.clone(),
-        }
-    }
-}
-
 /// The rule line under an unknown key.
 const UNKNOWN_KEY_RULE: &str = "`canon facts` lists the keys";
 
-/// One entry of a refusal: the clause as typed, where in it the entry points, what is wrong, and
-/// the lines under it — each line one or more ways, set apart by [`WAYS_APART`].
-#[derive(Debug, Clone, PartialEq)]
-pub(in crate::expr) struct Entry {
-    clause: String,
-    place: Place,
-    statement: String,
-    lines: Vec<Vec<Way>>,
+/// **The bottom line**: where the other reading of a value lives, for a refusal whose type
+/// mismatches meet a key of type text. It names no clause and rewrites nothing, so it prints
+/// once, at the bottom, in the strongest form any mismatch of the refusal holds — the forms
+/// ordered weakest first. A path key has none, and neither has a bucket, whose range is its own
+/// cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::expr) enum Conversion {
+    /// Any key of type text but a stored key read as it is stored: a modifier reads it.
+    InFilterOnly,
+    /// A stored key read with no accessor and no modifier: its stored type can change too.
+    WithStoredType,
 }
 
-impl Entry {
-    fn new(clause: &str, place: Place, statement: String, hints: Vec<String>) -> Entry {
-        Entry::with_lines(
-            clause,
-            place,
-            statement,
-            hints.into_iter().map(|h| vec![Way::hint(h)]).collect(),
-        )
-    }
-
-    fn with_lines(clause: &str, place: Place, statement: String, lines: Vec<Vec<Way>>) -> Entry {
-        Entry {
-            clause: clause.to_string(),
-            place,
-            statement,
-            lines,
+impl Conversion {
+    fn line(self) -> &'static str {
+        match self {
+            Conversion::InFilterOnly => {
+                "Type conversion: in the filter with a modifier such as |number or |year."
+            }
+            Conversion::WithStoredType => {
+                "Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`."
+            }
         }
     }
+}
 
-    /// Drop every way out whose rewrite `binds` refuses; a line left with no way goes.
-    fn keep_ways_that_bind(&mut self, binds: &dyn Fn(&str) -> bool) {
-        for line in &mut self.lines {
-            line.retain(|way| way.rewrite.as_deref().is_none_or(binds));
-        }
-        self.lines.retain(|line| !line.is_empty());
-    }
-
-    /// Leave out every way out that rewrites text; a line left with no way goes.
-    fn keep_ways_without_rewrite(&mut self) {
-        self.keep_ways_that_bind(&|_| false);
-    }
-
-    /// The clauses or keys this entry's ways out rewrite to, as shown.
-    #[cfg(test)]
-    pub(in crate::expr) fn rewrites(&self) -> Vec<String> {
-        self.lines
-            .iter()
-            .flatten()
-            .filter_map(|way| way.rewrite.clone())
-            .collect()
-    }
-
-    /// The entry's block in `text`, the typed text it points into: the typed line and the caret
-    /// line with the statement, then the lines under it, two spaces further in.
-    fn render(&self, text: &str, indent: &str, out: &mut Vec<String>) {
-        out.extend(caret_block(text, self.place.start, &self.statement, indent));
-        self.render_lines(indent, out);
-    }
-
-    /// The entry as its clause and statement on one line, with no typed line and no caret.
-    fn render_as_clause(&self, indent: &str, out: &mut Vec<String>) {
-        out.push(format!("{indent}{}: {}", self.clause, self.statement));
-        self.render_lines(indent, out);
-    }
-
-    fn render_lines(&self, indent: &str, out: &mut Vec<String>) {
-        out.extend(self.lines.iter().map(|line| {
-            let shown: Vec<String> = line.iter().map(Way::shown).collect();
-            format!("{indent}  {}", shown.join(WAYS_APART))
-        }));
-    }
+/// A key of mixed type, read by a clause: the clause as typed, where the key sits, the
+/// statement, the counts line, the full stored key and its types.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::expr) struct MixedType {
+    clause: String,
+    place: Place,
+    sentence: String,
+    counts: String,
+    key: String,
+    types: KeyTypes,
 }
 
 /// Why a filter or key cannot run. `Read` is a problem in what was typed; `UnknownName` a name
 /// given alone, outside any expression, that names no key; every other cause but the last two is
-/// a typed value or key Canon cannot read for its key; those two are answers about what a key
-/// is.
+/// a typed value or key Canon cannot read for its key, one [`Problem`] each; those two are
+/// answers about what a key is.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::expr) enum BindCause {
     Read(Problem),
     UnknownName(String),
-    UnknownKey(Entry),
-    Unreadable(Entry),
-    TypeMismatch(Entry),
-    OutOfRange(Entry),
-    /// A modifier or accessor the key's type cannot take; `fallback` names the ones that
-    /// apply, shown where the entry's own way out would be refused again.
-    WrongModifier {
-        entry: Entry,
-        fallback: String,
+    UnknownKey(Problem),
+    Unreadable(Problem),
+    /// A value that reads as another type for a key of type text or path, and the bottom line
+    /// it owes.
+    TypeMismatch {
+        problem: Problem,
+        conversion: Option<Conversion>,
     },
-    GlobNotText(Entry),
-    NotABucketLabel(Entry),
-    BucketOrdered(Entry),
-    TooFine(Entry),
-    /// A key holding two types, read by a clause; `key` is the full stored key.
-    MixedType {
-        entry: Entry,
-        key: String,
-    },
+    OutOfRange(Problem),
+    /// A modifier or accessor the key's chain cannot take.
+    WrongModifier(Problem),
+    GlobNotText(Problem),
+    NotABucketLabel(Problem),
+    BucketOrdered(Problem),
+    TooFine(Problem),
+    /// A key of mixed type, read by a clause.
+    MixedType(Box<MixedType>),
     /// A value of a type binding did not bind the key for, met while the filter ran.
     /// `had_no_facts`: the key had none when it was bound, so it gained its first.
     TypeChanged {
@@ -1809,14 +1406,14 @@ impl BindCause {
     /// read.
     pub(in crate::expr) fn is_answer(&self) -> bool {
         match self {
-            BindCause::MixedType { .. } | BindCause::TypeChanged { .. } => true,
+            BindCause::MixedType(_) | BindCause::TypeChanged { .. } => true,
             BindCause::Read(_)
             | BindCause::UnknownName(_)
             | BindCause::UnknownKey(_)
             | BindCause::Unreadable(_)
-            | BindCause::TypeMismatch(_)
+            | BindCause::TypeMismatch { .. }
             | BindCause::OutOfRange(_)
-            | BindCause::WrongModifier { .. }
+            | BindCause::WrongModifier(_)
             | BindCause::GlobNotText(_)
             | BindCause::NotABucketLabel(_)
             | BindCause::BucketOrdered(_)
@@ -1824,35 +1421,40 @@ impl BindCause {
         }
     }
 
-    fn entry(&self) -> Option<&Entry> {
+    /// The cause's problem, where it is one.
+    pub(in crate::expr) fn problem(&self) -> Option<&Problem> {
         match self {
-            BindCause::UnknownKey(entry)
-            | BindCause::Unreadable(entry)
-            | BindCause::TypeMismatch(entry)
-            | BindCause::OutOfRange(entry)
-            | BindCause::WrongModifier { entry, .. }
-            | BindCause::GlobNotText(entry)
-            | BindCause::NotABucketLabel(entry)
-            | BindCause::BucketOrdered(entry)
-            | BindCause::TooFine(entry)
-            | BindCause::MixedType { entry, .. } => Some(entry),
-            BindCause::Read(_) | BindCause::UnknownName(_) | BindCause::TypeChanged { .. } => None,
+            BindCause::Read(problem)
+            | BindCause::UnknownKey(problem)
+            | BindCause::Unreadable(problem)
+            | BindCause::TypeMismatch { problem, .. }
+            | BindCause::OutOfRange(problem)
+            | BindCause::WrongModifier(problem)
+            | BindCause::GlobNotText(problem)
+            | BindCause::NotABucketLabel(problem)
+            | BindCause::BucketOrdered(problem)
+            | BindCause::TooFine(problem) => Some(problem),
+            BindCause::UnknownName(_) | BindCause::MixedType(_) | BindCause::TypeChanged { .. } => {
+                None
+            }
         }
     }
 
-    fn entry_mut(&mut self) -> Option<&mut Entry> {
+    fn problem_mut(&mut self) -> Option<&mut Problem> {
         match self {
-            BindCause::UnknownKey(entry)
-            | BindCause::Unreadable(entry)
-            | BindCause::TypeMismatch(entry)
-            | BindCause::OutOfRange(entry)
-            | BindCause::WrongModifier { entry, .. }
-            | BindCause::GlobNotText(entry)
-            | BindCause::NotABucketLabel(entry)
-            | BindCause::BucketOrdered(entry)
-            | BindCause::TooFine(entry)
-            | BindCause::MixedType { entry, .. } => Some(entry),
-            BindCause::Read(_) | BindCause::UnknownName(_) | BindCause::TypeChanged { .. } => None,
+            BindCause::Read(problem)
+            | BindCause::UnknownKey(problem)
+            | BindCause::Unreadable(problem)
+            | BindCause::TypeMismatch { problem, .. }
+            | BindCause::OutOfRange(problem)
+            | BindCause::WrongModifier(problem)
+            | BindCause::GlobNotText(problem)
+            | BindCause::NotABucketLabel(problem)
+            | BindCause::BucketOrdered(problem)
+            | BindCause::TooFine(problem) => Some(problem),
+            BindCause::UnknownName(_) | BindCause::MixedType(_) | BindCause::TypeChanged { .. } => {
+                None
+            }
         }
     }
 
@@ -1860,61 +1462,35 @@ impl BindCause {
     /// changing while a run reads it point into no text.
     fn place(&self) -> Option<Place> {
         match self {
-            BindCause::Read(problem) => Some(problem.place),
-            _ => self.entry().map(|entry| entry.place),
+            BindCause::MixedType(mixed) => Some(mixed.place),
+            _ => self.problem().map(|problem| problem.place),
         }
     }
 
     /// **The cause drawn at an alias's use**, its place being inside the alias's value: the
     /// caret under the alias where it was typed (`name`), the sentence after "in alias
-    /// `name`: ", and nothing shown that rewrites text — a problem's fix and every way out
-    /// with a rewrite left out, the lines that rewrite nothing kept, and a wrong modifier left
-    /// with none naming the modifiers that apply. A key of two types is told as the alias
-    /// typed, its clause the alias's name.
+    /// `name`: ", and no fix, since a fix would rewrite the alias's text — the rule line and the
+    /// bottom line, which rewrite nothing, kept. A key of mixed type is told as the alias typed,
+    /// its clause the alias's name.
     fn at_use(&self, place: Place, name: &str) -> BindCause {
-        let inside = |sentence: &str| format!("in alias `{name}`: {sentence}");
         let mut drawn = self.clone();
-        match &mut drawn {
-            BindCause::Read(problem) => {
-                problem.place = place;
-                problem.sentence = inside(&problem.sentence);
-                problem.fix = Fix::None;
-            }
-            BindCause::MixedType { entry, .. } => {
-                entry.clause = name.to_string();
-                entry.place = place;
-            }
-            BindCause::WrongModifier { entry, fallback } => {
-                entry.place = place;
-                entry.statement = inside(&entry.statement);
-                entry.keep_ways_without_rewrite();
-                if entry.lines.is_empty() && !fallback.is_empty() {
-                    entry.lines.push(vec![Way::hint(fallback.clone())]);
-                }
-            }
-            BindCause::UnknownKey(entry)
-            | BindCause::Unreadable(entry)
-            | BindCause::TypeMismatch(entry)
-            | BindCause::OutOfRange(entry)
-            | BindCause::GlobNotText(entry)
-            | BindCause::NotABucketLabel(entry)
-            | BindCause::BucketOrdered(entry)
-            | BindCause::TooFine(entry) => {
-                entry.place = place;
-                entry.statement = inside(&entry.statement);
-                entry.keep_ways_without_rewrite();
-            }
-            BindCause::UnknownName(_) | BindCause::TypeChanged { .. } => {}
+        if let BindCause::MixedType(mixed) = &mut drawn {
+            mixed.clause = name.to_string();
+            mixed.place = place;
+        } else if let Some(problem) = drawn.problem_mut() {
+            problem.place = place;
+            problem.sentence = format!("in alias `{name}`: {}", problem.sentence);
+            problem.fix = Fix::None;
         }
         drawn
     }
 
     /// The cause as it stands in a refusal whose texts begin `by` texts further on.
     fn moved_by(mut self, by: usize) -> BindCause {
-        if let BindCause::Read(problem) = &mut self {
+        if let BindCause::MixedType(mixed) = &mut self {
+            mixed.place.text += by;
+        } else if let Some(problem) = self.problem_mut() {
             problem.place.text += by;
-        } else if let Some(entry) = self.entry_mut() {
-            entry.place.text += by;
         }
         self
     }
@@ -1922,29 +1498,34 @@ impl BindCause {
     fn render(&self, texts: &[String], indent: &str, out: &mut Vec<String>) {
         let text = |place: Place| texts.get(place.text).map_or("", String::as_str);
         match self {
-            BindCause::Read(problem) => out.extend(problem.render(text(problem.place), indent)),
+            BindCause::Read(problem)
+            | BindCause::UnknownKey(problem)
+            | BindCause::Unreadable(problem)
+            | BindCause::TypeMismatch { problem, .. }
+            | BindCause::OutOfRange(problem)
+            | BindCause::WrongModifier(problem)
+            | BindCause::GlobNotText(problem)
+            | BindCause::NotABucketLabel(problem)
+            | BindCause::BucketOrdered(problem)
+            | BindCause::TooFine(problem) => {
+                out.extend(problem.render(text(problem.place), indent))
+            }
             BindCause::UnknownName(name) => {
                 out.push(format!("{indent}`{name}` is an unknown key"));
                 out.push(format!("{indent}  {UNKNOWN_KEY_RULE}"));
             }
-            BindCause::UnknownKey(entry)
-            | BindCause::Unreadable(entry)
-            | BindCause::TypeMismatch(entry)
-            | BindCause::OutOfRange(entry)
-            | BindCause::WrongModifier { entry, .. }
-            | BindCause::GlobNotText(entry)
-            | BindCause::NotABucketLabel(entry)
-            | BindCause::BucketOrdered(entry)
-            | BindCause::TooFine(entry) => entry.render(text(entry.place), indent, out),
-            BindCause::MixedType { entry, .. } => entry.render_as_clause(indent, out),
+            BindCause::MixedType(mixed) => {
+                out.push(format!("{indent}{}: {}", mixed.clause, mixed.sentence));
+                out.push(format!("{indent}  {}", mixed.counts));
+            }
             BindCause::TypeChanged { key, had_no_facts } => out.push(if *had_no_facts {
                 format!(
-                    "{indent}{} gained facts while this ran; run it again.",
+                    "{indent}{} gained facts while this ran; run it again",
                     printed_key(key)
                 )
             } else {
                 format!(
-                    "{indent}{}'s type changed while this ran; run it again.",
+                    "{indent}{}'s type changed while this ran; run it again",
                     printed_key(key)
                 )
             }),
@@ -1965,7 +1546,7 @@ pub(in crate::expr) enum Refused {
 /// texts read, in the order given, and every cause. Pure data with one `Display`: with any
 /// input Canon cannot read, the first line naming what was refused, then each cause drawn under
 /// the typed line it sits in, in order of text and position (the caller prefixes `Error: `);
-/// with answers only, the answers as they stand. Keys of two types alone share one way-out
+/// with answers only, the answers as they stand. Keys of mixed type alone share one way-out
 /// block at the end; beside other causes, each key's way out sits under its own entry.
 #[derive(Debug, Clone)]
 pub struct ExpressionRefused {
@@ -2036,7 +1617,8 @@ impl ExpressionRefused {
     /// Every cause at `indent`, without the first line: in order of text and position, each
     /// drawn under the typed line it sits in — a cause inside an alias's value under the alias
     /// where it was typed ([`BindCause::at_use`]), in order of the use and then of its place
-    /// in the value. A key of two types is told once per clause.
+    /// in the value. A key of mixed type is told once per clause; the bottom line
+    /// ([`Conversion`]) last, once.
     pub fn render(&self, indent: &str) -> Vec<String> {
         let mut causes: Vec<((usize, usize, usize), BindCause)> = self
             .causes
@@ -2059,36 +1641,41 @@ impl ExpressionRefused {
             .iter()
             .map(|(_, cause)| cause)
             .filter(|cause| {
-                let BindCause::MixedType { entry, .. } = cause else {
+                let BindCause::MixedType(mixed) = cause else {
                     return true;
                 };
-                let clause = (entry.clause.as_str(), entry.statement.as_str());
-                let new = !told.contains(&clause);
-                told.push(clause);
+                let told_as = (mixed.clause.as_str(), mixed.sentence.as_str());
+                let new = !told.contains(&told_as);
+                told.push(told_as);
                 new
             })
             .collect();
-        // Keys of two types alone share one way-out block at the end; beside any other cause,
+        // Keys of mixed type alone share one way-out block at the end; beside any other cause,
         // each one's way out sits under its own entry, so none reads as the entry's above it.
-        let only_two_types = causes
+        let only_mixed = causes
             .iter()
-            .all(|cause| matches!(cause, BindCause::MixedType { .. }));
+            .all(|cause| matches!(cause, BindCause::MixedType(_)));
         let mut lines = Vec::new();
-        let mut keys: Vec<&str> = Vec::new();
+        let mut keys: Vec<(&str, &KeyTypes)> = Vec::new();
+        let mut conversion: Option<Conversion> = None;
         for cause in causes {
             cause.render(&self.texts, indent, &mut lines);
-            if let BindCause::MixedType { key, .. } = cause {
-                if only_two_types {
-                    if !keys.contains(&key.as_str()) {
-                        keys.push(key);
+            match cause {
+                BindCause::MixedType(mixed) if only_mixed => {
+                    if !keys.iter().any(|(k, _)| *k == mixed.key) {
+                        keys.push((&mixed.key, &mixed.types));
                     }
-                } else {
-                    lines.extend(
-                        mixed_type_way_out(&[key])
-                            .into_iter()
-                            .map(|l| format!("{indent}  {l}")),
-                    );
                 }
+                BindCause::MixedType(mixed) => lines.extend(
+                    mixed_type_way_out(&[(&mixed.key, &mixed.types)])
+                        .into_iter()
+                        .map(|l| format!("{indent}  {l}")),
+                ),
+                BindCause::TypeMismatch {
+                    conversion: Some(c),
+                    ..
+                } => conversion = conversion.max(Some(*c)),
+                _ => {}
             }
         }
         lines.extend(
@@ -2096,6 +1683,7 @@ impl ExpressionRefused {
                 .into_iter()
                 .map(|l| format!("{indent}{l}")),
         );
+        lines.extend(conversion.map(|c| format!("{indent}{}", c.line())));
         lines
     }
 
@@ -2142,6 +1730,7 @@ mod tests {
             ("content.Title".to_string(), one(FactType::Text)),
             ("content.SourceFile".to_string(), one(FactType::Text)),
             ("content.FNumber".to_string(), one(FactType::Num)),
+            ("content.Rating".to_string(), one(FactType::Num)),
             (
                 "content.File Size".to_string(),
                 KeyTypes::from_counts([(FactType::Num, 41_220), (FactType::Text, 380)]).unwrap(),
@@ -2170,19 +1759,6 @@ mod tests {
         }
     }
 
-    /// One filter as the reader reads it, which must read with no problem.
-    fn read(text: &str) -> Expr {
-        let reading = read_filter(text, 0, AliasMode::NotLoaded);
-        assert!(
-            reading.problems.is_empty(),
-            "{text}: {:?}",
-            reading.problems
-        );
-        reading
-            .value
-            .unwrap_or_else(|| panic!("{text}: nothing read"))
-    }
-
     fn causes(text: &str) -> Vec<BindCause> {
         bind(text).err().unwrap_or_else(|| panic!("{text} bound"))
     }
@@ -2205,49 +1781,54 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // The bare-value classes
+    // The input types
     // ------------------------------------------------------------------
 
+    /// A value's input type is what it reads as: a number by its written form, whether or not
+    /// Canon can hold it; a time; a time of day; and text however it looks.
     #[test]
-    fn a_bare_value_is_number_shaped_time_shaped_or_a_word() {
-        use BareClass::*;
+    fn a_value_that_reads_as_nothing_else_is_text() {
+        use InputType::*;
         let cases = [
-            ("1024", NumberShaped),
-            ("-5", NumberShaped),
-            ("3.14", NumberShaped),
-            ("1e20", NumberShaped),
-            (".5", NumberShaped),
-            ("5.", NumberShaped),
-            ("+5", NumberShaped),
-            ("1e", NumberShaped),
-            ("1-2", NumberShaped),
-            ("18:00", TimeShaped),
-            ("14:30:05", TimeShaped),
-            ("2024:07:23", TimeShaped),
-            ("25:99", TimeShaped),
-            ("2024-06", NumberShaped),
-            ("2024", NumberShaped),
-            ("2024-06-15", NumberShaped),
-            ("2024-06-15T14:30", TimeShaped),
-            ("2024-06-15T14:30:05.45+02:00", TimeShaped),
-            ("2023-12-31-05:00", TimeShaped),
-            ("2024-06-15T14:30+0200", TimeShaped),
-            ("E", Word),
-            ("E-5", Word),
-            ("e5", Word),
-            ("3gp", Word),
-            ("7z", Word),
-            ("nan", Word),
-            ("20240615_x.jpg", Word),
-            ("jpg", Word),
+            ("1024", Number),
+            ("-5", Number),
+            ("3.14", Number),
+            ("1e20", Number),
+            ("1e400", Number),
+            ("1e-400", Number),
+            ("007", Number),
+            ("2024", Number),
+            ("12345e67", Number),
+            ("2024-06", Time),
+            ("2024-06-15", Time),
+            ("2024:07:23", Time),
+            ("2024-06-15T14:30", Time),
+            ("2024-06-15T14:30:05.45+02:00", Time),
+            ("18:00", TimeOfDay),
+            ("14:30:05", TimeOfDay),
+            ("23:00:29.000", TimeOfDay),
+            ("2024e", Text),
+            ("12:3", Text),
+            ("2024-06-15_beach.jpg", Text),
+            ("1.2.3", Text),
+            ("25:99", Text),
+            (".5", Text),
+            ("5.", Text),
+            ("+5", Text),
+            ("1e", Text),
+            ("1-2", Text),
+            ("2023-12-31-05:00", Text),
+            ("E-5", Text),
+            ("nan", Text),
+            ("jpg", Text),
         ];
         for (text, class) in cases {
-            assert_eq!(bare_class(text), class, "{text}");
+            assert_eq!(input_type(text), class, "{text}");
         }
     }
 
     #[test]
-    fn against_text_a_shaped_value_is_the_type_mismatch_or_unreadable_and_a_word_is_text() {
+    fn against_text_a_value_that_reads_as_another_type_is_the_type_mismatch() {
         for text in [
             "numtext<10",
             "source.rel_path[0]=2019",
@@ -2257,31 +1838,381 @@ mod tests {
             "source.rel_path[0]=2024-06-15T14:30",
             "content.hash.sha256|short=12345e67",
             "Title=2024-06-15T14:30:05.45+02:00",
+            "Title=1e400",
+            "Title=1e-400",
         ] {
             assert!(
-                matches!(causes(text).as_slice(), [BindCause::TypeMismatch(_)]),
+                matches!(causes(text).as_slice(), [BindCause::TypeMismatch { .. }]),
                 "{text}: {:?}",
                 causes(text)
             );
         }
-        for text in [
-            "numtext=.5",
-            "numtext=1-2",
-            "stem=5.",
-            "Title=2023-12-31-05:00",
-            "Title=25:99",
+        for (text, word) in [
+            ("ext=E-5", "E-5"),
+            ("ext=3gp", "3gp"),
+            ("Title=nan", "nan"),
+            ("numtext=.5", ".5"),
+            ("numtext=1-2", "1-2"),
+            ("stem=5.", "5."),
+            ("Title=2023-12-31-05:00", "2023-12-31-05:00"),
+            ("Title=25:99", "25:99"),
+            ("Title=2024e", "2024e"),
+            ("Title=12:3", "12:3"),
+            ("Title=2024-06-15_beach.jpg", "2024-06-15_beach.jpg"),
         ] {
-            assert!(
-                matches!(causes(text).as_slice(), [BindCause::Unreadable(_)]),
-                "{text}"
-            );
-        }
-        for (text, word) in [("ext=E-5", "E-5"), ("ext=3gp", "3gp"), ("Title=nan", "nan")] {
             assert_eq!(test_of(text), Test::Text(word.into()), "{text}");
         }
         // Quoted, every value is text; after `~` a glob, whatever its spelling.
         assert_eq!(test_of(r#"numtext="10""#), Test::Text("10".into()));
         assert!(matches!(bind("numtext~1*"), Ok(Bound::Glob { .. })));
+    }
+
+    /// **Every type sentence as the table writes it**: each row of the language's table for a
+    /// value read as its key's type — the key, the operator and the value typed, and the whole
+    /// block the refusal prints: the caret, the sentence, the rule line, the fix, the bottom
+    /// line. Expected blocks are the table's words; nothing else is printed.
+    #[test]
+    fn each_value_refused_for_its_key_prints_the_tables_block() {
+        let forms = r#"Type a year, month, day, minute or second: 2024, 2024-06, 2024-06-15, "2024-06-15 14:30""#;
+        let stored =
+            "Type conversion: in the filter with a modifier such as |number or |year; for \
+                      the stored type, `canon facts convert`.";
+        let in_filter = "Type conversion: in the filter with a modifier such as |number or |year.";
+        let forms = format!("  {forms}");
+        let numbers = format!("  {}", applicable_line(&Gives::Number, false));
+        let of_day = format!("  {}", applicable_line(&Gives::TimeOfDay, true));
+        let rows: Vec<(&str, usize, String, Vec<&str>)> = vec![
+            (
+                "filename=2024",
+                9,
+                r#"filename is of type text, and `2024` is a number. For a text key: filename="2024""#
+                    .into(),
+                vec![in_filter],
+            ),
+            (
+                "source.rel_path=2024",
+                16,
+                r#"source.rel_path is of type path, and `2024` is a number. For a path key: source.rel_path="2024""#
+                    .into(),
+                vec![],
+            ),
+            (
+                "source.rel_path|lowercase=2024",
+                26,
+                r#"source.rel_path|lowercase is of type path, and `2024` is a number. For a path key: source.rel_path|lowercase="2024""#
+                    .into(),
+                vec![],
+            ),
+            (
+                "Title<2019",
+                6,
+                "Title is of type text, and `2019` is a number".into(),
+                vec![stored],
+            ),
+            (
+                "Title=2024-06",
+                6,
+                r#"Title is of type text, and `2024-06` is a time. For a text key: Title="2024-06""#
+                    .into(),
+                vec![stored],
+            ),
+            (
+                "Title!=14:30",
+                7,
+                r#"Title is of type text, and `14:30` is a time of day. For a text key: Title!="14:30""#
+                    .into(),
+                vec![stored],
+            ),
+            (
+                "Rating=big",
+                7,
+                "Rating is of type number; `big` is not a number".into(),
+                vec!["  Type a number: 1024, -5, 3.14, 1e20"],
+            ),
+            (
+                "Rating=1e-400",
+                7,
+                "Rating is of type number; `1e-400` cannot be represented exactly".into(),
+                vec![],
+            ),
+            (
+                "source.mtime=abc",
+                13,
+                "source.mtime is of type time; `abc` is not a time".into(),
+                vec![&forms],
+            ),
+            (
+                "source.mtime=1704067200",
+                13,
+                "source.mtime is of type time; `1704067200` is not a time: a year is four digits, \
+                 and a number never means seconds since 1970"
+                    .into(),
+                vec![&forms],
+            ),
+            (
+                "source.mtime=14:30",
+                13,
+                "source.mtime is of type time; `14:30` has no date".into(),
+                vec![&forms],
+            ),
+            (
+                "source.mtime|time=x",
+                18,
+                "source.mtime|time is a time of day; `x` is not a time of day".into(),
+                vec!["  Type a time of day: 14:30, 14:30:05"],
+            ),
+            (
+                "source.mtime|year=99",
+                18,
+                "source.mtime|year is a year, four digits; `99` is not one".into(),
+                vec!["  Type a year as four digits: 2024"],
+            ),
+            (
+                "source.mtime|month=13",
+                19,
+                "source.mtime|month is a month from 1 to 12; `13` is outside it".into(),
+                vec![],
+            ),
+            (
+                "source.size|bucket=5",
+                19,
+                "source.size|bucket is grouped into ranges; `5` is not one of them".into(),
+                vec!["  Its ranges are powers of ten, as facts prints them: 0, 1-to-10, 10-to-100, 1K-to-10K, …"],
+            ),
+            (
+                "source.size|bucket(10,100)=5",
+                27,
+                "source.size|bucket(10,100) is grouped into ranges; `5` is not one of them".into(),
+                vec!["  Its ranges: under-10, 10-to-100, 100-and-up"],
+            ),
+            (
+                "source.size|bucket<5",
+                19,
+                "a bucket is compared with =, !=, IN or NOT IN; source.size|bucket is grouped into \
+                 ranges"
+                    .into(),
+                vec![],
+            ),
+            (
+                "source.mtime~2024*",
+                13,
+                "`~` works on text; source.mtime is of type time".into(),
+                vec![],
+            ),
+            (
+                "source.mtime|yearmonth=2024-06-15",
+                23,
+                "source.mtime|yearmonth is a month; `2024-06-15` is finer than a month".into(),
+                vec![],
+            ),
+            (
+                "source.size|lowercase=x",
+                11,
+                "|lowercase works on text, paths or another modifier's result; source.size is of \
+                 type number"
+                    .into(),
+                vec![&numbers],
+            ),
+            (
+                "source.mtime|time|year=2024",
+                17,
+                "|year needs a date; source.mtime|time is a time of day, which has none".into(),
+                vec![&of_day],
+            ),
+            (
+                "source.size[0]=1",
+                11,
+                "an accessor `[…]` works on paths or text; source.size is of type number".into(),
+                vec![&numbers],
+            ),
+            (
+                "Rating?=1",
+                7,
+                "AND or OR is missing before `=1`".into(),
+                vec!["  After a condition: AND, OR, ) or the end"],
+            ),
+            (
+                "Nope=1",
+                0,
+                "`Nope` is an unknown key".into(),
+                vec!["  `canon facts` lists the keys"],
+            ),
+        ];
+        for (text, at, sentence, under) in rows {
+            let mut expected = vec![
+                "cannot run the filter as given".to_string(),
+                format!("  {text}"),
+                format!("  {}^ {sentence}", " ".repeat(at)),
+            ];
+            expected.extend(under.iter().map(|line| format!("  {line}")));
+            assert_eq!(refusal(text), expected.join("\n"), "{text}");
+        }
+    }
+
+    /// **The bottom line prints once, in its strongest form**: however many type mismatches a
+    /// refusal holds, one line at the bottom — with `canon facts convert` where any of them is a
+    /// stored key read as stored, in the filter only otherwise — and none for a path or a
+    /// bucket. It fails if the line prints per clause, or the weaker form wins.
+    #[test]
+    fn the_conversion_line_is_printed_once_in_its_strongest_form() {
+        let line = |text: &str| -> Vec<String> {
+            refusal(text)
+                .lines()
+                .filter(|l| l.contains("Type conversion"))
+                .map(|l| l.trim_start().to_string())
+                .collect()
+        };
+        let stored =
+            "Type conversion: in the filter with a modifier such as |number or |year; for \
+                      the stored type, `canon facts convert`.";
+        let in_filter = "Type conversion: in the filter with a modifier such as |number or |year.";
+        for (text, expected) in [
+            ("filename=2024 AND Title=2025", vec![stored]),
+            ("Title=2025 AND filename=2024", vec![stored]),
+            (
+                "filename=2024 OR stem=2025 OR filename IN (1, 2)",
+                vec![in_filter],
+            ),
+            ("Title|lowercase=2024", vec![in_filter]),
+            ("source.rel_path[0]=2024", vec![in_filter]),
+            ("Title IN (2024, 2025)", vec![stored]),
+            ("Title<2019 AND Rating=big", vec![stored]),
+            ("source.rel_path=2024", vec![]),
+            ("source.size|bucket=5", vec![]),
+            ("Rating=big", vec![]),
+        ] {
+            assert_eq!(line(text), expected, "{text}");
+        }
+        // It sits last, under the blocks, at the refusal's own indent.
+        let text = refusal("filename=2024 AND Title=2025");
+        assert_eq!(text.lines().last(), Some(&*format!("  {stored}")));
+    }
+
+    /// In a list every item that reads as another type has its own caret; the one fix, every
+    /// such item quoted, sits on the first.
+    #[test]
+    fn a_list_has_one_fix_for_the_keys_type_on_its_first_item() {
+        assert_eq!(
+            refusal("Title IN (2024, x, 2025-06)"),
+            [
+                "cannot run the filter as given",
+                "  Title IN (2024, x, 2025-06)",
+                r#"            ^ Title is of type text, and `2024` is a number. For a text key: Title IN ("2024", x, "2025-06")"#,
+                "  Title IN (2024, x, 2025-06)",
+                "                     ^ Title is of type text, and `2025-06` is a time",
+                "  Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`.",
+            ]
+            .join("\n")
+        );
+    }
+
+    /// **A list needing quotes for both reasons gets one fix**: every item with a character that
+    /// needs quotes and every item that reads as another type is quoted in the one fix, under
+    /// the first such item's own sentence and label, so the fix binds where a fix quoting one
+    /// reason alone would be refused again.
+    #[test]
+    fn a_list_needing_quotes_for_both_reasons_gets_one_fix() {
+        // A built-in key has no stored type, so the bottom line names the filter only.
+        let conversion =
+            "  Type conversion: in the filter with a modifier such as |number or |year.";
+        assert_eq!(
+            refusal("filename IN (2024, a%b)"),
+            [
+                "cannot run the filter as given",
+                "  filename IN (2024, a%b)",
+                r#"               ^ filename is of type text, and `2024` is a number. For a text key: filename IN ("2024", "a%b")"#,
+                "  filename IN (2024, a%b)",
+                "                      ^ `%` needs quotes around the value",
+                conversion,
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            refusal("filename IN (a%b, 2024, x)"),
+            [
+                "cannot run the filter as given",
+                "  filename IN (a%b, 2024, x)",
+                r#"                ^ `%` needs quotes around the value: filename IN ("a%b", "2024", x)"#,
+                "  filename IN (a%b, 2024, x)",
+                "                    ^ filename is of type text, and `2024` is a number",
+                conversion,
+            ]
+            .join("\n")
+        );
+    }
+
+    /// Form first, fit second, for a text key too: a value written as a number is a number,
+    /// whether or not Canon can hold it, so it gets the fix for a text key.
+    #[test]
+    fn a_number_form_is_a_number_for_a_text_key_whether_or_not_it_fits() {
+        for value in ["1e400", "1e-400", "1.0000000000000001", "2024"] {
+            match causes(&format!("filename={value}")).as_slice() {
+                [BindCause::TypeMismatch { problem, .. }] => {
+                    assert_eq!(
+                        problem.fix,
+                        Fix::ForKeyType {
+                            key_type: TextOrPath::Text,
+                            rewrite: format!("filename=\"{value}\""),
+                        },
+                        "{value}"
+                    );
+                    assert!(
+                        problem
+                            .sentence
+                            .ends_with(&format!("`{value}` is a number")),
+                        "{value}"
+                    );
+                }
+                other => panic!("{value}: {other:?}"),
+            }
+        }
+    }
+
+    /// **A chain is checked on a key with no facts**: its first step takes any type, every later
+    /// one the table's, so a chain no key could pass a value through is refused — under `?`,
+    /// `NOT` and in a report — and one some key could is not.
+    #[test]
+    fn a_chain_is_checked_on_a_key_with_no_facts() {
+        for (text, sentence) in [
+            (
+                "nothing|year|time?",
+                "|time works on times or text; nothing|year is a year, four digits",
+            ),
+            (
+                "NOT nothing|bucket|year?",
+                "|year works on times or text; nothing|bucket is grouped into ranges",
+            ),
+            (
+                "nothing[0]|bucket?",
+                "|bucket works on numbers; nothing[0] is of type text",
+            ),
+        ] {
+            match causes(text).as_slice() {
+                [BindCause::WrongModifier(problem)] => {
+                    assert_eq!(problem.sentence, sentence, "{text}")
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        for text in [
+            "nothing?",
+            "nothing|year?",
+            "nothing|bucket?",
+            "nothing|lowercase|year?",
+            "textdate|lowercase|year?",
+            "nothing[0]|number|bucket?",
+            "nothing[1:3]|lowercase?",
+            "nothing|time|hour?",
+        ] {
+            assert!(bind(text).is_ok(), "{text}: {:?}", bind(text));
+        }
+        // A range is never a time, on a key with facts as on one without.
+        assert!(matches!(
+            causes("source.size|bucket|year?").as_slice(),
+            [BindCause::WrongModifier(_)]
+        ));
+        assert!(bind("source.size|bucket|number?").is_ok());
     }
 
     // ------------------------------------------------------------------
@@ -2353,6 +2284,38 @@ mod tests {
         assert_eq!(test_of("source.mtime|year>=2020"), Test::Part(2020));
     }
 
+    /// Ordered, a part reads any whole number in its own form, so a bound past its range
+    /// means something; `=`, `!=` and `IN` refuse one it can never match. Digits of any length
+    /// read without overflow; a year is four digits with every operator.
+    #[test]
+    fn a_part_reads_any_whole_number_when_ordered() {
+        assert_eq!(test_of("source.mtime|hour<24"), Test::Part(24));
+        assert_eq!(test_of("source.mtime|month>0"), Test::Part(0));
+        assert_eq!(test_of("source.mtime|month=0000000010"), Test::Part(10));
+        assert_eq!(
+            test_of("source.mtime|hour<99999999999999999999"),
+            Test::Part(i64::MAX)
+        );
+        for text in [
+            "source.mtime|month=13",
+            "NOT source.mtime|month=13",
+            "source.mtime|month IN (1, 13)",
+            "source.mtime|hour=99999999999999999999",
+        ] {
+            assert!(
+                matches!(causes(text).as_slice(), [BindCause::OutOfRange(_)]),
+                "{text}: {:?}",
+                causes(text)
+            );
+        }
+        for text in ["source.mtime|year>999", "source.mtime|year<20240"] {
+            assert!(
+                matches!(causes(text).as_slice(), [BindCause::Unreadable(_)]),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn a_time_of_day_reads_through_time() {
         let Test::TimeOfDay(tv) = test_of("source.mtime|time>=18:00") else {
@@ -2367,30 +2330,58 @@ mod tests {
 
     #[test]
     fn a_bucket_reads_its_own_labels_and_only_equality() {
-        assert_eq!(
-            test_of("source.size|bucket(60,300)=60-300"),
-            Test::Bucket("60-300".into())
-        );
-        assert_eq!(
-            test_of(r#"source.size|bucket(60,300)="<60""#),
-            Test::Bucket("<60".into())
-        );
-        assert_eq!(
-            test_of("source.size|bucket=1K-10K"),
-            Test::Bucket("1K-10K".into())
-        );
+        for (text, label) in [
+            ("source.size|bucket(60,300)=60-to-300", "60-to-300"),
+            ("source.size|bucket(60,300)=under-60", "under-60"),
+            ("source.size|bucket(60,300)=300-and-up", "300-and-up"),
+            ("source.size|bucket(-90,0)=under-minus-90", "under-minus-90"),
+            ("source.size|bucket=1K-to-10K", "1K-to-10K"),
+            ("source.size|bucket=0", "0"),
+            ("source.size|bucket=0.00001-to-0.0001", "0.00001-to-0.0001"),
+        ] {
+            assert_eq!(test_of(text), Test::Bucket(label.into()), "{text}");
+        }
+        for text in [
+            "source.size|bucket(60,300)=61-to-299",
+            "source.size|bucket=2K-to-20K",
+        ] {
+            assert!(
+                matches!(causes(text).as_slice(), [BindCause::NotABucketLabel(_)]),
+                "{text}"
+            );
+        }
         assert!(matches!(
-            causes("source.size|bucket(60,300)=61-299").as_slice(),
-            [BindCause::NotABucketLabel(_)]
-        ));
-        assert!(matches!(
-            causes("source.size|bucket=2K-20K").as_slice(),
-            [BindCause::NotABucketLabel(_)]
-        ));
-        assert!(matches!(
-            causes("source.size|bucket(60,300)>60-300").as_slice(),
+            causes("source.size|bucket(60,300)>60-to-300").as_slice(),
             [BindCause::BucketOrdered(_)]
         ));
+    }
+
+    /// A bucket's old labels name no range now: each is refused as not one of its ranges.
+    #[test]
+    fn an_old_label_is_refused() {
+        for text in [
+            r#"source.size|bucket(10,100)="<10""#,
+            r#"source.size|bucket(10,100)=">100""#,
+            "source.size|bucket(10,100)=10-100",
+            "source.size|bucket(10,100)=-Inf-10",
+            "source.size|bucket(10,100)=100-Inf",
+            "source.size|bucket=1-10",
+            "source.size|bucket=1K-10K",
+            "source.size|bucket=0-0",
+        ] {
+            assert!(
+                matches!(causes(text).as_slice(), [BindCause::NotABucketLabel(_)]),
+                "{text}: {:?}",
+                causes(text)
+            );
+        }
+        // The rule line lists the ranges in the one printed form.
+        assert!(
+            refusal(r#"source.size|bucket(10,100)="<10""#)
+                .contains("Its ranges: under-10, 10-to-100, 100-and-up"),
+            "{}",
+            refusal(r#"source.size|bucket(10,100)="<10""#)
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2399,7 +2390,8 @@ mod tests {
 
     /// Every modifier against every input, written out from the rule as stated rather
     /// than read off `result_of`: `T` time, `X` text, `N` number, `P` path, `R` a modifier's
-    /// result that is a number (`|month`), `O` a time of day (`|time`).
+    /// result that is a number (`|month`), `O` a time of day (`|time`), `B` a bucket's range,
+    /// which is never a time. A case modifier keeps a path a path.
     #[test]
     fn the_modifier_table_says_what_each_modifier_reads_and_gives() {
         use Modifier::*;
@@ -2418,6 +2410,7 @@ mod tests {
             ("P", Gives::Path, false),
             ("R", Gives::Part(Month), true),
             ("O", Gives::TimeOfDay, true),
+            ("B", Gives::Bucket(Vec::new()), true),
         ];
         for m in Modifier::iter() {
             for (name, input, from_modifier) in &inputs {
@@ -2426,15 +2419,17 @@ mod tests {
                     matches!(*name, "T" | "X" | "O").then_some(Gives::Part(m))
                 } else if time_parts.contains(&m) {
                     matches!(*name, "T" | "X").then_some(Gives::Part(m))
+                } else if [Lowercase, Uppercase, Capitalize].contains(&m) && *name == "P" {
+                    Some(Gives::Path)
                 } else if text_modifiers.contains(&m) {
-                    matches!(*name, "X" | "P" | "R" | "O").then_some(Gives::Text)
+                    matches!(*name, "X" | "P" | "R" | "O" | "B").then_some(Gives::Text)
                 } else {
                     match (m, *name) {
                         (Date, "T" | "X") => Some(Gives::TimeAt(Precision::Day)),
                         (YearMonth, "T" | "X") => Some(Gives::TimeAt(Precision::Month)),
                         (DateTime, "T" | "X") => Some(Gives::Time),
                         (Time, "T" | "X" | "O") => Some(Gives::TimeOfDay),
-                        (Number, "X" | "N" | "R") => Some(Gives::Number),
+                        (Number, "X" | "N" | "R" | "B") => Some(Gives::Number),
                         (Bucket, "N" | "R") => Some(Gives::Bucket(Vec::new())),
                         _ => None,
                     }
@@ -2470,8 +2465,7 @@ mod tests {
                 },
             ];
             let table = result_of(&Gives::TimeOfDay, true, &calls[1]).is_some();
-            let chain =
-                apply_chain(saved.clone(), None, &calls, "k", true, &UserZone::utc()).is_ok();
+            let chain = apply_chain(saved.clone(), None, &calls, "k", &UserZone::utc()).is_ok();
             assert_eq!(table, chain, "|time|{}", <&'static str>::from(m));
         }
     }
@@ -2483,14 +2477,25 @@ mod tests {
             text.contains("Modifiers for numbers: |bucket, |number"),
             "{text}"
         );
-        // A text modifier directly on a stored number or time names the printed form.
-        let text = refusal("FNumber|lowercase=x");
-        assert!(text.contains("FNumber|number|lowercase=x"), "{text}");
-        let text = refusal("source.mtime|lowercase=x");
-        assert!(text.contains("source.mtime|datetime|lowercase=x"), "{text}");
-        // `|number` on a whole path names a segment.
-        let text = refusal("source.rel_path|number>=2019");
-        assert!(text.contains("source.rel_path[0]|number>=2019"), "{text}");
+        // No other filter is offered: the sentence and the modifiers that apply, nothing else.
+        assert_eq!(
+            refusal("FNumber|lowercase=x"),
+            [
+                "cannot run the filter as given",
+                "  FNumber|lowercase=x",
+                "         ^ |lowercase works on text, paths or another modifier's result; FNumber \
+                 is of type number",
+                &format!("    {}", applicable_line(&Gives::Number, false)),
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            refusal("source.rel_path|number>=2019").lines().nth(2),
+            Some(
+                "                 ^ |number works on text or numbers; source.rel_path is of type \
+                 path"
+            )
+        );
         // A text modifier after a modifier reads its printed form, and accessors read
         // text as path segments.
         assert_eq!(
@@ -2509,7 +2514,7 @@ mod tests {
             "source.mtime|time|datetime>=2000",
         ] {
             assert!(
-                matches!(causes(text).as_slice(), [BindCause::WrongModifier { .. }]),
+                matches!(causes(text).as_slice(), [BindCause::WrongModifier(_)]),
                 "{text}"
             );
             // The statement says what is missing, never "works on times": a time of day is one.
@@ -2523,7 +2528,7 @@ mod tests {
             let said = refusal(text);
             assert!(
                 said.contains(&format!(
-                    "|{name} needs a date; |time gives a time of day, which has none."
+                    "|{name} needs a date; source.mtime|time is a time of day, which has none\n"
                 )),
                 "{said}"
             );
@@ -2532,7 +2537,7 @@ mod tests {
         // An accessor on a number is refused.
         assert!(matches!(
             causes("source.size[0]=1").as_slice(),
-            [BindCause::WrongModifier { .. }]
+            [BindCause::WrongModifier(_)]
         ));
     }
 
@@ -2540,37 +2545,41 @@ mod tests {
     // A typed period finer than a fixed-grain modifier
     // ------------------------------------------------------------------
 
+    /// A time finer than a fixed grain is refused under every operator, saying what the key is
+    /// and what the value is finer than; no other modifier is offered.
     #[test]
     fn a_period_finer_than_a_fixed_grain_is_refused_under_every_operator() {
-        for (text, way_out) in [
-            ("taken|yearmonth=2024-06-15", "taken|date=2024-06-15"),
-            ("taken|yearmonth>=2024-06-15", "taken|date>=2024-06-15"),
+        for (text, sentence) in [
             (
-                r#"taken|date="2024-06-15 14:30""#,
-                r#"taken|datetime="2024-06-15 14:30""#,
+                "taken|yearmonth=2024-06-15",
+                "taken|yearmonth is a month; `2024-06-15` is finer than a month",
             ),
             (
-                r#"textdate|date="2024-06-15 14:30""#,
-                r#"textdate|datetime="2024-06-15 14:30""#,
+                "taken|yearmonth>=2024-06-15",
+                "taken|yearmonth is a month; `2024-06-15` is finer than a month",
+            ),
+            (
+                r#"taken|date="2024-06-15 14:30""#,
+                r#"taken|date is a day; `"2024-06-15 14:30"` is finer than a day"#,
             ),
             (
                 r#"source.rel_path[0]|date>="2024-06-15 14:30""#,
-                r#"source.rel_path[0]|datetime>="2024-06-15 14:30""#,
+                r#"source.rel_path[0]|date is a day; `"2024-06-15 14:30"` is finer than a day"#,
             ),
             (
                 "taken|yearmonth IN (2024-06, 2024-07-15)",
-                "taken|date IN (2024-06, 2024-07-15)",
+                "taken|yearmonth is a month; `2024-07-15` is finer than a month",
             ),
-            // A date typed in another of Canon's spellings is shown in Canon's, as asked.
-            ("taken|yearmonth=2024:06:15", "taken|date=2024-06-15"),
             (
-                "taken|date=2024:07:23T14:30:05.25",
-                r#"taken|datetime="2024-07-23 14:30:05.25""#,
+                "taken|yearmonth=2024:06:15",
+                "taken|yearmonth is a month; `2024:06:15` is finer than a month",
             ),
         ] {
             match causes(text).as_slice() {
-                [BindCause::TooFine(entry)] => {
-                    assert_eq!(entry.rewrites(), [way_out.to_string()], "{text}")
+                [BindCause::TooFine(problem)] => {
+                    assert_eq!(problem.sentence, sentence, "{text}");
+                    assert_eq!(problem.fix, Fix::None, "{text}");
+                    assert_eq!(problem.rule_line, None, "{text}");
                 }
                 other => panic!("{text}: {other:?}"),
             }
@@ -2722,69 +2731,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // The pin: every way out binds
-    // ------------------------------------------------------------------
-
-    /// Following a way out never meets a second refusal: every clause a refusal rewrites
-    /// to binds against the same keys.
-    #[test]
-    fn every_way_out_binds() {
-        let refused = [
-            "numtext<10",
-            "numtext>=10",
-            "yeartext=2020",
-            "source.rel_path[0]=2019",
-            "stem=18:00",
-            "textdate>=2024-06",
-            "textdate=2024:07:23",
-            "textdate!=2024",
-            "numtext=.5",
-            "numtext IN (9, jpg, 10)",
-            "numtext IN (2024, 2025)",
-            "textdate IN (2024-06, 2024-07-15)",
-            "Title=2024-06-15T14:30:05.45+02:00",
-            "source.rel_path[0]=2024-06-15T14:30",
-            "content.hash.sha256|short=12345e67",
-            "source.mtime|weekday|lowercase=1",
-            "source.size=true",
-            "source.size=false",
-            "source.mtime=18:00",
-            "source.mtime IN (18:00, 19:30)",
-            "taken IN (2024, 12:30)",
-            "taken|yearmonth=2024-06-15",
-            r#"taken|date="2024-06-15 14:30""#,
-            r#"textdate|date="2024-06-15 14:30""#,
-            "taken|yearmonth IN (2024-06, 2024-07-15)",
-            r#"taken|date IN (2024-06-15, "2024-06-16 10:00")"#,
-            "source.mtime|date~2024-06*",
-            "source.mtime~2024-06-15*",
-            "source.mtime!~2024*",
-            "FNumber|lowercase=x",
-            "source.mtime|lowercase=x",
-            "source.rel_path|number>=2019",
-            "source.rel_path[1:3]|number>=2019",
-        ];
-        let mut rewrites = 0;
-        for text in refused {
-            let found = causes(text);
-            assert!(!found.is_empty(), "{text} bound");
-            for cause in &found {
-                for way in cause.entry().map(Entry::rewrites).unwrap_or_default() {
-                    rewrites += 1;
-                    if let Err(again) = bind(&way) {
-                        panic!("{text} → way out {way} is refused again: {again:?}");
-                    }
-                }
-            }
-        }
-        assert!(
-            rewrites >= refused.len(),
-            "only {rewrites} ways out were checked"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // Keys: unknown, two types
+    // Keys: unknown, mixed type
     // ------------------------------------------------------------------
 
     #[test]
@@ -2798,7 +2745,7 @@ mod tests {
     }
 
     #[test]
-    fn a_two_type_key_refuses_every_clause_that_reads_its_value_as_an_answer() {
+    fn a_mixed_type_key_refuses_every_clause_that_reads_its_value_as_an_answer() {
         for text in [
             r#""content.File Size">1000"#,
             r#""content.File Size"~1*"#,
@@ -2806,7 +2753,7 @@ mod tests {
             r#""content.File Size"|bucket?"#,
         ] {
             match causes(text).as_slice() {
-                [cause @ BindCause::MixedType { .. }] => assert!(cause.is_answer(), "{text}"),
+                [cause @ BindCause::MixedType(_)] => assert!(cause.is_answer(), "{text}"),
                 other => panic!("{text}: {other:?}"),
             }
         }
@@ -2824,10 +2771,10 @@ mod tests {
         assert_eq!(
             answer,
             [
-                r#""content.File Size">1000: "content.File Size" holds numbers and text; a filter compares one type only."#,
+                r#""content.File Size">1000: "content.File Size" is of mixed type (number and text); a filter supports one type only"#,
                 "  numbers: 41,220 facts   text: 380 facts   (every fact of the key, on every root)",
-                "To inspect it and learn how to convert it to one type:",
-                r#"  `canon facts convert '"content.File Size"'`"#,
+                "To see its values and convert it to one type:",
+                "  `canon facts convert 'content.File Size'`",
             ]
             .join("\n")
         );
@@ -2837,16 +2784,16 @@ mod tests {
             [
                 "cannot run the filter as given",
                 "  numtext<10",
-                "          ^ numtext holds text; 10 is a number.",
-                r#"    As text: numtext<"10"     As numbers, if its values are numbers: numtext|number<10"#,
-                "    `canon facts convert content.numtext` to see what it holds and change its type",
+                "          ^ numtext is of type text, and `10` is a number",
+                "  Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`.",
             ]
             .join("\n")
         );
     }
 
     #[test]
-    fn several_two_type_keys_share_one_way_out_block() {
+    fn several_mixed_type_keys_share_one_way_out_block() {
         let refused = ExpressionRefused {
             refused: Refused::Filter,
             texts: Vec::new(),
@@ -2860,7 +2807,7 @@ mod tests {
         };
         assert!(refused.is_answer());
         let text = refused.to_string();
-        assert_eq!(text.matches("To inspect each").count(), 1, "{text}");
+        assert_eq!(text.matches("To see their values").count(), 1, "{text}");
         assert_eq!(text.matches("canon facts convert").count(), 2, "{text}");
         assert!(
             text.contains("`canon facts convert content.Width`"),
@@ -2879,30 +2826,30 @@ mod tests {
             .starts_with("cannot run the filter as given\n"));
     }
 
-    /// Beside other causes, a two-type key's way out sits under its own entry, at the indent
-    /// every way out uses — never at a new entry's, where it would read as the entry's above it.
-    /// It fails if the block is shared at the end, as when the key stands alone.
+    /// Beside other causes, a mixed-type key's way out sits under its own entry, at the indent
+    /// every rule line uses — never at a new entry's, where it would read as the entry's above
+    /// it. It fails if the block is shared at the end, as when the key stands alone.
     #[test]
-    fn a_two_type_way_out_sits_under_its_own_entry_beside_other_causes() {
+    fn a_mixed_type_way_out_sits_under_its_own_entry_beside_other_causes() {
         assert_eq!(
             refusal(r#"FNumber=garbage AND "content.File Size"=2 AND numtext<10"#),
             [
                 "cannot run the filter as given",
                 r#"  FNumber=garbage AND "content.File Size"=2 AND numtext<10"#,
-                r#"          ^ FNumber holds numbers; "garbage" is not a number."#,
+                "          ^ FNumber is of type number; `garbage` is not a number",
                 "    Type a number: 1024, -5, 3.14, 1e20",
-                r#"  "content.File Size"=2: "content.File Size" holds numbers and text; a filter compares one type only."#,
+                r#"  "content.File Size"=2: "content.File Size" is of mixed type (number and text); a filter supports one type only"#,
                 "    numbers: 41,220 facts   text: 380 facts   (every fact of the key, on every root)",
-                "    To inspect it and learn how to convert it to one type:",
-                r#"      `canon facts convert '"content.File Size"'`"#,
+                "    To see its values and convert it to one type:",
+                "      `canon facts convert 'content.File Size'`",
                 r#"  FNumber=garbage AND "content.File Size"=2 AND numtext<10"#,
-                "                                                        ^ numtext holds text; 10 is a number.",
-                r#"    As text: numtext<"10"     As numbers, if its values are numbers: numtext|number<10"#,
-                "    `canon facts convert content.numtext` to see what it holds and change its type",
+                "                                                        ^ numtext is of type text, and `10` is a number",
+                "  Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`.",
             ]
             .join("\n")
         );
-        // Two two-type keys beside another cause: each way out under its own entry, none at
+        // Two mixed-type keys beside another cause: each way out under its own entry, none at
         // the end.
         let text = refusal(r#""content.File Size">1 AND source.size=x AND Width>1"#);
         let lines: Vec<&str> = text.lines().collect();
@@ -2911,390 +2858,24 @@ mod tests {
             Some(&"      `canon facts convert content.Width`"),
             "{text}"
         );
-        assert_eq!(text.matches("    To inspect it").count(), 2, "{text}");
-        assert!(!text.contains("To inspect each"), "{text}");
+        assert_eq!(text.matches("    To see its values").count(), 2, "{text}");
+        assert!(!text.contains("To see their values"), "{text}");
         // The `source.size=x` entry's typed line comes straight after the first key's way out.
         let size = lines
             .iter()
-            .position(|l| l.contains("^ source.size holds numbers"))
+            .position(|l| l.contains("^ source.size is of type number"))
             .unwrap();
         assert_eq!(
             lines[size - 2],
-            r#"      `canon facts convert '"content.File Size"'`"#,
+            "      `canon facts convert 'content.File Size'`",
             "{text}"
         );
         // One key read by two clauses beside another cause: each clause's entry carries its
-        // own way out, as each conversion pointer does; alone, the shared block names it once.
+        // own way out; alone, the shared block names it once.
         let twice = refusal("Width=1 AND Width=2 AND source.size=x");
-        assert_eq!(twice.matches("    To inspect it").count(), 2, "{twice}");
+        assert_eq!(twice.matches("    To see its values").count(), 2, "{twice}");
         let alone = refusal("Width=1 AND Width=2");
         assert_eq!(alone.matches("canon facts convert").count(), 1, "{alone}");
-    }
-
-    /// A way out keeps the user's question and their value: a date typed in another of
-    /// Canon's spellings is shown as Canon writes it; a hash is offered only quoting; a word
-    /// the user typed is printed one way inside one entry.
-    #[test]
-    fn a_way_out_reprints_only_in_canons_own_spellings() {
-        let rewrites = |text: &str| -> Vec<String> {
-            causes(text)
-                .iter()
-                .flat_map(|c| c.entry().map(Entry::rewrites).unwrap_or_default().to_vec())
-                .collect()
-        };
-        assert_eq!(
-            rewrites("textdate=2024:07:23"),
-            [r#"textdate="2024:07:23""#, "textdate|date=2024-07-23"]
-        );
-        assert_eq!(
-            rewrites("textdate=2024:07:23T14:30:05")[1],
-            r#"textdate|datetime="2024-07-23 14:30:05""#
-        );
-        assert_eq!(
-            rewrites("textdate=2024:07:23T14:30:05.25")[1],
-            r#"textdate|datetime="2024-07-23 14:30:05.25""#,
-            "a typed fraction is kept: the way out asks the same question"
-        );
-        assert_eq!(
-            rewrites("textdate IN (2024:07:23T14:30:05.25, 2024:07:24)")[1],
-            r#"textdate|datetime IN ("2024-07-23 14:30:05.25", 2024-07-24)"#
-        );
-        assert_eq!(
-            rewrites("textdate=2024-07-23T14:30+02:00")[1],
-            "textdate|datetime=2024-07-23T14:30+02:00",
-            "a time with an offset stays as typed"
-        );
-        assert_eq!(
-            rewrites("content.hash.sha256|short=12345e67"),
-            [r#"content.hash.sha256|short="12345e67""#]
-        );
-        let text = refusal("source.size=true");
-        assert!(text.contains(r#""true" is not a number"#), "{text}");
-        assert!(
-            text.contains(r#""true" is stored as 1: source.size=1"#),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn the_conversion_pointer_is_only_for_a_stored_key_with_no_transforms() {
-        // Offered on a text key where one other type reads every value: after the conversion
-        // the clause binds.
-        for text in [
-            "numtext<10",
-            "numtext=2024-06-15",
-            "numtext IN (2019, 2024-06)",
-            "textdate>=2024-06",
-            "yeartext=2020",
-        ] {
-            assert!(refusal(text).contains("canon facts convert"), "{text}");
-        }
-        // Never on a number or time key: a value it cannot read points at the value.
-        for text in [
-            "FNumber=big",
-            "FNumber>=garbage",
-            r#"FNumber="12:30""#,
-            "FNumber=2024-06-15",
-            "FNumber=2024-06",
-            "FNumber IN (2.8, garbage)",
-            "FNumber=true",
-            "taken=big",
-            "taken=yesterday",
-            "taken=2024-13",
-            "taken=10",
-            "taken=24",
-            "taken=1704067200",
-        ] {
-            assert!(!refusal(text).contains("canon facts convert"), "{text}");
-        }
-        // Not where no one type reads them all: a time of day alone reads as no type, and a
-        // number beside a month is neither a number nor a time throughout.
-        for text in [
-            "numtext=12:30",
-            "numtext IN (2024, 12:30)",
-            "numtext IN (10, 2024-06)",
-            "FNumber=12:30",
-            "taken=12:30",
-            "taken IN (big, 10)",
-            "numtext|lowercase<10",
-            "source.rel_path[0]=2019",
-            "stem=18:00",
-            "content.hash.sha256|short=12345e67",
-            "content.hash.sha256=123",
-        ] {
-            assert!(!refusal(text).contains("canon facts convert"), "{text}");
-        }
-    }
-
-    /// The pointer's rule, asked of binding itself: on a stored key of each type, the conversion
-    /// is offered exactly where converting the key to a type it leads to makes the same clause
-    /// bind — so following it never meets this refusal again. From text it leads to numbers or
-    /// times. From numbers or times it leads nowhere useful: number to time and time to number
-    /// are refused by the conversion, and as text a clause that binds can match no stored value.
-    /// It fails if the pointer is offered wherever text reads every value.
-    #[test]
-    fn the_conversion_pointer_is_offered_exactly_where_a_converted_key_binds() {
-        let leads_to = |t: FactType| -> &'static [FactType] {
-            match t {
-                FactType::Text => &[FactType::Num, FactType::Time],
-                FactType::Num | FactType::Time | FactType::Path => &[],
-            }
-        };
-        let binds_as = |clause: &str, t: FactType| {
-            let types = HashMap::from([(
-                "content.k".to_string(),
-                KeyTypes::from_counts([(t, 1)]).unwrap(),
-            )]);
-            let expr = read(clause);
-            let mut causes = Vec::new();
-            bind_expr(&expr, &types, AliasMode::NotLoaded, &mut causes);
-            causes.is_empty()
-        };
-        let values = [
-            "10",
-            "2024",
-            "2024-06",
-            "2024-06-15",
-            "12:30",
-            "big",
-            r#""12:30""#,
-            "1e",
-            "2024-06-15T14:30",
-            "true",
-        ];
-        let mut clauses: Vec<String> = values.iter().map(|v| format!("k={v}")).collect();
-        for a in values {
-            for b in values {
-                clauses.push(format!("k IN ({a}, {b})"));
-            }
-        }
-        let all = [
-            FactType::Text,
-            FactType::Num,
-            FactType::Time,
-            FactType::Path,
-        ];
-        for t in all {
-            for clause in &clauses {
-                if binds_as(clause, t) {
-                    continue;
-                }
-                let types = HashMap::from([(
-                    "content.k".to_string(),
-                    KeyTypes::from_counts([(t, 1)]).unwrap(),
-                )]);
-                let mut causes = Vec::new();
-                bind_expr(&read(clause), &types, AliasMode::NotLoaded, &mut causes);
-                let offered = ExpressionRefused {
-                    refused: Refused::Filter,
-                    texts: vec![clause.clone()],
-                    typed_at: BTreeMap::new(),
-                    causes,
-                }
-                .to_string()
-                .contains("canon facts convert");
-                let helps = leads_to(t).iter().any(|&other| binds_as(clause, other));
-                assert_eq!(offered, helps, "{clause} on a {t} key");
-            }
-        }
-    }
-
-    /// A way out on the text side rewrites the whole clause, so every type-mismatch cause of
-    /// one clause offers the same rewrites, whichever value it was read for.
-    #[test]
-    fn every_cause_of_one_clause_offers_the_same_ways_out() {
-        let values = [
-            "10",
-            "2019",
-            "2024-06",
-            "2024-06-15",
-            "12:30",
-            "2024:07:23",
-            "1e20",
-            "0500",
-            "2024-06-15T14:30",
-        ];
-        for a in values {
-            for b in values {
-                let clause = format!("numtext IN ({a}, {b})");
-                let offered: Vec<Vec<String>> = causes(&clause)
-                    .into_iter()
-                    .filter_map(|cause| match cause {
-                        BindCause::TypeMismatch(entry) => Some(entry.rewrites()),
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(first) = offered.first() {
-                    for other in &offered {
-                        assert_eq!(other, first, "{clause}");
-                    }
-                }
-            }
-        }
-        // A quoted sibling reads the same against a date chain, so the date way out stands.
-        assert!(refusal(r#"numtext IN (2019, "2024-06")"#)
-            .contains("numtext|yearmonth IN (2019, 2024-06)"));
-    }
-
-    /// **A way out makes its whole clause bind** (`keep_ways_that_bind`), over every pair of
-    /// a wide set of values — `true`, `false` and a value holding five spaces included — on
-    /// keys and chains that reach every builder of a way out, under `?` and every comparison
-    /// and list operator; each way out is read in the text shown. The corpus must reach each
-    /// kind of refusal that offers one, so a narrower corpus cannot pass in silence.
-    #[test]
-    fn every_way_out_binds_the_whole_clause() {
-        let values = [
-            "10",
-            "2019",
-            "0500",
-            "-5",
-            "1e20",
-            "1.2.3",
-            "2024-06",
-            "2024-06-15",
-            "2024-06-15T14:30",
-            "2024:07:23",
-            "12:30",
-            "false",
-            r#""a     b""#,
-            "2024*",
-            "2024-06*",
-            "x",
-            "true",
-            r#""x""#,
-            r#""2024-06""#,
-            r#""12:30""#,
-        ];
-        let keys = [
-            "numtext",
-            "numtext|yearmonth",
-            "numtext|number",
-            "textdate|date",
-            "taken",
-            "taken|date",
-            "taken|yearmonth",
-            "taken|year",
-            "taken|time",
-            "taken|lowercase",
-            "FNumber",
-            "FNumber|lowercase",
-            "source.mtime",
-            "source.mtime|lowercase",
-            "source.size",
-            "source.rel_path|number",
-            "source.rel_path[1:3]|number",
-            "source.rel_path[0]",
-            "content.hash.sha256|short",
-        ];
-        let operators = ["=", "!=", "<", "<=", ">", ">=", "~", "!~"];
-        let mut clauses = Vec::new();
-        for key in keys {
-            clauses.push(format!("{key}?"));
-            for a in values {
-                for op in operators {
-                    clauses.push(format!("{key}{op}{a}"));
-                }
-                for b in values {
-                    clauses.push(format!("{key} IN ({a}, {b})"));
-                    clauses.push(format!("{key} NOT IN ({a}, {b})"));
-                }
-            }
-        }
-        let mut reached: Vec<&'static str> = Vec::new();
-        let mut checked = 0;
-        for clause in &clauses {
-            for cause in bind(clause).err().unwrap_or_default() {
-                let ways = cause.entry().map(Entry::rewrites).unwrap_or_default();
-                if !ways.is_empty() {
-                    let kind = match &cause {
-                        BindCause::Read(_) => "read",
-                        BindCause::UnknownName(_) => "unknown name",
-                        BindCause::UnknownKey(_) => "unknown key",
-                        BindCause::Unreadable(_) => "unreadable",
-                        BindCause::TypeMismatch(_) => "type mismatch",
-                        BindCause::OutOfRange(_) => "out of range",
-                        BindCause::WrongModifier { .. } => "wrong modifier",
-                        BindCause::GlobNotText(_) => "glob",
-                        BindCause::NotABucketLabel(_) => "bucket label",
-                        BindCause::BucketOrdered(_) => "bucket ordered",
-                        BindCause::TooFine(_) => "too fine",
-                        BindCause::MixedType { .. } => "two types",
-                        BindCause::TypeChanged { .. } => "type changed",
-                    };
-                    if !reached.contains(&kind) {
-                        reached.push(kind);
-                    }
-                }
-                let shown = ExpressionRefused {
-                    refused: Refused::Filter,
-                    texts: vec![clause.clone()],
-                    typed_at: BTreeMap::new(),
-                    causes: vec![cause.clone()],
-                }
-                .to_string();
-                for way in ways {
-                    checked += 1;
-                    assert!(
-                        shown.contains(&format!(": {way}")),
-                        "{way} not shown:\n{shown}"
-                    );
-                    if let Err(again) = bind(&way) {
-                        panic!("{clause} → way out {way} is refused again: {again:?}");
-                    }
-                }
-            }
-        }
-        for kind in ["unreadable", "type mismatch", "wrong modifier", "too fine"] {
-            assert!(reached.contains(&kind), "no {kind} way out was reached");
-        }
-        assert!(checked > 1000, "only {checked} ways out were checked");
-    }
-
-    /// A way out that would be refused again is not shown, its text with it; a wrong modifier
-    /// left with no way out names the modifiers that apply instead.
-    #[test]
-    fn a_way_out_that_would_be_refused_again_is_not_offered() {
-        let text = refusal("source.size|lowercase=10");
-        assert!(!text.contains("|number|lowercase"), "{text}");
-        assert!(text.contains("Modifiers for numbers"), "{text}");
-        assert!(refusal("source.size|lowercase=x").contains("source.size|number|lowercase=x"));
-        let list = refusal("source.size IN (true, big)");
-        assert!(!list.contains("is stored as 1"), "{list}");
-        assert!(refusal("source.size IN (true, 5)").contains("source.size IN (1, 5)"));
-        // Each builder's way out is shown where it binds.
-        for (clause, shown) in [
-            ("numtext=10", r#"As text: numtext="10""#),
-            (
-                "numtext=10",
-                "As numbers, if its values are numbers: numtext|number=10",
-            ),
-            (
-                "numtext=2024-06",
-                "As dates, if its values are dates: numtext|yearmonth=2024-06",
-            ),
-            ("numtext=1.2.3", r#"As text: numtext="1.2.3""#),
-            (
-                "source.size IN (true, false)",
-                "is stored as 1: source.size IN (1, 0)",
-            ),
-            (
-                "source.size IN (true, false)",
-                "is stored as 0: source.size IN (1, 0)",
-            ),
-            ("source.mtime=12:30", "|time: source.mtime|time=12:30"),
-            (
-                "taken|yearmonth=2024-06-15",
-                "To compare by day: taken|date=2024-06-15",
-            ),
-            ("source.size|lowercase=x", "source.size|number|lowercase=x"),
-            (
-                "source.rel_path|number>=2019",
-                "source.rel_path[0]|number>=2019",
-            ),
-        ] {
-            let text = refusal(clause);
-            assert!(text.contains(shown), "{clause}: {shown} not in\n{text}");
-        }
     }
 
     #[test]
@@ -3304,33 +2885,32 @@ mod tests {
             start: 0,
             end: 1,
         };
-        let entry = || Entry::new("k", place, String::new(), Vec::new());
+        let problem = || Problem::new(place, String::new(), None);
         for cause in [
-            BindCause::Read(Problem {
-                place,
-                sentence: String::new(),
-                rule_line: None,
-                fix: Fix::None,
-            }),
-            BindCause::UnknownKey(entry()),
-            BindCause::Unreadable(entry()),
-            BindCause::TypeMismatch(entry()),
-            BindCause::OutOfRange(entry()),
-            BindCause::WrongModifier {
-                entry: entry(),
-                fallback: String::new(),
+            BindCause::Read(problem()),
+            BindCause::UnknownKey(problem()),
+            BindCause::Unreadable(problem()),
+            BindCause::TypeMismatch {
+                problem: problem(),
+                conversion: None,
             },
-            BindCause::GlobNotText(entry()),
-            BindCause::NotABucketLabel(entry()),
-            BindCause::BucketOrdered(entry()),
-            BindCause::TooFine(entry()),
+            BindCause::OutOfRange(problem()),
+            BindCause::WrongModifier(problem()),
+            BindCause::GlobNotText(problem()),
+            BindCause::NotABucketLabel(problem()),
+            BindCause::BucketOrdered(problem()),
+            BindCause::TooFine(problem()),
         ] {
             assert!(!cause.is_answer(), "{cause:?}");
         }
-        assert!(BindCause::MixedType {
-            entry: entry(),
-            key: "content.k".into()
-        }
+        assert!(BindCause::MixedType(Box::new(MixedType {
+            clause: "k=1".into(),
+            place,
+            sentence: String::new(),
+            counts: String::new(),
+            key: "content.k".into(),
+            types: KeyTypes::from_counts([(FactType::Num, 1), (FactType::Text, 1)]).unwrap(),
+        }))
         .is_answer());
         assert!(BindCause::TypeChanged {
             key: "content.k".into(),
@@ -3384,11 +2964,11 @@ mod tests {
             lines,
             [
                 "@x",
-                "^ in alias `@x`: numtext holds text; 10 is a number.",
-                "  `canon facts convert content.numtext` to see what it holds and change its type",
+                "^ in alias `@x`: numtext is of type text, and `10` is a number",
                 "Title=a OR @x",
-                "           ^ in alias `@x`: numtext holds text; 10 is a number.",
-                "  `canon facts convert content.numtext` to see what it holds and change its type",
+                "           ^ in alias `@x`: numtext is of type text, and `10` is a number",
+                "Type conversion: in the filter with a modifier such as |number or |year; for the \
+                 stored type, `canon facts convert`.",
             ],
             "{joined}"
         );
@@ -3436,7 +3016,7 @@ mod tests {
                 "  @x AND FNumber=abc AND @x",
                 "  ^ in alias `@x`: `%` needs quotes around the value",
                 "  @x AND FNumber=abc AND @x",
-                r#"                 ^ FNumber holds numbers; "abc" is not a number."#,
+                "                 ^ FNumber is of type number; `abc` is not a number",
                 "    Type a number: 1024, -5, 3.14, 1e20",
                 "  @x AND FNumber=abc AND @x",
                 "                         ^ in alias `@x`: `%` needs quotes around the value",
@@ -3450,7 +3030,7 @@ mod tests {
             [
                 "cannot run the filter as given",
                 "  Title=a OR @t?",
-                "             ^ in alias `@t`: an accessor ([…]) works on paths or text; taken holds times.",
+                "             ^ in alias `@t`: an accessor `[…]` works on paths or text; taken is of type time",
                 &format!("    {}", applicable_line(&Gives::Time, false)),
             ]
         );
@@ -3458,14 +3038,15 @@ mod tests {
 
     #[test]
     fn inside_an_alias_nothing_that_rewrites_text_is_shown_and_pointers_stay() {
-        // A wrong type's ways out rewrite the clause and are left out; the convert pointer stays.
+        // A type mismatch's fix rewrites the clause and is left out; the bottom line stays.
         assert_eq!(
-            alias_refusal(&[("x", "numtext<10")], "@x"),
+            alias_refusal(&[("x", "numtext=10")], "@x"),
             drawn(&[
                 "cannot run the filter as given",
                 "  @x",
-                "  ^ in alias `@x`: numtext holds text; 10 is a number.",
-                "    `canon facts convert content.numtext` to see what it holds and change its type",
+                "  ^ in alias `@x`: numtext is of type text, and `10` is a number",
+                "  Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`.",
             ])
         );
         // A rule line stays.
@@ -3478,14 +3059,14 @@ mod tests {
                 "    `canon facts` lists the keys",
             ])
         );
-        // A wrong modifier whose way out rewrites names the modifiers that apply instead.
+        // A wrong modifier names the modifiers that apply.
         assert_eq!(
             alias_refusal(&[("x", "taken|lowercase=a")], "@x"),
             drawn(&[
                 "cannot run the filter as given",
                 "  @x",
                 "  ^ in alias `@x`: |lowercase works on text, paths or another modifier's result; \
-                 taken holds times.",
+                 taken is of type time",
                 &format!("    {}", applicable_line(&Gives::Time, false)),
             ])
         );
@@ -3523,31 +3104,22 @@ mod tests {
                 "    After a key: =, !=, <, >, <=, >=, ~, !~, ?, IN or NOT IN",
             ])
         );
-        // A way out that replaces a key alias's own last modifier would rewrite the alias: none
-        // is offered. Typed in full, the same clause keeps it.
+        // A key alias's own modifier is named by the alias as typed.
         assert_eq!(
             alias_refusal(&[("d", "taken|yearmonth")], "@d=2024-07-23"),
             drawn(&[
                 "cannot run the filter as given",
                 "  @d=2024-07-23",
-                "     ^ |yearmonth gives months; 2024-07-23 is finer than a month.",
+                "     ^ @d is a month; `2024-07-23` is finer than a month",
             ])
-        );
-        assert_eq!(
-            refusal("taken|yearmonth=2024-07-23").lines().last(),
-            Some("    To compare by day: taken|date=2024-07-23")
         );
         assert_eq!(
             alias_refusal(&[("b", "FNumber|bucket")], "@b>5"),
             drawn(&[
                 "cannot run the filter as given",
                 "  @b>5",
-                "     ^ a bucket is compared with =, !=, IN or NOT IN; @b gives bucket ranges.",
+                "     ^ a bucket is compared with =, !=, IN or NOT IN; @b is grouped into ranges",
             ])
-        );
-        assert_eq!(
-            refusal("FNumber|bucket>5").lines().last(),
-            Some("    To order the values, compare FNumber itself with >, >=, < or <=")
         );
     }
 
@@ -3563,7 +3135,7 @@ mod tests {
                 "    `canon facts` lists the keys",
             ])
         );
-        // Its wrong value, and the way out, by the alias as typed.
+        // Its wrong value by the alias as typed.
         let text = alias_refusal(&[("taken", "taken")], "@taken=garbage");
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
@@ -3571,37 +3143,50 @@ mod tests {
             [
                 "cannot run the filter as given",
                 "  @taken=garbage",
-                r#"         ^ @taken holds times; "garbage" is not a time."#,
+                "         ^ @taken is of type time; `garbage` is not a time",
             ]
         );
         assert!(
             lines[3].starts_with("    Type a year, month, day"),
             "{text}"
         );
-        let text = alias_refusal(&[("n", "numtext")], "@n<10");
         assert_eq!(
-            text,
+            alias_refusal(&[("n", "numtext")], "@n<10"),
             drawn(&[
                 "cannot run the filter as given",
                 "  @n<10",
-                "     ^ @n holds text; 10 is a number.",
-                r#"    As text: @n<"10"     As numbers, if its values are numbers: @n|number<10"#,
-                "    `canon facts convert content.numtext` to see what it holds and change its type",
+                "     ^ @n is of type text, and `10` is a number",
+                "  Type conversion: in the filter with a modifier such as |number or |year; for \
+                 the stored type, `canon facts convert`.",
             ])
         );
-        // Its two types by the alias as typed; a filter alias's by its own key.
-        assert!(alias_refusal(&[("w", "Width")], "@w=2024")
-            .starts_with("@w=2024: @w holds numbers and times; a filter compares one type only."));
-        assert!(alias_refusal(&[("old", "Width=5")], "@old")
-            .starts_with("@old: Width holds numbers and times; a filter compares one type only."));
+        // A modifier inside the alias is named with the key as the alias writes it, up to the
+        // modifier; one typed after the alias, with the alias as typed.
+        assert_eq!(
+            alias_refusal(&[("t", "taken|time|year")], "@t?").lines().nth(2),
+            Some("  ^ in alias `@t`: |year needs a date; taken|time is a time of day, which has none")
+        );
+        assert_eq!(
+            alias_refusal(&[("t", "taken|time")], "@t|year?")
+                .lines()
+                .nth(2),
+            Some("    ^ |year needs a date; @t is a time of day, which has none")
+        );
+        // Its mixed type by the alias as typed; a filter alias's by its own key.
+        assert!(alias_refusal(&[("w", "Width")], "@w=2024").starts_with(
+            "@w=2024: @w is of mixed type (number and time); a filter supports one type only"
+        ));
+        assert!(alias_refusal(&[("old", "Width=5")], "@old").starts_with(
+            "@old: Width is of mixed type (number and time); a filter supports one type only"
+        ));
     }
 
     #[test]
-    fn the_two_types_answer_starts_with_the_clause_as_typed() {
+    fn the_mixed_type_answer_starts_with_the_clause_as_typed() {
         let answer = drawn(&[
-            "@old: Width holds numbers and times; a filter compares one type only.",
+            "@old: Width is of mixed type (number and time); a filter supports one type only",
             "  numbers: 2 facts   times: 1 fact   (every fact of the key, on every root)",
-            "To inspect it and learn how to convert it to one type:",
+            "To see its values and convert it to one type:",
             "  `canon facts convert content.Width`",
         ]);
         assert_eq!(alias_refusal(&[("old", "Width=5")], "@old"), answer);
@@ -3614,11 +3199,11 @@ mod tests {
         assert_eq!(
             alias_refusal(&[("w", "Width")], "@w=2024 OR @w=2025"),
             drawn(&[
-                "@w=2024: @w holds numbers and times; a filter compares one type only.",
+                "@w=2024: @w is of mixed type (number and time); a filter supports one type only",
                 "  numbers: 2 facts   times: 1 fact   (every fact of the key, on every root)",
-                "@w=2025: @w holds numbers and times; a filter compares one type only.",
+                "@w=2025: @w is of mixed type (number and time); a filter supports one type only",
                 "  numbers: 2 facts   times: 1 fact   (every fact of the key, on every root)",
-                "To inspect it and learn how to convert it to one type:",
+                "To see its values and convert it to one type:",
                 "  `canon facts convert content.Width`",
             ])
         );

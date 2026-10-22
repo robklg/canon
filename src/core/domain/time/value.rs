@@ -224,28 +224,12 @@ impl TimeValue {
         }
     }
 
-    /// A clock reading's span, `None` for an instant, which only the user's zone can turn into
-    /// local time.
-    fn as_written(&self) -> Option<ClockSpan> {
-        match self.0 {
-            Repr::Clock { at, precision } => Some(ClockSpan::as_written(at, precision)),
-            Repr::Instant { .. } => None,
-        }
-    }
-
     /// The one printed spelling, on the user's clock, at the value's precision:
     /// `2024`, `2024-06`, `2024-06-15`, `2024-06-15 14:30`, `2024-06-15 14:30:05`. A fraction
     /// prints to the second, truncated. Never an offset. The span's own spelling
     /// ([`ClockSpan::printed`]), read through the frame rule.
     pub fn printed(&self, zone: &UserZone) -> String {
         self.on_clock(zone).printed()
-    }
-
-    /// A typed clock reading named back as it was asked ([`ClockSpan::printed_as_asked`]: a
-    /// fraction's digits kept), which needs no clock; `None` for an instant, which only the
-    /// user's clock can print. For a value a person typed, never a stored one.
-    pub fn printed_clock_reading_as_asked(&self) -> Option<String> {
-        self.as_written().map(|span| span.printed_as_asked())
     }
 
     /// The one ISO 8601 spelling of what is stored: its form, its precision and its offset —
@@ -850,29 +834,6 @@ mod tests {
             span("2024-06-15T14:30:05.45").printed(),
             "2024-06-15 14:30:05"
         );
-    }
-
-    /// A typed clock reading is named back as asked with no clock — its fraction kept, as the
-    /// span on any clock prints it as asked; an instant has no spelling without the user's
-    /// clock.
-    #[test]
-    fn a_typed_clock_reading_is_named_back_as_asked_without_a_clock() {
-        use crate::core::domain::time::reading::read_time;
-        for (text, asked) in [
-            ("2024:07:23", "2024-07-23"),
-            ("2024-06-15T14:30:05.25", "2024-06-15 14:30:05.25"),
-            ("2024:06:15 14:30", "2024-06-15 14:30"),
-        ] {
-            let tv = read_time(text).unwrap();
-            assert_eq!(
-                tv.printed_clock_reading_as_asked().as_deref(),
-                Some(asked),
-                "{text}"
-            );
-            assert_eq!(tv.on_clock(&ams()).printed_as_asked(), asked, "{text}");
-        }
-        let instant = read_time("2024-06-15T14:30+02:00").unwrap();
-        assert_eq!(instant.printed_clock_reading_as_asked(), None);
     }
 
     #[test]

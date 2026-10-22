@@ -1191,7 +1191,7 @@ mod tests {
             .unwrap()
             .query_map([], |r| crate::core::repo::fact::fact_value_at(r, 0))
             .unwrap()
-            .map(|r| match r.unwrap().unwrap() {
+            .map(|r| match r.unwrap().readable().unwrap() {
                 crate::core::domain::fact::FactValue::Time(tv) => tv.printed(&utc),
                 crate::core::domain::fact::FactValue::Text(t) => t,
                 crate::core::domain::fact::FactValue::Num(n) => n.to_string(),

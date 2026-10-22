@@ -505,6 +505,44 @@ fn a_camera_date_is_read_in_the_manifests_zone_and_a_clock_reading_as_written() 
     }
 }
 
+/// **A refresh states the clock for every way a time is read**: a pattern reading instant text
+/// through an accessor (`{content.Stamp[0]|year}`) read an instant on the clock, so a refresh
+/// in another zone states the change in full — as it does for a time read with no accessor.
+#[test]
+fn a_refresh_states_the_clock_for_a_time_read_through_an_accessor() {
+    let home = Home::new();
+    let id = home.source_id("photos/f0.jpg");
+    let record = serde_json::json!({
+        "source_id": id,
+        "basis_rev": 0,
+        "facts": {"Stamp": "2023-12-31T23:30:00Z"},
+    });
+    home.run("UTC", &["import-facts"], Some(&format!("{record}\n")));
+    let manifest = home.manifest_over("Europe/Amsterdam", &["photos/f0.jpg"]);
+    home.edit_manifest(
+        &manifest,
+        "pattern = ",
+        "pattern = \"{content.Stamp[0]|year}/{filename}\"",
+    );
+    home.run("Europe/Amsterdam", &["cluster", "refresh", &manifest], None);
+    home.edit_manifest(&manifest, "zone = ", "zone = \"America/New_York\"");
+    let refreshed = home.run("America/New_York", &["cluster", "refresh", &manifest], None);
+    assert!(
+        refreshed.stdout.contains(
+            "Time zone changed from Europe/Amsterdam to America/New_York: times in the query and \
+             in folder names are now in America/New_York"
+        ),
+        "{}{}",
+        refreshed.stdout,
+        refreshed.stderr
+    );
+    home.run("America/New_York", &["apply", &manifest, "--yes"], None);
+    assert!(
+        home.path("archive/2023/f0.jpg").exists(),
+        "placed on New York's clock"
+    );
+}
+
 /// **A refresh states the scope's refusal first**: a scope line on a suspended root, beside a
 /// zone line Canon cannot read, prints the door, then the zone's cause, then the abort once —
 /// exit 1 with no `Error:`, nothing written.

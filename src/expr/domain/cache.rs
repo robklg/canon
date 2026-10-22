@@ -22,8 +22,9 @@ use crate::expr::domain::value::source_value;
 pub struct FactCache {
     /// Facts stored on sources: (source_id, key) -> FactValue
     pub on_sources: HashMap<(i64, String), fact::FactValue>,
-    /// Facts stored on objects: (object_id, key) -> FactValue
-    pub on_objects: HashMap<(i64, String), fact::FactValue>,
+    /// Facts stored on objects: (object_id, key) -> FactValue, or a row Canon cannot read,
+    /// which decides that the source has no value for the key.
+    pub on_objects: HashMap<(i64, String), fact::Stored<fact::FactValue>>,
     /// Source to object mapping
     pub source_objects: HashMap<i64, i64>,
     /// Keys that were prefetched (for existence checks)
@@ -57,10 +58,15 @@ impl FactCache {
         self.on_sources.get(&(source_id, key.to_string()))
     }
 
-    pub fn get_on_object(&self, source_id: i64, key: &str) -> Option<&fact::FactValue> {
+    pub fn get_on_object(
+        &self,
+        source_id: i64,
+        key: &str,
+    ) -> Option<fact::Stored<&fact::FactValue>> {
         self.source_objects
             .get(&source_id)
             .and_then(|obj_id| self.on_objects.get(&(*obj_id, key.to_string())))
+            .map(fact::Stored::as_ref)
     }
 
     /// The source's one value for a stored key: the content's fact first, the source's own

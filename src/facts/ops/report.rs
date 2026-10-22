@@ -199,7 +199,7 @@ fn aggregate_and_sort(
 /// with stored fact keys from the database. A computed key counts the sources the resolver
 /// has a value for — every source, but for a save time Canon cannot read — so the listing agrees
 /// with the key's own `(no value)` line and with `K?`. Each key's type is the key's own,
-/// from all its facts: a key holding two types lists as mixed, whatever the scope holds.
+/// from all its facts: a key of mixed type lists as mixed, whatever the scope holds.
 pub fn compute_all_keys(
     conn: &mut Connection,
     source_ids: &[i64],
@@ -931,7 +931,7 @@ mod tests {
             assert!(refused.is_answer());
             assert_eq!(
                 refused.to_string(),
-                "content.Make's type changed while this ran; run it again."
+                "content.Make's type changed while this ran; run it again"
             );
         }
         let Err(err) = gained else {
@@ -943,7 +943,7 @@ mod tests {
         assert!(refused.is_answer(), "{refused}");
         assert_eq!(
             refused.to_string(),
-            "content.New gained facts while this ran; run it again."
+            "content.New gained facts while this ran; run it again"
         );
     }
 

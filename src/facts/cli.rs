@@ -4,7 +4,7 @@ pub(super) mod import;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
-use crate::core::domain::fact::FactType;
+use crate::core::domain::fact::{FactType, KeyTypes};
 use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
@@ -15,7 +15,7 @@ use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
 use crate::expr::{read_filters, read_report, ExpressionText};
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
-use crate::expr::{Key, KeyKind, Listing, ParsedFactKey, SourceFact};
+use crate::expr::{Key, KeyKind, Listing, ParsedFactKey};
 use crate::facts::domain::{delete_key, names_the_root};
 use crate::facts::ops::maintain::{
     execute_delete, execute_prune_excluded, execute_prune_orphaned, execute_prune_stale,
@@ -281,11 +281,11 @@ fn key_row(key_info: &KeyInfo, total_sources: usize) -> String {
 fn mixed_key_lines(result: &AllKeysResult) -> Vec<String> {
     use crate::expr::{mixed_type_statement, mixed_type_way_out};
 
-    let mixed: Vec<&str> = result
+    let mixed: Vec<(&str, &KeyTypes)> = result
         .keys
         .iter()
         .filter(|key_info| key_info.types.is_mixed())
-        .map(|key_info| key_info.key.as_str())
+        .map(|key_info| (key_info.key.as_str(), &key_info.types))
         .collect();
     let mut lines = mixed_type_statement(&mixed);
     lines.extend(mixed_type_way_out(&mixed));
@@ -295,9 +295,9 @@ fn mixed_key_lines(result: &AllKeysResult) -> Vec<String> {
 /// A value as the distribution table's first column shows it: labelled when
 /// empty, cut to fit the 40-character column when long. The cut counts
 /// characters, as the column's padding does, never bytes.
-fn value_cell(value: &str, base_key: &str) -> String {
+fn value_cell(value: &str) -> String {
     if value.is_empty() {
-        empty_label(base_key).to_string()
+        EMPTY.to_string()
     } else if value.chars().count() > 38 {
         format!("{}...", first_chars(value, 35))
     } else {
@@ -305,23 +305,15 @@ fn value_cell(value: &str, base_key: &str) -> String {
     }
 }
 
-/// What an empty value is shown as in a report, by the key read: `(no extension)` for the
-/// extension (`ext`, `source.ext`), `(empty)` for any other key — `filename|ext` included,
-/// whose base is not the extension. One label for every table a report prints, its main
-/// values and its groups alike.
-fn empty_label(base_key: &str) -> &'static str {
-    // Matched on the key, not its spelling: `ext` is the same value.
-    if Key::read(base_key).and_then(|key| key.as_source_fact()) == Some(SourceFact::Ext) {
-        "(no extension)"
-    } else {
-        "(empty)"
-    }
-}
+/// What an empty value is shown as in a report, for every key: one label for every table a
+/// report prints, its main values and its groups alike. A file with no extension has no
+/// value for it, so it is counted with the sources that have none.
+const EMPTY: &str = "(empty)";
 
 /// A grouping value as a report's group line shows it: labelled when empty.
-fn group_cell(value: &str, key: &ParsedFactKey) -> String {
+fn group_cell(value: &str) -> String {
     if value.is_empty() {
-        empty_label(&key.base_key).to_string()
+        EMPTY.to_string()
     } else {
         value.to_string()
     }
@@ -341,7 +333,7 @@ fn display_distribution(result: &DistributionResult, key: &ParsedFactKey) {
     let _ = writeln!(handle, "{}", "─".repeat(62));
 
     for entry in &result.entries {
-        let display_val = value_cell(&entry.value, &key.base_key);
+        let display_val = value_cell(&entry.value);
         let coverage = (entry.count as f64 / result.total_sources as f64) * 100.0;
         if writeln!(
             handle,
@@ -416,7 +408,7 @@ fn display_grouped_distribution(
 
     for group in &result.groups {
         let coverage = (group.total_count as f64 / total_sources as f64) * 100.0;
-        let main_display = group_cell(&group.main_value, main_key);
+        let main_display = group_cell(&group.main_value);
         if writeln!(
             handle,
             "{} (total: {:>6}, {:>5.1}%)",
@@ -437,7 +429,7 @@ fn display_grouped_distribution(
                 if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref()) {
                     format_root_display(rid, rpath)
                 } else {
-                    group_cell(&sub.group_values[0], &grouping_keys[0])
+                    group_cell(&sub.group_values[0])
                 }
             } else {
                 let parts: Vec<String> = grouping_keys
@@ -449,10 +441,10 @@ fn display_grouped_distribution(
                             {
                                 format_root_display(rid, rpath)
                             } else {
-                                group_cell(&sub.group_values[i], gk)
+                                group_cell(&sub.group_values[i])
                             }
                         } else {
-                            group_cell(&sub.group_values[i], gk)
+                            group_cell(&sub.group_values[i])
                         }
                     })
                     .collect();
@@ -802,21 +794,15 @@ pub fn show_aliases() {
 mod tests {
     use super::*;
 
-    /// Both of a report's cells read one empty label: `(no extension)` for the extension, by
-    /// either name, and `(empty)` for any other key — `value_cell` for the plain table's
-    /// values, `group_cell` for the grouped table's main and grouping values. That the grouped
-    /// display calls `group_cell` is interface text this pin cannot see; it was read on the
-    /// binary.
+    /// Both of a report's cells read one empty label, `(empty)`, for every key —
+    /// `value_cell` for the plain table's values, `group_cell` for the grouped table's main and
+    /// grouping values. That the grouped display calls `group_cell` is interface text this pin
+    /// cannot see; it was read on the binary.
     #[test]
     fn an_empty_value_is_labelled_alike_in_every_table() {
-        let key = |written: &str| ParsedFactKey::parse(written).unwrap();
-        for written in ["ext", "source.ext"] {
-            assert_eq!(value_cell("", &key(written).base_key), "(no extension)");
-            assert_eq!(group_cell("", &key(written)), "(no extension)");
-        }
-        assert_eq!(value_cell("", "content.Make"), "(empty)");
-        assert_eq!(group_cell("", &key("Make")), "(empty)");
-        assert_eq!(group_cell("jpg", &key("ext")), "jpg");
+        assert_eq!(value_cell(""), "(empty)");
+        assert_eq!(group_cell(""), "(empty)");
+        assert_eq!(group_cell("jpg"), "jpg");
     }
 
     // =========================================================================
@@ -868,10 +854,9 @@ mod tests {
         assert_eq!(
             mixed_key_lines(&result),
             vec![
-                r#""content.File Size" is of mixed type, so filters and patterns cannot use its values:"#,
-                "only values of one type can be compared or formatted correctly.",
-                "To inspect it and learn how to convert it to one type:",
-                r#"  `canon facts convert '"content.File Size"'`"#,
+                r#""content.File Size" is of mixed type (number and text); filters and patterns support one type only."#,
+                "To see its values and convert it to one type:",
+                "  `canon facts convert 'content.File Size'`",
             ]
         );
     }
@@ -892,11 +877,12 @@ mod tests {
         assert_eq!(
             mixed_key_lines(&result),
             vec![
-                "2 keys are of mixed type, so filters and patterns cannot use their values:",
-                "only values of one type can be compared or formatted correctly.",
-                "To inspect each and learn how to convert to one type:",
+                "2 keys are of mixed type; filters and patterns support one type only:",
+                "  content.CreateDate (time and text)",
+                r#"  "content.File Size" (number and text)"#,
+                "To see their values and convert each to one type:",
                 "  `canon facts convert content.CreateDate`",
-                r#"  `canon facts convert '"content.File Size"'`"#,
+                "  `canon facts convert 'content.File Size'`",
             ]
         );
     }
@@ -918,7 +904,7 @@ mod tests {
     /// between letters, never inside one.
     #[test]
     fn a_long_accented_value_is_cut_between_characters() {
-        let cell = value_cell(&"é".repeat(40), "content.title");
+        let cell = value_cell(&"é".repeat(40));
         assert_eq!(cell, format!("{}...", "é".repeat(35)));
     }
 
@@ -927,11 +913,8 @@ mod tests {
     #[test]
     fn a_value_that_fits_in_characters_prints_whole() {
         let value = "é".repeat(38);
-        assert_eq!(value_cell(&value, "content.title"), value);
-        assert_eq!(
-            value_cell(&"a".repeat(39), "content.title").chars().count(),
-            38
-        );
+        assert_eq!(value_cell(&value), value);
+        assert_eq!(value_cell(&"a".repeat(39)).chars().count(), 38);
     }
 
     // =========================================================================

@@ -972,7 +972,7 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
 /// [`DoorRefused`] anywhere in the chain is stated as it stands, **on the
 /// dispatched command's own class channel** ([`door_channel_for`]) rather
 /// than unconditionally on stderr. A [`crate::expr::ExpressionRefused`] that is
-/// only an answer about what a key is (two types, a type changed mid-run) is
+/// only an answer about what a key is (mixed type, a type changed mid-run) is
 /// stated the same way; one holding input Canon cannot read prints with
 /// `Error:` on stderr. Everything else is a real failure and renders exactly
 /// as before.

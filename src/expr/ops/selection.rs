@@ -67,7 +67,7 @@ pub struct Selection {
     /// Which status predicates appeared in filter expressions.
     pub used_status: UsedStatus,
     /// Whether the filters read an instant on the clock
-    /// (`expr::domain::transform::reads_an_instant`).
+    /// (`expr::domain::transform::Chained`'s answer).
     pub read_an_instant: bool,
 }
 

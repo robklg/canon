@@ -35,7 +35,7 @@ use jiff::{SignedDuration, Timestamp};
 use rusqlite::types::Value as SqlValue;
 
 use super::db::{populate_temp_sources, Connection};
-use crate::core::domain::fact::{FactEntry, FactType, FactValue, KeyTypes};
+use crate::core::domain::fact::{FactEntry, FactType, FactValue, KeyTypes, SourceFacts, Stored};
 use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 
 // Source-keyed fetches fill a temp table (populate_temp_sources) rather than chunk an IN
@@ -43,7 +43,8 @@ use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 
 /// Fetch all facts for the given source IDs.
 ///
-/// Returns a map from source_id to list of FactEntry.
+/// Returns a map from source_id to its [`SourceFacts`]: every readable row, and the keys whose
+/// row on the content Canon cannot read.
 /// Each source's facts include:
 /// - Facts stored on the source (entity_type = 'source', entity_id = source_id)
 /// - Facts stored on its object (entity_type = 'object', entity_id = object_id) if source has object_id
@@ -53,7 +54,7 @@ use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 pub fn batch_fetch_for_sources(
     conn: &mut Connection,
     source_ids: &[i64],
-) -> Result<HashMap<i64, Vec<FactEntry>>> {
+) -> Result<HashMap<i64, SourceFacts>> {
     if source_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -86,20 +87,24 @@ pub fn batch_fetch_for_sources(
         let entity_type: String = row.get(2)?;
         let entity_id: i64 = row.get(3)?;
         let value = fact_value_at(row, 4)?;
-
-        Ok(value.map(|value| {
-            (
-                source_id,
-                FactEntry::new(key, value, entity_type, entity_id),
-            )
-        }))
+        Ok((source_id, key, entity_type, entity_id, value))
     })?;
 
-    // Group facts by source_id
-    let mut result: HashMap<i64, Vec<FactEntry>> = HashMap::new();
+    // Group facts by source_id: an unreadable row on the content is kept as its key, one on
+    // the source dropped.
+    let mut result: HashMap<i64, SourceFacts> = HashMap::new();
     for row in rows {
-        if let Some((source_id, entry)) = row? {
-            result.entry(source_id).or_default().push(entry);
+        let (source_id, key, entity_type, entity_id, value) = row?;
+        match value {
+            Stored::Readable(value) => {
+                let entry = FactEntry::new(key, value, entity_type, entity_id);
+                result.entry(source_id).or_default().entries.push(entry);
+            }
+            Stored::Unreadable if FactEntry::sits_on_source(&entity_type) => {}
+            Stored::Unreadable => {
+                let facts = result.entry(source_id).or_default();
+                facts.unreadable_on_content.push(key);
+            }
         }
     }
 
@@ -175,9 +180,10 @@ pub fn fact_value_columns_of(alias: &str) -> String {
 /// Read a fact's value from the seven columns starting at `first`.
 ///
 /// A row the table's CHECKs forbid is an error. A stored time Canon cannot read — outside
-/// the years every zone reads in 0000–9999, or with a part its constructor refuses — is no
-/// value for that fact (`Ok(None)`), never an error that fails the command.
-pub fn fact_value_at(row: &rusqlite::Row, first: usize) -> rusqlite::Result<Option<FactValue>> {
+/// the years every zone reads in 0000–9999, or with a part its constructor refuses — is
+/// `Stored::Unreadable`, never an error that fails the command: a reader on the source's side
+/// drops it, one on the content's keeps it, since there it decides the source has no value.
+pub fn fact_value_at(row: &rusqlite::Row, first: usize) -> rusqlite::Result<Stored<FactValue>> {
     let text: Option<String> = row.get(first)?;
     let num: Option<f64> = row.get(first + 1)?;
     let time: Option<i64> = row.get(first + 2)?;
@@ -193,8 +199,8 @@ pub fn fact_value_at(row: &rusqlite::Row, first: usize) -> rusqlite::Result<Opti
         )
     };
     match (text, num, time) {
-        (Some(t), None, None) => Ok(Some(FactValue::Text(t))),
-        (None, Some(n), None) => Ok(Some(FactValue::Num(n))),
+        (Some(t), None, None) => Ok(Stored::Readable(FactValue::Text(t))),
+        (None, Some(n), None) => Ok(Stored::Readable(FactValue::Num(n))),
         (None, None, Some(secs)) => {
             let precision = precision
                 .as_deref()
@@ -219,7 +225,9 @@ pub fn fact_value_at(row: &rusqlite::Row, first: usize) -> rusqlite::Result<Opti
                     .and_then(|(at, o)| TimeValue::instant(at, Some(o), precision).ok()),
                 _ => return Err(forbidden("time form")),
             };
-            Ok(value.map(FactValue::Time))
+            Ok(value.map_or(Stored::Unreadable, |tv| {
+                Stored::Readable(FactValue::Time(tv))
+            }))
         }
         _ => Err(forbidden("one value column")),
     }
@@ -360,7 +368,7 @@ mod tests {
 
         let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
         // Source exists but has no facts - not in result map
-        assert!(result.get(&1).map(|v| v.is_empty()).unwrap_or(true));
+        assert!(result.get(&1).map(|v| v.entries.is_empty()).unwrap_or(true));
     }
 
     #[test]
@@ -371,7 +379,7 @@ mod tests {
         insert_fact_text(&conn, "source", 1, "source.policy", "reviewed");
 
         let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
+        let facts = &result.get(&1).unwrap().entries;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].key, "source.policy");
     }
@@ -385,7 +393,7 @@ mod tests {
         insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
 
         let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
+        let facts = &result.get(&1).unwrap().entries;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].key, "content.Make");
     }
@@ -400,7 +408,7 @@ mod tests {
         insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
 
         let result = batch_fetch_for_sources(&mut conn, &[1]).unwrap();
-        let facts = result.get(&1).unwrap();
+        let facts = &result.get(&1).unwrap().entries;
         assert_eq!(facts.len(), 2);
     }
 
@@ -416,8 +424,8 @@ mod tests {
         insert_fact_text(&conn, "object", 101, "content.Make", "Nikon");
 
         let result = batch_fetch_for_sources(&mut conn, &[1, 2]).unwrap();
-        assert_eq!(result.get(&1).unwrap().len(), 1);
-        assert_eq!(result.get(&2).unwrap().len(), 1);
+        assert_eq!(result.get(&1).unwrap().entries.len(), 1);
+        assert_eq!(result.get(&2).unwrap().entries.len(), 1);
     }
 
     // =========================================================================
@@ -467,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn key_types_reports_two_types_with_their_counts() {
+    fn key_types_reports_mixed_types_with_their_counts() {
         let conn = setup_test_db();
         insert_root(&conn, 1, "/r");
         insert_source(&conn, 1, 1, "a", None);
@@ -558,6 +566,7 @@ mod tests {
             |r| fact_value_at(r, 0),
         )
         .unwrap()
+        .readable()
     }
 
     #[test]
@@ -628,7 +637,8 @@ mod tests {
     /// A stored time outside the years every zone reads in 0000–9999 — reachable only by a
     /// pre-upgrade import late in year 9999 with a negative offset, which the old parser
     /// stored as a second in year 10000 — is no value for that fact, and the fetch over it
-    /// completes.
+    /// completes: on the source the row is dropped, on the content its key is kept as
+    /// unreadable, since there it decides the source's value.
     #[test]
     fn a_stored_time_outside_the_readable_line_is_no_value_and_the_fetch_completes() {
         let mut conn = setup_test_db();
@@ -652,8 +662,20 @@ mod tests {
         )
         .unwrap();
 
-        let all = batch_fetch_for_sources(&mut conn, &[1, 2]).unwrap();
+        insert_object(&conn, 100, "abc123");
+        insert_source(&conn, 3, 1, "c.jpg", Some(100));
+        conn.execute(
+            "INSERT INTO facts (entity_type, entity_id, key, value_time, time_form, time_precision, observed_at, observed_basis_rev)
+             VALUES ('object', 100, 'content.T', 253402315200, 'clock', 'second', 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let all = batch_fetch_for_sources(&mut conn, &[1, 2, 3]).unwrap();
         assert!(!all.contains_key(&1));
-        assert_eq!(all[&2].len(), 1, "only the readable fact");
+        assert_eq!(all[&2].entries.len(), 1, "only the readable fact");
+        assert!(all[&2].unreadable_on_content.is_empty());
+        assert!(all[&3].entries.is_empty());
+        assert_eq!(all[&3].unreadable_on_content, ["content.T"]);
     }
 }

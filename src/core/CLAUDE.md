@@ -40,7 +40,7 @@ positive half alone, is what gets reviewed when either changes.
 ### It names — `domain::{source, root, object, fact}`
 
 `Source`, `Root`, `RootSpec`, `Object`, `ArchiveCopy`/`ArchiveLocation`,
-`FactEntry`/`FactType`/`FactValue`, and the predicates
+`FactEntry`/`FactType`/`FactValue`/`Stored`/`SourceFacts`, and the predicates
 that read them (`is_excluded`, `is_contentless`/`is_contentless_size`, `matches_scope`,
 `find_containing_root`, `FactEntry::is_on_source`), and `KeyTypes`, the types a key's facts hold.
 Every subsystem speaks these; nothing here knows about any subsystem. Beside them the pure
@@ -96,14 +96,15 @@ records, never the machine's.
 
 **A stored time is `value_time` plus four `time_*` columns** (form, offset, fraction,
 precision), read and written only through `repo::fact`'s conversion pair (`fact_value_params`,
-`fact_value_at`): `value_time` alone is no epoch second for a clock reading.
+`fact_value_at`): `value_time` alone is no epoch second for a clock reading. An unreadable time,
+`Stored::Unreadable`, is kept only on the content.
 
 **A number is one noun, read and written one way** (`domain::number`): `read_number` is the
 one reading of text as a number — Canon's grammar, no `inf`, no leading `+`, no hexadecimal,
 nothing too large to hold — and `spelled` the one writing, the shortest plain decimal that reads
 back as the same number, never an exponent. Pinned beside it, every spelling read back;
-recognised here, with no roster row. **Not reached**: plain `|bucket`'s range labels
-(`expr/domain/transform.rs`), which keep their own short form.
+recognised here, with no roster row. **Form first, fit second**: `number_form` asks the
+grammar, `NumberForm::exact` the fit, which filter values and their printing ask.
 
 **Text is cut by characters, never by byte index**, because a cut inside a multi-byte
 character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies

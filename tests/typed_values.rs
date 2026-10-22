@@ -592,7 +592,7 @@ fn what_worklist_emits_pastes_back() {
     assert_eq!(fx.listed(&format!("taken={taken}")), names(&["a.jpg"]));
 }
 
-/// A refusal that is an answer about what a key is — a key holding two types — prints as it
+/// A refusal that is an answer about what a key is — a key of mixed type — prints as it
 /// stands, without `Error:`, on the command's own channel: stderr for a list command,
 /// stdout for an effectful one; anything holding input Canon cannot read prints with
 /// `Error:` on stderr, the answer beside it. Each exits non-zero and runs nothing.
@@ -614,7 +614,8 @@ fn an_answer_prints_without_error_on_the_commands_channel() {
         .unwrap();
     assert_eq!(changed, 1);
     drop(db);
-    let answer = "mixed=5: mixed holds text and numbers; a filter compares one type only.";
+    let answer =
+        "mixed=5: mixed is of mixed type (text and number); a filter supports one type only\n";
     let way_out = "  `canon facts convert content.mixed`";
 
     let listed = fx.run(&["ls", "--global", "--where", "mixed=5"]);
@@ -672,6 +673,118 @@ fn an_answer_prints_without_error_on_the_commands_channel() {
     );
 }
 
+/// **A key of mixed type is named with its types on every surface that names one**: a filter
+/// ("a filter supports one type only") and a report's modifier ("a modifier supports one type
+/// only"), each with its counts and the convert line; the `facts` listing, `cluster generate`'s
+/// warning and the manifest's comment, one key named with its types and several counted, then
+/// each named. The convert line names the full stored key, quoted for the shell only.
+#[test]
+fn a_mixed_type_key_is_named_with_its_types() {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    fx.import(&[
+        (
+            "a.jpg",
+            serde_json::json!({"Model": "EOS", "File Size": "380 KB"}),
+        ),
+        (
+            "b.jpg",
+            serde_json::json!({"Model": "R5", "File Size": "41 KB"}),
+        ),
+    ]);
+    // Import keeps a key to one type, so the second type is written as an older Canon could.
+    let second_type = |key: &str, text: &str| {
+        let db = rusqlite::Connection::open(fx.path("home/canon.db")).unwrap();
+        let changed = db
+            .execute(
+                "UPDATE facts SET value_text = NULL, value_num = 5 \
+                 WHERE key = ?1 AND value_text = ?2",
+                [key, text],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    };
+    second_type("content.Model", "R5");
+
+    let counts = "  text: 1 fact   numbers: 1 fact   (every fact of the key, on every root)";
+    let listed = fx.run(&["ls", "--global", "--where", "Model=EOS"]);
+    assert_eq!(
+        listed.stderr,
+        format!(
+            "Model=EOS: Model is of mixed type (text and number); a filter supports one type \
+             only\n{counts}\nTo see its values and convert it to one type:\n  `canon facts \
+             convert content.Model`\n"
+        )
+    );
+    let report = fx.run(&["facts", "--global", "--key", "Model|lowercase"]);
+    assert_ne!(report.code, 0);
+    let said = format!("{}{}", report.stdout, report.stderr);
+    assert!(
+        said.contains(
+            "Model|lowercase: Model is of mixed type (text and number); a modifier supports one \
+             type only\n"
+        ),
+        "{said}"
+    );
+
+    let statement = "content.Model is of mixed type (text and number); filters and patterns \
+                     support one type only.\nTo see its values and convert it to one type:\n  \
+                     `canon facts convert content.Model`\n";
+    let keys = fx.run(&["facts", "--global"]);
+    assert_eq!(keys.code, 0, "{}{}", keys.stdout, keys.stderr);
+    assert!(keys.stdout.contains(statement), "{}", keys.stdout);
+
+    std::fs::create_dir_all(fx.path("arc")).unwrap();
+    let run = fx.run(&["scan", "--add", "--role", "archive", &fx.path_str("arc")]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let manifest = fx.path("m.toml");
+    let generate = |output: &std::path::Path| {
+        fx.run(&[
+            "cluster",
+            "generate",
+            &fx.path_str("src"),
+            "--dest",
+            &format!("{}/out", fx.path_str("arc")),
+            "--output",
+            &output.to_string_lossy(),
+        ])
+    };
+    let generated = generate(&manifest);
+    assert_eq!(
+        generated.code, 0,
+        "{}{}",
+        generated.stdout, generated.stderr
+    );
+    assert!(generated.stderr.contains(statement), "{}", generated.stderr);
+    let written = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        written.contains(
+            "#     To see its values and convert it to one type:\n\
+             #       `canon facts convert content.Model`\n"
+        ),
+        "{written}"
+    );
+
+    second_type("content.File Size", "41 KB");
+    let several = "2 keys are of mixed type; filters and patterns support one type only:\n  \
+                   \"content.File Size\" (text and number)\n  content.Model (text and number)\n\
+                   To see their values and convert each to one type:\n  `canon facts convert \
+                   'content.File Size'`\n  `canon facts convert content.Model`\n";
+    let keys = fx.run(&["facts", "--global"]);
+    assert!(keys.stdout.contains(several), "{}", keys.stdout);
+    let generated = generate(&fx.path("m2.toml"));
+    assert_eq!(
+        generated.code, 0,
+        "{}{}",
+        generated.stdout, generated.stderr
+    );
+    assert!(generated.stderr.contains(several), "{}", generated.stderr);
+    let written = std::fs::read_to_string(fx.path("m2.toml")).unwrap();
+    assert!(
+        written.contains("#       `canon facts convert 'content.File Size'`\n"),
+        "{written}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // How a refusal points at what was typed, on the built binary.
 // ---------------------------------------------------------------------------
@@ -718,7 +831,7 @@ fn a_refusal_points_at_each_problem_with_a_caret() {
          \x20 filename=a%b AND source.size=big\n\
          \x20           ^ `%` needs quotes around the value: filename=\"a%b\"\n\
          \x20 filename=a%b AND source.size=big\n\
-         \x20                              ^ source.size holds numbers; \"big\" is not a number.\n\
+         \x20                              ^ source.size is of type number; `big` is not a number\n\
          \x20   Type a number: 1024, -5, 3.14, 1e20\n\
          \x20 source.ext=jpg AND Foo=1\n\
          \x20                    ^ `Foo` is an unknown key\n\
@@ -737,7 +850,7 @@ fn a_refusal_points_at_each_problem_with_a_caret() {
         stderr,
         "Error: cannot run the filter as given\n\
          \x20 AND source.size=big\n\
-         \x20                 ^ source.size holds numbers; \"big\" is not a number.\n\
+         \x20                 ^ source.size is of type number; `big` is not a number\n\
          \x20   Type a number: 1024, -5, 3.14, 1e20\n"
     );
     let stderr = refused(&fx, &["facts", "--global", "--key", "source.ext|yeer"]);
@@ -778,7 +891,7 @@ fn plain_values_are_read_by_the_reading_rules() {
         ("Model=EOS 5D", "^ a space separates values\n"),
         (
             "source.size=4%",
-            "^ source.size holds numbers; \"4%\" is not a number.",
+            "^ source.size is of type number; `4%` is not a number",
         ),
         ("Foo=a%b", "^ `Foo` is an unknown key\n"),
     ] {
@@ -817,7 +930,7 @@ fn a_wildcard_after_equals_is_named_with_both_readings() {
         ),
         (
             "source.size=1*",
-            "^ source.size holds numbers; \"1*\" is not a number.",
+            "^ source.size is of type number; `1*` is not a number",
         ),
     ] {
         let stderr = refused(&fx, &["ls", "--global", "--where", filter]);
@@ -917,7 +1030,7 @@ fn worklist_names_an_emit_name_beside_a_refused_filter() {
         stderr,
         "Error: cannot run the filter as given\n\
          \x20 Rating=big\n\
-         \x20        ^ Rating holds numbers; \"big\" is not a number.\n\
+         \x20        ^ Rating is of type number; `big` is not a number\n\
          \x20   Type a number: 1024, -5, 3.14, 1e20\n\
          \x20 `source.extension` is an unknown key\n\
          \x20   `canon facts` lists the keys\n"

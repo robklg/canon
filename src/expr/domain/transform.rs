@@ -11,7 +11,9 @@ use jiff::civil::Weekday;
 
 use crate::core::domain::fact::FactValue;
 use crate::core::domain::number::{read_number, spelled};
-use crate::core::domain::time::reading::read_time;
+
+use super::print::bucket_label;
+use crate::core::domain::time::reading::{read_time, read_time_of_day};
 use crate::core::domain::time::value::{Precision, TimeForm, TimeValue, REFERENCE_DAY};
 use crate::core::domain::time::zone::UserZone;
 
@@ -179,39 +181,53 @@ fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Resu
 
     let segments: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
     let len = segments.len() as i32;
-    let no_segment = Ok(Modified::NoValue(NoValueCause::NoSegment));
     let found = |value: FactValue| Ok(Modified::Value(value));
 
     match accessor {
         PathAccessor::Index(idx) => {
             let actual_idx = normalize_index(*idx, len);
             if actual_idx < 0 || actual_idx >= len {
-                return no_segment;
+                return Ok(Modified::NoValue(NoValueCause::NoSegment));
             }
             found(FactValue::Text(segments[actual_idx as usize].to_string()))
         }
+        // A slice always has a value, as in Python: its bounds are clamped to the segments,
+        // and one that selects none is the path with no segments. Taken from the first
+        // segment of an absolute path, what it selects keeps the leading `/`.
         PathAccessor::Slice { start, end } => {
-            let out_of_bounds = |bound: &Option<i32>| {
-                bound.is_some_and(|b| {
-                    let normalized = normalize_index(b, len);
-                    normalized < 0 || normalized > len
-                })
-            };
-            if out_of_bounds(start) || out_of_bounds(end) {
-                return no_segment;
-            }
-            let start_idx = start.map(|s| normalize_index(s, len)).unwrap_or(0);
-            let end_idx = end.map(|e| normalize_index(e, len)).unwrap_or(len);
-            let start_idx = start_idx.max(0) as usize;
-            let end_idx = end_idx.max(0) as usize;
-
-            if start_idx >= end_idx || start_idx >= segments.len() {
+            let clamp = |bound: i32| normalize_index(bound, len).clamp(0, len) as usize;
+            let start_idx = start.map_or(0, clamp);
+            let end_idx = end.map_or(len as usize, clamp);
+            if start_idx >= end_idx {
                 return found(FactValue::Path(String::new()));
             }
-
-            let sliced: Vec<&str> = segments[start_idx..end_idx.min(segments.len())].to_vec();
-            found(FactValue::Path(sliced.join("/")))
+            let sliced = segments[start_idx..end_idx].join("/");
+            let absolute = path_str.starts_with('/') && start_idx == 0;
+            found(FactValue::Path(if absolute {
+                format!("/{sliced}")
+            } else {
+                sliced
+            }))
         }
+    }
+}
+
+/// **A name's extension**: what follows its last dot, where that is neither its first character
+/// nor its last — none for `README`, `.bashrc` and `trail.`, the one rule for the extension a
+/// source fact gives and `|ext` reads.
+pub(in crate::expr) fn extension(name: &str) -> Option<&str> {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+}
+
+/// A name with its first character upper case and the rest lower.
+fn capitalized(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
+        None => String::new(),
     }
 }
 
@@ -248,20 +264,38 @@ pub enum NoValueCause {
     NotATime { modifier: Modifier },
     /// Text given to `|number` that is not a number.
     NotANumber,
-    /// An accessor found no segment: an index or a slice bound past the end.
+    /// An index found no segment: it is past the end.
     NoSegment,
+    /// A name with no extension, or one ending in a dot: `|ext` of `README`, `.bashrc`, `trail.`.
+    NoExtension,
+    /// Plain `|bucket` given a number below zero: its ranges are powers of ten from 0 up.
+    BelowZero,
 }
 
-impl std::fmt::Display for NoValueCause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl NoValueCause {
+    /// Why there is no value, where Canon has a reason to say; a name with no extension needs
+    /// none.
+    pub fn reason(&self) -> Option<String> {
         match self {
-            NoValueCause::TooCoarse { precision, .. } => {
-                write!(f, "the time is known only to the {}", precision.word())
-            }
-            NoValueCause::NotATime { .. } => f.write_str("the text is not a time"),
-            NoValueCause::NotANumber => f.write_str("the text is not a number"),
-            NoValueCause::NoSegment => f.write_str("the path has no such segment"),
+            NoValueCause::TooCoarse { precision, .. } => Some(format!(
+                "the time is known only to the {}",
+                precision.word()
+            )),
+            NoValueCause::NotATime { .. } => Some("the text is not a time".to_string()),
+            NoValueCause::NotANumber => Some("the text is not a number".to_string()),
+            NoValueCause::NoSegment => Some("the path has no such segment".to_string()),
+            NoValueCause::BelowZero => Some("|bucket groups numbers from 0 up".to_string()),
+            NoValueCause::NoExtension => None,
         }
+    }
+}
+
+/// **The no-value sentence**: `{subject} has no value`, and its reason after a colon where the
+/// cause has one.
+pub(in crate::expr) fn no_value_sentence(subject: &str, cause: NoValueCause) -> String {
+    match cause.reason() {
+        Some(reason) => format!("{subject} has no value: {reason}"),
+        None => format!("{subject} has no value"),
     }
 }
 
@@ -270,9 +304,8 @@ impl std::fmt::Display for NoValueCause {
 /// ([`rendered`]), and one given a stored number or time directly refuses it — the user
 /// says which printed form they mean (`|number`, `|datetime`).
 ///
-/// The `for_display` parameter controls formatting context:
-/// - `true`: Human-readable format (e.g., `<60`, `>600`)
-/// - `false`: Path-safe format (e.g., `-Inf-60`, `600-Inf`)
+/// `|bucket` gives its range's label ([`bucket_label`]), the one printed form a report, a
+/// rejection and a directory share.
 ///
 /// A time modifier reads a time on the user's clock (`zone`), through the frame rule, and
 /// text through the one time reading; text that is not a time has no value.
@@ -281,11 +314,16 @@ fn apply_modifier(
     produced_by: Option<Modifier>,
     call: &ModifierCall,
     key: &str,
-    for_display: bool,
     zone: &UserZone,
 ) -> Result<Modified> {
     let name: &'static str = call.modifier.into();
     let text = |s: String| Ok(Modified::Value(FactValue::Text(s)));
+    let cased = |s: String| {
+        Ok(Modified::Value(match value {
+            FactValue::Path(_) => FactValue::Path(s),
+            FactValue::Text(_) | FactValue::Num(_) | FactValue::Time(_) => FactValue::Text(s),
+        }))
+    };
     // The text a string modifier works on.
     let text_in = || -> Result<String> {
         match (produced_by, value) {
@@ -320,7 +358,15 @@ fn apply_modifier(
             }
             let tv = match value {
                 FactValue::Time(tv) => *tv,
-                FactValue::Text(t) => match read_time(t) {
+                // A time of day written as text is read as one by the modifiers that read a
+                // time of day, as its printed form is.
+                FactValue::Text(t) => match read_time(t).or_else(|error| {
+                    if call.modifier.reads_a_time_of_day() {
+                        read_time_of_day(t)
+                    } else {
+                        Err(error)
+                    }
+                }) {
                     Ok(tv) => tv,
                     Err(_) => {
                         return Ok(Modified::NoValue(NoValueCause::NotATime {
@@ -347,19 +393,20 @@ fn apply_modifier(
         }
         Modifier::Ext => {
             let s = text_in()?;
-            let path = std::path::Path::new(&s);
-            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            text(ext.to_string())
+            Ok(match extension(&s) {
+                Some(ext) => Modified::Value(FactValue::Text(ext.to_string())),
+                None => Modified::NoValue(NoValueCause::NoExtension),
+            })
         }
         Modifier::Short => text(text_in()?.chars().take(8).collect()),
-        Modifier::Lowercase => text(text_in()?.to_lowercase()),
-        Modifier::Uppercase => text(text_in()?.to_uppercase()),
+        // A case modifier keeps a path a path, and capitalizes each of its names.
+        Modifier::Lowercase => cased(text_in()?.to_lowercase()),
+        Modifier::Uppercase => cased(text_in()?.to_uppercase()),
         Modifier::Capitalize => {
             let s = text_in()?;
-            let mut chars = s.chars();
-            text(match chars.next() {
-                Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
-                None => String::new(),
+            cased(match value {
+                FactValue::Path(_) => s.split('/').map(capitalized).collect::<Vec<_>>().join("/"),
+                FactValue::Text(_) | FactValue::Num(_) | FactValue::Time(_) => capitalized(&s),
             })
         }
 
@@ -374,10 +421,9 @@ fn apply_modifier(
                 ),
             };
 
-            if call.args.is_empty() {
-                text(format_magnitude_bucket(n))
-            } else {
-                text(format_threshold_bucket(n, &call.args, for_display))
+            match bucket_range(n, &call.args) {
+                Some(range) => text(bucket_label(&range)),
+                None => Ok(Modified::NoValue(NoValueCause::BelowZero)),
             }
         }
         Modifier::Number => match value {
@@ -405,27 +451,64 @@ pub fn apply_chain(
     accessor: Option<&PathAccessor>,
     modifiers: &[ModifierCall],
     key: &str,
-    for_display: bool,
     zone: &UserZone,
-) -> Result<Modified> {
+) -> Result<Chained> {
+    // A value read through no transform is compared or printed as it is: on the clock, where
+    // it is an instant.
+    let mut read_an_instant =
+        accessor.is_none() && modifiers.is_empty() && is_stored_instant(&value);
+    let chained = |value: Modified, read_an_instant: bool| {
+        Ok(Chained {
+            value,
+            read_an_instant,
+        })
+    };
     let mut value = match accessor {
         Some(acc) => match apply_accessor(&value, acc, key)? {
             Modified::Value(found) => found,
-            none @ Modified::NoValue(_) => return Ok(none),
+            none @ Modified::NoValue(_) => return chained(none, read_an_instant),
         },
         None => value,
     };
     let mut produced_by = None;
     for call in modifiers {
-        match apply_modifier(&value, produced_by, call, key, for_display, zone)? {
+        // **The instant rule, at the step that reads**: a time modifier given an instant — a
+        // stored one, or text that reads as one — reads it on the clock.
+        if call.modifier.category() == ModifierCategory::Time && reads_as_an_instant(&value) {
+            read_an_instant = true;
+        }
+        match apply_modifier(&value, produced_by, call, key, zone)? {
             Modified::Value(next) => {
                 value = next;
                 produced_by = Some(call.modifier);
             }
-            none @ Modified::NoValue(_) => return Ok(none),
+            none @ Modified::NoValue(_) => return chained(none, read_an_instant),
         }
     }
-    Ok(Modified::Value(value))
+    chained(Modified::Value(value), read_an_instant)
+}
+
+/// What a value went through its accessor and modifiers to, and whether a step of it read an
+/// instant on the user's clock.
+#[derive(Debug, Clone)]
+pub struct Chained {
+    pub value: Modified,
+    pub read_an_instant: bool,
+}
+
+/// A stored time that is an instant, every save time among them; a clock reading reads as
+/// written on any clock.
+fn is_stored_instant(value: &FactValue) -> bool {
+    matches!(value, FactValue::Time(tv) if tv.form() != TimeForm::Clock)
+}
+
+/// A value a time modifier reads as an instant: a stored instant, or text the one time reading
+/// reads as one.
+fn reads_as_an_instant(value: &FactValue) -> bool {
+    match value {
+        FactValue::Text(t) => read_time(t).is_ok_and(|tv| tv.form() != TimeForm::Clock),
+        FactValue::Time(_) | FactValue::Num(_) | FactValue::Path(_) => is_stored_instant(value),
+    }
 }
 
 /// **The one printed form of a value**, given the modifier that produced it (`last`; `None`
@@ -491,52 +574,18 @@ fn printed_plain(value: &FactValue, zone: &UserZone) -> String {
     }
 }
 
-/// **Whether evaluating `value` through an accessor and `modifiers` reads an instant on the
-/// clock** — the one answer to "did this run's clock matter?", read by the archive's
-/// statements about the zone a manifest's run used.
-///
-/// An instant is a time whose form is not a clock reading, every save time among them; a
-/// clock reading reads as written on any clock, so it never counts. A stored instant reads
-/// the clock compared or printed bare, and through a time modifier; text reads one when a
-/// time modifier reads it as an instant. The first transform is the only one that sees the
-/// stored value — a time modifier's result is already a clock reading, and whatever follows
-/// reads that. An accessor refuses a time, and `|bucket`, `|number` and the text modifiers
-/// refuse one; none of them reads a clock. A number never reads one.
-pub(crate) fn reads_an_instant(
-    value: &FactValue,
-    accessor: Option<&PathAccessor>,
-    modifiers: &[ModifierCall],
-) -> bool {
-    if accessor.is_some() {
-        return false;
-    }
-    let first = modifiers.first().map(|call| call.modifier);
-    let time_modifier = first.is_some_and(|m| m.category() == ModifierCategory::Time);
-    match value {
-        FactValue::Time(tv) => tv.form() != TimeForm::Clock && (first.is_none() || time_modifier),
-        FactValue::Text(t) => {
-            time_modifier && read_time(t).is_ok_and(|tv| tv.form() != TimeForm::Clock)
-        }
-        FactValue::Num(_) | FactValue::Path(_) => false,
-    }
-}
-
-/// The record a run keeps of [`reads_an_instant`]: set by every evaluation site through the
-/// rule, read once the run is done. Held by the run's own context (`FactCache` for filters,
-/// `EvalContext` for patterns), so no evaluation signature carries it.
+/// The record a run keeps of whether it read an instant on the clock: set from each chain's
+/// own answer ([`Chained::read_an_instant`]), read once the run is done — the one answer to
+/// "did this run's clock matter?", read by the archive's statements about the zone a
+/// manifest's run used. Held by the run's own context (`FactCache` for filters, `EvalContext`
+/// for patterns).
 #[derive(Debug, Default)]
 pub(crate) struct InstantRecord(std::cell::Cell<bool>);
 
 impl InstantRecord {
-    /// Note one evaluation, through the rule. Once the run has read an instant, nothing
-    /// further changes the answer, so the rule is not asked again.
-    pub(crate) fn note(
-        &self,
-        value: &FactValue,
-        accessor: Option<&PathAccessor>,
-        modifiers: &[ModifierCall],
-    ) {
-        if !self.0.get() && reads_an_instant(value, accessor, modifiers) {
+    /// Note one evaluation's answer.
+    pub(crate) fn note(&self, read_an_instant: bool) {
+        if read_an_instant {
             self.0.set(true);
         }
     }
@@ -624,116 +673,51 @@ fn weekday_name(day: Weekday) -> &'static str {
     }
 }
 
-/// Format bucket using magnitude (powers of 10)
-fn format_magnitude_bucket(n: f64) -> String {
-    if n == 0.0 {
-        return "0".to_string();
-    }
-
-    let abs_n = n.abs();
-    let sign = if n < 0.0 { "-" } else { "" };
-    let log = abs_n.log10().floor() as i32;
-    let lower = 10_f64.powi(log);
-    let upper = 10_f64.powi(log + 1);
-
-    format!(
-        "{}{}-{}",
-        sign,
-        format_bucket_num(lower),
-        format_bucket_num(upper)
-    )
+/// **A bucket's range**: what `|bucket` puts a number in. Plain `|bucket` groups by powers of
+/// ten from 0 up — `0` alone, then `10^e` to `10^(e+1)` — and has no range for a number below
+/// zero; `|bucket(a,b,…)` groups any number, below the first threshold, between two, or from
+/// the last up. The printing rule spells each range ([`bucket_label`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::expr) enum BucketRange {
+    Zero,
+    PowerOfTen(i32),
+    Below(f64),
+    Between(f64, f64),
+    From(f64),
 }
 
-/// Format bucket using custom thresholds
-/// Uses exact threshold values as specified by user (no SI suffix conversion)
-fn format_threshold_bucket(n: f64, thresholds: &[f64], for_display: bool) -> String {
-    for (i, &t) in thresholds.iter().enumerate() {
-        if n < t {
-            if i == 0 {
-                // Below first threshold
-                return if for_display {
-                    format!("<{}", format_threshold_num(t))
-                } else {
-                    format!("-Inf-{}", format_threshold_num(t))
-                };
-            } else {
-                return format!(
-                    "{}-{}",
-                    format_threshold_num(thresholds[i - 1]),
-                    format_threshold_num(t)
-                );
-            }
-        }
-    }
-    // Value >= last threshold
-    let last = format_threshold_num(*thresholds.last().unwrap());
-    if for_display {
-        format!(">{last}")
-    } else {
-        format!("{last}-Inf")
-    }
-}
-
-/// Every label `|bucket(a,b,…)` gives as `facts` and filters print it — read off the bucket
-/// function itself, one number below the first threshold and one at each threshold, so the
-/// list cannot drift from what a value is put in.
-pub(super) fn threshold_bucket_labels(thresholds: &[f64]) -> Vec<String> {
-    let mut labels: Vec<String> = std::iter::once(f64::NEG_INFINITY)
-        .chain(thresholds.iter().copied())
-        .map(|n| format_threshold_bucket(n, thresholds, true))
-        .collect();
-    labels.dedup();
-    labels
-}
-
-/// Whether `label` is one plain `|bucket` gives: its lower edge read back through the bucket
-/// function gives the same label.
-pub(super) fn is_magnitude_bucket_label(label: &str) -> bool {
-    if label == "0" {
-        return true;
-    }
-    let (sign, unsigned) = match label.strip_prefix('-') {
-        Some(rest) => (-1.0, rest),
-        None => (1.0, label),
+/// The range `n` falls in, for `|bucket` with `thresholds` (none for plain `|bucket`); `None`
+/// for a number below zero under plain `|bucket`.
+pub(in crate::expr) fn bucket_range(n: f64, thresholds: &[f64]) -> Option<BucketRange> {
+    let Some(&first) = thresholds.first() else {
+        return if n == 0.0 {
+            Some(BucketRange::Zero)
+        } else if n < 0.0 {
+            None
+        } else {
+            Some(BucketRange::PowerOfTen(power_of_ten(n)))
+        };
     };
-    let Some((lower, _)) = unsigned.split_once('-') else {
-        return false;
-    };
-    let (digits, scale) = match lower.char_indices().last() {
-        Some((at, 'K')) => (lower.get(..at), 1e3),
-        Some((at, 'M')) => (lower.get(..at), 1e6),
-        Some((at, 'G')) => (lower.get(..at), 1e9),
-        _ => (Some(lower), 1.0),
-    };
-    digits
-        .and_then(|d| read_number(d).ok())
-        .is_some_and(|n| n > 0.0 && format_magnitude_bucket(sign * n * scale) == label)
-}
-
-/// Format a user-specified threshold value: the one number spelling, no SI suffixes.
-fn format_threshold_num(v: f64) -> String {
-    spelled(v)
-}
-
-/// Format number with SI suffixes for bucket labels
-fn format_bucket_num(v: f64) -> String {
-    if v >= 1_000_000_000.0 {
-        format!("{}G", (v / 1_000_000_000.0) as i64)
-    } else if v >= 1_000_000.0 {
-        format!("{}M", (v / 1_000_000.0) as i64)
-    } else if v >= 1_000.0 {
-        format!("{}K", (v / 1_000.0) as i64)
-    } else if v >= 1.0 {
-        format!("{}", v as i64)
-    } else if v == 0.0 {
-        "0".to_string()
-    } else {
-        // For sub-1 values, trim trailing zeros
-        format!("{v:.3}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
+    if n < first {
+        return Some(BucketRange::Below(first));
     }
+    let range = thresholds
+        .windows(2)
+        .find(|pair| n < pair[1])
+        .map(|pair| BucketRange::Between(pair[0], pair[1]));
+    Some(range.unwrap_or(BucketRange::From(
+        thresholds.last().copied().unwrap_or(first),
+    )))
+}
+
+/// The power of ten a positive number's leading digit stands at, read off Rust's shortest
+/// exponent form (`5e-5` is -5), which is exact at a power of ten where `log10` is not.
+fn power_of_ten(n: f64) -> i32 {
+    let written = format!("{n:e}");
+    written
+        .split_once('e')
+        .and_then(|(_, exponent)| exponent.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Get a human-readable type name for a FactValue
@@ -769,7 +753,7 @@ mod tests {
 
     /// The modifier's output in its printed form, or `None` for no value.
     fn modified(value: &FactValue, modifier: Modifier, zone: &UserZone) -> Option<String> {
-        match apply_modifier(value, None, &call(modifier), "k", true, zone).unwrap() {
+        match apply_modifier(value, None, &call(modifier), "k", zone).unwrap() {
             Modified::Value(v) => Some(rendered(Some(modifier), &v, zone)),
             Modified::NoValue(_) => None,
         }
@@ -783,11 +767,45 @@ mod tests {
     ) -> Result<Option<String>> {
         let calls: Vec<ModifierCall> = modifiers.iter().map(|m| call(*m)).collect();
         Ok(
-            match apply_chain(value.clone(), None, &calls, "k", true, zone)? {
+            match apply_chain(value.clone(), None, &calls, "k", zone)?.value {
                 Modified::Value(v) => Some(rendered(modifiers.last().copied(), &v, zone)),
                 Modified::NoValue(_) => None,
             },
         )
+    }
+
+    /// A time of day written as text is read by `|hour`, `|minute`, `|second` and `|time`, as
+    /// a time of day's printed form is; a modifier needing a date has no value for it.
+    #[test]
+    fn an_hour_reads_a_time_of_day_stored_as_text() {
+        let zone = amsterdam();
+        let text = FactValue::Text("14:30:05".into());
+        assert_eq!(
+            modified(&text, Modifier::Hour, &zone).as_deref(),
+            Some("14")
+        );
+        assert_eq!(
+            modified(&text, Modifier::Minute, &zone).as_deref(),
+            Some("30")
+        );
+        assert_eq!(
+            modified(&text, Modifier::Second, &zone).as_deref(),
+            Some("05")
+        );
+        assert_eq!(
+            modified(&text, Modifier::Time, &zone).as_deref(),
+            Some("14:30:05")
+        );
+        assert_eq!(modified(&text, Modifier::Year, &zone), None);
+        assert_eq!(modified(&text, Modifier::Date, &zone), None);
+        // The same as `|time`'s printed form read again.
+        let printed = chained(
+            &FactValue::Text("14:30".into()),
+            &[Modifier::Time, Modifier::Lowercase, Modifier::Hour],
+            &zone,
+        )
+        .unwrap();
+        assert_eq!(printed.as_deref(), Some("14"));
     }
 
     const TIME_MODIFIERS: [Modifier; 13] = [
@@ -889,8 +907,7 @@ mod tests {
             let tv = read_time(written).unwrap();
             let value = FactValue::Time(tv);
             for modifier in TIME_MODIFIERS {
-                let got =
-                    apply_modifier(&value, None, &call(modifier), "k", true, &amsterdam()).unwrap();
+                let got = apply_modifier(&value, None, &call(modifier), "k", &amsterdam()).unwrap();
                 if tv.precision() >= needs(modifier) {
                     assert!(matches!(got, Modified::Value(_)), "{written} {modifier:?}");
                 } else {
@@ -903,7 +920,7 @@ mod tests {
                             assert_eq!(precision, tv.precision());
                         }
                         Modified::Value(v) => panic!("{written} {modifier:?} gave {v:?}"),
-                        Modified::NoValue(other) => panic!("{written} {modifier:?}: {other}"),
+                        Modified::NoValue(other) => panic!("{written} {modifier:?}: {other:?}"),
                     }
                 }
             }
@@ -970,12 +987,12 @@ mod tests {
             (Modifier::Time, clock("2000-01-01 14:30:45"), "14:30:45"),
         ];
         for (modifier, typed, printed) in cases {
-            match apply_modifier(&reading, None, &call(modifier), "k", true, &zone).unwrap() {
+            match apply_modifier(&reading, None, &call(modifier), "k", &zone).unwrap() {
                 Modified::Value(v) => {
                     assert_eq!(format!("{v:?}"), format!("{typed:?}"), "{modifier:?}");
                     assert_eq!(rendered(Some(modifier), &v, &zone), printed, "{modifier:?}");
                 }
-                Modified::NoValue(cause) => panic!("{modifier:?}: {cause}"),
+                Modified::NoValue(cause) => panic!("{modifier:?}: {cause:?}"),
             }
         }
         // A part below ten prints with its leading zero, a weekday as its word.
@@ -994,14 +1011,7 @@ mod tests {
         }
         // `|weekday` counts from Monday 1 to Sunday 7.
         for (day, n) in [("2024-07-22", 1.0), ("2024-07-28", 7.0)] {
-            let v = apply_modifier(
-                &clock(day),
-                None,
-                &call(Modifier::Weekday),
-                "k",
-                true,
-                &zone,
-            );
+            let v = apply_modifier(&clock(day), None, &call(Modifier::Weekday), "k", &zone);
             assert!(matches!(v.unwrap(), Modified::Value(FactValue::Num(got)) if got == n));
         }
     }
@@ -1019,7 +1029,7 @@ mod tests {
             (Modifier::Time, "00:30:00"),
         ] {
             let Modified::Value(FactValue::Time(tv)) =
-                apply_modifier(&saved, None, &call(modifier), "k", true, &amsterdam()).unwrap()
+                apply_modifier(&saved, None, &call(modifier), "k", &amsterdam()).unwrap()
             else {
                 panic!("{modifier:?} gave no time");
             };
@@ -1038,9 +1048,8 @@ mod tests {
     #[test]
     fn number_reads_text_as_a_number_and_a_number_as_itself() {
         let zone = amsterdam();
-        let number = |value: FactValue| {
-            apply_modifier(&value, None, &call(Modifier::Number), "k", true, &zone)
-        };
+        let number =
+            |value: FactValue| apply_modifier(&value, None, &call(Modifier::Number), "k", &zone);
         for (text, n) in [
             ("07", 7.0),
             ("0500", 500.0),
@@ -1094,7 +1103,7 @@ mod tests {
         // Read as a time first, so a coarse text is too coarse like any coarse time.
         let year = FactValue::Text("2024".into());
         assert!(matches!(
-            apply_modifier(&year, None, &call(Modifier::Month), "k", true, &zone).unwrap(),
+            apply_modifier(&year, None, &call(Modifier::Month), "k", &zone).unwrap(),
             Modified::NoValue(NoValueCause::TooCoarse { .. })
         ));
         for text in ["misc", "", "Monday"] {
@@ -1105,7 +1114,6 @@ mod tests {
                         None,
                         &call(Modifier::Year),
                         "k",
-                        true,
                         &zone
                     )
                     .unwrap(),
@@ -1130,7 +1138,6 @@ mod tests {
                 None,
                 &call(Modifier::Year),
                 "content.X",
-                true,
                 &amsterdam(),
             )
             .unwrap_err();
@@ -1166,41 +1173,202 @@ mod tests {
         }
     }
 
-    /// An accessor that finds no segment gives no value, never an error.
+    /// A slice of `path`, as its value's debug text (a value has no `==`).
+    fn sliced(path: FactValue, start: Option<i32>, end: Option<i32>) -> String {
+        let accessor = PathAccessor::Slice { start, end };
+        match apply_chain(path, Some(&accessor), &[], "k", &amsterdam())
+            .unwrap()
+            .value
+        {
+            Modified::Value(value) => format!("{value:?}"),
+            Modified::NoValue(cause) => panic!("{accessor:?}: {cause:?}"),
+        }
+    }
+
+    /// **A slice always has a value**, as in Python: its bounds are clamped to the segments,
+    /// and one that selects none is the path with no segments.
+    #[test]
+    fn a_slice_always_has_a_value() {
+        let abc = || FactValue::Path("a/b/c".into());
+        let path = |p: &str| format!("{:?}", FactValue::Path(p.into()));
+        for (start, end, expected) in [
+            (Some(5), None, ""),
+            (None, Some(-5), ""),
+            (Some(2), Some(4), "c"),
+            (Some(-10), None, "a/b/c"),
+            (None, Some(10), "a/b/c"),
+            (Some(2), Some(1), ""),
+            (None, Some(-1), "a/b"),
+            (Some(1), Some(-1), "b"),
+        ] {
+            assert_eq!(
+                sliced(abc(), start, end),
+                path(expected),
+                "[{start:?}:{end:?}]"
+            );
+        }
+        // A file at the top of its root: `[:-1]` is the path with no segments.
+        assert_eq!(
+            sliced(FactValue::Path("photo.jpg".into()), None, Some(-1)),
+            path("")
+        );
+        assert_eq!(sliced(FactValue::Text("".into()), None, None), path(""));
+    }
+
+    /// **A slice of an absolute path from its first segment keeps the leading `/`**, text
+    /// read as a path included; one starting later, or selecting no segment, has none.
+    #[test]
+    fn a_slice_from_the_first_segment_keeps_the_slash() {
+        let absolute = || FactValue::Path("/private/tmp/claude-501/a.jpg".into());
+        let path = |p: &str| format!("{:?}", FactValue::Path(p.into()));
+        assert_eq!(
+            sliced(absolute(), None, Some(3)),
+            path("/private/tmp/claude-501")
+        );
+        assert_eq!(sliced(absolute(), Some(0), Some(2)), path("/private/tmp"));
+        assert_eq!(sliced(absolute(), Some(-10), Some(1)), path("/private"));
+        assert_eq!(sliced(absolute(), None, None), format!("{:?}", absolute()));
+        assert_eq!(sliced(absolute(), Some(1), Some(3)), path("tmp/claude-501"));
+        assert_eq!(sliced(absolute(), Some(0), Some(0)), path(""));
+        assert_eq!(
+            sliced(FactValue::Text("/a/b".into()), None, Some(1)),
+            path("/a")
+        );
+        assert_eq!(
+            sliced(FactValue::Path("a/b".into()), None, Some(1)),
+            path("a")
+        );
+    }
+
+    /// **A case modifier keeps a path a path**, and `|capitalize` capitalizes each of its
+    /// names; on text it capitalizes the whole value once, and `|stem`, `|ext` and `|short`
+    /// give text.
+    #[test]
+    fn case_modifiers_keep_a_path() {
+        let zone = amsterdam();
+        let on = |value: FactValue, modifier: Modifier| match apply_modifier(
+            &value,
+            None,
+            &call(modifier),
+            "k",
+            &zone,
+        )
+        .unwrap()
+        {
+            Modified::Value(value) => value,
+            Modified::NoValue(cause) => panic!("{modifier:?}: {cause:?}"),
+        };
+        let shown = |value: FactValue| format!("{value:?}");
+        let path = || FactValue::Path("my PHOTOS/IMG_01.JPG".into());
+        assert_eq!(
+            shown(on(path(), Modifier::Lowercase)),
+            shown(FactValue::Path("my photos/img_01.jpg".into()))
+        );
+        assert_eq!(
+            shown(on(path(), Modifier::Uppercase)),
+            shown(FactValue::Path("MY PHOTOS/IMG_01.JPG".into()))
+        );
+        assert_eq!(
+            shown(on(path(), Modifier::Capitalize)),
+            shown(FactValue::Path("My photos/Img_01.jpg".into()))
+        );
+        assert_eq!(
+            shown(on(
+                FactValue::Text("my PHOTOS/IMG".into()),
+                Modifier::Capitalize
+            )),
+            shown(FactValue::Text("My photos/img".into()))
+        );
+        for modifier in [Modifier::Stem, Modifier::Short] {
+            assert!(
+                matches!(on(path(), modifier), FactValue::Text(_)),
+                "{modifier:?}"
+            );
+        }
+        assert_eq!(
+            shown(on(path(), Modifier::Ext)),
+            shown(FactValue::Text("JPG".into()))
+        );
+        // Through the chain, a case modifier after another keeps the path.
+        let calls = [call(Modifier::Lowercase), call(Modifier::Capitalize)];
+        assert!(matches!(
+            apply_chain(path(), None, &calls, "k", &zone).unwrap().value,
+            Modified::Value(FactValue::Path(p)) if p == "My photos/Img_01.jpg"
+        ));
+    }
+
+    /// **A worked-out empty value has no value**: `|ext` of a name with no extension — none, a
+    /// leading dot alone, a trailing dot, empty text — has none, with no reason to state; a
+    /// stored empty text keeps its value through a text modifier, and has none for a modifier
+    /// reading it as a number or a time.
+    #[test]
+    fn a_worked_out_empty_value_has_no_value() {
+        let zone = amsterdam();
+        let on = |text: &str, modifier: Modifier| {
+            apply_modifier(
+                &FactValue::Text(text.into()),
+                None,
+                &call(modifier),
+                "k",
+                &zone,
+            )
+            .unwrap()
+        };
+        for name in ["README", ".bashrc", "trail.", "", "dir/README"] {
+            assert!(
+                matches!(
+                    on(name, Modifier::Ext),
+                    Modified::NoValue(NoValueCause::NoExtension)
+                ),
+                "{name:?}"
+            );
+        }
+        assert_eq!(
+            no_value_sentence("source.ext", NoValueCause::NoExtension),
+            "source.ext has no value"
+        );
+        assert!(
+            matches!(on("README", Modifier::Stem), Modified::Value(FactValue::Text(t)) if t == "README")
+        );
+        for modifier in [
+            Modifier::Lowercase,
+            Modifier::Uppercase,
+            Modifier::Short,
+            Modifier::Stem,
+        ] {
+            assert!(
+                matches!(on("", modifier), Modified::Value(FactValue::Text(t)) if t.is_empty()),
+                "{modifier:?}"
+            );
+        }
+        assert!(matches!(
+            on("", Modifier::Number),
+            Modified::NoValue(NoValueCause::NotANumber)
+        ));
+        assert!(matches!(
+            on("", Modifier::Year),
+            Modified::NoValue(NoValueCause::NotATime { .. })
+        ));
+    }
+
+    /// An index that finds no segment gives no value, never an error.
     #[test]
     fn an_accessor_that_finds_no_segment_gives_no_value() {
         let path = FactValue::Text("a/b/c".into());
-        let misses = [
-            PathAccessor::Index(3),
-            PathAccessor::Index(-4),
-            PathAccessor::Slice {
-                start: Some(5),
-                end: None,
-            },
-            PathAccessor::Slice {
-                start: None,
-                end: Some(-5),
-            },
-        ];
+        let misses = [PathAccessor::Index(3), PathAccessor::Index(-4)];
         for accessor in misses {
             assert!(
                 matches!(
-                    apply_chain(path.clone(), Some(&accessor), &[], "k", true, &amsterdam())
-                        .unwrap(),
+                    apply_chain(path.clone(), Some(&accessor), &[], "k", &amsterdam())
+                        .unwrap()
+                        .value,
                     Modified::NoValue(NoValueCause::NoSegment)
                 ),
                 "{accessor:?}"
             );
         }
-        let last = apply_chain(
-            path,
-            Some(&PathAccessor::Index(-1)),
-            &[],
-            "k",
-            true,
-            &amsterdam(),
-        );
-        assert!(matches!(last.unwrap(), Modified::Value(FactValue::Text(t)) if t == "c"));
+        let last = apply_chain(path, Some(&PathAccessor::Index(-1)), &[], "k", &amsterdam());
+        assert!(matches!(last.unwrap().value, Modified::Value(FactValue::Text(t)) if t == "c"));
     }
 
     /// A text modifier after another modifier reads that modifier's printed form; one given a
@@ -1247,52 +1415,75 @@ mod tests {
         }
     }
 
+    /// What `|bucket` gives a number, through the modifier: its range's label.
+    fn bucketed(n: f64, args: &[f64]) -> Option<String> {
+        let call = ModifierCall {
+            modifier: Modifier::Bucket,
+            args: args.to_vec(),
+        };
+        match apply_modifier(&FactValue::Num(n), None, &call, "k", &amsterdam()).unwrap() {
+            Modified::Value(v) => Some(rendered(Some(Modifier::Bucket), &v, &amsterdam())),
+            Modified::NoValue(_) => None,
+        }
+    }
+
     #[test]
     fn test_bucket_magnitude() {
-        // Test format_magnitude_bucket directly
-        assert_eq!(format_magnitude_bucket(0.0), "0");
-        assert_eq!(format_magnitude_bucket(5.0), "1-10");
-        assert_eq!(format_magnitude_bucket(50.0), "10-100");
-        assert_eq!(format_magnitude_bucket(500.0), "100-1K");
-        assert_eq!(format_magnitude_bucket(5000.0), "1K-10K");
-        assert_eq!(format_magnitude_bucket(50000.0), "10K-100K");
-        assert_eq!(format_magnitude_bucket(5000000.0), "1M-10M");
-        assert_eq!(format_magnitude_bucket(5000000000.0), "1G-10G");
-        // Negative numbers
-        assert_eq!(format_magnitude_bucket(-50.0), "-10-100");
+        let cases = [
+            (0.0, "0"),
+            (5.0, "1-to-10"),
+            (1.0, "1-to-10"),
+            (10.0, "10-to-100"),
+            (50.0, "10-to-100"),
+            (500.0, "100-to-1K"),
+            (999.0, "100-to-1K"),
+            (1000.0, "1K-to-10K"),
+            (5000.0, "1K-to-10K"),
+            (50000.0, "10K-to-100K"),
+            (5_000_000.0, "1M-to-10M"),
+            (5_000_000_000.0, "1G-to-10G"),
+            (0.5, "0.1-to-1"),
+            (0.1, "0.1-to-1"),
+        ];
+        for (n, label) in cases {
+            assert_eq!(bucketed(n, &[]).as_deref(), Some(label), "{n}");
+        }
     }
 
     #[test]
     fn test_bucket_threshold_display() {
-        // Test format_threshold_bucket with for_display=true
-        // Uses exact values as specified (no SI suffix conversion)
-        let thresholds = vec![60.0, 3600.0, 7200.0];
-        assert_eq!(format_threshold_bucket(30.0, &thresholds, true), "<60");
-        assert_eq!(format_threshold_bucket(100.0, &thresholds, true), "60-3600");
-        assert_eq!(
-            format_threshold_bucket(5000.0, &thresholds, true),
-            "3600-7200"
-        );
-        assert_eq!(format_threshold_bucket(10000.0, &thresholds, true), ">7200");
+        // Thresholds are spelled as written, with no suffix.
+        let thresholds = [60.0, 3600.0, 7200.0];
+        for (n, label) in [
+            (30.0, "under-60"),
+            (60.0, "60-to-3600"),
+            (100.0, "60-to-3600"),
+            (5000.0, "3600-to-7200"),
+            (7200.0, "7200-and-up"),
+            (10000.0, "7200-and-up"),
+        ] {
+            assert_eq!(bucketed(n, &thresholds).as_deref(), Some(label), "{n}");
+        }
     }
 
+    /// Plain `|bucket` groups from 0 up: a number below zero has no range, and says why.
     #[test]
-    fn test_bucket_threshold_path() {
-        // Test format_threshold_bucket with for_display=false (path-safe)
-        let thresholds = vec![60.0, 3600.0, 7200.0];
-        assert_eq!(format_threshold_bucket(30.0, &thresholds, false), "-Inf-60");
+    fn a_negative_number_under_plain_bucket_has_no_value_and_says_why() {
+        let call = ModifierCall {
+            modifier: Modifier::Bucket,
+            args: Vec::new(),
+        };
+        let none = apply_modifier(&FactValue::Num(-50.0), None, &call, "k", &amsterdam()).unwrap();
+        let Modified::NoValue(cause) = none else {
+            panic!("{none:?}")
+        };
+        assert_eq!(cause, NoValueCause::BelowZero);
         assert_eq!(
-            format_threshold_bucket(100.0, &thresholds, false),
-            "60-3600"
+            no_value_sentence("source.size|bucket", cause),
+            "source.size|bucket has no value: |bucket groups numbers from 0 up"
         );
-        assert_eq!(
-            format_threshold_bucket(5000.0, &thresholds, false),
-            "3600-7200"
-        );
-        assert_eq!(
-            format_threshold_bucket(10000.0, &thresholds, false),
-            "7200-Inf"
-        );
+        // With thresholds, any number has a range.
+        assert_eq!(bucketed(-50.0, &[0.0]).as_deref(), Some("under-0"));
     }
 
     #[test]
@@ -1308,43 +1499,41 @@ mod tests {
         assert!(call.args.is_empty());
     }
 
-    #[test]
-    fn test_bucket_num_format() {
-        // Test format_bucket_num with SI suffixes
-        assert_eq!(format_bucket_num(0.0), "0");
-        assert_eq!(format_bucket_num(1.0), "1");
-        assert_eq!(format_bucket_num(100.0), "100");
-        assert_eq!(format_bucket_num(1000.0), "1K");
-        assert_eq!(format_bucket_num(10000.0), "10K");
-        assert_eq!(format_bucket_num(1000000.0), "1M");
-        assert_eq!(format_bucket_num(1000000000.0), "1G");
-        assert_eq!(format_bucket_num(0.5), "0.5");
-        assert_eq!(format_bucket_num(0.123), "0.123");
-    }
-
-    /// The rule's edges: a stored instant reads the clock compared or printed bare and
-    /// through a time modifier; text reads one only where a time modifier reads it as an
-    /// instant; an accessor, `|bucket`, `|number` and the text modifiers refuse a time; a clock
-    /// reading and a number never read one.
+    /// **The instant rule, asked of the chain**: a step reads an instant on the clock where a
+    /// stored instant is compared or printed with no transform, or a time modifier is given an
+    /// instant — a stored one, or text that reads as one, after an accessor or a text modifier
+    /// too. A clock reading reads as written on any clock, and a modifier that refuses a time
+    /// reads none.
     #[test]
     fn the_instant_rule_reads_only_what_reads_a_clock() {
         let calls = |ms: &[Modifier]| ms.iter().map(|m| call(*m)).collect::<Vec<_>>();
+        let zone = amsterdam();
+        let read = |value: &FactValue, accessor: Option<&PathAccessor>, ms: &[Modifier]| {
+            apply_chain(value.clone(), accessor, &calls(ms), "k", &zone)
+                .is_ok_and(|chained| chained.read_an_instant)
+        };
+        let reads = |value: &FactValue, ms: &[Modifier]| read(value, None, ms);
         let instant = FactValue::Time(TimeValue::from_epoch_secs(1_718_452_800).unwrap());
         let clock = FactValue::Time(read_time("2024-06-15 14:30:05").unwrap());
-        let index = PathAccessor::Index(0);
-        let reads = |value: &FactValue, ms: &[Modifier]| reads_an_instant(value, None, &calls(ms));
 
         assert!(reads(&instant, &[]), "compared or printed bare");
         assert!(reads(&instant, &[Modifier::Year]));
         assert!(reads(&instant, &[Modifier::Date, Modifier::Lowercase]));
-        for refusing in [Modifier::Bucket, Modifier::Number, Modifier::Lowercase] {
-            assert!(!reads(&instant, &[refusing]), "{refusing:?}");
+        // A modifier that is no time modifier reads no clock, given text that reads as an
+        // instant: each of these runs, so only the rule can answer.
+        let instant_text = || FactValue::Text("2024-06-15T14:30:05Z".into());
+        for other in [
+            Modifier::Number,
+            Modifier::Lowercase,
+            Modifier::Short,
+            Modifier::Stem,
+        ] {
+            assert!(
+                apply_chain(instant_text(), None, &calls(&[other]), "k", &zone).is_ok(),
+                "{other:?} runs"
+            );
+            assert!(!reads(&instant_text(), &[other]), "{other:?}");
         }
-        assert!(!reads_an_instant(
-            &instant,
-            Some(&index),
-            &calls(&[Modifier::Year])
-        ));
         assert!(!reads(&clock, &[]));
         assert!(!reads(&clock, &[Modifier::Year]));
 
@@ -1362,6 +1551,38 @@ mod tests {
         assert!(!reads(&text("misc"), &[Modifier::Year]));
         assert!(!reads(&FactValue::Num(1.0e9), &[Modifier::Year]));
         assert!(!reads(&FactValue::Num(1.0e9), &[]));
+    }
+
+    /// **A time read through an accessor or after a text modifier is recorded**: the step that
+    /// reads it is the one that answers, wherever it stands in the chain.
+    #[test]
+    fn a_time_read_through_an_accessor_or_after_a_text_modifier_is_recorded() {
+        let calls = |ms: &[Modifier]| ms.iter().map(|m| call(*m)).collect::<Vec<_>>();
+        let zone = amsterdam();
+        let read = |value: FactValue, accessor: Option<&PathAccessor>, ms: &[Modifier]| {
+            apply_chain(value, accessor, &calls(ms), "k", &zone)
+                .unwrap()
+                .read_an_instant
+        };
+        let first = PathAccessor::Index(0);
+        let instant_text = || FactValue::Text("2024-06-15T14:30:05Z/a.jpg".into());
+        assert!(read(instant_text(), Some(&first), &[Modifier::Year]));
+        assert!(read(
+            FactValue::Text("2024-06-15T14:30:05Z".into()),
+            None,
+            &[Modifier::Uppercase, Modifier::Year]
+        ));
+        // `|short` cuts the text to `2024-06-`, which reads as no time: nothing is read.
+        assert!(!read(
+            FactValue::Text("2024-06-15T14:30:05Z".into()),
+            None,
+            &[Modifier::Short, Modifier::Date]
+        ));
+        // A clock reading through the same steps reads none, and neither does the accessor
+        // on its own.
+        let clock_text = || FactValue::Text("2024-06-15 14:30:05/a.jpg".into());
+        assert!(!read(clock_text(), Some(&first), &[Modifier::Year]));
+        assert!(!read(instant_text(), Some(&first), &[]));
     }
 
     // =========================================================================

@@ -179,7 +179,7 @@ pub fn fetch_content_facts_on_source(
 
     let facts = stmt
         .query_map([source_id], |row| {
-            let Some(value) = fact_value_at(row, 3)? else {
+            let Some(value) = fact_value_at(row, 3)?.readable() else {
                 return Ok(None);
             };
             Ok(Some(ContentFactOnSource {
