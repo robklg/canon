@@ -39,9 +39,6 @@ pub struct PatternGaps {
     pub too_coarse: BTreeMap<(String, Precision), usize>,
     /// A fact the source does not carry.
     pub fact_not_carried: bool,
-    /// Whether an entry that expanded used an instant — what decides whether
-    /// the zone the run read on is worth a sentence.
-    pub used_an_instant: bool,
 }
 
 impl PatternGaps {
@@ -66,11 +63,6 @@ impl PatternGaps {
             }
             None => self.fact_not_carried = true,
         }
-    }
-
-    /// Record one entry that expanded.
-    pub fn placed(&mut self, expansion: &Expansion) {
-        self.used_an_instant |= expansion.used_an_instant;
     }
 
     /// Each `key|modifier` that met a time too coarse for it, once, in order.

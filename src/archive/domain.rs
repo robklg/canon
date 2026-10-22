@@ -64,7 +64,7 @@ pub struct ManifestMeta {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub scope: Vec<String>,
-    /// The time zone the query and the folder names read times in, as the user's own
+    /// The time zone the query and the directory names read times in, as the user's own
     /// editable line. Raw text here, read only through [`settle_manifest_zone`], so a name
     /// Canon cannot read is one refusal among a refresh's causes rather than a parse error
     /// that stops them. Absent: the next refresh records this machine's.
@@ -671,6 +671,10 @@ pub enum OwedWayBack {
     /// The pattern cannot expand and no rebuild would change that, so what
     /// moves this manifest is an edit to the pattern or to what it names.
     AdjustPattern,
+    /// The last refresh selected no sources, so there is no lock, and a refresh
+    /// over the same query and scope selects nothing again: what moves this
+    /// manifest is a changed query or scope, then the refresh.
+    ChangeTheSelection,
 }
 
 /// One thing standing between a manifest and an act that reads it.
@@ -733,12 +737,8 @@ pub enum Obstacle {
     /// No lock file beside the manifest, so there is nothing to carry across.
     /// Enforced at `apply`'s own lock read.
     ///
-    /// **Unreachable in the report today** — a manifest with no lock has
-    /// nothing pending, and the interface asks for a step only where
-    /// something is. Written out anyway, because a row answering nothing is
-    /// how a table starts being guessed at, and answered from the standing
-    /// rather than at face value, because nothing observes this row being
-    /// wrong.
+    /// The report asks for a step here although nothing is pending: an absent
+    /// lock is a state with something to say.
     ///
     /// Its rebuild answer turns on which absence this is. A manifest still
     /// naming a lock hash lost a lock that existed, and a refresh rebuilds
@@ -748,9 +748,8 @@ pub enum Obstacle {
     /// the three touched reproduces that same answer: `Leaves`. That is a
     /// **fixed point, not a forecast**: it says what running the same act
     /// over the same inputs comes to, and claims nothing about what the query
-    /// would match after the user changes one of them. The interface reads
-    /// the same fact the same way (`cli.rs`’s `no_lock_remedy`), which is the
-    /// point of the row existing.
+    /// would match after the user changes one of them — so what that manifest
+    /// owes is [`OwedWayBack::ChangeTheSelection`].
     NoLock,
     /// The lock's bytes no longer hash to what the manifest records.
     /// Enforced by `apply`'s lock-hash comparison, before anything is planned.
@@ -1011,7 +1010,7 @@ impl ManifestStanding {
     /// What the reader is owed where [`next_step`](Self::next_step) names no
     /// act.
     ///
-    /// **Four kinds of cause reach that answer and two of them speak for
+    /// **Five kinds of cause reach that answer and two of them speak for
     /// themselves.** A door is announced with `canon roots unsuspend`, and a
     /// zone or a query line the refresh cannot read is announced in the
     /// refresh's own words, so neither needs anything here. A recorded scope
@@ -1022,7 +1021,9 @@ impl ManifestStanding {
     /// time or a grain no refresh changes — what moves it is an edit: to the
     /// pattern, the facts or the query, or the file's save time — the query
     /// then refreshed, the file scanned and then refreshed. The way out the
-    /// report prints is composed per cause.
+    /// report prints is composed per cause. A lock a refresh never wrote,
+    /// because the selection was empty, is not rebuilt by refreshing the same
+    /// query and scope: what moves it is a changed selection.
     ///
     /// **The scope outranks the pattern**, because a scope that kept nothing
     /// is also why the pattern has nothing to measure from: fixing the scope
@@ -1047,6 +1048,15 @@ impl ManifestStanding {
                     Rebuild::Clears | Rebuild::Refused => owed,
                     Rebuild::Leaves => OwedWayBack::AdjustPattern,
                 },
+                // A lock that was never written because the selection was empty: owed only
+                // where the refresh would run, since a refused one is answered on the line
+                // that names its cause. A lost lock is rebuilt, which was named as the step.
+                Obstacle::NoLock => match obstacle.rebuild(self) {
+                    Rebuild::Leaves if self.refresh_refused_by().is_none() => {
+                        OwedWayBack::ChangeTheSelection
+                    }
+                    Rebuild::Clears | Rebuild::Leaves | Rebuild::Refused => owed,
+                },
                 // Each of these is either named on a line carrying its own
                 // act, or is not what withheld the step.
                 Obstacle::ParkedScope
@@ -1055,7 +1065,6 @@ impl ManifestStanding {
                 | Obstacle::QueryUnreadable
                 | Obstacle::ParkedDestination
                 | Obstacle::ParkedOrigins
-                | Obstacle::NoLock
                 | Obstacle::LockHashMismatch
                 | Obstacle::LockPredatesMeasurement
                 | Obstacle::LockPredatesZone
@@ -1734,10 +1743,9 @@ base_dir = "photos"
     /// is a pure function of the query, the scope and the index, so refreshing
     /// with none of the three touched reproduces the same answer.
     ///
-    /// Pinned because the row is unreachable in the report today — nothing
-    /// observes it being wrong — and because the interface answers the same
-    /// question from the same field (`cli.rs`’s `no_lock_remedy`), so the two
-    /// must not drift.
+    /// Pinned because the report reads both answers: the rebuild named as the
+    /// step for a lost lock, the changed selection owed for an empty one
+    /// (`each_absent_lock_is_named_by_its_own_cause`).
     #[test]
     fn a_missing_lock_is_rebuilt_and_a_zero_match_one_is_not() {
         let lost = ManifestStanding {
@@ -1785,11 +1793,12 @@ base_dir = "photos"
     /// expand either, but that pair is walked anyway: the table answers it
     /// consistently, so nothing rests on the skip and it is not made.
     ///
-    /// Two of the three answers are pinned by name. A door owes nothing,
+    /// Three of the four answers are pinned by name. A door owes nothing,
     /// because its own line carries `canon roots unsuspend`. A scope that kept
     /// nothing outranks a pattern that cannot expand, because it is why the
     /// pattern has nothing to measure from — sending the reader at the pattern
     /// there would be sending them to edit a line that was never the problem.
+    /// An empty selection whose refresh would run is owed a changed selection.
     #[test]
     fn a_withheld_step_is_never_left_without_an_answer() {
         let mut locks = vec![LockStanding::absent(""), LockStanding::absent("abc123")];
@@ -1847,7 +1856,16 @@ base_dir = "photos"
                                                     "the scope outranks the pattern: {standing:?}"
                                                 );
                                             }
-                                            // Exhaustive on purpose: a fourth
+                                            if lock == LockStanding::absent("")
+                                                && standing.refresh_refused_by().is_none()
+                                            {
+                                                assert_eq!(
+                                                    owed,
+                                                    OwedWayBack::ChangeTheSelection,
+                                                    "an empty selection is owed a changed one: {standing:?}"
+                                                );
+                                            }
+                                            // Exhaustive on purpose: a fifth
                                             // answer fails to compile here until
                                             // it says which input earns it.
                                             match owed {
@@ -1874,6 +1892,11 @@ base_dir = "photos"
                                             OwedWayBack::AdjustPattern => assert!(
                                                 !pattern_expands && !scope_kept_nothing,
                                                 "a pattern remedy owed by something other than the pattern: {standing:?}"
+                                            ),
+                                            OwedWayBack::ChangeTheSelection => assert!(
+                                                lock == LockStanding::absent("")
+                                                    && standing.refresh_refused_by().is_none(),
+                                                "a changed selection owed where the selection was not empty, or the refresh is refused: {standing:?}"
                                             ),
                                         }
                                         }

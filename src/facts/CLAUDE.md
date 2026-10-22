@@ -59,7 +59,7 @@ fails the build. Repairing one call site deletes that file's entry, never both.
 
 **Barrel** (`facts.rs`), `main.rs`-facing: `run`, `import_run`, `delete_facts`,
 `DeleteOptions`, `prune_stale`, `prune_orphaned_objects`, `prune_excluded_facts`,
-`show_aliases`, plus `compute_distribution`, which the source-value law's verifier reads. `cli.rs` declares `pub(super) mod import;` and `ops.rs` declares
+plus `compute_distribution`, which the source-value law's verifier reads. `cli.rs` declares `pub(super) mod import;` and `ops.rs` declares
 `report`/`maintain`/`import` the same way, so nothing below the front door is reachable
 from outside it. No repo-tier item is on the barrel: nothing else reaches facts.
 

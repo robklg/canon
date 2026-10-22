@@ -2,7 +2,7 @@
 
 Pattern expressions define how files are organized in archives. They use `{expr}` syntax to insert dynamic values based on facts.
 
-Patterns are used in the `pattern` field of [cluster manifests](../commands/archive/cluster.md). When you run `canon cluster generate`, it creates a manifest with a default `pattern = "{filename}"` that you can customize.
+Patterns are used in the `pattern` field of [cluster manifests](../commands/archive/cluster.md). When you run `canon cluster generate`, it creates a manifest with a default pattern that you can customize: `{scope.rel_path}` when the generation is scoped, and `{source.rel_path}` when it is not.
 
 ## Basic Syntax
 
@@ -99,7 +99,7 @@ Examples with `source.rel_path = "photos/2024/vacation/IMG_001.jpg"`:
 
 ## Aliases
 
-Aliases provide shorthand for common expressions. Use `canon facts --show-aliases` to see all available aliases.
+Aliases provide shorthand for common expressions in patterns.
 
 | Alias | Expands To |
 |-------|------------|

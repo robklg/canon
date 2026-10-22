@@ -375,7 +375,7 @@ impl Home {
 
 /// **The New Year is read in the manifest's time zone on any machine.** A manifest recorded in
 /// Amsterdam, refreshed and applied in New York, places the file saved at 23:30 UTC on New
-/// Year's Eve 2023 under 2024 — Amsterdam's year — and says which clock it read. With the
+/// Year's Eve 2023 under 2024 — Amsterdam's year — and `apply` says which clock it read. With the
 /// zone line edited to New York and refreshed, the same file places under 2023.
 #[test]
 fn the_new_year_is_read_in_the_manifests_zone_on_any_machine() {
@@ -387,21 +387,21 @@ fn the_new_year_is_read_in_the_manifests_zone_on_any_machine() {
         }
 
         let refreshed = home.run("America/New_York", &["cluster", "refresh", &manifest], None);
-        match zone_line {
-            None => assert!(
-                refreshed.stdout.contains(
-                    "times are in Europe/Amsterdam, as the manifest records (this machine: America/New_York)"
-                ),
-                "{}",
-                refreshed.stdout
-            ),
-            Some(_) => assert!(
+        // The query reads no time, so the refresh states no clock and the change in its quiet
+        // clause: the pattern's time is `apply`'s to state, below.
+        assert!(
+            !refreshed.stdout.contains("times are in"),
+            "{}",
+            refreshed.stdout
+        );
+        if zone_line.is_some() {
+            assert!(
                 refreshed
                     .stdout
-                    .contains("Time zone changed from Europe/Amsterdam to America/New_York"),
+                    .contains("(time zone changed from Europe/Amsterdam to America/New_York)"),
                 "{}",
                 refreshed.stdout
-            ),
+            );
         }
 
         let dry = home.run("America/New_York", &["apply", &manifest, "--dry-run"], None);
@@ -505,9 +505,10 @@ fn a_camera_date_is_read_in_the_manifests_zone_and_a_clock_reading_as_written() 
     }
 }
 
-/// **A refresh states the clock for every way a time is read**: a pattern reading instant text
-/// through an accessor (`{content.Stamp[0]|year}`) read an instant on the clock, so a refresh
-/// in another zone states the change in full — as it does for a time read with no accessor.
+/// **A refresh states the clock for every way the query reads a time**: a query reading instant
+/// text through an accessor (`content.Stamp[0]|year`) read an instant on the clock, so a
+/// refresh in another zone states the change in full — as it does for a time read with no
+/// accessor.
 #[test]
 fn a_refresh_states_the_clock_for_a_time_read_through_an_accessor() {
     let home = Home::new();
@@ -521,21 +522,29 @@ fn a_refresh_states_the_clock_for_a_time_read_through_an_accessor() {
     let manifest = home.manifest_over("Europe/Amsterdam", &["photos/f0.jpg"]);
     home.edit_manifest(
         &manifest,
+        "query = ",
+        "query = [\"content.Stamp[0]|year >= 2023\"]",
+    );
+    home.edit_manifest(
+        &manifest,
         "pattern = ",
         "pattern = \"{content.Stamp[0]|year}/{filename}\"",
     );
     home.run("Europe/Amsterdam", &["cluster", "refresh", &manifest], None);
     home.edit_manifest(&manifest, "zone = ", "zone = \"America/New_York\"");
-    let refreshed = home.run("America/New_York", &["cluster", "refresh", &manifest], None);
-    assert!(
-        refreshed.stdout.contains(
-            "Time zone changed from Europe/Amsterdam to America/New_York: times in the query and \
-             in folder names are now in America/New_York"
-        ),
-        "{}{}",
-        refreshed.stdout,
-        refreshed.stderr
-    );
+    let refreshed = home.run("Europe/Amsterdam", &["cluster", "refresh", &manifest], None);
+    for line in [
+        "Time zone changed from Europe/Amsterdam to America/New_York: times in the query are now \
+         in America/New_York, which can change which sources a time query selects",
+        "times are in America/New_York, as the manifest records (this machine: Europe/Amsterdam)",
+    ] {
+        assert!(
+            refreshed.stdout.contains(line),
+            "{line}\n{}{}",
+            refreshed.stdout,
+            refreshed.stderr
+        );
+    }
     home.run("America/New_York", &["apply", &manifest, "--yes"], None);
     assert!(
         home.path("archive/2023/f0.jpg").exists(),
@@ -715,4 +724,32 @@ fn the_trail_refuses_a_date_outside_the_one_list() {
         "{}",
         refused.stderr
     );
+}
+
+/// **A zone change with no time in the query is one line**: the pattern reads a time on the
+/// clock, the query reads none, so the refresh says the change in its quiet clause and states no
+/// clock — the pattern never decides either.
+#[test]
+fn a_zone_change_with_no_time_in_the_query_is_one_line() {
+    let home = Home::new();
+    let manifest = home.manifest_made_in("Europe/Amsterdam");
+    home.run("Europe/Amsterdam", &["cluster", "refresh", &manifest], None);
+    home.edit_manifest(&manifest, "zone = ", "zone = \"America/New_York\"");
+    let refreshed = home.run("Europe/Amsterdam", &["cluster", "refresh", &manifest], None);
+    assert!(
+        refreshed
+            .stdout
+            .contains("(time zone changed from Europe/Amsterdam to America/New_York)"),
+        "{}{}",
+        refreshed.stdout,
+        refreshed.stderr
+    );
+    for absent in ["Time zone changed", "times are in"] {
+        assert!(
+            !refreshed.stdout.contains(absent) && !refreshed.stderr.contains(absent),
+            "{absent}: {}{}",
+            refreshed.stdout,
+            refreshed.stderr
+        );
+    }
 }

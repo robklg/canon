@@ -79,6 +79,19 @@ pub fn run(
         .with_context(|| format!("Failed to read manifest config: {}", config_path.display()))?;
     let config = parse_manifest_config(&config_content, &config_path)?;
 
+    // Read the JSONL lock file: the header it settled, and its entries.
+    //
+    // Straight after the manifest, before anything else is asked of it: apply carries out a
+    // lock, and with none there is nothing to carry out. An absent lock is an ordinary state
+    // rather than a broken file — a refresh whose query selected nothing takes the lock away
+    // and records the empty hash — so it is refused by name here instead of arriving as a
+    // failed open, and the same way for every cause of absence: apply infers nothing about
+    // why, and `cluster status` states which absence it is. The manifest is read first, so a
+    // mistyped manifest path is still told the manifest is missing.
+    let Some(lock) = manifest::read_lock_file(&lock_path)? else {
+        bail!("{}", super::missing_lock_refusal(config_path.as_ref()));
+    };
+
     // Merge manifest [options] with CLI options.
     //
     // Only the duplicates flag is merged, and that is settled rather than an
@@ -97,29 +110,6 @@ pub fn run(
         );
     }
 
-    // Read the JSONL lock file: the header it settled, and its entries.
-    //
-    // An absent lock is an ordinary state rather than a broken file — a
-    // refresh whose query matched nothing takes the lock away and records the
-    // empty hash — so it is refused by name here instead of arriving as a
-    // failed open. `cluster status` states the same absence and reads on;
-    // apply is an act, cannot act, and says so.
-    //
-    // **And it says which absence**, from the same record the report reads it
-    // from, because the two take opposite remedies. A lock that has gone is
-    // rebuilt by a refresh. A manifest whose last refresh matched nothing has
-    // no lock *because* the query found nothing, so a refresh runs, matches
-    // nothing again, and leaves the user exactly where they were — the one
-    // shape of wrong advice worse than none, since it does not even change
-    // the reason.
-    let Some(lock) = manifest::read_lock_file(&lock_path)? else {
-        bail!(
-            "No lock file beside this manifest: {}\n\
-             Nothing was moved. {}",
-            lock_path.display(),
-            super::no_lock_remedy(config_path.as_ref(), &config.meta.lock_hash),
-        );
-    };
     // Why an entry might carry no measurement — asked of the file, which can
     // tell the two causes apart, rather than left to a refusal to guess.
     let unmeasured = lock.unmeasured_reason();
@@ -2045,5 +2035,54 @@ mod tests {
             "each scope's own name must survive, or this proves nothing: {:?}",
             baseline.placed()
         );
+    }
+
+    /// **Apply says one thing for every missing lock**: a lock that has gone and one a refresh
+    /// that selected no sources took away print the same sentence, naming the report that
+    /// tells them apart — nothing moves and nothing is recorded.
+    #[test]
+    fn apply_names_one_line_for_every_missing_lock() {
+        let mut f = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+        fs::remove_file(f.manifest.with_extension("lock")).unwrap();
+        let expected = format!(
+            "This manifest is missing its lock file. Nothing was moved. Run `canon cluster status \
+             {}` to inspect.",
+            f.manifest.display()
+        );
+
+        let lost = format!("{:#}", apply(&mut f).unwrap_err());
+        assert_eq!(lost, expected);
+
+        let text = fs::read_to_string(&f.manifest).unwrap();
+        let selected_nothing: String = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("lock_hash = ") {
+                    "lock_hash = \"\"\n".to_string()
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        assert_ne!(text, selected_nothing, "the hash line is where expected");
+        fs::write(&f.manifest, selected_nothing).unwrap();
+        assert_eq!(format!("{:#}", apply(&mut f).unwrap_err()), expected);
+
+        assert!(f.placed().is_empty(), "{:?}", f.placed());
+        assert_eq!(f.decision_count(), 0);
+    }
+
+    /// **A mistyped manifest path is told the manifest is missing**, not its lock: the
+    /// manifest is read before the lock is looked for.
+    #[test]
+    fn a_mistyped_manifest_path_is_told_the_manifest_is_missing() {
+        let mut f = fixture("tree", &["proj-v1"], |root| vec![format!("{root}/proj-v1")]);
+        f.manifest = f.manifest.with_file_name("no-such-manifest.toml");
+        let message = format!("{:#}", apply(&mut f).unwrap_err());
+        assert!(
+            message.starts_with("Failed to read manifest config: "),
+            "{message}"
+        );
+        assert!(!message.contains("lock file"), "{message}");
     }
 }

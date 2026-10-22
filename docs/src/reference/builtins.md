@@ -36,6 +36,8 @@ Short names for values used often. Some have the same value as a source fact.
 | `hash` | text | The content hash, `content.hash.sha256` |
 | `hash_short` | text | The first 8 characters of the content hash |
 
+[`canon facts`](../commands/query/facts.md) ends with these keys and their meanings when it is run without `--where`.
+
 A name that is a built-in key reads as that key in `--where`, `--key`, `--group-by` and `worklist --emit`. A content fact imported under such a name (`size`, `filename`, `id`) is stored as `content.size` and so on, and a filter reaches it only by that full name. [`canon facts delete`](../commands/maintain/facts-delete.md) reads every name under `content.`, so `canon facts delete size` deletes `content.size`.
 
 ## The Content Hash

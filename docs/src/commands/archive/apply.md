@@ -113,28 +113,23 @@ Error: This machine's time zone data does not know Europe/Kyiv, the zone the loc
 
 **No lock file beside the manifest:**
 
-Apply carries out a lock file, so a manifest without one stops with an error before apply plans. There are two
-ways to arrive here and they take opposite remedies, told apart by the `lock_hash` the manifest
-records. A lock file that has gone while the manifest still names its hash is rebuilt:
+Apply carries out a lock file, so a manifest without one stops with an error straight after the
+manifest is read, before anything else is checked. It says the same for every cause:
 
 ```
-Error: No lock file beside this manifest: manifest.lock
-Nothing was moved. Rebuild it: canon cluster refresh manifest.toml
+Error: This manifest is missing its lock file. Nothing was moved. Run `canon cluster status manifest.toml` to inspect.
 ```
 
-A refresh whose query matched nothing removes the lock and empties `lock_hash`. Refreshing again
-would match nothing again, so the way forward is a different selection:
-
-```
-Error: No lock file beside this manifest: manifest.lock
-Nothing was moved. The last refresh matched nothing, so there is no lock to carry across.
-Edit the query or scope in the manifest, then canon cluster refresh manifest.toml to select again.
-```
+There are two ways to arrive here, and they take opposite ways forward: a lock file that has gone
+while the manifest still names its hash is rebuilt by a refresh, and a refresh whose query selected
+no sources removed the lock itself, so refreshing again would select nothing again.
+[`cluster status`](cluster.md) tells them apart, from the `lock_hash` the manifest records, and names
+the step for each. A mistyped manifest path is told the manifest is missing, since the manifest is
+read first.
 
 A lock file that exists but cannot be read — empty, or with a line that does not parse — is a
-different answer and says so. [`cluster status`](cluster.md) states either absence and continues,
-since its job is to say what state the manifest is in; it rejects an unreadable lock, as
-apply does.
+different answer and says so. `cluster status` states either absence and continues, since its job
+is to say what state the manifest is in; it rejects an unreadable lock, as apply does.
 
 **A lock file built before lock files recorded the scopes they were built from:**
 
@@ -166,6 +161,9 @@ for, is stated by `cluster generate` and `cluster refresh` when they build the l
 does not reach apply. See [`cluster`](cluster.md).
 
 **A pattern that cannot expand:**
+
+Every source is checked for a place the pattern gives it only at `apply`, before anything
+moves; `cluster status` reports the same problems and runs none of the pre-flight checks.
 
 `{scope.rel_path}` has no value over a lock built while the manifest recorded no scope: one
 generated with `--global`, or with filters and no path. Apply reports the failure per source,
@@ -230,8 +228,9 @@ Verifying 1,234 sources against the lock file (reading file heads)...
 ```
 
 The two passes before the transfer loop stay separate: an unreadable source is rejected
-before any file's content is read. `--dry-run` returns after planning, so it never runs
-them.
+before any file's content is read. `--dry-run` shows what apply's plan checks refuse; the
+write-permission check and the two read passes run only in a run without `--dry-run`, before
+any file moves.
 
 **Resume mode (`--resume`):**
 

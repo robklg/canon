@@ -225,17 +225,20 @@ impl BuiltinKey {
         }
     }
 
+    /// What the key means, in one line — the one meaning every surface naming a
+    /// built-in key prints: `canon facts`' list of built-in keys and the manifest's
+    /// comment block.
     fn description(self) -> &'static str {
         match self {
-            BuiltinKey::Filename => "Filename (last path component)",
-            BuiltinKey::Stem => "Filename without extension",
-            BuiltinKey::Ext => "File extension",
-            BuiltinKey::Hash => "Content hash",
-            BuiltinKey::HashShort => "Content hash (short)",
-            BuiltinKey::Id => "Source ID",
-            BuiltinKey::Size => "File size in bytes",
-            BuiltinKey::Mtime => "File modification time",
-            BuiltinKey::RootId => "Root ID",
+            BuiltinKey::Filename => "last path component",
+            BuiltinKey::Stem => "file name without its extension",
+            BuiltinKey::Ext => "same as source.ext",
+            BuiltinKey::Hash => "content hash, content.hash.sha256",
+            BuiltinKey::HashShort => "first 8 characters of the content hash",
+            BuiltinKey::Id => "same as source.id",
+            BuiltinKey::Size => "same as source.size",
+            BuiltinKey::Mtime => "same as source.mtime",
+            BuiltinKey::RootId => "ID of the source's root",
         }
     }
 }

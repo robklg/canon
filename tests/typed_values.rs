@@ -1212,3 +1212,144 @@ fn the_refresh_query_block_stands_at_the_querys_place_in_every_arm() {
         &["no sources known at", block[0], block[1]],
     );
 }
+
+/// Replace the manifest's `pattern = ` line by `pattern`, as a user editing it does, and return
+/// the line written.
+fn set_pattern(manifest: &std::path::Path, pattern: &str) -> String {
+    let line = format!("pattern = {pattern:?}");
+    let config = std::fs::read_to_string(manifest).unwrap();
+    let edited: Vec<String> = config
+        .lines()
+        .map(|l| {
+            if l.starts_with("pattern = ") {
+                line.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(manifest, edited.join("\n") + "\n").unwrap();
+    line
+}
+
+/// A key of mixed type, `Model`: text on `a.jpg`, a number on `b.jpg`; and `Taken` on `a.jpg`,
+/// a time known only to the year.
+fn import_a_mixed_model(fx: &Fixture) {
+    fx.import(&[
+        (
+            "a.jpg",
+            serde_json::json!({"Model": "EOS", "Taken": {"value": "2024", "type": "datetime"}}),
+        ),
+        ("b.jpg", serde_json::json!({"Model": "R5"})),
+    ]);
+    // Import keeps a key to one type, so the second type is written as an older Canon could.
+    let db = rusqlite::Connection::open(fx.path("home/canon.db")).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE facts SET value_text = NULL, value_num = 5 \
+             WHERE key = 'content.Model' AND value_text = 'R5'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// The patterns a refresh must not read: one per kind of problem a pattern can have, and one
+/// that leaves a source with no place.
+const BROKEN_PATTERNS: [&str; 6] = [
+    // A reading problem.
+    "{source.mtime|yeer}/{filename}",
+    // An unknown key.
+    "{content.Nothing}/{filename}",
+    // A modifier the key's type does not take.
+    "{source.ext|year}/{filename}",
+    // A key of mixed type.
+    "{content.Model}/{filename}",
+    // A problem in the literal text.
+    "a//{filename}",
+    // A time too coarse for its modifier: `a.jpg` gets no place.
+    "{content.Taken|month}/{filename}",
+];
+
+/// **`cluster refresh` never reads the pattern**: under a valid pattern and under each broken
+/// one it exits 0, writes the same lock, writes the pattern's text back byte for byte, and
+/// prints the same lines — so no line names the pattern, a count of sources with no place, or
+/// a placement.
+#[test]
+fn refresh_never_reads_the_pattern() {
+    let fx = Fixture::new();
+    import_a_mixed_model(&fx);
+    let manifest = manifest_with_query(&fx, "source.ext = jpg");
+    let m = manifest.to_string_lossy().into_owned();
+    let lock = manifest.with_extension("lock");
+
+    set_pattern(&manifest, "{filename}");
+    let valid = fx.run(&["cluster", "refresh", &m]);
+    assert_eq!(valid.code, 0, "{}{}", valid.stdout, valid.stderr);
+    let valid_lock = std::fs::read(&lock).unwrap();
+
+    for pattern in BROKEN_PATTERNS {
+        let line = set_pattern(&manifest, pattern);
+        let run = fx.run(&["cluster", "refresh", &m]);
+        assert_eq!(run.code, 0, "{pattern}: {}{}", run.stdout, run.stderr);
+        assert_eq!(std::fs::read(&lock).unwrap(), valid_lock, "{pattern}");
+        let written = std::fs::read_to_string(&manifest).unwrap();
+        assert!(
+            written.lines().any(|l| l == line),
+            "{pattern}: the pattern line comes back as written:\n{written}"
+        );
+        assert_eq!(run.stdout, valid.stdout, "{pattern}");
+        assert_eq!(run.stderr, valid.stderr, "{pattern}");
+    }
+}
+
+/// **A broken pattern beside a broken query: the refresh refuses for the query alone** — the
+/// same refusal, word for word, it gives under a valid pattern.
+#[test]
+fn a_refresh_with_a_broken_pattern_and_query_refuses_for_the_query_alone() {
+    let fx = Fixture::new();
+    let manifest = manifest_with_query(&fx, "source.ext =");
+    let m = manifest.to_string_lossy().into_owned();
+
+    set_pattern(&manifest, "{filename}");
+    let query_alone = fx.run(&["cluster", "refresh", &m]);
+    assert_ne!(query_alone.code, 0);
+
+    set_pattern(&manifest, "{source.mtime|yeer}/{filename}");
+    let config = std::fs::read_to_string(&manifest).unwrap();
+    let both = fx.run(&["cluster", "refresh", &m]);
+    assert_eq!(both.code, query_alone.code);
+    assert_eq!(both.stdout, query_alone.stdout);
+    assert_eq!(both.stderr, query_alone.stderr);
+    assert!(!both.stderr.contains("yeer"), "{}", both.stderr);
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), config);
+}
+
+/// **`cluster generate` writes the default pattern and no placement warning**, even where the
+/// manifest is written at the destination itself — the one place a default pattern meets it.
+#[test]
+fn generate_writes_the_default_and_no_placement_warning() {
+    let fx = Fixture::new();
+    let dest = format!("{}/out.d", fx.path_str("arc"));
+    let run = fx.run(&[
+        "cluster",
+        "generate",
+        &fx.path_str("src"),
+        "--dest",
+        &dest,
+        "--allow",
+        "duplicates",
+        "--output",
+        &dest,
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let written = std::fs::read_to_string(&dest).unwrap();
+    assert!(
+        written
+            .lines()
+            .any(|l| l == r#"pattern = "{scope.rel_path}""#),
+        "{written}"
+    );
+    assert!(!run.stderr.contains("Warning"), "{}", run.stderr);
+    assert!(!run.stdout.contains("Warning"), "{}", run.stdout);
+}

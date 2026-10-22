@@ -315,9 +315,6 @@ enum Commands {
         /// Show all source facts, including hidden ones like source.device and source.inode
         #[arg(long)]
         all: bool,
-        /// Show pattern aliases available for manifest patterns
-        #[arg(long)]
-        show_aliases: bool,
         /// Include additional sources: excluded, archived, all
         #[arg(long, value_delimiter = ',')]
         include: Vec<IncludeValue>,
@@ -1212,15 +1209,10 @@ fn run(cli: Cli) -> Result<()> {
             global,
             limit,
             all,
-            show_aliases,
             include,
             by_root,
             group_by,
         } => {
-            if show_aliases {
-                facts::show_aliases();
-                return Ok(());
-            }
             match action {
                 Some(FactsAction::Delete {
                     key,
@@ -2158,5 +2150,16 @@ mod tests {
         ] {
             Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("must parse: {argv:?}\n{e}"));
         }
+    }
+
+    /// `--show-aliases` is gone: an alias is an `@name` from the aliases file, and the
+    /// built-in keys it listed end the plain `canon facts` list instead.
+    #[test]
+    fn show_aliases_is_an_unknown_flag() {
+        let refused = Cli::try_parse_from(["canon", "facts", "--show-aliases"])
+            .err()
+            .expect("--show-aliases must be refused");
+        assert_eq!(refused.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(Cli::try_parse_from(["canon", "facts"]).is_ok());
     }
 }

@@ -4118,7 +4118,6 @@ mod source {
                 "prune_stale",
                 "prune_orphaned_objects",
                 "prune_excluded_facts",
-                "show_aliases",
                 // Read by the source-value law's verifier.
                 "compute_distribution",
             ],

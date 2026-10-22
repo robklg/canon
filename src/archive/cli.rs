@@ -10,7 +10,7 @@ pub(super) mod cluster;
 
 use std::path::Path;
 
-use crate::archive::domain::{LockStanding, ZoneRefusal};
+use crate::archive::domain::ZoneRefusal;
 use crate::archive::ops::pattern::PatternGaps;
 use crate::core::domain::format::shell_quote;
 use crate::core::domain::format_count;
@@ -187,12 +187,36 @@ fn apply_command(manifest: &Path, resume: bool) -> String {
     )
 }
 
+/// The report, as a user would type it — the sibling of [`refresh_command`],
+/// quoted by the same owner for the same reason. Named where a refusal has no
+/// way back of its own to give, and the report is where the cause is stated.
+fn status_command(manifest: &Path) -> String {
+    format!(
+        "canon cluster status {}",
+        shell_quote(&manifest.display().to_string())
+    )
+}
+
+/// `apply`'s refusal where no lock file stands beside the manifest — one sentence
+/// for every cause of absence alike.
+///
+/// Apply carries out a lock already built; with none it has nothing to carry
+/// out, and it infers nothing about why. Which absence it is — an empty
+/// selection or a lock that has gone — is `cluster status`'s to state, so the
+/// refusal names the report and no remedy of its own.
+fn missing_lock_refusal(manifest: &Path) -> String {
+    format!(
+        "This manifest is missing its lock file. Nothing was moved. Run `{}` to inspect.",
+        status_command(manifest)
+    )
+}
+
 /// The way back from a lock that cannot be used as it stands: rebuild it.
 ///
 /// One sentence for the three refusals that share one meaning — a lock whose
-/// hash no longer matches, a lock written before the measurement, and a lock
-/// that is not there — because they take the same act and differ only in what
-/// the caller has already said about the cause.
+/// hash no longer matches, a lock with no measurement recorded, and a lock
+/// with no time zone recorded — because they take the same act and differ
+/// only in what the caller has already said about the cause.
 ///
 /// **It takes no [`RefreshStanding`], deliberately.** All three callers are
 /// `apply`, which is [`RefreshStanding::Unasked`] by construction, so the
@@ -207,31 +231,20 @@ fn rebuild_remedy(manifest: &Path) -> String {
     format!("Rebuild it: {}", refresh_command(manifest, false))
 }
 
-/// The way back from a manifest with no lock file beside it.
+/// The way forward from a manifest whose last refresh selected no sources, as
+/// `cluster status` names it.
 ///
-/// **Two absences, two remedies, told apart by the manifest's own record.** A
-/// manifest still naming a lock hash lost a lock that existed, and a refresh
-/// rebuilds it. A manifest recording the empty hash has no lock because its
-/// last refresh matched nothing — a refresh there runs, matches nothing again
-/// and returns the manifest unchanged, which is worse advice than none: it
-/// does not even change the stated reason. What moves that manifest forward
-/// is a different selection, so the remedy names the two fields that decide
-/// one and puts the refresh after them.
-///
-/// The same fact `cluster status` reads to name the absence, read here to
-/// name the way out of it — one record, two readers, neither guessing. Which
-/// absence it is comes off [`LockStanding::absent`], the one spelling of that
-/// question, rather than a second `is_empty()` at this end.
-fn no_lock_remedy(manifest: &Path, recorded_lock_hash: &str) -> String {
-    if LockStanding::absent(recorded_lock_hash).lost_a_lock_it_names() {
-        rebuild_remedy(manifest)
-    } else {
-        format!(
-            "The last refresh matched nothing, so there is no lock to carry across.\n\
-             Edit the query or scope in the manifest, then {} to select again.",
-            refresh_command(manifest, false)
-        )
-    }
+/// A refresh over the same query and scope selects nothing again and returns
+/// the manifest unchanged — a fixed point, not a remedy — so this names the two
+/// fields that decide a selection and puts the refresh after them. Which
+/// absence a lock is, and so whether this is owed, is the status table's
+/// answer (`OwedWayBack::ChangeTheSelection`); a lost lock is rebuilt instead.
+fn empty_selection_remedy(manifest: &Path) -> String {
+    format!(
+        "The last refresh selected no sources. Update the query or scope in the manifest, then \
+         run `{}`.",
+        refresh_command(manifest, false)
+    )
 }
 
 /// The way back from a lock naming source files the world no longer has.
@@ -393,7 +406,7 @@ fn zone_refusal(refusal: &ZoneRefusal) -> String {
              manifest — correct the zone line, or update this machine's time zone data"
         ),
         ZoneRefusal::Line(ZoneNameError::RuleString(_)) => {
-            "the zone line holds a time zone rule, not a zone name — write a zone name, for \
+            "the zone line is a time zone rule, not a zone name — write a zone name, for \
              example zone = \"Europe/Amsterdam\""
                 .to_string()
         }
@@ -482,20 +495,8 @@ fn coarse_way_out(gaps: &PatternGaps) -> String {
     )
 }
 
-/// What `cluster refresh` says about times too coarse for the pattern: the counts
-/// ([`coarse_value_counts`]), then the ways out once.
-fn coarse_value_statements(gaps: &PatternGaps) -> Vec<String> {
-    if gaps.too_coarse.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = coarse_value_counts(gaps);
-    lines.push(coarse_way_out(gaps));
-    lines
-}
-
 /// One line per key, modifier and grain a time was too coarse for, with how many sources
-/// hold it — read by `cluster refresh` and `cluster status` alike; the ways out follow in
-/// each command's own place.
+/// hold it — read by `cluster status`; the ways out follow in its own place.
 fn coarse_value_counts(gaps: &PatternGaps) -> Vec<String> {
     gaps.too_coarse
         .iter()
@@ -515,15 +516,6 @@ fn coarse_value_counts(gaps: &PatternGaps) -> Vec<String> {
         .collect()
 }
 
-/// What `cluster refresh` says when the lock it wrote cannot be read back for its statements:
-/// the refresh itself is done, and what is missing is said.
-fn statement_pass_failed(error: &anyhow::Error) -> String {
-    format!(
-        "Warning: the lock was written, but reading it back failed, so nothing is said about \
-         whether its pattern uses a time that depends on the time zone or about its coarse values: {error:#}"
-    )
-}
-
 /// What `cluster refresh` says about the zone a manifest had no line for.
 fn zone_line_recorded_statement(zone: &RecordedZone) -> String {
     format!(
@@ -533,16 +525,18 @@ fn zone_line_recorded_statement(zone: &RecordedZone) -> String {
 }
 
 /// What `cluster refresh` says when the zone it records differs from the one the old lock
-/// was built in: in full where the run read an instant on the clock, since the change can
-/// move what is selected and where it lands; in one quiet clause where it read none, or where
-/// the pattern's reads are not known and the query read none.
-fn zone_change_statement(old: &RecordedZone, new: &RecordedZone, instant_read: bool) -> String {
+/// was built in: in full where the query read an instant on the clock, since the change can
+/// move what is selected; in one quiet clause where it read none.
+fn zone_change_statement(
+    old: &RecordedZone,
+    new: &RecordedZone,
+    query_read_an_instant: bool,
+) -> String {
     let (old, new) = (old.name(), new.name());
-    if instant_read {
+    if query_read_an_instant {
         format!(
-            "Time zone changed from {old} to {new}: times in the query and in folder names \
-             are now in {new}, which can change which sources a time query selects and which \
-             folder a file goes to"
+            "Time zone changed from {old} to {new}: times in the query are now in {new}, which \
+             can change which sources a time query selects"
         )
     } else {
         format!("(time zone changed from {old} to {new})")
@@ -683,9 +677,9 @@ mod tests {
     /// most likely to carry one is the sentence nobody remembered.
     ///
     /// So the claim is structural instead: **every such spelling in archive's
-    /// command surface is in this file**, and there are exactly three. A new
+    /// command surface is in this file**, and there are exactly four. A new
     /// one anywhere in `cli/` fails here, and the repair is to route it
-    /// through [`refresh_command`], [`apply_command`], or
+    /// through [`refresh_command`], [`apply_command`], [`status_command`] or
     /// [`scan_or_edit_scope`] — each of which quotes through the tree's own
     /// owner. Matched both directions, so a spelling that moves out of this
     /// file fails too, rather than leaving the list asserting a site that has
@@ -718,9 +712,14 @@ mod tests {
                 if code.starts_with("//") || !code.contains('{') {
                     continue;
                 }
-                if ["canon apply", "canon cluster refresh", "canon scan"]
-                    .iter()
-                    .any(|verb| code.contains(verb))
+                if [
+                    "canon apply",
+                    "canon cluster refresh",
+                    "canon cluster status",
+                    "canon scan",
+                ]
+                .iter()
+                .any(|verb| code.contains(verb))
                 {
                     let name = file.file_name().expect("named file").to_string_lossy();
                     found.push(format!("{name}: {}", code.trim()));
@@ -732,9 +731,10 @@ mod tests {
             vec![
                 r#"cli.rs: "canon cluster refresh {flag}{}","#.to_string(),
                 r#"cli.rs: "canon apply {flag}{}","#.to_string(),
+                r#"cli.rs: "canon cluster status {}","#.to_string(),
                 r#"cli.rs: "If the files are there, `canon scan {}` to index them.","#.to_string(),
             ],
-            "a command spelled with a path outside this file's three owners"
+            "a command spelled with a path outside this file's four owners"
         );
     }
 
@@ -779,7 +779,6 @@ mod tests {
             unreadable_save_time: _,
             too_coarse: _,
             fact_not_carried: _,
-            used_an_instant: _,
         } = PatternGaps::default();
         for alone in [
             PatternGaps::for_lock(true),

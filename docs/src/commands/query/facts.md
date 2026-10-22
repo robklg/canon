@@ -107,6 +107,21 @@ To see their values and convert each to one type:
   `canon facts convert content.Model`
 ```
 
+Without `--where`, the list ends with the status words `--where` takes and the [built-in keys](../../reference/builtins.md#built-in-keys), each with its meaning:
+
+```
+Built-in keys (use in --where, --key, --group-by, --emit and patterns):
+  filename       last path component
+  stem           file name without its extension
+  ext            same as source.ext
+  hash           content hash, content.hash.sha256
+  hash_short     first 8 characters of the content hash
+  id             same as source.id
+  size           same as source.size
+  mtime          same as source.mtime
+  root_id        ID of the source's root
+```
+
 Example grouped output (`--by-root`):
 ```
 source.ext (by root)

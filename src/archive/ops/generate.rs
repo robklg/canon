@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
@@ -33,8 +33,7 @@ use crate::expr::{
 };
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
-use super::manifest::{read_lock_file, write_and_sync, write_lock_file};
-use super::pattern::{evaluate_pattern, PatternGaps};
+use super::manifest::{write_and_sync, write_lock_file};
 
 // ============================================================================
 // Types
@@ -381,10 +380,6 @@ pub struct ExecuteGenerateResult {
     pub source_count: usize,
     pub root_breakdown: Vec<(String, usize)>,
     pub not_archived_count: usize,
-    /// The pattern the manifest was written with — chosen here on generation,
-    /// carried over from the manifest on refresh. The interface reads it back
-    /// to say what the run committed to.
-    pub pattern: String,
 }
 
 impl ExecuteGenerateResult {
@@ -519,7 +514,6 @@ pub fn execute_generate(
         source_count: plan.lock_entries.len(),
         root_breakdown: plan.root_breakdown.clone(),
         not_archived_count: plan.not_archived_count,
-        pattern: config.output.pattern.clone(),
     })
 }
 
@@ -595,51 +589,8 @@ pub fn execute_refresh(
             source_count: plan.lock_entries.len(),
             root_breakdown: plan.root_breakdown.clone(),
             not_archived_count: plan.not_archived_count,
-            pattern: config.output.pattern.clone(),
         }),
     })
-}
-
-/// What the pattern meets over the lock a refresh has just written, read on the zone the
-/// run settled: the causes of every entry that will not expand — the too-coarse ones
-/// counted — and whether any entry that does uses an instant.
-///
-/// It reads the lock back from disk, through the reader `apply` and `cluster status` use,
-/// so the three see one lock and ask it the same questions (`LockFile::unmeasured_reason`,
-/// `LockFile::pattern_needs_a_scope_it_lacks`). A pattern that does not parse, or a refresh
-/// that wrote no lock, meets nothing here: `apply` reports the first, and the second has
-/// nothing to place.
-pub fn pattern_gaps_for_written_lock(
-    conn: &mut Connection,
-    lock_path: &Path,
-    pattern: &str,
-    zone: &UserZone,
-) -> Result<PatternGaps> {
-    let Ok(pattern) = crate::expr::parse_pattern(pattern) else {
-        return Ok(PatternGaps::default());
-    };
-    let Some(lock) = read_lock_file(lock_path)? else {
-        return Ok(PatternGaps::default());
-    };
-    let mut gaps = PatternGaps::for_lock(lock.pattern_needs_a_scope_it_lacks(&pattern));
-    let unmeasured = lock.unmeasured_reason();
-    let root_paths: HashMap<i64, String> = repo::root::fetch_all(conn)?
-        .into_iter()
-        .map(|r| (r.id, r.path))
-        .collect();
-    let source_ids: Vec<i64> = lock.entries.iter().map(|e| e.id).collect();
-    let facts = crate::expr::prefetch_pattern_facts(
-        conn,
-        &source_ids,
-        &crate::expr::extract_fact_keys(&pattern),
-    )?;
-    for entry in &lock.entries {
-        match evaluate_pattern(&pattern, entry, unmeasured, &root_paths, &facts, zone) {
-            Ok(expansion) => gaps.placed(&expansion),
-            Err(e) => gaps.met(&e),
-        }
-    }
-    Ok(gaps)
 }
 
 // ============================================================================
@@ -683,45 +634,6 @@ fn default_pattern(confirmed_scope: &[DecisionScope]) -> &'static str {
     }
 }
 
-/// Whether a file about to be written stands where the pattern's placements
-/// need a directory.
-///
-/// The manifest and its lock usually live in the same tree the files land in,
-/// so the two can collide: `-O photos` beside a pattern placing into `photos/`
-/// leaves a file standing where a directory has to go, and every transfer then
-/// fails on a directory it cannot create. It is knowable at write time — the
-/// pattern's static prefix says which directories the run needs — so it is said
-/// then, while the manifest is still a text file nobody has acted on.
-///
-/// Returns the written path that stands in the way and the directory it
-/// blocks. Only the directories the pattern *commits* to are checked: what
-/// expansion opens below them depends on values this side cannot see.
-/// A pattern that does not parse is left to the apply, which reports it
-/// properly.
-pub fn placement_blocked_by_written_file(
-    pattern: &str,
-    placement_root: &Path,
-    written_paths: &[&Path],
-) -> Option<(PathBuf, PathBuf)> {
-    let parsed = crate::expr::parse_pattern(pattern).ok()?;
-    let (static_prefix, _fans_out) = crate::expr::placement_shape(&parsed);
-    let placement_dir = match static_prefix {
-        Some(prefix) => placement_root.join(prefix),
-        None => placement_root.to_path_buf(),
-    };
-
-    // The whole chain, not just the leaf: a file standing anywhere along it
-    // blocks the directory below it just as thoroughly.
-    for dir in placement_dir.ancestors() {
-        for written in written_paths {
-            if *written == dir {
-                return Some((written.to_path_buf(), placement_dir));
-            }
-        }
-    }
-    None
-}
-
 /// Assemble the manifest document every write path emits: header, Cluster
 /// Summary, Notes block, TOML body, fact help.
 ///
@@ -741,7 +653,7 @@ fn assemble_manifest(
 ) -> Result<String> {
     let header = "# Canon manifest — edit pattern and Notes freely.\n\
                   # To change the query, edit it here then run: canon cluster refresh <manifest>\n\
-                  # zone: the time zone for times in the query and in folder names.\n\
+                  # zone: the time zone for times in the query and in directory names.\n\
                   # Edit it, or delete it to take this machine's, then run: canon cluster refresh <manifest>\n\
                   # Other fields are managed by Canon — do not edit.\n\
                   #\n";
@@ -2688,6 +2600,12 @@ base_dir = \"output\"\n";
         let manifest = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(manifest.starts_with("# Canon manifest"), "got: {manifest}");
         assert!(
+            manifest.lines().any(
+                |l| l == "# zone: the time zone for times in the query and in directory names."
+            ),
+            "got: {manifest}"
+        );
+        assert!(
             manifest.contains("# === Cluster Summary ==="),
             "got: {manifest}"
         );
@@ -2714,7 +2632,6 @@ base_dir = \"output\"\n";
             source_count: 3,
             root_breakdown: vec![("/photos".to_string(), 3)],
             not_archived_count: 1,
-            pattern: "{filename}".to_string(),
         };
         let summary = one.compose_summary("Generated manifest: cluster.toml");
         assert!(summary.contains("From 1 root:"), "got: {summary}");
@@ -2724,7 +2641,6 @@ base_dir = \"output\"\n";
             source_count: 5,
             root_breakdown: vec![("/photos".to_string(), 3), ("/scans".to_string(), 2)],
             not_archived_count: 4,
-            pattern: "{filename}".to_string(),
         };
         let summary = several.compose_summary("Generated manifest: cluster.toml");
         assert!(summary.contains("From 2 roots:"), "got: {summary}");
@@ -2737,7 +2653,6 @@ base_dir = \"output\"\n";
             source_count: 2,
             root_breakdown: vec![("/photos".to_string(), 2)],
             not_archived_count: 2,
-            pattern: "{filename}".to_string(),
         };
         let summary = result.compose_summary("Generated manifest: cluster.toml (2 sources)");
         let lines: Vec<&str> = summary.lines().collect();

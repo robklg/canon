@@ -20,7 +20,7 @@ archive/
     cluster.rs    # canon cluster generate/refresh/status
   ops.rs          # declaration-only
   ops/
-    pattern.rs    # build_eval_context + evaluate_pattern — used by plan, status, generate, cli/apply
+    pattern.rs    # build_eval_context + evaluate_pattern — used by plan, status, cli/apply
     plan.rs       # what an apply would do, and what stands in the way
     execute.rs    # the transfer loop, receipts, extraction rows
     receipt.rs    # apply's two receipt document shapes
@@ -31,8 +31,7 @@ archive/
 ```
 
 **The internal dependency direction is a DAG, and the split is what keeps it one**:
-`execute → plan → pattern`; `execute → receipt`; `generate → manifest`, `generate → pattern`
-(the refresh's pass over the lock it just wrote, `pattern_gaps_for_written_lock`); `status →
+`execute → plan → pattern`; `execute → receipt`; `generate → manifest`; `status →
 manifest`, `status → pattern` (a function-local `use` inside `compute_manifest_status`). `pattern`, `manifest`
 and `receipt` are the sinks, pointing at nothing above `domain`. An edge from `plan` to `execute`
 would undo the separation the split exists to hold.
@@ -57,7 +56,8 @@ strata moves inside the subsystem rather than the surface widening to reach the 
 
 `cluster generate` selects sources (`batch_fetch_by_roots` + domain predicates), batch-fetches
 facts, computes 100%-coverage facts in-memory; the lock file stores **source identity, staleness
-data, and where each file goes (no fact snapshots)** — a fact can be looked up fresh and the
+data, and, where the manifest is scoped, each file's path relative to the scope (no fact snapshots,
+no destination)** — a fact can be looked up fresh and the
 measurement cannot, which is the line the format draws. **The lock file is an immutable snapshot
 artifact — never mutated after it is written**: a refresh writes a new one whole.
 
@@ -202,8 +202,8 @@ The dispositions differ by what each command is about to do, and none of them is
   be turned away — `scope_kept_nothing` and `scope_confirms_nothing`, the two halves of the
   recorded scope the decision table reads. `all_accounted_for()` answers about source files the
   report checked — never over a lock placed nowhere. Whether there is a **next step** is never the
-  scope's business: none with nothing pending or unplaced, nor where a checked entry found
-  something lost or wrong (`found_nothing_lost_or_wrong`); *which* is the table's.
+  scope's business: none with nothing pending or unplaced over a lock that is there, nor where a
+  checked entry found something lost or wrong (`found_nothing_lost_or_wrong`); *which* is the table's.
 
 The recorded-scope resolution itself, and its pins, live in `src/core/CLAUDE.md`.
 
@@ -356,10 +356,16 @@ the report invited the one command that refuses, in four separate ways.
   states which of the two absences it is, from the manifest's own record, and reads on
   (`an_absent_lock_is_a_state_the_read_states`, `an_unreadable_lock_is_still_an_error`); the two
   sentences themselves are `each_absent_lock_is_named_by_its_own_cause`'s, since naming the wrong
-  one sends the reader to the act that cannot help. `apply`
-  refuses by name instead: it exists to act and cannot.
+  one sends the reader to the act that cannot help. Each absence also names its step where the
+  refresh would run: the rebuild for a lost lock, and for an empty
+  selection the table's `OwedWayBack::ChangeTheSelection` — a refresh over the same query
+  selects nothing again
+  (`a_lock_that_matched_nothing_is_not_sent_back_to_the_same_query`). `apply`
+  refuses by name instead, straight after reading the manifest and in one sentence for both
+  absences, pointing at the report: it exists to act and cannot, and infers nothing about why.
 - **One spelling for the remedies naming a command.** `cli.rs` owns `refresh_command`,
-  `apply_command`, `rebuild_remedy`, `no_lock_remedy`, `source_lost_remedy`,
+  `apply_command`, `status_command`, `rebuild_remedy`, `missing_lock_refusal`,
+  `empty_selection_remedy`, `source_lost_remedy`,
   `scan_or_edit_scope`, `scope_kept_nothing_way_back` and `adjust_pattern_remedy`. The **quoting belongs to the spelling**, not
   to each sentence — but the
   quoting itself belongs to neither: `core::domain::format::shell_quote` owns it, and
@@ -370,7 +376,7 @@ the report invited the one command that refuses, in four separate ways.
   which is a rung too low for a defect that arrived twice: three `canon apply --resume` lines
   pasted a path of their own where no pin reached them. So the bypass is refused structurally as
   well — every spelling of one of these commands with something pasted into it lives in `cli.rs`,
-  and there are exactly three
+  and there are exactly four
   (`a_command_is_spelled_with_a_path_only_where_it_is_quoted`, matched both directions). `source_lost_remedy` takes a
   `RefreshStanding` and asks *would a refresh run, and if not, why* — the refusals are kept
   apart because only some state their own way back in the line that announces them (a door; a zone
@@ -381,12 +387,8 @@ the report invited the one command that refuses, in four separate ways.
   lock already built and checks it still holds, resolving no recorded scope, and a manifest may
   record none — so its remedies speak about the lock, and a refresh named from there that is
   turned away is answered by the refresh, which states its own outcome and the acts for it.
-  `no_lock_remedy` asks a
-  different question the manifest *does* answer — which of the two absences this is — because a
-  manifest whose last refresh matched nothing is sent to a refresh that matches nothing again,
-  a fixed point rather than a remedy
-  (`a_lock_that_matched_nothing_is_not_sent_back_to_the_same_query`). `rebuild_remedy` asks
-  nothing: all three of its callers are apply's, all `Unasked` by construction.
+  `rebuild_remedy` asks nothing: all three of its callers are apply's, all `Unasked` by
+  construction.
   **`scan_or_edit_scope` offers two acts, not one**: a set-aside path is a folder Canon has no
   sources under, and nothing on disk tells an unscanned folder from a wrong one — so the scan
   leads, naming the very paths the report has just skipped, and the scope edit follows
@@ -412,11 +414,11 @@ the report invited the one command that refuses, in four separate ways.
   closed door is and the others are not. Which sentence each owes is the table's, not the
   report's: `owed_way_back` ranks the causes once, a scope that kept nothing outranking a pattern
   that cannot expand because it is *why* the pattern has nothing to measure from, and the report
-  matches its three answers with no rest arm
+  matches its four answers with no rest arm
   (`a_withheld_step_is_never_left_without_an_answer`, walked over every shape the table can take,
   every input varied, the one pair construction rules out skipped by name). **The claim reaches the table's answers and no further**: the
-  interface's outermost gate — nothing pending or unplaced, or a source lost, or a destination of the wrong
-  size — returns before the table is asked, and a report stopped there names no act. For a lost
+  interface's outermost gate — nothing pending or unplaced over a lock that is there, or a source
+  lost, or a destination of the wrong size — returns before the table is asked, and a report stopped there names no act. For a lost
   source the line above has already said to check the volume; for a wrong-sized destination
   nothing has, and `apply --resume` on the same manifest holds the look-before-deleting guidance
   the report withholds. That gap is the gate's, older than the table, and stands.

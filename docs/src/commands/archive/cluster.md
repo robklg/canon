@@ -28,7 +28,7 @@ canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archiv
 canon cluster generate --where 'source.ext|lowercase=jpg' --dest /Volumes/Archive --force
 ```
 
-The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) holding what the run settled: the resolved scope, and one line per source recording its state and where it goes. The lock is not edited by hand: [`apply`](apply.md) uses it as written.
+The command generates two files: a manifest (`.toml`) that you edit, and a lock file (`.lock`) holding what the run settled: the resolved scope, and one line per source recording its state and, where the manifest is scoped, its path relative to the scope. The lock is not edited by hand: [`apply`](apply.md) uses it as written.
 
 **Typical workflow:**
 
@@ -63,7 +63,7 @@ The generated manifest includes a cluster summary, a notes section for your own 
 ```toml
 # Canon manifest — edit pattern and Notes freely.
 # To change the query, edit it here then run: canon cluster refresh <manifest>
-# zone: the time zone for times in the query and in folder names.
+# zone: the time zone for times in the query and in directory names.
 # Edit it, or delete it to take this machine's, then run: canon cluster refresh <manifest>
 # Other fields are managed by Canon — do not edit.
 #
@@ -102,8 +102,8 @@ archive_root_id = 2
 
   Scoping to files rather than a folder — `canon cluster generate notes-2026-02*`, letting the shell expand the wildcard — places those files by name: directly under the destination when they all sit in one folder, and otherwise below the folder they share, which keeps files of the same name apart. How many files the wildcard happened to match makes no difference.
 
-  Writing the manifest inside the destination is fine, but a manifest whose own path is a directory the pattern needs blocks every file below it. Generate and refresh warn when that is the case, naming both paths; [`apply`](apply.md) rejects the run. This is easy to hit by naming a manifest after a folder whose name contains a dot: `-o`/`-O` append `.toml` only when the name has no extension, so `-O photos.2024` writes exactly that name.
-- **`zone`** is the time zone used for dates, in the query and in folder names. See [The manifest's time zone](#the-manifests-time-zone).
+  Writing the manifest inside the destination is fine, but a manifest whose own path is a directory the pattern needs blocks every file below it. [`apply`](apply.md) rejects the run, and `apply --dry-run` shows it before anything moves. This is easy to hit by naming a manifest after a folder whose name contains a dot: `-o`/`-O` append `.toml` only when the name has no extension, so `-O photos.2024` writes exactly that name.
+- **`zone`** is the time zone used for dates, in the query and in directory names. See [The manifest's time zone](#the-manifests-time-zone).
 - **The facts comment** lists the fact keys every source carries, with their type. If a key's fact type is not uniform, it is listed as `mixed`, followed by a `canon facts convert` line for it; generate and refresh also print such keys as a warning. A time fact not written to the second for every source names its coarsest grain and how many values have it, for example `content.Taken time — 12 known only to the year`: a pattern's `|month` finds no value in those.
 - **`version`** field tracks the manifest format version.
 - **`[options]`** records which `--allow` flags were used during generation. [`cluster refresh`](cluster.md) reads them, because it re-selects sources from the same query. [`apply`](apply.md) reads only `duplicates`, which speaks to the content it is about to transfer; `archived` acknowledged a selection that has already happened, and apply selects nothing. What apply needs acknowledged, it asks for on its own flags.
@@ -150,7 +150,7 @@ The folder a file goes to can depend on the time zone: a time with an offset, or
 - **`cluster refresh`** takes the zone line, selects in that time zone, and writes it into the lock. With no zone line it records this machine's zone and says so. A name that differs only in upper and lower case is written back in its usual spelling.
 - **[`apply`](apply.md)** and `cluster status` use the lock's time zone, never this machine's.
 
-Edit the zone line, or delete it to take this machine's, then refresh. When the manifest's time zone is not this machine's, a refresh whose query or pattern uses a time that depends on the time zone says which:
+Edit the zone line, or delete it to take this machine's, then refresh. When the manifest's time zone is not this machine's, a refresh whose query uses a time that depends on the time zone says which:
 
 ```
 times are in Europe/Amsterdam, as the manifest records (this machine: America/New_York)
@@ -159,10 +159,10 @@ times are in Europe/Amsterdam, as the manifest records (this machine: America/Ne
 A refresh recording a zone other than the one the old lock was built in says what changes:
 
 ```
-Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now in America/New_York, which can change which sources a time query selects and which folder a file goes to
+Time zone changed from Europe/Amsterdam to America/New_York: times in the query are now in America/New_York, which can change which sources a time query selects
 ```
 
-Where the query and the pattern use no time that depends on the time zone (a camera's time with no offset is the same in any time zone), the change is one line in parentheses, and the `times are in …` line does not print. Two names for the same zone, such as `US/Eastern` and `America/New_York`, are not a change.
+Where the query uses no time that depends on the time zone (a camera's time with no offset is the same in any time zone), the change is one line in parentheses, and the `times are in …` line does not print. A refresh reads no pattern, so it says nothing about the pattern's times: [`apply`](apply.md) names the lock's time zone where the pattern uses one. Two names for the same zone, such as `US/Eastern` and `America/New_York`, are not a change.
 
 A zone line Canon does not recognize stops the refresh, which writes nothing:
 
@@ -345,12 +345,7 @@ Use a coarser modifier in the pattern, which takes effect at the next apply; or 
 
 The query and a file's save time are both evaluated when the lock is built, so those ways out take
 effect at the refresh, and `cluster status` names the apply once the rebuilt lock places every file.
-The pattern is evaluated when files are placed, so a coarser modifier needs no refresh. `cluster refresh`
-states the same cause with its counts, over the lock it has just written:
-
-```
-12 sources hold content.DateTimeOriginal only to the year, so {content.DateTimeOriginal|month} has no value for them
-```
+The pattern is evaluated when files are placed, so a coarser modifier needs no refresh.
 
 If the recorded scope resolves to nothing — every path in it set aside, so the report has just
 printed `no sources known at …` — a refresh is rejected outright, and pointing at one would only
@@ -373,13 +368,15 @@ the refresh states its own outcome. A lock is what your query, your scope and th
 so unsuspending and refreshing again rebuilds it from the same query and scope — over the world as
 it stands then, which is not always the world it described before.
 
-When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh. `cluster status` reads such a manifest and reports the absence rather than failing on it:
+When the query matches nothing, the lock file is removed and `lock_hash` is emptied. The manifest is rewritten in full, with the Cluster Summary stating the zero match and the Notes section preserved as on any other refresh. `cluster status` reads such a manifest and reports the absence rather than failing on it, then the way forward: refreshing the same query and scope would select nothing again, so the step is a different selection:
 
 ```
-Lock: none — the last refresh matched nothing.
+Lock: missing — the manifest selected no sources.
+...
+The last refresh selected no sources. Update the query or scope in the manifest, then run `canon cluster refresh manifest.toml`.
 ```
 
-A manifest that still records a `lock_hash` but whose lock file is gone gets `Lock: none — the manifest names a lock file that is not there.` [`apply`](apply.md) stops with an error in both cases: there is nothing to carry across.
+A manifest that still records a `lock_hash` but whose lock file is gone gets `Lock: missing — the manifest names a lock file that is not there.`, and the rebuild as its step (`To rebuild the lock: canon cluster refresh manifest.toml`). [`apply`](apply.md) stops with an error in both cases: there is nothing to carry across.
 
 ### The zone in `cluster status`
 

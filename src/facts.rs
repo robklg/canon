@@ -9,8 +9,7 @@ mod repo;
 
 pub use cli::import::import_run;
 pub use cli::{
-    delete_facts, prune_excluded_facts, prune_orphaned_objects, prune_stale, run, show_aliases,
-    DeleteOptions,
+    delete_facts, prune_excluded_facts, prune_orphaned_objects, prune_stale, run, DeleteOptions,
 };
 
 // No production caller: the source-value law's verifier (source_value_law_tests.rs) reads the

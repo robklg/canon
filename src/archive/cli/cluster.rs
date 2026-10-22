@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::archive::domain::{
     parse_manifest_allow, parse_manifest_config, settle_manifest_zone, LockHeaderStanding,
@@ -12,7 +12,6 @@ use crate::archive::ops::generate::{
 };
 use crate::archive::ops::manifest::read_lock_zone_tolerantly;
 use crate::archive::ops::manifest::{parse_recorded_query, LockZone};
-use crate::archive::ops::pattern::PatternGaps;
 use crate::archive::ops::{generate as generate_ops, status as status_ops};
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
@@ -209,8 +208,6 @@ pub fn generate(
 
     println!("{}", full_summary);
     println!("{}", super::zone_recorded_statement(&zone));
-
-    warn_if_written_file_blocks_placement(&result.pattern, dest, &[output_path, &lock_path]);
 
     if !options.no_edit {
         if let Err(e) = open_editor(output_path) {
@@ -481,18 +478,6 @@ fn refresh_with_editor(
     display_plan_warnings(&plan, &display_options);
 
     // Execute (the lock's path was settled above, before the door was asked)
-
-    // Where this manifest's files would land, for the write-time collision
-    // warning below. The loop that produces the collision is generate (no
-    // prefix) → edit adds one → refresh, so the rewrite is usually the moment
-    // it becomes knowable. A manifest naming a root that is gone gets no
-    // warning rather than an error: the refresh itself is still legitimate.
-    let placement_root = refresh_roots
-        .iter()
-        .find(|r| r.id == config.output.archive_root_id)
-        .map(|r| Path::new(&r.path).join(&config.output.base_dir));
-    let written_pattern = config.output.pattern.clone();
-
     let exec_params = ExecuteRefreshParams {
         lock_path: lock_path.clone(),
         manifest_path: config_path.to_path_buf(),
@@ -521,16 +506,9 @@ fn refresh_with_editor(
             old_lock_zone.as_ref(),
             machine,
             plan.query_read_an_instant,
-            Some(&PatternGaps::default()),
         );
         for line in statements {
             println!("{line}");
-        }
-        // The manifest only: this arm removed the lock file, and a warning
-        // about a file standing in the way would be naming one that no longer
-        // stands anywhere.
-        if let Some(root) = &placement_root {
-            warn_if_written_file_blocks_placement(&written_pattern, root, &[config_path]);
         }
         return Ok(());
     }
@@ -596,79 +574,46 @@ fn refresh_with_editor(
     // The decision is settled; the recorder's hold on the connection ends here.
     drop(recorder);
 
-    // What the pattern meets over the lock just written, on the zone just
-    // settled — read only for what the statements below say about it.
-    // The refresh has run and is recorded; this pass only composes sentences, so a failure
-    // here is said as a warning and never turns the finished refresh into an error.
-    let statements = match generate_ops::pattern_gaps_for_written_lock(
-        conn,
-        &lock_path,
-        &r.pattern,
-        zone.clock(),
+    for line in refresh_zone_statements(
+        &manifest_zone,
+        old_lock_zone.as_ref(),
+        machine,
+        plan.query_read_an_instant,
     ) {
-        Ok(gaps) => refresh_zone_statements(
-            &manifest_zone,
-            old_lock_zone.as_ref(),
-            machine,
-            plan.query_read_an_instant,
-            Some(&gaps),
-        ),
-        Err(e) => {
-            eprintln!("{}", super::statement_pass_failed(&e));
-            refresh_zone_statements(
-                &manifest_zone,
-                old_lock_zone.as_ref(),
-                machine,
-                plan.query_read_an_instant,
-                None,
-            )
-        }
-    };
-    for line in statements {
         println!("{line}");
-    }
-
-    if let Some(root) = &placement_root {
-        warn_if_written_file_blocks_placement(&r.pattern, root, &[config_path, &lock_path]);
     }
 
     Ok(())
 }
 
 /// What a refresh says about its zone once it has run, in order: a zone line it had to
-/// record, a zone that differs from the one the old lock was built in, the clock it read
-/// on where that is not this machine's, and the times too coarse for the pattern.
+/// record, a zone that differs from the one the old lock was built in, and the clock it read
+/// on where that is not this machine's.
 ///
-/// The clock is worth a sentence only where the run read an instant on it — the query's
-/// filters or the pattern's placements; a clock reading reads the same on any clock. Every
-/// comparison is between parsed zones, never text (`RecordedZone::same_zone`).
-///
-/// `gaps` is `None` where reading the written lock back failed: what the pattern placed is
-/// then unknown, so no sentence that turns on it is said — the coarse values, and the clock
-/// and the zone change's full form unless the query alone read an instant. A zone change is
-/// still said, in its quiet clause, since it is read from the two zones and not from the
-/// lock.
+/// The clock is worth a sentence only where the query read an instant on it — the
+/// selection's own answer; a clock reading reads the same on any clock. The pattern never
+/// decides either: a refresh selects and places no file, so it reads no pattern to say it.
+/// Every comparison is between parsed zones, never text (`RecordedZone::same_zone`).
 fn refresh_zone_statements(
     manifest_zone: &ManifestZone,
     old_lock_zone: Option<&RecordedZone>,
     machine: &UserZone,
     query_read_an_instant: bool,
-    gaps: Option<&PatternGaps>,
 ) -> Vec<String> {
     let zone = manifest_zone.zone();
-    let instant_read = query_read_an_instant || gaps.is_some_and(|g| g.used_an_instant);
     let mut lines = Vec::new();
     if let ManifestZone::FromMachine(recorded) = manifest_zone {
         lines.push(super::zone_line_recorded_statement(recorded));
     }
     if let Some(old) = old_lock_zone.filter(|old| !old.same_zone(zone)) {
-        lines.push(super::zone_change_statement(old, zone, instant_read));
+        lines.push(super::zone_change_statement(
+            old,
+            zone,
+            query_read_an_instant,
+        ));
     }
-    if instant_read && !zone.clock().reads_like(machine) {
+    if query_read_an_instant && !zone.clock().reads_like(machine) {
         lines.push(super::manifest_clock_statement(zone, machine));
-    }
-    if let Some(gaps) = gaps {
-        lines.extend(super::coarse_value_statements(gaps));
     }
     lines
 }
@@ -676,68 +621,6 @@ fn refresh_zone_statements(
 // ============================================================================
 // Display helpers
 // ============================================================================
-
-/// Say so when the file just written stands where the pattern's placements
-/// need a directory.
-///
-/// The apply would fail on it later, one transfer at a time; here it is one
-/// line at the moment the arrangement was made, naming both paths.
-///
-/// Both sides are resolved to the same form first, because they arrive in
-/// different ones: the manifest path as the user typed it on the command line,
-/// the destination from the archive root's stored canonical path. On a machine
-/// where a mount or a temp directory is reached through a symlink, the two
-/// spellings of one place never compare equal, and the warning would simply
-/// never fire. A file that does not exist yet resolves through its parent,
-/// which does.
-fn placement_warning(
-    pattern: &str,
-    placement_root: &Path,
-    written_paths: &[&Path],
-) -> Option<String> {
-    let resolve = |p: &Path| -> PathBuf {
-        if let Ok(real) = fs::canonicalize(p) {
-            return real;
-        }
-        let through_parent = match (p.parent(), p.file_name()) {
-            (Some(parent), Some(name)) => fs::canonicalize(parent).ok().map(|real| real.join(name)),
-            _ => None,
-        };
-        through_parent.unwrap_or_else(|| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
-    };
-    let root = resolve(placement_root);
-    let written: Vec<PathBuf> = written_paths.iter().map(|p| resolve(p)).collect();
-    let refs: Vec<&Path> = written.iter().map(|p| p.as_path()).collect();
-
-    let (blocker, blocked) =
-        generate_ops::placement_blocked_by_written_file(pattern, &root, &refs)?;
-    let situation = if blocker == blocked {
-        format!(
-            "Warning: {} is also the directory this manifest's pattern places files into.",
-            blocker.display()
-        )
-    } else {
-        format!(
-            "Warning: {} stands in the way of {}, where this manifest's pattern places files.",
-            blocker.display(),
-            blocked.display()
-        )
-    };
-    Some(format!(
-        "{situation}\n  Apply will stop with an error until one of them moves: write the manifest \
-         elsewhere (-o/-O), or edit the pattern."
-    ))
-}
-
-fn warn_if_written_file_blocks_placement(
-    pattern: &str,
-    placement_root: &Path,
-    written_paths: &[&Path],
-) {
-    if let Some(warning) = placement_warning(pattern, placement_root, written_paths) {
-        eprintln!("{warning}");
-    }
-}
 
 /// Display plan warnings (archived files, keys of mixed type) to stderr.
 fn display_plan_warnings(plan: &ClusterGeneratePlan, options: &GenerateOptions) {
@@ -776,12 +659,13 @@ fn mixed_key_lines(plan: &ClusterGeneratePlan) -> Vec<String> {
 /// The step that moves this manifest forward, or nothing when there is none.
 ///
 /// **Whether** there is anything to say at all is this function's own
-/// question, and the only one it is: files still to transfer, and nothing lost
-/// or wrong. That gate is outermost on purpose. A manifest with nothing
-/// pending has no next step to take, and one with content missing has just
-/// been told to check the volume before refreshing — advising a refresh in
-/// either state clears the lock and gains nothing, and in the second it
-/// contradicts the line above it.
+/// question, and the only one it is: files still to transfer, or no lock at
+/// all, and nothing lost or wrong. That gate is outermost on purpose. A
+/// manifest whose lock is there with nothing pending has no next step to take,
+/// and one with content missing has just been told to check the volume before
+/// refreshing — advising a refresh in either state clears the lock and gains
+/// nothing, and in the second it contradicts the line above it. An absent lock
+/// has nothing pending either, and still a step: its state is the answer.
 ///
 /// The gate's third arm — a destination of the wrong size — has no such
 /// justification and is older than the table below. A report stopped there
@@ -810,7 +694,12 @@ fn write_next_step(
     status: &status_ops::ManifestStatus,
     manifest_path: &Path,
 ) {
-    if (status.pending == 0 && status.unplaced == 0) || !status.found_nothing_lost_or_wrong() {
+    // An absent lock has nothing pending and still a step to name: its own state is the
+    // answer the reader needs.
+    let lock_absent = matches!(status.lock, LockStanding::Absent { .. });
+    if (!lock_absent && status.pending == 0 && status.unplaced == 0)
+        || !status.found_nothing_lost_or_wrong()
+    {
         return;
     }
     match status.next_step() {
@@ -821,6 +710,9 @@ fn write_next_step(
                     super::scope_kept_nothing_way_back(manifest_path, &status.set_aside_scope)
                 }
                 OwedWayBack::AdjustPattern => super::adjust_pattern_remedy(&status.pattern_gaps),
+                OwedWayBack::ChangeTheSelection => {
+                    vec![super::empty_selection_remedy(manifest_path)]
+                }
             };
             if !lines.is_empty() {
                 let _ = writeln!(handle);
@@ -864,9 +756,8 @@ fn write_next_step(
 /// itself writes: a refresh whose query matched nothing takes the lock away
 /// and records the empty hash. Which of the two absences it is comes from the
 /// manifest's own record, so the sentence names a cause it can actually know,
-/// and the two causes take opposite remedies at `apply`
-/// (`cli.rs`’s `no_lock_remedy`) — a report naming the wrong one would send the
-/// reader to the act that cannot help.
+/// and the two causes take opposite next steps below it — a report naming the
+/// wrong one would send the reader to the act that cannot help.
 ///
 /// **A lock's age is stated on this line too.** `apply` refuses a lock
 /// written before the measurement whatever the pattern says, and the report
@@ -879,10 +770,10 @@ fn lock_line(lock: LockStanding, entry_count: usize) -> String {
     match lock {
         LockStanding::Absent {
             manifest_names_a_hash: false,
-        } => "Lock: none — the last refresh matched nothing.".to_string(),
+        } => "Lock: missing — the manifest selected no sources.".to_string(),
         LockStanding::Absent {
             manifest_names_a_hash: true,
-        } => "Lock: none — the manifest names a lock file that is not there.".to_string(),
+        } => "Lock: missing — the manifest names a lock file that is not there.".to_string(),
         LockStanding::Read {
             header: LockHeaderStanding::Absent,
             ..
@@ -2123,37 +2014,48 @@ mod tests {
         );
     }
 
-    /// **The two absences take opposite remedies, and the manifest's own
+    /// **The two absences take opposite next steps, and the manifest's own
     /// record tells them apart.** A manifest still naming a lock hash lost a
-    /// lock that existed, and a rebuild is the way back. A manifest recording
-    /// the empty hash has no lock *because* its last refresh matched nothing,
-    /// so naming the rebuild there is a fixed point — the refresh runs,
-    /// matches nothing again, and returns the manifest with not even the
-    /// stated reason changed. What moves it forward is a different selection.
+    /// lock that existed, and a rebuild is the step. A manifest recording the
+    /// empty hash has no lock *because* its last refresh selected no sources,
+    /// so naming the rebuild there is a fixed point — the refresh runs, selects
+    /// nothing again, and returns the manifest with not even the stated reason
+    /// changed. What moves it forward is a different selection.
     #[test]
     fn a_lock_that_matched_nothing_is_not_sent_back_to_the_same_query() {
-        let manifest = Path::new("m.toml");
-
-        let matched_nothing = super::super::no_lock_remedy(manifest, "");
-        assert!(
-            matched_nothing.contains("matched nothing"),
-            "{matched_nothing}"
+        let selected_nothing = status_with(
+            0,
+            0,
+            0,
+            LockStanding::Absent {
+                manifest_names_a_hash: false,
+            },
         );
-        assert!(
-            matched_nothing.contains("Edit the query or scope"),
-            "the way out is a different selection: {matched_nothing}"
-        );
-
-        let lock_has_gone = super::super::no_lock_remedy(manifest, "abc123");
         assert_eq!(
-            lock_has_gone, "Rebuild it: canon cluster refresh m.toml",
+            next_step(&selected_nothing),
+            "\nThe last refresh selected no sources. Update the query or scope in the manifest, \
+             then run `canon cluster refresh m.toml`.\n",
+            "the way forward is a different selection"
+        );
+
+        let lock_has_gone = status_with(
+            0,
+            0,
+            0,
+            LockStanding::Absent {
+                manifest_names_a_hash: true,
+            },
+        );
+        assert_eq!(
+            next_step(&lock_has_gone),
+            "\nTo rebuild the lock: canon cluster refresh m.toml\n",
             "a lock that existed is rebuilt"
         );
     }
 
     /// **The two absences read differently, and the sentences are not
-    /// interchangeable.** Each names the cause that decides which remedy
-    /// `apply` gives, so swapping them would send a reader whose query matched
+    /// interchangeable.** Each names the cause that decides which next step
+    /// the report gives, so swapping them would send a reader whose query matched
     /// nothing to a rebuild that matches nothing again — the fixed point this
     /// pair exists to keep the report out of.
     #[test]
@@ -2165,7 +2067,7 @@ mod tests {
                 },
                 0
             ),
-            "Lock: none — the last refresh matched nothing.",
+            "Lock: missing — the manifest selected no sources.",
             "the empty hash is Canon's own record of a zero-match refresh"
         );
         assert_eq!(
@@ -2175,7 +2077,7 @@ mod tests {
                 },
                 0
             ),
-            "Lock: none — the manifest names a lock file that is not there.",
+            "Lock: missing — the manifest names a lock file that is not there.",
             "a recorded hash means a lock existed and has since gone"
         );
         assert_eq!(
@@ -2229,8 +2131,8 @@ mod tests {
             let set_aside = vec!["/photos/2019".to_string()];
             let mut sentences = vec![
                 super::super::rebuild_remedy(path),
-                super::super::no_lock_remedy(path, ""),
-                super::super::no_lock_remedy(path, "abc123"),
+                super::super::empty_selection_remedy(path),
+                super::super::missing_lock_refusal(path),
                 super::super::apply_command(path, false),
                 super::super::apply_command(path, true),
             ];
@@ -2254,6 +2156,7 @@ mod tests {
                 // flag is.
                 for verb in [
                     "canon cluster refresh ",
+                    "canon cluster status ",
                     "canon apply --resume ",
                     "canon apply ",
                 ] {
@@ -3169,136 +3072,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // The write-time collision warning
-    // =========================================================================
-
-    /// Driven with exactly the arguments `generate` passes: the destination
-    /// the user named as the placement root, the manifest and its lock as the
-    /// files being written.
-    ///
-    /// Generation cannot reach this state today: it writes the default
-    /// pattern, and both defaults commit to no directory below the
-    /// destination, so nothing the manifest could be named would stand in the
-    /// way. The call site is wired all the same, and this holds it to its
-    /// behaviour for the day a chosen pattern reaches generation.
-    #[test]
-    fn generate_warns_when_the_manifest_stands_in_the_placement_path() {
-        let dest = Path::new("/archive/photos");
-        let manifest = Path::new("/archive/photos/2024");
-        let lock = Path::new("/archive/photos/2024.lock");
-
-        let warning = placement_warning("2024/{filename}", dest, &[manifest, lock])
-            .expect("the manifest occupies the directory the pattern needs");
-        assert!(warning.contains("/archive/photos/2024"), "got: {warning}");
-        assert!(warning.contains("edit the pattern"), "got: {warning}");
-
-        // The lock file blocks just as well as the manifest does.
-        let lock_blocker = Path::new("/archive/photos/2024");
-        assert!(
-            placement_warning("2024/{filename}", dest, &[lock_blocker]).is_some(),
-            "a lock file standing in the path is the same collision"
-        );
-    }
-
-    /// The refresh twin: the placement root is the manifest's own archive root
-    /// joined with its recorded base_dir, and the pattern is the one the
-    /// manifest carries — the prefix an edit added is exactly what makes the
-    /// collision knowable at this moment.
-    #[test]
-    fn refresh_warns_when_the_manifest_stands_in_the_placement_path() {
-        let placement_root = Path::new("/archive").join("photos");
-        let manifest = Path::new("/archive/photos/2024");
-
-        assert!(
-            placement_warning("2024/{filename}", &placement_root, &[manifest]).is_some(),
-            "the edited prefix put the manifest in the placement path"
-        );
-        // Before the edit added the prefix there was nothing to warn about.
-        assert!(
-            placement_warning("{filename}", &placement_root, &[manifest]).is_none(),
-            "a flat pattern needs no directory below the destination"
-        );
-    }
-
-    /// The shape this warning was written for: a manifest named after a folder
-    /// whose name carries a dot, written into the archive with `-O`. The dot
-    /// reads as an extension so no `.toml` is appended, the bare name lands in
-    /// the destination, and the pattern the user then edits in names that same
-    /// directory. Dotted folder names are exactly what people name a manifest
-    /// after, which is why this coincidence is not the freak it looks like.
-    #[test]
-    fn the_dotted_manifest_name_that_collided_with_its_own_pattern_is_named() {
-        let placement_root = Path::new("/Volumes/Archive").join("Projects");
-        let manifest = Path::new("/Volumes/Archive/Projects/example.org");
-
-        let warning =
-            placement_warning("example.org/{scope.rel_path}", &placement_root, &[manifest])
-                .expect("the manifest is the directory its own pattern needs");
-        assert!(warning.contains("example.org"), "got: {warning}");
-        assert!(
-            warning.contains("Apply will stop with an error"),
-            "the warning says what happens next: {warning}"
-        );
-    }
-
-    /// The two sides arrive spelled differently — the manifest as typed, the
-    /// destination from the archive root's stored canonical path. Comparing
-    /// the two spellings without resolving them finds nothing, and finds it
-    /// silently: a warning that cannot see the collision is indistinguishable
-    /// from a warning with nothing to say. The symlink is built here rather
-    /// than borrowed from the platform's temp path, so the guard holds
-    /// wherever it runs.
-    #[cfg(unix)]
-    #[test]
-    fn the_warning_sees_through_a_symlinked_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = fs::canonicalize(dir.path()).unwrap().join("archive");
-        fs::create_dir(&real).unwrap();
-        let linked = fs::canonicalize(dir.path()).unwrap().join("link");
-        std::os::unix::fs::symlink(&real, &linked).unwrap();
-
-        // The manifest as the user typed it, through the link; the
-        // destination as the database stored it, resolved.
-        let manifest = linked.join("2024.toml");
-        fs::write(&manifest, "").unwrap();
-        assert_ne!(manifest, real.join("2024.toml"), "the two spellings differ");
-        assert!(
-            placement_warning("2024.toml/{filename}", &real, &[&manifest]).is_some(),
-            "the same place spelled two ways must still compare equal"
-        );
-    }
-
-    #[test]
-    fn a_manifest_beside_the_placement_path_draws_no_warning() {
-        let dest = Path::new("/archive/photos");
-        assert!(
-            placement_warning(
-                "2024/{filename}",
-                dest,
-                &[Path::new("/archive/photos/manifest.toml")]
-            )
-            .is_none(),
-            "an ordinary manifest beside the destination blocks nothing"
-        );
-    }
-
-    #[test]
-    fn a_file_standing_above_the_placement_path_is_caught_too() {
-        // The chain is checked, not just its last component: a file at
-        // /archive/photos blocks /archive/photos/2024/raw just as thoroughly.
-        let dest = Path::new("/archive");
-        assert!(
-            placement_warning(
-                "photos/2024/raw/{filename}",
-                dest,
-                &[Path::new("/archive/photos")]
-            )
-            .is_some(),
-            "a blocker anywhere on the chain stops the directories below it"
-        );
-    }
-
     #[test]
     fn refresh_without_edit_never_opens_an_editor() {
         let dir = tempfile::tempdir().unwrap();
@@ -3357,6 +3130,17 @@ mod tests {
             ),
             "{:?}",
             zone_lines(&status, manifest)
+        );
+
+        status.manifest_zone = Err(crate::archive::domain::ZoneRefusal::Line(
+            crate::core::domain::time::zone::ZoneNameError::RuleString(
+                "EST5EDT,M3.2.0,M11.1.0".to_string(),
+            ),
+        ));
+        assert_eq!(
+            zone_lines(&status, manifest)[1],
+            "  cluster refresh would be rejected: the zone line is a time zone rule, not a zone name \
+             — write a zone name, for example zone = \"Europe/Amsterdam\""
         );
     }
 
@@ -3519,13 +3303,8 @@ mod tests {
         assert_eq!(lock_header_zone(&lock).as_deref(), Some("America/New_York"));
 
         let recorded = new_york.recordable().unwrap();
-        let lines = refresh_zone_statements(
-            &ManifestZone::FromMachine(recorded),
-            None,
-            &new_york,
-            false,
-            Some(&PatternGaps::default()),
-        );
+        let lines =
+            refresh_zone_statements(&ManifestZone::FromMachine(recorded), None, &new_york, false);
         assert_eq!(
             lines,
             ["Recorded this machine's time zone in the manifest: America/New_York"]
@@ -3692,38 +3471,24 @@ mod tests {
         assert!(!lock.exists());
     }
 
-    /// **The clock line is said where the run read an instant and the clock is not this
-    /// machine's** — and only there: a clock reading reads the same on any clock, and a
-    /// machine on the same rules needs no line.
+    /// **The clock line is said where the query read an instant and the clock is not this
+    /// machine's** — and only there: a clock reading reads the same on any clock, a machine on
+    /// the same rules needs no line, and the pattern never decides it.
     #[test]
     fn refresh_states_the_clock_when_it_differs_and_an_instant_is_read() {
         let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
         let new_york = UserZone::for_test("America/New_York");
         let recorded = ManifestZone::Recorded(amsterdam.clone());
-        let placed = PatternGaps {
-            used_an_instant: true,
-            ..Default::default()
-        };
-        let line =
-            "times are in Europe/Amsterdam, as the manifest records (this machine: America/New_York)";
 
-        let query = refresh_zone_statements(
-            &recorded,
-            Some(&amsterdam),
-            &new_york,
-            true,
-            Some(&PatternGaps::default()),
+        assert_eq!(
+            refresh_zone_statements(&recorded, Some(&amsterdam), &new_york, true),
+            ["times are in Europe/Amsterdam, as the manifest records (this machine: America/New_York)"]
         );
-        assert_eq!(query, [line]);
-        let pattern =
-            refresh_zone_statements(&recorded, Some(&amsterdam), &new_york, false, Some(&placed));
-        assert_eq!(pattern, [line]);
         let same_machine = refresh_zone_statements(
             &recorded,
             Some(&amsterdam),
             &UserZone::for_test("Europe/Amsterdam"),
             true,
-            Some(&placed),
         );
         assert!(same_machine.is_empty(), "{same_machine:?}");
     }
@@ -3736,39 +3501,13 @@ mod tests {
             Some(&amsterdam),
             &UserZone::for_test("America/New_York"),
             false,
-            Some(&PatternGaps::default()),
         );
         assert!(lines.is_empty(), "{lines:?}");
     }
 
-    /// **Where the written lock could not be read back, what was measured is still said, and
-    /// nothing more**: the query's own instant is known from the plan, so the full zone change
-    /// and the clock follow from it; a query that read none leaves the pattern's reads unknown,
-    /// so only the quiet clause — and never a coarse count.
-    #[test]
-    fn a_failed_read_back_says_what_was_measured_and_nothing_more() {
-        let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
-        let new_york = parse_zone_name("America/New_York").unwrap();
-        let machine = UserZone::for_test("Europe/Amsterdam");
-        let recorded = ManifestZone::Recorded(new_york.clone());
-
-        let query_read = refresh_zone_statements(&recorded, Some(&amsterdam), &machine, true, None);
-        assert_eq!(
-            query_read,
-            [
-                "Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now in America/New_York, which can change which sources a time query selects and which folder a file goes to",
-                "times are in America/New_York, as the manifest records (this machine: Europe/Amsterdam)",
-            ]
-        );
-        let unknown = refresh_zone_statements(&recorded, Some(&amsterdam), &machine, false, None);
-        assert_eq!(
-            unknown,
-            ["(time zone changed from Europe/Amsterdam to America/New_York)"]
-        );
-    }
-
-    /// **A zone different from the old lock's is stated**: in full where an instant was
-    /// read, in one quiet clause where none was — and never for a link naming the same zone.
+    /// **A zone different from the old lock's is stated**: in full where the query read an
+    /// instant, naming the query alone, in one quiet clause where it read none — and never
+    /// for a link naming the same zone.
     #[test]
     fn refresh_states_a_zone_change_from_the_old_lock() {
         let amsterdam = parse_zone_name("Europe/Amsterdam").unwrap();
@@ -3776,37 +3515,17 @@ mod tests {
         let machine = UserZone::for_test("America/New_York");
         let recorded = ManifestZone::Recorded(new_york.clone());
 
-        let full = refresh_zone_statements(
-            &recorded,
-            Some(&amsterdam),
-            &machine,
-            true,
-            Some(&PatternGaps::default()),
+        assert_eq!(
+            refresh_zone_statements(&recorded, Some(&amsterdam), &machine, true),
+            ["Time zone changed from Europe/Amsterdam to America/New_York: times in the query are now in America/New_York, which can change which sources a time query selects"]
         );
         assert_eq!(
-            full,
-            ["Time zone changed from Europe/Amsterdam to America/New_York: times in the query and in folder names are now in America/New_York, which can change which sources a time query selects and which folder a file goes to"]
-        );
-        let quiet = refresh_zone_statements(
-            &recorded,
-            Some(&amsterdam),
-            &machine,
-            false,
-            Some(&PatternGaps::default()),
-        );
-        assert_eq!(
-            quiet,
+            refresh_zone_statements(&recorded, Some(&amsterdam), &machine, false),
             ["(time zone changed from Europe/Amsterdam to America/New_York)"]
         );
 
         let link = parse_zone_name("US/Eastern").unwrap();
-        let none = refresh_zone_statements(
-            &recorded,
-            Some(&link),
-            &machine,
-            true,
-            Some(&PatternGaps::default()),
-        );
+        let none = refresh_zone_statements(&recorded, Some(&link), &machine, true);
         assert!(none.is_empty(), "a link names the same zone: {none:?}");
     }
 
@@ -3826,38 +3545,6 @@ mod tests {
             run_refresh(&mut db, &manifest, None).unwrap();
             assert_eq!(lock_header_zone(&lock).as_deref(), Some("Europe/Amsterdam"));
         }
-    }
-
-    /// **Times too coarse for the pattern are stated with counts and both ways out**, read
-    /// over the lock the refresh just wrote.
-    #[test]
-    fn refresh_states_coarse_values_with_counts_and_both_ways_out() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut db, manifest, lock) =
-            new_year_setup(dir.path(), "source.ext = jpg", Some("Europe/Amsterdam"));
-        let id: i64 = db
-            .conn_mut()
-            .query_row("SELECT id FROM sources WHERE rel_path = 'a.jpg'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        crate::core::testing::insert_time_fact(db.conn_mut(), id, "content.Taken", "2024");
-        run_refresh(&mut db, &manifest, None).unwrap();
-
-        let gaps = generate_ops::pattern_gaps_for_written_lock(
-            db.conn_mut(),
-            &lock,
-            "{content.Taken|month}/{filename}",
-            parse_zone_name("Europe/Amsterdam").unwrap().clock(),
-        )
-        .unwrap();
-        assert_eq!(
-            super::super::coarse_value_statements(&gaps),
-            [
-                "1 source holds content.Taken only to the year, so {content.Taken|month} has no value for it",
-                "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.Taken|month?\" to the manifest's query to leave such files out, then refresh.",
-            ]
-        );
     }
 
     /// **`generate` records this machine's zone in both files.**

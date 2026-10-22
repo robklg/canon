@@ -256,7 +256,25 @@ fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicat
             "  {:<14} has metadata beyond content hash",
             "enriched?"
         );
+        let _ = writeln!(handle);
+        for line in built_in_key_lines() {
+            let _ = writeln!(handle, "{line}");
+        }
     }
+}
+
+/// The built-in keys, beside the status words and in their form: each key's name and its
+/// meaning, read off the key vocabulary — never a list of its own, so a key added there is
+/// listed here.
+fn built_in_key_lines() -> Vec<String> {
+    let mut lines =
+        vec!["Built-in keys (use in --where, --key, --group-by, --emit and patterns):".to_string()];
+    lines.extend(
+        Key::all_typed()
+            .filter(|(key, _, _)| key.kind() == KeyKind::BuiltinKey)
+            .map(|(key, _, meaning)| format!("  {:<14} {meaning}", key.name())),
+    );
+    lines
 }
 
 /// One key's row in the listing: its name, the key's type word, the scope's count and
@@ -767,29 +785,6 @@ pub fn prune_excluded_facts(
     Ok(())
 }
 
-// ============================================================================
-// Show Aliases
-// ============================================================================
-
-pub fn show_aliases() {
-    use crate::expr::BuiltinKey;
-    use strum::IntoEnumIterator;
-
-    println!("Pattern Aliases:");
-    println!();
-
-    for key in BuiltinKey::iter() {
-        if let Some(expansion) = key.expansion() {
-            let name: &'static str = key.into();
-            println!("  {name:<15} \u{2192} {expansion}");
-        }
-    }
-
-    println!();
-    println!("Note: these also work in --where filters and in facts --key, where 'hash'");
-    println!("means content.hash.sha256 and 'hash_short' means content.hash.sha256|short.");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,5 +1056,38 @@ mod tests {
                 );
             },
         )
+    }
+
+    /// **The built-in keys footer lists every built-in key, each with its meaning**: the
+    /// header, then the nine keys of `reference/builtins.md` in the status words' form. Asserted
+    /// against the vocabulary's own built-in keys too, so a key added there and not here, or
+    /// dropped here, fails.
+    #[test]
+    fn the_built_in_keys_footer_lists_every_built_in_key() {
+        let lines = built_in_key_lines();
+        assert_eq!(
+            lines,
+            [
+                "Built-in keys (use in --where, --key, --group-by, --emit and patterns):",
+                "  filename       last path component",
+                "  stem           file name without its extension",
+                "  ext            same as source.ext",
+                "  hash           content hash, content.hash.sha256",
+                "  hash_short     first 8 characters of the content hash",
+                "  id             same as source.id",
+                "  size           same as source.size",
+                "  mtime          same as source.mtime",
+                "  root_id        ID of the source's root",
+            ]
+        );
+        let listed: Vec<&str> = lines[1..]
+            .iter()
+            .map(|line| line.split_whitespace().next().unwrap())
+            .collect();
+        let vocabulary: Vec<String> = Key::all()
+            .filter(|key| key.kind() == KeyKind::BuiltinKey)
+            .map(|key| key.name().to_string())
+            .collect();
+        assert_eq!(listed, vocabulary);
     }
 }
