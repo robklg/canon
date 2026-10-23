@@ -182,6 +182,7 @@ fn drawn_problem(at: usize, sentence: String) -> Problem {
         sentence,
         rule_line: None,
         fix: Fix::None,
+        also: None,
     }
 }
 

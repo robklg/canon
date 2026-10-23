@@ -401,9 +401,10 @@ mod tests {
     ///
     /// **Its limit, which is half the point.** The equality holds over the
     /// source facts, the built-in keys and the content hash, and says nothing
-    /// wider. `scope.rel_path` and `object.hash` are context-supplied and are
-    /// *not* `Key`s; they are the hand-written half of `is_context_supplied`
-    /// and are pinned there, separately. Widening this assertion to cover them
+    /// wider. `scope.rel_path`, which is not a `Key`, and `content.hash.sha256`,
+    /// which is one the resolver does not compute, are context-supplied: they
+    /// are the hand-written half of `is_context_supplied` and are pinned there,
+    /// separately. Widening this assertion to cover them
     /// would assert an equality that does not hold and is exactly the
     /// false-equality generator the limit rule exists to prevent.
     #[test]

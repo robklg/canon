@@ -15,7 +15,7 @@ use crate::archive::ops::manifest::{parse_recorded_query, LockZone};
 use crate::archive::ops::{generate as generate_ops, status as status_ops};
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::{DecisionCommand, DecisionStatus};
-use crate::core::domain::format::first_chars;
+use crate::core::domain::format::{first_chars, with_visible_nulls};
 use crate::core::domain::format_count;
 use crate::core::domain::root::{DoorVerb, ParkedRoot, RefusedAct, RefusedActs};
 use crate::core::domain::scope::ScopeResolution;
@@ -695,11 +695,11 @@ fn write_next_step(
     manifest_path: &Path,
 ) {
     // An absent lock has nothing pending and still a step to name: its own state is the
-    // answer the reader needs.
+    // answer the reader needs. So has an entry with no destination computed.
     let lock_absent = matches!(status.lock, LockStanding::Absent { .. });
-    if (!lock_absent && status.pending == 0 && status.unplaced == 0)
-        || !status.found_nothing_lost_or_wrong()
-    {
+    let nothing_to_bring =
+        status.pending == 0 && status.unplaced == 0 && status.no_destination == 0;
+    if (!lock_absent && nothing_to_bring) || !status.found_nothing_lost_or_wrong() {
         return;
     }
     match status.next_step() {
@@ -709,7 +709,9 @@ fn write_next_step(
                 OwedWayBack::ScanOrEditScope => {
                     super::scope_kept_nothing_way_back(manifest_path, &status.set_aside_scope)
                 }
-                OwedWayBack::AdjustPattern => super::adjust_pattern_remedy(&status.pattern_gaps),
+                OwedWayBack::AdjustPattern => {
+                    super::adjust_pattern_remedy(&status.pattern_gaps, manifest_path)
+                }
                 OwedWayBack::ChangeTheSelection => {
                     vec![super::empty_selection_remedy(manifest_path)]
                 }
@@ -884,34 +886,51 @@ fn state_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<u8> 
             let _ = writeln!(out, "{line}");
         }
     }
+    // What stops `apply` before any destination is worked out: `base_dir`, then the pattern —
+    // each the cause for every entry, stated once with its way back.
+    if status.base_dir_refusal.is_some() {
+        let _ = writeln!(out, "{}", super::base_dir_status_line(&status.base_dir));
+    }
+    if let Some(refusal) = &status.pattern_refusal {
+        let _ = writeln!(out, "{}", super::PATTERN_UNREADABLE);
+        for line in refusal.render("    ") {
+            let _ = writeln!(out, "{line}");
+        }
+    }
     out
 }
 
-/// The block for entries the pattern gave no destination: how many, each distinct reason, the
-/// first few sources, and — where a time was too coarse for the pattern — the counted lines
-/// `cluster refresh` states, per key, modifier and grain. The ways out follow with the next
-/// step. Composed rather than printed so the block is a value a test can read.
+/// The block for entries the pattern gave no place: how many, each cause once with how many
+/// sources met it, then the first few sources. The ways out follow with the next step. Composed
+/// rather than printed so the block is a value a test can read.
 fn expansion_failure_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
-    if status.expansion_failures.is_empty() {
+    let gaps = &status.pattern_gaps;
+    if !gaps.any() {
         return Vec::new();
     }
+    let failed: Vec<&status_ops::StatusEntry> = status
+        .entries
+        .iter()
+        .filter(|e| e.destination == status_ops::Destination::NotWorkedOut)
+        .collect();
     let mut lines = vec![format!(
         "{} of {} entries have no destination:",
-        format_count(status.expansion_failure_count),
+        format_count(failed.len()),
         format_count(status.lock_entry_count),
     )];
-    for reason in &status.expansion_failures {
-        lines.push(format!("  {reason}"));
+    for (cause, count) in &gaps.met {
+        lines.push(format!("  {}", cause.count_line(*count)));
+    }
+    for (why, count) in &gaps.not_contained {
+        lines.push(format!(
+            "  {}",
+            super::not_contained_count_line(*why, *count)
+        ));
     }
     // Which ones, not only how many: the per-entry table shows a fixed status word, so
     // without this the report names a count and never a file. Capped like every other
     // listing here.
     const SHOWN: usize = 5;
-    let failed: Vec<&status_ops::StatusEntry> = status
-        .entries
-        .iter()
-        .filter(|e| e.dest_path.starts_with(status_ops::EXPANSION_FAILED))
-        .collect();
     for entry in failed.iter().take(SHOWN) {
         lines.push(format!("  {}", entry.source_path));
     }
@@ -921,20 +940,32 @@ fn expansion_failure_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
             format_count(failed.len() - SHOWN)
         ));
     }
-    lines.extend(super::coarse_value_counts(&status.pattern_gaps));
     lines
 }
 
 /// The report's summary line. A lock placed nowhere gets no counts: every one would be a zero
-/// nobody measured, the lost-source count among them.
+/// nobody measured, the lost-source count among them. An entry with no destination computed is
+/// counted as that, never as pending; where the pattern or `base_dir` gave every entry none,
+/// the line says why once.
 fn summary_line(status: &status_ops::ManifestStatus) -> String {
     if status.unplaced > 0 {
         format!("Summary: {}", super::unplaced_statement(status.unplaced))
-    } else {
+    } else if status.no_destination == 0 {
         format!(
             "Summary: {} at destination, {} pending, {} source files missing.",
             format_count(status.at_destination),
             format_count(status.pending),
+            format_count(status.source_lost),
+        )
+    } else if let Some(because) = status.no_destination_because() {
+        super::no_destination_summary(status.no_destination, because, status.source_lost)
+    } else {
+        format!(
+            "Summary: {} at destination, {} pending, {} with no destination computable, {} source \
+             files missing.",
+            format_count(status.at_destination),
+            format_count(status.pending),
+            format_count(status.no_destination),
             format_count(status.source_lost),
         )
     }
@@ -1123,7 +1154,7 @@ pub fn status(
     // Header
     println!("Manifest: {}", status.manifest_path);
     println!("Destination: {}", status.dest_display);
-    println!("Pattern: {}", status.pattern);
+    println!("Pattern: {}", with_visible_nulls(&status.pattern));
     // The lock's own line, composed rather than printed so which sentence
     // each standing gets is a value a test can read — the rest of this
     // function speaks straight to the terminal and is unpinned, and a
@@ -1264,10 +1295,19 @@ pub fn status(
                 .filter(|e| e.status == status_ops::EntryStatus::SourceLost)
                 .collect();
             for entry in &lost_entries {
-                println!(
-                    "  {} (source: {}, dest: {})",
-                    entry.source_filename, entry.source_path, entry.dest_path
-                );
+                match &entry.destination {
+                    status_ops::Destination::At(dest) => println!(
+                        "  {} (source: {}, dest: {})",
+                        entry.source_filename,
+                        entry.source_path,
+                        dest.display()
+                    ),
+                    // No destination was worked out for it, and none is named.
+                    status_ops::Destination::NotWorkedOut => println!(
+                        "  {} (source: {})",
+                        entry.source_filename, entry.source_path
+                    ),
+                }
             }
             println!();
             // Composed where its twin in `apply`'s resume path is composed,
@@ -1317,6 +1357,7 @@ mod tests {
 
     use crate::archive::ops::generate::FullCoverageFact;
     use crate::core::domain::fact::{FactType, KeyTypes};
+    use crate::expr::{Modifier, NoPlaceCause};
 
     /// A plan whose full-coverage keys hold the given types, counted.
     fn plan_with_keys(keys: &[(&str, &[(FactType, u64)])]) -> ClusterGeneratePlan {
@@ -1481,7 +1522,7 @@ mod tests {
             source_path: format!("/photos/f{i}.jpg"),
             source_filename: format!("f{i}.jpg"),
             source_exists: !matches!(status, status_ops::EntryStatus::SourceLost),
-            dest_path: format!("/archive/f{i}.jpg"),
+            destination: status_ops::Destination::At(format!("/archive/f{i}.jpg").into()),
             db_registered: matches!(status, status_ops::EntryStatus::AtDestination),
             status,
         };
@@ -1503,6 +1544,7 @@ mod tests {
             manifest_path: "m.toml".to_string(),
             dest_display: "/archive".to_string(),
             pattern: "{filename}".to_string(),
+            base_dir: String::new(),
             lock_entry_count: entries.len(),
             lock,
             entries,
@@ -1520,10 +1562,10 @@ mod tests {
             scope_confirms_nothing: false,
             parked_entries: Vec::new(),
             parked_destination: None,
-            pattern_unexpandable: false,
-            expansion_failures: Vec::new(),
+            pattern_refusal: None,
+            base_dir_refusal: None,
             pattern_gaps: Default::default(),
-            expansion_failure_count: 0,
+            no_destination: 0,
             // The zone the lock's header standing describes, and a manifest line naming the
             // same zone: a row that is not about the zone poses no question about it.
             lock_zone: match lock {
@@ -1704,17 +1746,27 @@ mod tests {
         for (pending, at_destination) in [(2, 0), (1, 1)] {
             for needs_a_scope in [false, true] {
                 let mut status = status_with(pending, at_destination, 0, sound_lock());
-                status.pattern_unexpandable = true;
                 status.pattern_gaps.needs_a_scope_it_lacks = needs_a_scope;
-                status.pattern_gaps.fact_not_carried = !needs_a_scope;
+                status.pattern_gaps.met = vec![(
+                    if needs_a_scope {
+                        NoPlaceCause::NoScopeRecorded
+                    } else {
+                        NoPlaceCause::NoFact {
+                            subject: "{content.Make}".into(),
+                            key: "content.Make".into(),
+                        }
+                    },
+                    pending,
+                )];
                 // The scope arm is the manifest that records no scope that
                 // confirms. Where one does, the rebuild measures and *is* the
                 // step (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`).
                 status.scope_confirms_nothing = needs_a_scope;
                 let printed = next_step(&status);
+                // A refresh is named only as the step after the edit, never as the step itself.
                 assert!(
-                    !printed.contains("canon cluster refresh") && !printed.contains("canon apply"),
-                    "no command may be named here: {printed}"
+                    !printed.contains("To rebuild the lock") && !printed.contains("canon apply"),
+                    "no step may be named here: {printed}"
                 );
                 if needs_a_scope {
                     assert!(
@@ -1728,7 +1780,8 @@ mod tests {
                     );
                 } else {
                     assert!(
-                        printed.contains("canon facts") && printed.contains("facts it names"),
+                        printed.contains("`canon facts`")
+                            && printed.contains("import the missing facts"),
                         "the fact failure takes the fact answer: {printed}"
                     );
                     assert!(
@@ -1743,8 +1796,8 @@ mod tests {
         // gets its rebuild where the scope confirms — there the refresh is
         // exactly the fix, whatever the header says.
         let mut status = status_with(2, 0, 0, old_lock());
-        status.pattern_unexpandable = true;
         status.pattern_gaps.needs_a_scope_it_lacks = true;
+        status.pattern_gaps.met = vec![(NoPlaceCause::LockPredatesMeasurement, 2)];
         assert_eq!(
             next_step(&status),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n"
@@ -1846,8 +1899,8 @@ mod tests {
     #[test]
     fn a_rebuild_that_only_changes_the_reason_is_not_offered() {
         let mut confirms = status_with(2, 0, 0, old_lock());
-        confirms.pattern_unexpandable = true;
         confirms.pattern_gaps.needs_a_scope_it_lacks = true;
+        confirms.pattern_gaps.met = vec![(NoPlaceCause::LockPredatesMeasurement, 2)];
         assert_eq!(
             next_step(&confirms),
             "\nTo rebuild the lock: canon cluster refresh m.toml\n",
@@ -1855,12 +1908,12 @@ mod tests {
         );
 
         let mut nothing_to_measure = status_with(2, 0, 0, old_lock());
-        nothing_to_measure.pattern_unexpandable = true;
         nothing_to_measure.pattern_gaps.needs_a_scope_it_lacks = true;
+        nothing_to_measure.pattern_gaps.met = vec![(NoPlaceCause::LockPredatesMeasurement, 2)];
         with_scope(&mut nothing_to_measure, RecordedScope::Nothing);
         let printed = next_step(&nothing_to_measure);
         assert!(
-            !printed.contains("canon cluster refresh"),
+            !printed.contains("To rebuild the lock"),
             "the rebuild would change only the reason: {printed}"
         );
         assert!(
@@ -3639,7 +3692,7 @@ mod tests {
         status.unplaced = 2;
         assert_eq!(
             summary_line(&status),
-            "Summary: 2 entries with no destination computed, and their source files not checked: the lock records no time zone this machine can read."
+            "Summary: 2 entries with no destination computable, and their source files not checked: the lock records no time zone this machine can read."
         );
         status.unplaced = 0;
         assert!(summary_line(&status).contains("source files missing"));
@@ -3688,18 +3741,25 @@ mod tests {
             },
         );
         status.lock_entry_count = 2;
-        status.expansion_failures = vec![
-            "content.Taken|month has no value: the time is known only to the year".to_string(),
-        ];
-        status.expansion_failure_count = 2;
-        status.pattern_gaps.too_coarse =
-            [(("content.Taken|month".to_string(), Precision::Year), 2)].into();
+        status.pattern_gaps.met = vec![(
+            NoPlaceCause::TooCoarse {
+                subject: "{content.Taken|month}".into(),
+                modifier: Modifier::Month,
+                precision: Precision::Year,
+            },
+            2,
+        )];
         let lines = expansion_failure_lines(&status);
         assert!(
             lines.contains(
-                &"2 sources hold content.Taken only to the year, so {content.Taken|month} has no value for them"
+                &"  2 sources: {content.Taken|month} has no value: the time is known only to the year"
                     .to_string()
             ),
+            "{lines:?}"
+        );
+        // One counted line per reason, and no separate count line beside it.
+        assert!(
+            !lines.iter().any(|l| l.contains("only to the year, so")),
             "{lines:?}"
         );
     }

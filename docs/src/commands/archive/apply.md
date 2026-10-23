@@ -160,56 +160,91 @@ A scope path that no longer names a known root, or that names a place Canon has 
 for, is stated by `cluster generate` and `cluster refresh` when they build the lock, and
 does not reach apply. See [`cluster`](cluster.md).
 
-**A pattern that cannot expand:**
+**A pattern that cannot be used:**
 
-Every source is checked for a place the pattern gives it only at `apply`, before anything
-moves; `cluster status` reports the same problems and runs none of the pre-flight checks.
+Apply reads the pattern after the lock's own checks and before anything is planned. A pattern
+with any problem is refused whole, every problem in one run, and nothing is planned, moved or
+recorded:
 
-`{scope.rel_path}` has no value over a lock built while the manifest recorded no scope: one
-generated with `--global`, or with filters and no path. Apply reports the failure per source,
-says what the pattern needs, and transfers nothing:
+```
+Error: cannot use the pattern as specified
+  {Rating}/{filename}
+   ^ `Rating` is an unknown key
+    `canon facts` lists the keys
+```
+
+See [Checking a pattern](../../reference/expr.md#checking-a-pattern) for what is refused.
+`cluster status` reports the same problems and runs none of the pre-flight checks.
+
+**Sources with no place:**
+
+Every source is checked for a place the pattern gives it before anything moves. Apply lists
+each source with every cause it met, then one line for each cause saying what to do, and
+transfers nothing. `manifest.toml` stands for the manifest's own path:
 
 ```
 Error: 2 sources failed pattern expansion:
-  /Volumes/Photos/2016/IMG_0001.jpg: scope.rel_path is not available: the selected sources were not scoped
-  /Volumes/Photos/2016/IMG_0002.jpg: scope.rel_path is not available: the selected sources were not scoped
+  /photos/2016/IMG_0001.jpg: {content.Make} has no value
+  /photos/2016/IMG_0002.jpg: {content.Make} is `AC/DC`: a file or directory name cannot contain `/`
 
-The pattern places files relative to the scopes declared in the manifest, and this lock records none.
-Use {source.rel_path} to keep each file's own folders, or add paths to meta.scope and refresh.
+Adjust the pattern in your manifest, or import the missing facts; or add "content.Make?" to the manifest's query to leave such sources out, then run `canon cluster refresh manifest.toml`.
+`canon facts` shows which sources have these facts
+Adjust the pattern in your manifest; or leave such sources out with the manifest's query, then run `canon cluster refresh manifest.toml`.
 Error: Aborting due to pattern expansion failures
 ```
 
-Apply prints this whatever `meta.scope` says now, because it uses the lock and not the scope.
-While the manifest records no scope, a refresh does not help — there is nothing to measure from
-— and `cluster status` ends with the same two lines. Once a path with sources is in `meta.scope`,
-the refresh is what measures the lock, and `cluster status` names it instead.
+One source reads `Error: 1 source failed pattern expansion:`. Each cause has its own line:
 
-A pattern using a file's save time that Canon cannot read, one at the edge of the years
-0000–9999 or beyond ([Save times](../../concepts/facts.md#save-times)), stops with an error for that cause:
+| Cause | What to do |
+|---|---|
+| A stored fact the source does not carry | Adjust the pattern, or import the missing facts; or leave such sources out with the fact's `?` in the query, then refresh |
+| A value Canon works out that is absent (no extension, an index past the end, text a modifier cannot read) | Adjust the pattern; or leave such sources out with the expression's `?` in the query, then refresh |
+| A save time Canon cannot read ([Save times](../../concepts/facts.md#save-times)) | Add `"source.mtime?"` to the query, or correct the file's save time and scan again; then refresh |
+| A time coarser than the modifier reads | Use a coarser modifier, which takes effect at the next apply; or leave such sources out with the expression's `?`, then refresh |
+| A value that cannot be a name (`/`, empty, `.`, `..`, a null character), or no file name left | Adjust the pattern; or leave such sources out with the query, then refresh |
+| `{scope.rel_path}` over a lock that records no scope | Use `{source.rel_path}` to keep each file's own directories, or add paths to `meta.scope` and refresh |
+
+`{scope.rel_path}` has no value over a lock built while the manifest recorded no scope: one
+generated with `--global`, or with filters and no path. Where the pattern needs that scope, its
+line prints alone, the scope having to be settled whatever else is wrong. Apply prints it
+whatever `meta.scope` says now, because it uses the lock and not the scope. While the manifest
+records no scope, a refresh does not help, since there is nothing to measure from, and
+`cluster status` ends with the same line. Once a path with sources is in `meta.scope`, the
+refresh is what measures the lock, and `cluster status` names it instead.
+
+A query edit and a corrected save time each change what the lock holds, so each takes effect
+once `canon cluster refresh` rebuilds it. A pattern edit takes effect at the next apply.
+
+**A destination that would leave its directory:**
+
+A destination holding a `..` directory name or a null character, which literal text around a
+path with no segments can make, is refused at pre-flight, each one listed whole, a null
+character shown as `\0`:
 
 ```
-Error: 1 sources failed pattern expansion:
-  /photos/2016/IMG_0003.jpg: Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond
+Preflight failed: 1 destination path contains a `..` directory name:
 
-A save time Canon cannot read gives the pattern no value.
-Add "source.mtime?" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh.
-Error: Aborting due to pattern expansion failures
+  ../README (from source: /photos/README)
+
+Adjust the pattern in your manifest.
+Error: Aborting due to destination paths with a `..` directory name or a null character
 ```
 
-A pattern naming a fact some sources do not carry ends with the fact pair instead, `Adjust the
-pattern in your manifest, or import the facts it names.`; a run that meets both prints both pairs,
-unless the pattern also needs a scope the lock lacks, where the scope pair prints alone. A modifier that asks for a finer part than a time carries gets a pair naming the key and modifier that failed, as the query entry that leaves such sources out:
+A run that also has sources with no place prints both blocks, the sources first, and ends
+`Error: Aborting due to pattern expansion failures`. The sample destinations shown before the
+confirmation are built the same way, so a refused destination shows as refused there too.
+
+A `base_dir` that is absolute, holds a `..` or a null character is refused before anything is
+planned:
 
 ```
-Error: 1 sources failed pattern expansion:
-  /photos/2016/IMG_0004.jpg: content.DateTimeOriginal|month has no value: the time is known only to the year
-
-A time known only to a coarser grain than the pattern uses gives the pattern no value.
-Use a coarser modifier in the pattern, which takes effect at the next apply; or add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, then refresh.
-Error: Aborting due to pattern expansion failures
+Error: Manifest base_dir '../x' leaves the archive root — absolute paths, `..` components and null characters are not allowed.
+Edit base_dir in the manifest's [output] section to a directory inside the archive root.
 ```
 
-A query edit and a corrected save time each change what the lock holds, so each takes effect once `canon cluster refresh` rebuilds it. A pattern edit takes effect at the next apply.
+A `.` in `base_dir` or in a destination is read as the operating system reads it: `base_dir =
+"./photos"` places files in `photos`, and what the index and the receipt record is the path a
+later scan finds.
 
 **Progress before anything moves:**
 
@@ -336,12 +371,12 @@ Edit the manifest's `[output]` section to customize the destination:
 ```toml
 [output]
 pattern = "{content.DateTimeOriginal|year}/{content.DateTimeOriginal|month}/{filename}"
-base_dir = "/path/to/archive"
+base_dir = "2024"
 ```
 
 Pattern variables use fact keys with optional modifiers (see [Pattern Expressions](../../reference/expr.md) for the full syntax):
-- `{filename}`, `{stem}`, `{ext}` - Filename aliases
-- `{hash}`, `{hash_short}` - Content hash aliases
+- `{filename}`, `{stem}`, `{ext}` - [Built-in keys](../../reference/builtins.md) for the file name
+- `{hash}`, `{hash_short}` - The content hash the lock recorded
 - `{source.mtime|year}`, `{source.mtime|month}` - File modification date
 - `{content.DateTimeOriginal|year}` - EXIF date with modifier
 - `{content.Make}`, `{content.Model}` - Any fact key

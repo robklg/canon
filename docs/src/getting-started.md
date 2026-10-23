@@ -83,7 +83,7 @@ Edit `manifest.toml` to customize the output pattern:
 ```toml
 [output]
 pattern = "{content.DateTimeOriginal|date}/{filename}"
-base_dir = "/Volumes/Archive/Trips/2023-Amsterdam"
+base_dir = "Trips/2023-Amsterdam"
 ```
 
 Preview and apply:

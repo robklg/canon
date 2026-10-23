@@ -867,6 +867,28 @@ const LAWS: &[Law] = &[
         authority: Authority::Recognised,
         record: "2026-10-17",
     },
+    Law {
+        // A key is read by one grammar wherever a key stands — a filter, a report key and a
+        // pattern's `{…}` — each position saying only what may follow it.
+        name: "one key grammar",
+        owner: "expr/domain/key.rs",
+        verifier: "a_key_reads_the_same_in_a_filter_a_report_and_a_pattern",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Recognised,
+        record: "2026-10-22",
+    },
+    Law {
+        // No file is placed outside the destination directory: every destination, and a
+        // manifest's `base_dir`, is a `ContainedPath`, whose one constructor refuses a root, a
+        // `..` and a null character, so a destination that could leave its directory cannot be
+        // built. The archive consumes it; the owner and its reach are core's.
+        name: "destination containment",
+        owner: "core/domain/path.rs",
+        verifier: "no_destination_escapes_the_destination_directory",
+        reach: Reach::Unit("core"),
+        authority: Authority::Recognised,
+        record: "2026-10-22",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

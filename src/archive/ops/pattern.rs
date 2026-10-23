@@ -5,40 +5,33 @@
 //! against it. Planning and the apply command both expand patterns, so the pair
 //! is shared rather than owned by either.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use anyhow::Result;
 
 use crate::archive::domain::LockEntry;
-use crate::core::domain::fact::FactValue;
-use crate::core::domain::path::path_strip_prefix;
-use crate::core::domain::time::value::Precision;
+use crate::core::domain::path::{path_strip_prefix, NotContained};
 use crate::core::domain::time::zone::UserZone;
 use crate::expr::{
-    evaluate, EvalContext, Pattern, PatternFacts, PatternNoValue, SourceAttributes, Unmeasured,
-    OBJECT_HASH,
+    evaluate, BoundPattern, EvalContext, NoPlace, NoPlaceCause, NotPlaced, PatternFacts, Placement,
+    SourceAttributes, Unmeasured,
 };
 
-/// Which causes a run's pattern failures met — what the archive's way out is composed from.
+/// Which causes a run's sources with no place met, and how many sources met each — what the
+/// archive's way out is composed from, and what `cluster status` counts.
 ///
-/// Read off the facility's typed cause, never off a refusal's wording, so the advice cannot
-/// drift from what actually failed. A failure the facility gives no cause for is a fact the
-/// source does not carry, which is what every pattern failure was before the causes existed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Read off the facility's typed causes, never off a sentence's wording, so the advice cannot
+/// drift from what actually failed.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PatternGaps {
     /// The pattern places files relative to the manifest's scope and the lock records none
     /// to place them from (`ops::manifest::LockFile::pattern_needs_a_scope_it_lacks`): the
     /// lock's answer, never this run's subset of entries.
     pub needs_a_scope_it_lacks: bool,
-    /// A file's save time Canon cannot read gave the pattern no value.
-    pub unreadable_save_time: bool,
-    /// A time written coarser than its modifier reads gave the pattern no value: how many
-    /// entries failed so, per `key|modifier` and the grain the time was known to, in order —
-    /// read off the facility's typed cause, so the counts and the way out cannot drift from
-    /// what failed.
-    pub too_coarse: BTreeMap<(String, Precision), usize>,
-    /// A fact the source does not carry.
-    pub fact_not_carried: bool,
+    /// Each cause met, once per count line, with how many sources met it, in the order met.
+    pub met: Vec<(NoPlaceCause, usize)>,
+    /// Each way a destination would leave its directory, with how many sources' did.
+    pub not_contained: Vec<(NotContained, usize)>,
 }
 
 impl PatternGaps {
@@ -50,36 +43,33 @@ impl PatternGaps {
         }
     }
 
-    /// Record the cause of one entry's failure.
-    pub fn met(&mut self, failure: &anyhow::Error) {
-        match failure.downcast_ref::<PatternNoValue>() {
-            Some(PatternNoValue::UnreadableSaveTime) => self.unreadable_save_time = true,
-            Some(coarse @ PatternNoValue::TooCoarse { .. }) => {
-                if let (Some(chain), Some(grain)) =
-                    (coarse.too_coarse_chain(), coarse.too_coarse_grain())
-                {
-                    *self.too_coarse.entry((chain, grain)).or_default() += 1;
-                }
+    /// Record every cause one source met.
+    pub fn met(&mut self, no_place: &NoPlace) {
+        for cause in &no_place.causes {
+            let line = cause.count_line(1);
+            match self
+                .met
+                .iter_mut()
+                .find(|(met, _)| met.count_line(1) == line)
+            {
+                Some((_, count)) => *count += 1,
+                None => self.met.push((cause.clone(), 1)),
             }
-            None => self.fact_not_carried = true,
         }
     }
 
-    /// Each `key|modifier` that met a time too coarse for it, once, in order.
-    pub fn too_coarse_chains(&self) -> BTreeSet<&str> {
-        self.too_coarse
-            .keys()
-            .map(|(chain, _)| chain.as_str())
-            .collect()
+    /// Record one source's destination that would leave its directory.
+    pub fn not_contained(&mut self, why: &NotContained) {
+        match self.not_contained.iter_mut().find(|(met, _)| met == why) {
+            Some((_, count)) => *count += 1,
+            None => self.not_contained.push((*why, 1)),
+        }
     }
-}
 
-/// One entry's expansion: where it goes, and whether placing it read an instant on the
-/// clock.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Expansion {
-    pub rel_path: String,
-    pub used_an_instant: bool,
+    /// Whether any source met a cause.
+    pub fn any(&self) -> bool {
+        !self.met.is_empty() || !self.not_contained.is_empty()
+    }
 }
 
 /// Build an EvalContext for a source using pre-fetched facts and cached root paths.
@@ -143,42 +133,38 @@ fn build_eval_context<'a>(
         ctx.set_fact(&entry.key, entry.value.clone());
     }
 
-    if let Some(ref hash) = source.hash_value {
-        ctx.set_fact(OBJECT_HASH, FactValue::Text(hash.clone()));
-    }
+    // The hash keys read the content hash the lock recorded: the settled record `apply`
+    // transfers, never the facts table's (the context-supplied law).
+    ctx.set_lock_hash(source.hash_value.clone());
 
     Ok(ctx)
 }
 
-/// Evaluate a pattern for a source, returning the destination relative path.
+/// Evaluate a pattern for a source: where it lands, or why it has no place.
 ///
 /// `unmeasured` is the lock's own answer to *why* an entry might carry no
 /// scope-relative path (`LockFile::unmeasured_reason`) — a per-run value,
 /// handed in the same way the root cache and the prefetched facts are, because
 /// an entry cannot answer it and a refusal that guesses prescribes a remedy
-/// that may not work.
+/// that may not work. The outer level is the root cache's own failure.
 ///
 /// `zone` is the clock the pattern's times are read on — the lock's, in every reader.
 pub fn evaluate_pattern(
-    pattern: &Pattern,
+    pattern: &BoundPattern,
     source: &LockEntry,
     unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     facts: &PatternFacts,
     zone: &UserZone,
-) -> Result<Expansion> {
+) -> Result<std::result::Result<Placement, NotPlaced>> {
     let ctx = build_eval_context(source, unmeasured, root_paths, facts, zone)?;
-    let rel_path = evaluate(pattern, &ctx)?;
-    Ok(Expansion {
-        rel_path,
-        used_an_instant: ctx.read_an_instant(),
-    })
+    Ok(evaluate(pattern, &ctx))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::parse_pattern;
+    use crate::expr::read_pattern;
 
     /// The fixture the documented examples are written against: one source at
     /// `/photos/IMG_001.jpg`, 100 bytes, modified 2024-06-15 12:00:00 UTC.
@@ -208,16 +194,20 @@ mod tests {
     }
 
     fn expand(pattern: &str) -> Result<String> {
-        let parsed = parse_pattern(pattern).unwrap();
-        evaluate_pattern(
-            &parsed,
+        let conn = crate::core::testing::setup_test_db();
+        let bound = read_pattern(&conn, pattern).unwrap().unwrap();
+        let placed = evaluate_pattern(
+            &bound,
             &entry(),
             Unmeasured::NoScopeRecorded,
             &roots(),
             &PatternFacts::from_entries(HashMap::new()),
             &UserZone::utc(),
-        )
-        .map(|e| e.rel_path)
+        )?;
+        match placed {
+            Ok(placement) => Ok(placement.path.as_str().to_string()),
+            Err(not) => anyhow::bail!("{not:?}"),
+        }
     }
 
     #[test]
@@ -275,7 +265,7 @@ mod tests {
     #[test]
     fn a_stored_fact_under_a_computed_name_does_not_move_the_destination() {
         use crate::core::testing::{insert_fact, insert_root, insert_source, setup_test_db};
-        use crate::expr::{extract_fact_keys, prefetch_pattern_facts};
+        use crate::expr::prefetch_pattern_facts;
 
         let mut conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
@@ -284,9 +274,10 @@ mod tests {
         // evaluation is visible in the destination rather than a coincidence.
         insert_fact(&conn, source, "source.mtime", "1546300800");
 
-        let pattern = parse_pattern("{source.mtime|year}/{filename}").unwrap();
-        let needed = extract_fact_keys(&pattern);
-        let facts = prefetch_pattern_facts(&mut conn, &[source], &needed).unwrap();
+        let pattern = read_pattern(&conn, "{source.mtime|year}/{filename}")
+            .unwrap()
+            .unwrap();
+        let facts = prefetch_pattern_facts(&mut conn, &[source], &pattern.stored_keys()).unwrap();
 
         let mut entry = entry();
         entry.id = source;
@@ -302,7 +293,10 @@ mod tests {
             &UserZone::utc(),
         )
         .unwrap()
-        .rel_path;
+        .unwrap()
+        .path
+        .as_str()
+        .to_string();
         assert_eq!(dest, "2024/IMG_001.jpg");
         assert_ne!(dest, "2019/IMG_001.jpg", "the stored fact decided the year");
     }

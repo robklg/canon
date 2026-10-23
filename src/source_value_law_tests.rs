@@ -13,7 +13,7 @@ use crate::core::repo::source::fetch_by_id;
 use crate::core::repo::Connection;
 use crate::core::testing::*;
 use crate::expr::{
-    apply_filters, evaluate, parse_pattern, prefetch_pattern_facts, read_filters, EvalContext,
+    apply_filters, evaluate, prefetch_pattern_facts, read_filters, read_pattern, EvalContext,
     ExpressionText, ParsedFactKey,
 };
 
@@ -79,7 +79,8 @@ fn placed(conn: &mut Connection, id: i64) -> String {
     for fact in facts.for_source(id) {
         ctx.set_fact(&fact.key, fact.value.clone());
     }
-    evaluate(&parse_pattern("{content.Make}").unwrap(), &ctx).unwrap()
+    let pattern = read_pattern(conn, "{content.Make}").unwrap().unwrap();
+    evaluate(&pattern, &ctx).unwrap().path.as_str().to_string()
 }
 
 /// What `worklist --emit content.Make` writes for one source.
@@ -204,7 +205,10 @@ fn an_unreadable_content_value_is_no_value() {
     for fact in facts.for_source(two_rows) {
         ctx.set_fact(&fact.key, fact.value.clone());
     }
-    assert!(evaluate(&parse_pattern("{content.Taken|year}").unwrap(), &ctx).is_err());
+    let pattern = read_pattern(&w.conn, "{content.Taken|year}")
+        .unwrap()
+        .unwrap();
+    assert!(evaluate(&pattern, &ctx).is_err());
 
     let sources: Vec<Source> = vec![fetch_by_id(&w.conn, two_rows).unwrap().unwrap()];
     let keys = [(

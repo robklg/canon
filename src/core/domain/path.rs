@@ -32,16 +32,93 @@ pub fn path_strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .and_then(|p| p.to_str())
 }
 
-/// Whether a supposedly-relative directory would land outside the directory
-/// it is joined onto: absolute (`PathBuf::join` replaces the base wholesale)
-/// or traversing through a parent component. Purely lexical — no
-/// normalization, no filesystem access — so a value that merely *contains*
-/// `..` as a component is rejected rather than resolved.
-pub fn rel_dir_escapes(dir: &str) -> bool {
-    let p = Path::new(dir);
-    p.is_absolute()
-        || p.components()
-            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+/// **Destination containment**: a relative path made only of ordinary names —
+/// no root, no Windows prefix, no `..`, no null character — so that joined
+/// under any directory its names cannot leave that directory. Built only by
+/// [`ContainedPath::new`], or as the default, the directory itself. `new`
+/// parses with [`Path::components`] and keeps the names as the platform reads
+/// them (`./a`, `a/./b` and `a//b` are `a`, `a/b`, `a/b`): a `.` never leaves
+/// a directory, so it is read, not refused.
+/// Purely lexical — no normalization, no filesystem access — so a path that
+/// merely *contains* `..` as a name is refused rather than resolved, and a
+/// link on disk below the directory is never read: it can still lead outside.
+///
+/// Every destination a manifest places a file at, and the manifest's
+/// `base_dir`, is one. The path copied to and recorded is [`as_str`]'s, the
+/// one rebuilt from the parsed names, so the index records what a scan finds.
+///
+/// [`as_str`]: ContainedPath::as_str
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct ContainedPath(String);
+
+/// Why a path is no [`ContainedPath`]: the first name met that could leave the
+/// directory it is joined under. Ordered as a report lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NotContained {
+    /// A `..` directory name.
+    ParentDirectory,
+    /// A name holding a null character.
+    NullChar,
+    /// An absolute path, or one with a Windows prefix.
+    Rooted,
+}
+
+impl ContainedPath {
+    /// Parse `path` into its names, refusing the first that could leave the
+    /// directory the path is joined under. `""` and `"."` are the directory
+    /// itself.
+    pub fn new(path: &str) -> Result<ContainedPath, NotContained> {
+        let mut names: Vec<&str> = Vec::new();
+        for component in Path::new(path).components() {
+            match component {
+                Component::RootDir | Component::Prefix(_) => return Err(NotContained::Rooted),
+                Component::ParentDir => return Err(NotContained::ParentDirectory),
+                Component::CurDir => {}
+                Component::Normal(name) => {
+                    let name = name.to_str().expect("a name parsed from a str is a str");
+                    if name.contains('\0') {
+                        return Err(NotContained::NullChar);
+                    }
+                    names.push(name);
+                }
+            }
+        }
+        Ok(ContainedPath(names.join("/")))
+    }
+
+    /// This path with `below` under it: contained under contained stays
+    /// contained, so no check is owed. An empty remainder gives this path back
+    /// through [`join_under_root`], the rule's owner; an empty base is no root
+    /// to join under, and gives `below` back.
+    pub fn join(&self, below: &ContainedPath) -> ContainedPath {
+        if self.0.is_empty() {
+            below.clone()
+        } else {
+            ContainedPath(join_under_root(&self.0, &below.0))
+        }
+    }
+
+    /// The one join onto a directory on disk, through [`join_under_root`]: the
+    /// directory itself gives `root` back, with no separator after it. Every
+    /// directory this is joined under starts at a root Canon holds as text, so
+    /// reading `root` as text loses nothing. Its limit: `root` is joined as
+    /// written, so a `root` ending in a separator — only `/` itself — gives a
+    /// doubled one (`//a`).
+    pub fn under(&self, root: &Path) -> PathBuf {
+        PathBuf::from(join_under_root(&root.to_string_lossy(), &self.0))
+    }
+
+    /// The names joined by `/`, as the index and a receipt store them; `""`
+    /// for the directory itself.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ContainedPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 // ============================================================================
@@ -179,7 +256,7 @@ pub fn resolve_containing_root(path: &str, roots: &[Root]) -> Option<RootedPath>
 /// **Like [`resolve_containing_root`], it does not lexically clean the path**,
 /// and here the precondition bites harder than there: [`Path::components`]
 /// keeps `..` verbatim, so an uncleaned `/root/../root/sub` comes back as
-/// `../root/sub` — a remainder [`rel_dir_escapes`] refuses, against a field
+/// `../root/sub` — a remainder [`ContainedPath::new`] refuses, against a field
 /// that promises a below-root one. Callers taking user arguments run
 /// [`clean_path`] first, which resolves `..` away; the one caller does.
 pub fn resolve_containing_root_as_written(path: &str, roots: &[Root]) -> Option<RootedPath> {
@@ -349,27 +426,101 @@ mod tests {
         assert!(path_is_under("/a/b/c", "/"));
     }
 
-    // rel_dir_escapes tests
+    // ContainedPath's base_dir cases, as the manifest's base_dir gate met them
 
     #[test]
-    fn rel_dir_escapes_rejects_parent_components() {
-        assert!(rel_dir_escapes(".."));
-        assert!(rel_dir_escapes("../../tmp"));
-        assert!(rel_dir_escapes("photos/../../../tmp"));
+    fn a_contained_path_refuses_parent_components() {
+        for path in ["..", "../../tmp", "photos/../../../tmp"] {
+            assert_eq!(
+                ContainedPath::new(path),
+                Err(NotContained::ParentDirectory),
+                "{path}"
+            );
+        }
     }
 
     #[test]
-    fn rel_dir_escapes_rejects_absolute() {
-        assert!(rel_dir_escapes("/tmp/evil"));
+    fn a_contained_path_refuses_absolute() {
+        assert_eq!(ContainedPath::new("/tmp/evil"), Err(NotContained::Rooted));
     }
 
     #[test]
-    fn rel_dir_escapes_accepts_nested_relative() {
-        assert!(!rel_dir_escapes(""));
-        assert!(!rel_dir_escapes("photos"));
-        assert!(!rel_dir_escapes("photos/2020/summer"));
-        // A filename merely containing dots is not a traversal.
-        assert!(!rel_dir_escapes("photos/..hidden"));
+    fn a_contained_path_accepts_nested_relative() {
+        for path in ["", "photos", "photos/2020/summer", "photos/..hidden"] {
+            // A name merely containing dots is not a traversal.
+            assert_eq!(
+                ContainedPath::new(path).map(|p| p.as_str().to_string()),
+                Ok(path.to_string())
+            );
+        }
+    }
+
+    // ContainedPath tests
+
+    /// **The destination-containment law's verifier**: a fixed table, never
+    /// generated input. Each refused row is a path that, joined under a
+    /// directory, would leave it or name a file no file system holds; each
+    /// accepted row is rebuilt from its parsed names, which is the path copied
+    /// to and recorded.
+    #[test]
+    fn no_destination_escapes_the_destination_directory() {
+        use NotContained::*;
+        let refused = [
+            ("..", ParentDirectory),
+            ("a/../b", ParentDirectory),
+            ("../../x", ParentDirectory),
+            // `{source.rel_path[:-1]}../{filename}` for a file at the top of its root,
+            // and its repeated form.
+            ("../README", ParentDirectory),
+            ("../../README", ParentDirectory),
+            ("/abs", Rooted),
+            ("a/b\0c", NullChar),
+            ("\0", NullChar),
+        ];
+        for (path, why) in refused {
+            assert_eq!(ContainedPath::new(path), Err(why), "{path:?}");
+        }
+        let accepted = [
+            ("x", "x"),
+            ("./x", "x"),
+            (".", ""),
+            ("", ""),
+            ("out/./x", "out/x"),
+            ("a/./x", "a/x"),
+            ("a//b", "a/b"),
+            ("a/b/", "a/b"),
+            ("photo..jpg", "photo..jpg"),
+            ("..hidden/x", "..hidden/x"),
+        ];
+        for (path, rebuilt) in accepted {
+            assert_eq!(
+                ContainedPath::new(path).map(|p| p.as_str().to_string()),
+                Ok(rebuilt.to_string()),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contained_joined_to_contained_stays_contained() {
+        let p = |s: &str| ContainedPath::new(s).unwrap();
+        let rows = [
+            ("", "x", "x"),
+            ("", "", ""),
+            ("photos", "", "photos"),
+            ("photos", "2024/x.jpg", "photos/2024/x.jpg"),
+            ("./out/./a", "b//c", "out/a/b/c"),
+        ];
+        for (base, below, joined) in rows {
+            let got = p(base).join(&p(below));
+            assert_eq!(got.as_str(), joined, "{base:?} + {below:?}");
+            assert_eq!(ContainedPath::new(got.as_str()), Ok(got.clone()));
+        }
+        // Compared as text: a path compares by its names, so a trailing separator
+        // would compare equal.
+        let under = |path: &str| p(path).under(Path::new("/arch")).display().to_string();
+        assert_eq!(under(""), "/arch");
+        assert_eq!(under("a/./b"), "/arch/a/b");
     }
 
     // path_strip_prefix tests

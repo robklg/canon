@@ -8,27 +8,39 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::archive::domain::{
     settle_manifest_zone, LockEntry, LockHeaderStanding, LockStanding, ManifestStanding,
-    ManifestZone, NextStep, OwedWayBack, RefreshRefusal, ZoneRefusal,
+    ManifestZone, NextStep, OwedWayBack, PatternStanding, RefreshRefusal, ZoneRefusal,
 };
+use crate::core::domain::path::{ContainedPath, NotContained};
 use crate::core::domain::root::{ParkedRoot, Root};
 use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::scope::resolve_recorded_scope;
 use crate::core::repo::{self, Connection};
-use crate::expr::{prefetch_pattern_facts, ExpressionRefused, Unmeasured};
+use crate::expr::{prefetch_pattern_facts, read_pattern, ExpressionRefused, NotPlaced, Unmeasured};
 
 use super::manifest::{parse_recorded_query, read_lock_file, read_manifest_config, LockZone};
 use super::pattern::PatternGaps;
 
-/// What a destination path reads when the pattern could not be expanded for
-/// that entry. Spoken here because the interface recovers the same fact by
-/// matching on it: two spellings would let the count and the listing beneath
-/// it drift apart silently, the count staying right while the listing
-/// quietly empties.
-pub const EXPANSION_FAILED: &str = "<pattern expansion failed";
+/// Where an entry's file goes: the destination worked out for it, or none — the pattern gave
+/// it no place, or no destination was worked out at all. A destination not worked out is never
+/// looked for on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    At(PathBuf),
+    NotWorkedOut,
+}
+
+/// Why no entry's destination was worked out, where none was: the pattern cannot be used as
+/// specified, or `base_dir` would leave the archive root. Each entry's source file is still
+/// checked against the lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoDestination {
+    PatternUnreadable,
+    BaseDirNotContained,
+}
 
 /// What one lock entry's two endpoints add up to — derived once, here, and
 /// read by the counts and by every line the interface prints. A header that
@@ -117,8 +129,8 @@ pub struct StatusEntry {
     pub source_filename: String,
     /// Whether the source file exists on disk.
     pub source_exists: bool,
-    /// Full destination path.
-    pub dest_path: String,
+    /// Where its file goes, where that was worked out.
+    pub destination: Destination,
     /// Whether the destination is registered in the DB (present=1).
     pub db_registered: bool,
     /// What the three facts above add up to.
@@ -133,6 +145,8 @@ pub struct ManifestStatus {
     pub dest_display: String,
     /// Output pattern from the manifest.
     pub pattern: String,
+    /// The manifest's `base_dir`, as specified.
+    pub base_dir: String,
     /// Number of entries in the lock file. Zero where there is no lock.
     pub lock_entry_count: usize,
     /// The lock beside the manifest, as the read found it — absent, or read
@@ -185,40 +199,22 @@ pub struct ManifestStatus {
     /// into is one the user closed. Nothing would be written there until it is
     /// opened, so the report says so rather than inviting an apply.
     pub parked_destination: Option<ParkedRoot>,
-    /// Whether the pattern failed to expand for any entry, and so would fail
-    /// for the whole run: `apply` collects expansion failures and aborts on
-    /// them before it transfers anything.
-    ///
-    /// One input of the decision table, never the whole answer to *can
-    /// `apply` run at all* — that question has its own owner
-    /// (`archive::domain::ManifestStanding`), reached through
-    /// [`standing`](ManifestStatus::standing).
-    pub pattern_unexpandable: bool,
-    /// What the pattern said when it could not expand, in the order the
-    /// entries were read and deduplicated: usually one reason for every
-    /// entry, since a pattern fails the same way for all of them.
-    ///
-    /// Carried because a report that declines to name a next step owes the
-    /// user the reason it declined — the per-entry table shows a fixed "not at
-    /// dest" and never this, so without it the run would report nothing at all
-    /// about a manifest that cannot be applied.
-    pub expansion_failures: Vec<String>,
-    /// Which causes the expansion failures met, and whether the pattern places
-    /// files relative to a scope the lock carries no measurement for.
-    ///
-    /// What tells the expansion failures apart, and they take different
-    /// advice: a scope the manifest does not have is repaired by scoping it or
-    /// by measuring from each file's own root, a fact no source carries by
-    /// supplying the fact, a save time Canon cannot read by leaving the file
-    /// out or correcting it. Asked of the language facility's typed cause
-    /// rather than of the refusal's wording, so the remedy cannot drift from
-    /// what actually failed.
+    /// The pattern's refusal, where it cannot be read or checked: the cause for every entry,
+    /// so none has a destination worked out (`expr::read_pattern`, `apply`'s own reading).
+    pub pattern_refusal: Option<ExpressionRefused>,
+    /// Why `base_dir` would leave the archive root, where it would: no destination is worked
+    /// out below it, and none is looked for on disk.
+    pub base_dir_refusal: Option<NotContained>,
+    /// Which causes the entries the pattern gave no place met, with how many met each — and
+    /// whether the pattern places files relative to a scope the lock carries no measurement
+    /// for, which tells their remedies apart. Read off the facility's typed causes, never off a
+    /// sentence's wording, so the remedy cannot drift from what actually failed.
     pub pattern_gaps: PatternGaps,
-    /// How many entries failed, which is not the length of the list above —
-    /// that deduplicates by message, and a pattern usually fails the same way
-    /// for every source. Carried rather than recovered by the interface,
-    /// which would otherwise have to match a display string to count.
-    pub expansion_failure_count: usize,
+    /// How many entries have no destination worked out because of the pattern or `base_dir`:
+    /// every entry where either cannot be used ([`Self::no_destination_because`]), otherwise
+    /// each entry the pattern gives no place or a destination that would leave its directory.
+    /// Counted in no destination state — neither pending nor at the destination.
+    pub no_destination: usize,
     /// The lock's zone, where the lock has a header to carry one.
     pub lock_zone: Option<LockZone>,
     /// The manifest's zone as a refresh here would settle it: its own line, or this machine's
@@ -236,10 +232,22 @@ pub struct ManifestStatus {
 
 impl ManifestStatus {
     /// Are all source files accounted for — every entry checked, each at its source or at its
-    /// destination? Never over a lock placed nowhere: an entry with no destination computed was
+    /// destination? Never while an entry has no destination worked out: its destination was
     /// not checked, so it is not accounted for.
     pub fn all_accounted_for(&self) -> bool {
-        self.unplaced == 0 && self.found_nothing_lost_or_wrong()
+        self.unplaced == 0 && self.no_destination == 0 && self.found_nothing_lost_or_wrong()
+    }
+
+    /// Why no entry has a destination worked out, where none has: `base_dir` first, which
+    /// leaves no destination whatever the pattern says.
+    pub fn no_destination_because(&self) -> Option<NoDestination> {
+        if self.base_dir_refusal.is_some() {
+            Some(NoDestination::BaseDirNotContained)
+        } else if self.pattern_refusal.is_some() {
+            Some(NoDestination::PatternUnreadable)
+        } else {
+            None
+        }
     }
 
     /// Whether the entries that were checked found no source lost and no destination of the
@@ -264,7 +272,14 @@ impl ManifestStatus {
     pub fn standing(&self) -> ManifestStanding {
         ManifestStanding {
             lock: self.lock,
-            pattern_expands: !self.pattern_unexpandable,
+            pattern: if self.pattern_refusal.is_some() {
+                PatternStanding::Unreadable
+            } else if self.pattern_gaps.any() {
+                PatternStanding::NoPlace
+            } else {
+                PatternStanding::Places
+            },
+            base_dir_not_contained: self.base_dir_refusal.is_some(),
             pattern_needs_a_scope_it_lacks: self.pattern_gaps.needs_a_scope_it_lacks,
             parked_origins: !self.parked_entries.is_empty(),
             parked_destination: self.parked_destination.is_some(),
@@ -340,17 +355,15 @@ pub fn compute_manifest_status(
     machine: &UserZone,
 ) -> Result<ManifestStatus> {
     use super::pattern::evaluate_pattern;
-    use crate::expr::{extract_fact_keys, parse_pattern};
 
     // 1. Read the manifest
     let config = read_manifest_config(manifest_path)?;
     let lock_path = manifest_path.with_extension("lock");
-    // The pattern is the manifest's own, so it is parsed before the lock is
-    // read: the lock is asked one question about it below, while it is still
-    // whole.
-    let pattern = parse_pattern(&config.output.pattern)
-        .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
-    let needed_keys = extract_fact_keys(&pattern);
+    // The pattern is the manifest's own, so it is read before the lock is: the
+    // lock is asked one question about it below, while it is still whole. One
+    // it cannot read is a state this report states — the cause for every
+    // entry — never a failure of the report.
+    let pattern = read_pattern(conn, &config.output.pattern)?;
     // 2. Read the lock beside it, or record that there is none, and settle
     //    the two claims a lock that *was* read makes about itself.
     //
@@ -395,7 +408,9 @@ pub fn compute_manifest_status(
                     },
                     lock_zone,
                     lock.unmeasured_reason(),
-                    lock.pattern_needs_a_scope_it_lacks(&pattern),
+                    pattern
+                        .as_ref()
+                        .is_ok_and(|pattern| lock.pattern_needs_a_scope_it_lacks(pattern)),
                     lock.entries,
                 )
             }
@@ -418,12 +433,17 @@ pub fn compute_manifest_status(
                 config.output.archive_root_id
             )
         })?;
-    let base_dir = if config.output.base_dir.is_empty() {
-        PathBuf::from(&archive_root.path)
-    } else {
-        PathBuf::from(&archive_root.path).join(&config.output.base_dir)
-    };
-    let dest_display = base_dir.to_string_lossy().to_string();
+    // `base_dir` is read as `apply` reads it; one that would leave the archive
+    // root gets no destination below it, and none is looked for on disk. The
+    // destination shown is then the archive root alone: the refusal names the
+    // `base_dir` as specified.
+    let base_dir = ContainedPath::new(&config.output.base_dir);
+    let dest_display = match &base_dir {
+        Ok(base_dir) => base_dir.under(Path::new(&archive_root.path)),
+        Err(_) => PathBuf::from(&archive_root.path),
+    }
+    .to_string_lossy()
+    .to_string();
 
     // 5. The manifest's own scope, through the same resolution `cluster generate`
     // and `cluster refresh` use. Status takes no measurement from it — that
@@ -442,59 +462,63 @@ pub fn compute_manifest_status(
 
     // Batch fetch facts for the entries placed, if the pattern uses content facts
     let source_ids: Vec<i64> = placed.iter().map(|(s, _)| s.id).collect();
+    let needed_keys = match &pattern {
+        Ok(pattern) => pattern.stored_keys(),
+        Err(_) => Vec::new(),
+    };
     let facts = prefetch_pattern_facts(conn, &source_ids, &needed_keys)?;
 
-    // 6. Evaluate patterns to get dest paths, then check filesystem + DB
-    let mut pattern_unexpandable = false;
+    // 6. Work out each destination, then check filesystem + DB
+    let pattern_refusal = pattern.as_ref().err().cloned();
+    let base_dir_refusal = base_dir.as_ref().err().copied();
     let mut pattern_gaps = PatternGaps::for_lock(pattern_needs_a_scope_it_lacks);
-    let mut expansion_failures: Vec<String> = Vec::new();
-    let mut expansion_failure_count = 0usize;
     let mut entries = Vec::with_capacity(lock_entry_count);
     let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
 
     for (lock_entry, zone) in placed {
+        let filename = Path::new(&lock_entry.path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| lock_entry.path.clone());
+        let source_exists = Path::new(&lock_entry.path).exists();
+        // Where no destination is worked out the source file is still checked
+        // against the lock, and the destination is never looked for.
+        let not_worked_out = |entries: &mut Vec<StatusEntry>, dest_rel_paths: &mut Vec<String>| {
+            entries.push(StatusEntry {
+                source_path: lock_entry.path.clone(),
+                source_filename: filename.clone(),
+                source_exists,
+                destination: Destination::NotWorkedOut,
+                db_registered: false,
+                status: classify_entry(source_exists, false, false),
+            });
+            dest_rel_paths.push(String::new());
+        };
+        let (Ok(pattern), Ok(base_dir)) = (&pattern, &base_dir) else {
+            not_worked_out(&mut entries, &mut dest_rel_paths);
+            continue;
+        };
         let dest_rel =
-            match evaluate_pattern(&pattern, lock_entry, unmeasured, &root_paths, &facts, zone) {
-                Ok(expansion) => expansion.rel_path,
-                Err(e) => {
-                    // If pattern expansion fails, we can't determine dest path.
-                    // Use a placeholder and mark as not-at-dest. It is also the
-                    // whole run's answer: apply aborts on expansion failures
-                    // before it transfers anything, so a report that has seen one
-                    // must not go on to name apply.
-                    pattern_unexpandable = true;
-                    pattern_gaps.met(&e);
-                    expansion_failure_count += 1;
-                    let reason = e.to_string();
-                    if !expansion_failures.contains(&reason) {
-                        expansion_failures.push(reason);
-                    }
-                    let filename = Path::new(&lock_entry.path)
-                        .file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or_else(|| lock_entry.path.clone());
-                    let source_exists = Path::new(&lock_entry.path).exists();
-                    entries.push(StatusEntry {
-                        source_path: lock_entry.path.clone(),
-                        source_filename: filename,
-                        source_exists,
-                        dest_path: format!("{EXPANSION_FAILED}: {e}>"),
-                        db_registered: false,
-                        status: classify_entry(source_exists, false, false),
-                    });
-                    dest_rel_paths.push(String::new());
+            match evaluate_pattern(pattern, lock_entry, unmeasured, &root_paths, &facts, zone)? {
+                Ok(placement) => placement.path,
+                // A source with no place is also the whole run's answer: apply
+                // aborts on it before it transfers anything, so a report that
+                // has seen one must not go on to name apply.
+                Err(NotPlaced::NoPlace(no_place)) => {
+                    pattern_gaps.met(&no_place);
+                    not_worked_out(&mut entries, &mut dest_rel_paths);
                     continue;
                 }
+                Err(NotPlaced::NotContained { why, .. }) => {
+                    pattern_gaps.not_contained(&why);
+                    not_worked_out(&mut entries, &mut dest_rel_paths);
+                    continue;
+                }
+                Err(NotPlaced::TypeChanged(refused)) => return Err(refused.into()),
             };
 
-        let archive_rel_path = if config.output.base_dir.is_empty() {
-            dest_rel.clone()
-        } else {
-            format!("{}/{}", config.output.base_dir, &dest_rel)
-        };
-
-        let dest_full = base_dir.join(&dest_rel);
-        let source_exists = Path::new(&lock_entry.path).exists();
+        let archive_rel_path = base_dir.join(&dest_rel);
+        let dest_full = archive_rel_path.under(Path::new(&archive_root.path));
         let dest_stat = fs::metadata(&dest_full).ok();
 
         let (dest_exists, dest_size_match) = match &dest_stat {
@@ -506,20 +530,15 @@ pub fn compute_manifest_status(
             _ => (false, false),
         };
 
-        let filename = Path::new(&lock_entry.path)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| lock_entry.path.clone());
-
         entries.push(StatusEntry {
             source_path: lock_entry.path.clone(),
             source_filename: filename,
             source_exists,
-            dest_path: dest_full.to_string_lossy().to_string(),
+            destination: Destination::At(dest_full),
             db_registered: false, // filled in below
             status: classify_entry(source_exists, dest_exists, dest_size_match),
         });
-        dest_rel_paths.push(archive_rel_path);
+        dest_rel_paths.push(archive_rel_path.as_str().to_string());
     }
 
     // 7. Batch check DB registration
@@ -541,8 +560,18 @@ pub fn compute_manifest_status(
     let mut source_lost = 0usize;
     let mut size_mismatch = 0usize;
     let mut source_still_present = 0usize;
+    let mut no_destination = 0usize;
 
     for entry in &entries {
+        // An entry with no destination worked out is counted as that, never as
+        // pending; its source file was checked, so a lost one is counted too.
+        if matches!(entry.destination, Destination::NotWorkedOut) {
+            no_destination += 1;
+            if entry.status == EntryStatus::SourceLost {
+                source_lost += 1;
+            }
+            continue;
+        }
         match entry.status {
             EntryStatus::AtDestination => {
                 at_destination += 1;
@@ -560,6 +589,7 @@ pub fn compute_manifest_status(
         manifest_path: manifest_path.to_string_lossy().to_string(),
         dest_display,
         pattern: config.output.pattern.clone(),
+        base_dir: config.output.base_dir.clone(),
         lock_entry_count,
         lock,
         entries,
@@ -575,10 +605,10 @@ pub fn compute_manifest_status(
         scope_confirms_nothing: scope.scopes().is_empty(),
         parked_entries: parked_lock_entries(conn, &lock_entries, &roots)?,
         parked_destination: archive_root.parked(),
-        pattern_unexpandable,
-        expansion_failures,
+        pattern_refusal,
+        base_dir_refusal,
         pattern_gaps,
-        expansion_failure_count,
+        no_destination,
         lock_zone,
         manifest_zone,
         query_refusal,
@@ -593,7 +623,7 @@ mod tests {
     use crate::core::testing::{
         insert_object, insert_root, insert_source_with_size, setup_test_db,
     };
-    use crate::expr::BoundFilters;
+    use crate::expr::{BoundFilters, Modifier, NoPlaceCause};
 
     use super::super::generate::{
         execute_generate, plan_generate, ClusterGenerateParams, ExecuteGenerateParams,
@@ -678,9 +708,9 @@ mod tests {
     fn an_absent_lock_is_a_state_the_read_states() {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);
         // A pattern that **cannot** expand, over a manifest recording no
-        // scope — so the derivation is the only thing keeping
-        // `pattern_unexpandable` false, and this assertion fails the day it
-        // is taken anywhere but the entry loop. With the fixture's own
+        // scope — so only the entry loop keeps the standing from reading the
+        // pattern as placing nothing, and this assertion fails the day that is
+        // read anywhere but the entry loop. With the fixture's own
         // expandable pattern the row below could not fail against the defect
         // it is cited for, which is the whole reason this line is here.
         rewrite_manifest_pattern(&manifest, "{scope.rel_path}");
@@ -769,15 +799,20 @@ mod tests {
             ),
             "the lock is a current one; its age explains nothing here"
         );
-        assert!(
-            status.pattern_unexpandable,
-            "the run cannot expand, which is what a next-step hint must ask"
+        assert_eq!(
+            status.standing().pattern,
+            PatternStanding::NoPlace,
+            "the run places nothing, which is what a next-step hint must ask"
         );
-        let dest = &status.entries[0].dest_path;
-        assert!(dest.contains("were not scoped"), "{dest}");
+        assert_eq!(status.entries[0].destination, Destination::NotWorkedOut);
+        let [(cause, 1)] = status.pattern_gaps.met.as_slice() else {
+            panic!("{:?}", status.pattern_gaps);
+        };
+        let said = cause.sentence();
+        assert!(said.contains("were not scoped"), "{said}");
         assert!(
-            !dest.contains("cluster refresh"),
-            "a refresh cannot give an unscoped manifest a scope: {dest}"
+            !said.contains("cluster refresh"),
+            "a refresh cannot give an unscoped manifest a scope: {said}"
         );
     }
 
@@ -869,20 +904,18 @@ mod tests {
 
         rewrite_manifest_pattern(&manifest, "{source.mtime|year}/{filename}");
         let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
-        assert!(status.pattern_gaps.unreadable_save_time);
-        assert!(!status.pattern_gaps.fact_not_carried);
-        assert!(status.pattern_gaps.too_coarse.is_empty());
-        let reasons: Vec<&str> = status
-            .entries
-            .iter()
-            .map(|e| e.dest_path.as_str())
-            .collect();
-        assert!(
-            reasons
+        let met = |status: &ManifestStatus| -> Vec<NoPlaceCause> {
+            status
+                .pattern_gaps
+                .met
                 .iter()
-                .any(|r| r.contains("Canon cannot read this file's save time")),
-            "{reasons:?}"
-        );
+                .map(|(c, _)| c.clone())
+                .collect()
+        };
+        assert_eq!(met(&status), [NoPlaceCause::UnreadableSaveTime]);
+        assert!(met(&status)[0]
+            .sentence()
+            .contains("Canon cannot read this file's save time"));
 
         // a.jpg carries the fact and fails on its save time; b.jpg fails on the fact.
         let a: i64 = conn
@@ -893,8 +926,10 @@ mod tests {
         crate::core::testing::insert_fact(&conn, a, "content.Make", "Canon");
         rewrite_manifest_pattern(&manifest, "{content.Make}/{source.mtime|year}");
         let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
-        assert!(status.pattern_gaps.unreadable_save_time);
-        assert!(status.pattern_gaps.fact_not_carried);
+        assert!(met(&status).contains(&NoPlaceCause::UnreadableSaveTime));
+        assert!(met(&status)
+            .iter()
+            .any(|c| matches!(c, NoPlaceCause::NoFact { key, .. } if key == "content.Make")));
     }
 
     /// **The report works out destinations in the lock's time zone, whatever the machine's** — the same
@@ -911,8 +946,10 @@ mod tests {
         let status = with_test_zone(new_york.clone(), || {
             compute_manifest_status(&mut conn, &manifest, &new_york).unwrap()
         });
-        let dest = &status.entries[0].dest_path;
-        assert!(dest.ends_with("/2024/a.jpg"), "{dest}");
+        let Destination::At(dest) = &status.entries[0].destination else {
+            panic!("no destination worked out");
+        };
+        assert!(dest.ends_with("2024/a.jpg"), "{dest:?}");
         assert_eq!(status.unplaced, 0);
     }
 
@@ -1367,11 +1404,15 @@ mod tests {
         rewrite_manifest_pattern(&manifest, "{content.Taken|month}/{filename}");
         let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(
-            status
-                .pattern_gaps
-                .too_coarse
-                .get(&("content.Taken|month".to_string(), Precision::Year)),
-            Some(&2)
+            status.pattern_gaps.met,
+            [(
+                NoPlaceCause::TooCoarse {
+                    subject: "{content.Taken|month}".into(),
+                    modifier: Modifier::Month,
+                    precision: Precision::Year,
+                },
+                2
+            )]
         );
     }
 }

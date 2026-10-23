@@ -76,6 +76,7 @@ pub(in crate::expr) fn needs_quotes_problem(rest: &str, at: usize, of: Place) ->
         sentence: needs_quotes_sentence(c),
         rule_line: None,
         fix: Fix::None,
+        also: None,
     }
 }
 

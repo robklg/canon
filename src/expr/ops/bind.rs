@@ -315,7 +315,10 @@ fn bind_filters(
 
 /// Keep each quoted name the reader offers only where it names a key with facts, the types read
 /// from the stored keys it names.
-fn offer_quoted_names(conn: &Connection, problems: &mut [Problem]) -> Result<()> {
+pub(in crate::expr) fn offer_quoted_names(
+    conn: &Connection,
+    problems: &mut [Problem],
+) -> Result<()> {
     let names: Vec<String> = problems
         .iter()
         .filter_map(quoted_name_key)
@@ -875,11 +878,12 @@ mod tests {
         );
     }
 
-    /// One key grammar: a key reads as the same key, accessor and modifiers in a filter and as
-    /// a report key.
+    /// **The one-key-grammar law's verifier**: a key reads as the same key, accessor and
+    /// modifiers in a filter, as a report key and inside a pattern's `{…}`.
     #[test]
-    fn a_key_reads_the_same_in_a_filter_and_a_report() {
+    fn a_key_reads_the_same_in_a_filter_a_report_and_a_pattern() {
         use crate::expr::domain::filter::Expr;
+        use crate::expr::domain::pattern::{read_pattern_text, InputPiece};
         for key in [
             "Make",
             "hash",
@@ -908,6 +912,12 @@ mod tests {
                 )
             };
             assert_eq!(shape(&in_filter), shape(in_report), "{key}");
+            let pattern = read_pattern_text(&format!("{{{key}}}"));
+            assert!(pattern.problems.is_empty(), "{key}: {:?}", pattern.problems);
+            let Some([InputPiece::Key(in_pattern)]) = pattern.value.as_deref() else {
+                panic!("{key}: not one key");
+            };
+            assert_eq!(shape(&in_pattern.key), shape(in_report), "{key}");
         }
     }
 

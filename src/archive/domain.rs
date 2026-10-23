@@ -589,15 +589,18 @@ impl LockStanding {
 pub struct ManifestStanding {
     /// What the lock beside it came to.
     pub lock: LockStanding,
-    /// Whether the destination pattern expands for the lock's entries as they
-    /// stand. Vacuously true where there are no entries to expand it for.
-    pub pattern_expands: bool,
+    /// What the destination pattern comes to for the lock's entries as they
+    /// stand.
+    pub pattern: PatternStanding,
+    /// Whether the manifest's `base_dir` would leave the archive root — no
+    /// destination is worked out below it.
+    pub base_dir_not_contained: bool,
     /// Whether the pattern places files relative to a scope the **lock** cannot
     /// place them from — the lock's own answer
     /// (`ops::manifest::LockFile::pattern_needs_a_scope_it_lacks`), never the
     /// manifest's: a manifest may declare a scope its lock was built without.
     /// This is what a rebuild can supply, so it is what decides whether one
-    /// clears an unexpandable pattern; never true where the pattern expands.
+    /// clears a pattern that leaves sources with no place.
     pub pattern_needs_a_scope_it_lacks: bool,
     /// Whether any lock entry's source stands on a root the user closed.
     pub parked_origins: bool,
@@ -617,6 +620,17 @@ pub struct ManifestStanding {
     /// Whether reading and binding refuse the recorded query
     /// (`ops::manifest::parse_recorded_query`).
     pub query_refused: bool,
+}
+
+/// What a manifest's destination pattern comes to for its lock's entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternStanding {
+    /// It places every entry worked out. Vacuously so where there are none.
+    Places,
+    /// It cannot be read or checked: no destination is worked out at all.
+    Unreadable,
+    /// It reads, and leaves some entry with no place.
+    NoPlace,
 }
 
 /// The two acts that read a manifest.
@@ -694,7 +708,9 @@ pub enum OwedWayBack {
 /// | [`LockPredatesMeasurement`](Self::LockPredatesMeasurement) | yes | no — same reason |
 /// | [`LockPredatesZone`](Self::LockPredatesZone) | yes | no — same reason |
 /// | [`LockZoneNotKnownHere`](Self::LockZoneNotKnownHere) | yes | no — same reason |
-/// | [`PatternUnexpandable`](Self::PatternUnexpandable) | yes | no — a refresh names no destination; only apply expands the pattern to move a file |
+/// | [`PatternUnreadable`](Self::PatternUnreadable) | yes | no — a refresh reads no pattern; only apply places a file |
+/// | [`PatternUnexpandable`](Self::PatternUnexpandable) | yes | no — same reason |
+/// | [`BaseDirNotContained`](Self::BaseDirNotContained) | yes | no — a refresh writes nothing below `base_dir` |
 /// | [`ParkedOrigins`](Self::ParkedOrigins) | yes | no — a record is not a naming: the rebuild re-selects from the open world and leaves them out |
 /// | [`ParkedDestination`](Self::ParkedDestination) | yes | no — a refresh writes only the manifest and its lock, never into the archive root |
 /// | [`ParkedScope`](Self::ParkedScope) | no — apply reads no recorded scope, taking its own from the lock header | yes |
@@ -713,8 +729,8 @@ pub enum OwedWayBack {
 ///
 /// `PatternUnexpandable` beside `NoLock` is a third impossible state and is
 /// **not** of that kind, which is worth saying because the three read alike.
-/// With no lock there are no entries, so nothing can fail to expand — but
-/// `pattern_expands` is a field beside the enum, not inside it, so the pair
+/// With no lock there are no entries, so none can be left with no place — but
+/// `pattern` is a field beside the enum, not inside it, so the pair
 /// *is* constructible here and only the caller's derivation keeps it from
 /// arising. The guarantee is therefore a construction fact of
 /// `archive::ops::status::compute_manifest_status`, pinned where it is made
@@ -726,9 +742,9 @@ pub enum OwedWayBack {
 ///
 /// **What this table does *not* enforce**, named here rather than left to be
 /// discovered: these are the obstacles a *report* can see. `canon apply`
-/// refuses at further sites of its own — a non-archive destination root, a
-/// `base_dir` escaping the archive root, unhashed entries, and every preflight
-/// finding about the world moving under the lock — and those refusals are not
+/// refuses at further sites of its own — a non-archive destination root,
+/// unhashed entries, and every preflight finding about the world moving under
+/// the lock — and those refusals are not
 /// raised from this table. Each row below names the `apply` site that enforces
 /// it; a *new* apply refusal with no row here is not build-refused, and that
 /// is the standing gap this enumeration narrows rather than closes.
@@ -770,10 +786,18 @@ pub enum Obstacle {
     /// manifest's line names the same unknown zone, [`ZoneLineUnreadable`](Self::ZoneLineUnreadable)
     /// stops that refresh, so no step is named.
     LockZoneNotKnownHere,
-    /// The destination pattern does not expand for the entries as they stand.
-    /// Enforced by `apply`'s expansion-failure refusal, which collects every
-    /// failure and aborts before it transfers anything.
+    /// The destination pattern cannot be read or checked. Enforced by `apply`'s
+    /// pattern reading, before anything is planned; the report states it with
+    /// its way back ("adjust the pattern in your manifest").
+    PatternUnreadable,
+    /// The destination pattern leaves some entry, as it stands, with no place.
+    /// Enforced by `apply`'s pattern-expansion refusal, which collects every
+    /// cause and aborts before it transfers anything.
     PatternUnexpandable,
+    /// The manifest's `base_dir` would leave the archive root. Enforced by
+    /// `apply`'s `base_dir` refusal, before anything is planned; the report
+    /// states it with its way back (edit `base_dir`).
+    BaseDirNotContained,
     /// Lock entries stand on a root the user closed.
     /// Enforced by `apply`'s origin door, over the one computation
     /// `cluster status` states in apply's conditional.
@@ -841,7 +865,9 @@ impl Obstacle {
             | Obstacle::LockPredatesMeasurement
             | Obstacle::LockPredatesZone
             | Obstacle::LockZoneNotKnownHere
+            | Obstacle::PatternUnreadable
             | Obstacle::PatternUnexpandable
+            | Obstacle::BaseDirNotContained
             | Obstacle::ParkedOrigins
             | Obstacle::ParkedDestination => Act::Apply,
             Obstacle::ParkedScope
@@ -901,8 +927,10 @@ impl Obstacle {
                     Rebuild::Leaves
                 }
             }
-            // No rebuild moves a destination.
-            Obstacle::ParkedDestination => Rebuild::Leaves,
+            // No rebuild moves a destination, and none edits the pattern or `base_dir`.
+            Obstacle::ParkedDestination
+            | Obstacle::PatternUnreadable
+            | Obstacle::BaseDirNotContained => Rebuild::Leaves,
             Obstacle::ParkedScope
             | Obstacle::ScopeKeptNothing
             | Obstacle::ZoneLineUnreadable
@@ -935,8 +963,13 @@ impl ManifestStanding {
                 }
             }
         }
-        if !self.pattern_expands {
-            raised.push(Obstacle::PatternUnexpandable);
+        match self.pattern {
+            PatternStanding::Places => {}
+            PatternStanding::Unreadable => raised.push(Obstacle::PatternUnreadable),
+            PatternStanding::NoPlace => raised.push(Obstacle::PatternUnexpandable),
+        }
+        if self.base_dir_not_contained {
+            raised.push(Obstacle::BaseDirNotContained);
         }
         if self.parked_origins {
             raised.push(Obstacle::ParkedOrigins);
@@ -1001,7 +1034,9 @@ impl ManifestStanding {
             | Obstacle::LockPredatesMeasurement
             | Obstacle::LockPredatesZone
             | Obstacle::LockZoneNotKnownHere
+            | Obstacle::PatternUnreadable
             | Obstacle::PatternUnexpandable
+            | Obstacle::BaseDirNotContained
             | Obstacle::ParkedOrigins
             | Obstacle::ParkedDestination => None,
         })
@@ -1058,8 +1093,12 @@ impl ManifestStanding {
                     Rebuild::Clears | Rebuild::Leaves | Rebuild::Refused => owed,
                 },
                 // Each of these is either named on a line carrying its own
-                // act, or is not what withheld the step.
-                Obstacle::ParkedScope
+                // act, or is not what withheld the step. A pattern that cannot
+                // be read and a `base_dir` leaving the archive root are each
+                // stated with their own way back.
+                Obstacle::PatternUnreadable
+                | Obstacle::BaseDirNotContained
+                | Obstacle::ParkedScope
                 | Obstacle::ZoneLineUnreadable
                 | Obstacle::NoZoneToRecord
                 | Obstacle::QueryUnreadable
@@ -1568,7 +1607,8 @@ base_dir = "photos"
                 hash_matches: true,
                 header: LockHeaderStanding::Sound,
             },
-            pattern_expands: true,
+            pattern: PatternStanding::Places,
+            base_dir_not_contained: false,
             pattern_needs_a_scope_it_lacks: false,
             parked_origins: false,
             parked_destination: false,
@@ -1588,7 +1628,9 @@ base_dir = "photos"
             Obstacle::LockPredatesMeasurement,
             Obstacle::LockPredatesZone,
             Obstacle::LockZoneNotKnownHere,
+            Obstacle::PatternUnreadable,
             Obstacle::PatternUnexpandable,
+            Obstacle::BaseDirNotContained,
             Obstacle::ParkedOrigins,
             Obstacle::ParkedDestination,
             Obstacle::ParkedScope,
@@ -1623,26 +1665,30 @@ base_dir = "photos"
             Obstacle::LockPredatesMeasurement => 2,
             Obstacle::LockPredatesZone => 3,
             Obstacle::LockZoneNotKnownHere => 4,
-            Obstacle::PatternUnexpandable => 5,
-            Obstacle::ParkedOrigins => 6,
-            Obstacle::ParkedDestination => 7,
-            Obstacle::ParkedScope => 8,
-            Obstacle::ScopeKeptNothing => 9,
-            Obstacle::ZoneLineUnreadable => 10,
-            Obstacle::NoZoneToRecord => 11,
-            Obstacle::QueryUnreadable => 12,
+            Obstacle::PatternUnreadable => 5,
+            Obstacle::PatternUnexpandable => 6,
+            Obstacle::BaseDirNotContained => 7,
+            Obstacle::ParkedOrigins => 8,
+            Obstacle::ParkedDestination => 9,
+            Obstacle::ParkedScope => 10,
+            Obstacle::ScopeKeptNothing => 11,
+            Obstacle::ZoneLineUnreadable => 12,
+            Obstacle::NoZoneToRecord => 13,
+            Obstacle::QueryUnreadable => 14,
         }
     }
 
     /// **The census is complete, and matched both directions.** A row minted
     /// without a place fails [`position`]'s match at compile time; a row given
-    /// a place but left out of the list fails the run here. Thirteen: the
+    /// a place but left out of the list fails the run here. Fifteen: the
     /// charter's seven conditions split the manifest door in two — the origin
     /// end and the destination end meet different acts — and the recorded
     /// scope's own two reasons are a door and the terminal rule, which are
     /// likewise not one row; then the zone's four — two about the lock's
     /// header, which stop `apply`, and two about the manifest's line, which
-    /// stop the refresh; and a query that cannot run, which stops it too.
+    /// stop the refresh; a query that cannot run, which stops it too; and the
+    /// pattern's two — one that cannot be read, one that leaves sources with no
+    /// place — and a `base_dir` leaving the archive root, which stop `apply`.
     #[test]
     fn the_table_holds_every_row_once() {
         let all = all_obstacles();
@@ -1654,7 +1700,7 @@ base_dir = "photos"
             (0..all.len()).collect::<Vec<_>>(),
             "every row listed once, and none listed twice"
         );
-        assert_eq!(all.len(), 13, "the table's row count");
+        assert_eq!(all.len(), 15, "the table's row count");
     }
 
     /// Each row stops exactly one act, and which one is the table's own claim
@@ -1672,7 +1718,9 @@ base_dir = "photos"
             (Obstacle::LockPredatesMeasurement, Act::Apply),
             (Obstacle::LockPredatesZone, Act::Apply),
             (Obstacle::LockZoneNotKnownHere, Act::Apply),
+            (Obstacle::PatternUnreadable, Act::Apply),
             (Obstacle::PatternUnexpandable, Act::Apply),
+            (Obstacle::BaseDirNotContained, Act::Apply),
             (Obstacle::ParkedOrigins, Act::Apply),
             (Obstacle::ParkedDestination, Act::Apply),
             (Obstacle::ParkedScope, Act::Refresh),
@@ -1698,14 +1746,14 @@ base_dir = "photos"
     /// if it tried to pose one.
     ///
     /// The pattern row is the one that reads like a third and is not. With no
-    /// lock there are no entries, so nothing can fail to expand — but
-    /// `pattern_expands` sits beside the enum rather than inside it, so the
+    /// lock there are no entries, so none can be left with no place — but
+    /// `pattern` sits beside the enum rather than inside it, so the
     /// second half here **poses the pair and asserts what actually happens**:
     /// both rows are raised. It records where the shape stops, which is why
     /// the real guarantee is pinned at the derivation instead.
     ///
     /// **It is a record of a gap, not a rule**, and the distinction matters
-    /// to whoever closes the gap: fold `pattern_expands` into `LockStanding`,
+    /// to whoever closes the gap: fold `pattern` into `LockStanding`,
     /// or suppress the pattern row where the lock is absent, and this arm is
     /// what changes — delete it and say so, rather than reading it as a claim
     /// that the weaker shape is wanted.
@@ -1727,7 +1775,7 @@ base_dir = "photos"
             lock: LockStanding::Absent {
                 manifest_names_a_hash: true,
             },
-            pattern_expands: false,
+            pattern: PatternStanding::NoPlace,
             ..sound()
         };
         assert_eq!(
@@ -1789,7 +1837,9 @@ base_dir = "photos"
     /// asserted about: with no lock there are no entries, so nothing can fail
     /// to expand (the construction fact `an_absent_lock_is_a_state_the_read_states`
     /// pins) — and the skip is load-bearing, since the table answers that
-    /// pair inconsistently. A pattern that needs a scope it lacks cannot
+    /// pair inconsistently. A pattern that cannot be read needs no entry to
+    /// be refused, so it meets an absent lock and that pair is walked. A
+    /// pattern that needs a scope it lacks cannot
     /// expand either, but that pair is walked anyway: the table answers it
     /// consistently, so nothing rests on the skip and it is not made.
     ///
@@ -1816,21 +1866,29 @@ base_dir = "photos"
             .flat_map(|z| [(z, false), (z, true)]);
         for (zone_refusal, query_refused) in refresh_causes {
             for lock in locks.iter().copied() {
-                for pattern_expands in [true, false] {
+                for (pattern, base_dir_not_contained) in [
+                    PatternStanding::Places,
+                    PatternStanding::Unreadable,
+                    PatternStanding::NoPlace,
+                ]
+                .into_iter()
+                .flat_map(|p| [(p, false), (p, true)])
+                {
                     for pattern_needs_a_scope_it_lacks in [true, false] {
                         for parked_origins in [true, false] {
                             for parked_scope in [true, false] {
                                 for parked_destination in [true, false] {
                                     for scope_kept_nothing in [true, false] {
                                         for scope_confirms_nothing in [true, false] {
-                                            if !pattern_expands
+                                            if pattern == PatternStanding::NoPlace
                                                 && matches!(lock, LockStanding::Absent { .. })
                                             {
                                                 continue;
                                             }
                                             let standing = ManifestStanding {
                                                 lock,
-                                                pattern_expands,
+                                                pattern,
+                                                base_dir_not_contained,
                                                 pattern_needs_a_scope_it_lacks,
                                                 parked_origins,
                                                 parked_destination,
@@ -1876,11 +1934,15 @@ base_dir = "photos"
                                             // what left the reader without one.
                                             // A zone the refresh cannot settle
                                             // is stated in the refresh's own
-                                            // words, with its ways out.
+                                            // words, with its ways out, and a
+                                            // pattern that cannot be read and a
+                                            // `base_dir` leaving the archive
+                                            // root each on their own line.
                                             OwedWayBack::Stated => assert!(
                                                 parked_scope
                                                     || parked_destination
-                                                    || pattern_expands
+                                                    || pattern != PatternStanding::NoPlace
+                                                    || base_dir_not_contained
                                                     || zone_refusal.is_some()
                                                     || query_refused,
                                                 "nothing here states its own way back: {standing:?}"
@@ -1890,7 +1952,8 @@ base_dir = "photos"
                                                 "a scan offered where the scope kept something: {standing:?}"
                                             ),
                                             OwedWayBack::AdjustPattern => assert!(
-                                                !pattern_expands && !scope_kept_nothing,
+                                                pattern == PatternStanding::NoPlace
+                                                    && !scope_kept_nothing,
                                                 "a pattern remedy owed by something other than the pattern: {standing:?}"
                                             ),
                                             OwedWayBack::ChangeTheSelection => assert!(
@@ -2016,7 +2079,7 @@ base_dir = "photos"
                 hash_matches: true,
                 header: LockHeaderStanding::Absent,
             },
-            pattern_expands: false,
+            pattern: PatternStanding::NoPlace,
             pattern_needs_a_scope_it_lacks: true,
             ..sound()
         };
@@ -2056,7 +2119,7 @@ base_dir = "photos"
         // And a current lock whose pattern will not expand is untouched by
         // this: no rebuild ever supplied its measurement.
         let current_and_unexpandable = ManifestStanding {
-            pattern_expands: false,
+            pattern: PatternStanding::NoPlace,
             ..sound()
         };
         assert_eq!(current_and_unexpandable.next_step(), NextStep::None);
@@ -2076,7 +2139,7 @@ base_dir = "photos"
                 hash_matches: true,
                 header: LockHeaderStanding::Sound,
             },
-            pattern_expands: false,
+            pattern: PatternStanding::NoPlace,
             pattern_needs_a_scope_it_lacks: true,
             scope_confirms_nothing: false,
             ..sound()

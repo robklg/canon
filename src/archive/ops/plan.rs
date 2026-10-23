@@ -21,10 +21,10 @@ use anyhow::{bail, Context, Result};
 
 use crate::archive::domain::{mtime_change, LockEntry};
 use crate::core::domain::format::{first_chars, shell_quote};
-use crate::core::domain::path::path_strip_prefix;
+use crate::core::domain::path::{path_strip_prefix, ContainedPath, NotContained};
 use crate::core::domain::time::zone::RecordedZone;
 use crate::core::repo::{self, Connection};
-use crate::expr::{prefetch_pattern_facts, Pattern, Unmeasured};
+use crate::expr::{prefetch_pattern_facts, BoundPattern, NoPlace, NotPlaced, Unmeasured};
 
 use super::pattern::{evaluate_pattern, PatternGaps};
 
@@ -47,10 +47,8 @@ pub trait PlanProgress {
 pub struct ApplyPlanParams<'a> {
     /// Filtered sources from the lock file (already filtered by --root).
     pub sources: &'a [&'a LockEntry],
-    /// Parsed output pattern.
-    pub pattern: &'a Pattern,
-    /// Fact keys needed by the pattern (from expr::extract_fact_keys).
-    pub needed_keys: &'a [String],
+    /// The output pattern, read and checked (`expr::read_pattern`).
+    pub pattern: &'a BoundPattern,
     /// The lock's own answer to why an entry might carry no scope-relative
     /// path (`ops::manifest::LockFile::unmeasured_reason`). Per run, like the
     /// pattern beside it.
@@ -68,8 +66,9 @@ pub struct ApplyPlanParams<'a> {
     pub lock_zone: &'a RecordedZone,
     /// Destination archive root ID.
     pub archive_root_id: i64,
-    /// Relative base directory within archive root (config.output.base_dir).
-    pub base_dir_rel: &'a str,
+    /// The directory within the archive root every destination is placed under
+    /// (`config.output.base_dir`), read as one that cannot leave the root.
+    pub base_dir: &'a ContainedPath,
     /// Whether this is a resume operation.
     pub resume: bool,
     /// Where to report the per-source sweep's progress, if anywhere.
@@ -88,9 +87,9 @@ pub struct ApplyTransfer {
     /// Path relative to source root (for receipt items).
     pub source_rel_path: String,
     /// Destination path relative to base_dir (for filesystem operations).
-    pub dest_rel_path: String,
+    pub dest_rel_path: ContainedPath,
     /// Destination path relative to archive root (for DB registration).
-    pub archive_rel_path: String,
+    pub archive_rel_path: ContainedPath,
     /// Content object ID (for DB registration).
     pub object_id: Option<i64>,
     /// Partial hash from lock file (for DB registration and staleness).
@@ -135,8 +134,8 @@ pub struct ApplyPlan {
 /// and decides whether to bail (hard gate) or proceed (with --allow flags).
 #[derive(Debug, Default)]
 pub struct ApplyViolations {
-    /// Sources that failed pattern expansion: (source_path, error_message).
-    pub expansion_failures: Vec<(String, String)>,
+    /// Sources the pattern gives no place: (source_path, every cause it met).
+    pub expansion_failures: Vec<(String, NoPlace)>,
     /// Which causes the expansion failures met, which is what tells their
     /// remedies apart: the scope the lock lacks is carried through from the
     /// params unchanged (the lock answers it, never this run's subset of
@@ -154,8 +153,9 @@ pub struct ApplyViolations {
     pub archive_conflicts_other: Vec<(String, String)>,
     /// Sources marked as excluded since manifest generation: (id, path).
     pub excluded_sources: Vec<(i64, String)>,
-    /// Destination paths that resolve outside the archive root: (source_path, resolved_dest).
-    pub escaped_paths: Vec<(String, String)>,
+    /// Destinations that would leave the directory they are placed in:
+    /// (source_path, destination, why).
+    pub not_contained: Vec<(String, String, NotContained)>,
     /// Source files that are missing (stat failed, not found).
     pub missing_sources: Vec<(i64, String)>,
     /// Source files that exist but are not readable (permission denied).
@@ -241,21 +241,6 @@ fn staleness_remedy(stale: &[StaleSource], manifest: &str) -> Vec<String> {
     ]
 }
 
-/// Compute the archive-relative path from base_dir_rel and dest_rel.
-///
-/// This is the path recorded in the database and in the receipt. The path
-/// actually written on disk is built separately, by joining the base
-/// directory onto the archive root. The two must agree on empty and trailing
-/// separators or the records point somewhere the file is not — which would
-/// read back as "not at destination" and invite a second copy.
-fn compute_archive_rel_path(base_dir_rel: &str, dest_rel: &str) -> String {
-    if base_dir_rel.is_empty() {
-        dest_rel.to_string()
-    } else {
-        format!("{base_dir_rel}/{dest_rel}")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Plan function
 // ---------------------------------------------------------------------------
@@ -283,21 +268,9 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
     // --- Preconditions (return Err) ---
 
-    // The manifest's base_dir must stay inside the archive root. It is
-    // user-editable, and it reaches both sides unfiltered: an absolute value
-    // replaces the archive root wholesale in the filesystem join, and a
-    // parent-traversing one walks out of the root while every recorded path
-    // still claims to be archive-relative. The per-transfer escape check
-    // below compares components without normalising, so it catches neither;
-    // this is the one gate.
-    if crate::core::domain::path::rel_dir_escapes(params.base_dir_rel) {
-        bail!(
-            "Manifest base_dir '{}' escapes the archive root — absolute paths and '..' components \
-             are not allowed.\n\
-             Edit base_dir in the manifest's [output] section to a directory inside the archive root.",
-            params.base_dir_rel
-        );
-    }
+    // The manifest's base_dir is a `ContainedPath`, so it cannot leave the archive root, and
+    // every destination below it is one too: contained under contained stays contained.
+    let base_dir = params.base_dir;
 
     // Check all lock entries have content hashes
     let unhashed: Vec<&str> = params
@@ -322,7 +295,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     // --- Batch fetch facts for pattern evaluation ---
 
     let source_ids: Vec<i64> = params.sources.iter().map(|s| s.id).collect();
-    let facts = prefetch_pattern_facts(conn, &source_ids, params.needed_keys)?;
+    let facts = prefetch_pattern_facts(conn, &source_ids, &params.pattern.stored_keys())?;
 
     // --- Expand patterns and build transfers ---
 
@@ -336,10 +309,10 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             params.root_paths,
             &facts,
             params.lock_zone.clock(),
-        ) {
-            Ok(expansion) => {
-                let dest_rel = expansion.rel_path;
-                let archive_rel_path = compute_archive_rel_path(params.base_dir_rel, &dest_rel);
+        )? {
+            Ok(placement) => {
+                let dest_rel = placement.path;
+                let archive_rel_path = base_dir.join(&dest_rel);
                 let source_root_path = params
                     .root_paths
                     .get(&source.root_id)
@@ -372,12 +345,20 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                     hash,
                 });
             }
-            Err(e) => {
-                violations.pattern_gaps.met(&e);
+            Err(NotPlaced::NoPlace(no_place)) => {
+                violations.pattern_gaps.met(&no_place);
                 violations
                     .expansion_failures
-                    .push((source.path.clone(), e.to_string()));
+                    .push((source.path.clone(), no_place));
             }
+            Err(NotPlaced::NotContained { destination, why }) => {
+                violations.pattern_gaps.not_contained(&why);
+                violations
+                    .not_contained
+                    .push((source.path.clone(), destination, why));
+            }
+            // A key's type changed while this ran: an answer, and the run stops.
+            Err(NotPlaced::TypeChanged(refused)) => return Err(refused.into()),
         }
     }
 
@@ -386,7 +367,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     let mut dest_to_sources: HashMap<&str, Vec<&str>> = HashMap::new();
     for t in &transfers {
         dest_to_sources
-            .entry(&t.dest_rel_path)
+            .entry(t.dest_rel_path.as_str())
             .or_default()
             .push(&t.source_path);
     }
@@ -429,38 +410,6 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     } else {
         std::collections::HashSet::new()
     };
-
-    // --- Check destination paths stay under archive root ---
-
-    if !transfers.is_empty() {
-        let archive_root_path =
-            params
-                .root_paths
-                .get(&params.archive_root_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Archive root {} not found in root_paths",
-                        params.archive_root_id
-                    )
-                })?;
-
-        for transfer in &transfers {
-            // This catches a destination that is absolute or otherwise
-            // rooted elsewhere. It cannot catch a parent-directory step: the
-            // check compares path components without normalising, so a path
-            // descending through `..` still reads as being under the archive
-            // root. Removing `..` from an expanded pattern happens in the
-            // expression evaluator, and a `..`-carrying or absolute base_dir
-            // is rejected as a precondition above; this is not a second
-            // guard for either.
-            let full_dest = format!("{}/{}", archive_root_path, transfer.archive_rel_path);
-            if !crate::core::domain::path::path_is_under(&full_dest, archive_root_path) {
-                violations
-                    .escaped_paths
-                    .push((transfer.source_path.clone(), full_dest));
-            }
-        }
-    }
 
     // --- Source existence and readability preflight ---
     // In resume mode, skip this — classify_resume_entries handles source state.
@@ -598,11 +547,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                         params.archive_root_id
                     )
                 })?;
-        let base_dir = if params.base_dir_rel.is_empty() {
-            PathBuf::from(archive_root_path)
-        } else {
-            PathBuf::from(archive_root_path).join(params.base_dir_rel)
-        };
+        let base_dir = base_dir.under(Path::new(archive_root_path));
 
         let classification = classify_resume_entries(&transfers, &base_dir);
 
@@ -613,7 +558,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
 
         // Extract size_mismatches errors
         for &(t, expected, actual) in &classification.size_mismatches {
-            let dest_path = base_dir.join(&t.dest_rel_path);
+            let dest_path = t.dest_rel_path.under(&base_dir);
             resume_size_mismatches.push((dest_path.display().to_string(), expected, actual));
         }
 
@@ -666,11 +611,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                     )
                 })?;
         let archive_root = Path::new(archive_root_path);
-        let base_dir = if params.base_dir_rel.is_empty() {
-            archive_root.to_path_buf()
-        } else {
-            archive_root.join(params.base_dir_rel)
-        };
+        let base_dir = base_dir.under(archive_root);
         violations.ancestor_collisions =
             check_ancestor_collisions(&transfers, &base_dir, archive_root);
     }
@@ -829,7 +770,7 @@ fn ancestor_directories(
 
     // Then each destination's own chain — the file itself is not a directory
     // the run must create, so the walk starts at its parent.
-    for dest in transfers.iter().map(|t| base_dir.join(&t.dest_rel_path)) {
+    for dest in transfers.iter().map(|t| t.dest_rel_path.under(base_dir)) {
         if let Some(parent) = dest.parent() {
             record(parent);
         }
@@ -867,7 +808,7 @@ pub fn check_ancestor_collisions(
         .map(|blocker| {
             let blocked: Vec<String> = transfers
                 .iter()
-                .map(|t| base_dir.join(&t.dest_rel_path))
+                .map(|t| t.dest_rel_path.under(base_dir))
                 .filter(|dest| dest.starts_with(&blocker))
                 .map(|dest| dest.display().to_string())
                 .collect();
@@ -913,8 +854,8 @@ pub fn check_disk_conflicts(plan: &ApplyPlan, base_dir: &Path) -> Vec<String> {
     plan.transfers
         .iter()
         .filter(|t| !db_conflicts.contains(t.archive_rel_path.as_str()))
-        .filter(|t| base_dir.join(&t.dest_rel_path).exists())
-        .map(|t| t.archive_rel_path.clone())
+        .filter(|t| t.dest_rel_path.under(base_dir).exists())
+        .map(|t| t.archive_rel_path.as_str().to_string())
         .collect()
 }
 
@@ -986,7 +927,7 @@ fn classify_resume_entries<'a>(
     };
 
     for transfer in transfers {
-        let dest_path = base_dir.join(&transfer.dest_rel_path);
+        let dest_path = transfer.dest_rel_path.under(base_dir);
         let source_exists = Path::new(&transfer.source_path).exists();
         let dest_stat = fs::metadata(&dest_path).ok();
 
@@ -1026,8 +967,7 @@ mod tests {
         insert_fact, insert_object, insert_root, insert_source_excluded,
         insert_source_with_metadata, setup_test_db,
     };
-
-    use crate::expr::{extract_fact_keys, parse_pattern};
+    use crate::expr::NoPlaceCause;
 
     fn make_lock_entry(
         id: i64,
@@ -1052,17 +992,26 @@ mod tests {
         }
     }
 
+    /// A pattern read and checked against the test database: it must bind.
+    fn read(conn: &Connection, text: &str) -> BoundPattern {
+        crate::expr::read_pattern(conn, text)
+            .unwrap()
+            .unwrap_or_else(|refused| panic!("{text}: {refused}"))
+    }
+
+    /// The base directory every test here plans under, unless it is the subject.
+    static ARCHIVE_ROOT_ITSELF: std::sync::LazyLock<ContainedPath> =
+        std::sync::LazyLock::new(ContainedPath::default);
+
     fn default_params<'a>(
         sources: &'a [&'a LockEntry],
-        pattern: &'a Pattern,
-        needed_keys: &'a [String],
+        pattern: &'a BoundPattern,
         root_paths: &'a HashMap<i64, String>,
         archive_root_id: i64,
     ) -> ApplyPlanParams<'a> {
         ApplyPlanParams {
             sources,
             pattern,
-            needed_keys,
             // Every test in this module drives a manifest with no recorded
             // scope, so this is the reading that is true of all of them.
             unmeasured: Unmeasured::NoScopeRecorded,
@@ -1071,7 +1020,7 @@ mod tests {
             pattern_needs_a_scope_it_lacks: false,
             root_paths,
             archive_root_id,
-            base_dir_rel: "",
+            base_dir: &ARCHIVE_ROOT_ITSELF,
             resume: false,
             progress: None,
             lock_zone: &UTC_LOCK_ZONE,
@@ -1126,14 +1075,13 @@ mod tests {
         let entry_a = make_lock_entry(src_a, root_id, "/photos/a.jpg", Some(obj_a), Some("hash1"));
         let entry_b = make_lock_entry(src_b, root_id, "/photos/b.jpg", Some(obj_b), Some("hash2"));
         let sources: Vec<&LockEntry> = vec![&entry_a, &entry_b];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
         let progress = RecordingPlanProgress::default();
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.progress = Some(&progress);
         plan_apply(&mut conn, &params).unwrap();
 
@@ -1143,7 +1091,7 @@ mod tests {
         );
 
         let resumed = RecordingPlanProgress::default();
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = true;
         params.progress = Some(&resumed);
         plan_apply(&mut conn, &params).unwrap();
@@ -1175,18 +1123,20 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{content.Make}/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{content.Make}/{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.transfers.len(), 1);
-        assert_eq!(plan.transfers[0].dest_rel_path, "Canon/photo.jpg");
-        assert_eq!(plan.transfers[0].archive_rel_path, "Canon/photo.jpg");
+        assert_eq!(plan.transfers[0].dest_rel_path.as_str(), "Canon/photo.jpg");
+        assert_eq!(
+            plan.transfers[0].archive_rel_path.as_str(),
+            "Canon/photo.jpg"
+        );
         assert!(plan.violations.expansion_failures.is_empty());
     }
 
@@ -1211,8 +1161,7 @@ mod tests {
         );
         entry.mtime = 1704065400;
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{source.mtime|year}/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{source.mtime|year}/{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
@@ -1222,12 +1171,12 @@ mod tests {
         let plan = with_test_zone(UserZone::for_test("America/New_York"), || {
             let params = ApplyPlanParams {
                 lock_zone: &lock_zone,
-                ..default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id)
+                ..default_params(&sources, &pattern, &root_paths, archive_id)
             };
             plan_apply(&mut conn, &params).unwrap()
         });
         assert_eq!(plan.transfers.len(), 1);
-        assert_eq!(plan.transfers[0].dest_rel_path, "2024/a.jpg");
+        assert_eq!(plan.transfers[0].dest_rel_path.as_str(), "2024/a.jpg");
     }
 
     #[test]
@@ -1253,20 +1202,20 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        params.base_dir_rel = "2024/vacation";
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
+        let base = ContainedPath::new("2024/vacation").unwrap();
+        params.base_dir = &base;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
 
-        assert_eq!(plan.transfers[0].dest_rel_path, "photo.jpg");
+        assert_eq!(plan.transfers[0].dest_rel_path.as_str(), "photo.jpg");
         assert_eq!(
-            plan.transfers[0].archive_rel_path,
+            plan.transfers[0].archive_rel_path.as_str(),
             "2024/vacation/photo.jpg"
         );
     }
@@ -1285,7 +1234,16 @@ mod tests {
             1000,
             1704067200,
         );
-        // No fact inserted — pattern requires content.Make
+        // The key has facts, so the pattern reads; this source carries none of them.
+        let other = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "other.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+        crate::core::testing::insert_fact(&conn, other, "content.Make", "Canon");
 
         let entry = make_lock_entry(
             src_id,
@@ -1295,18 +1253,29 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{content.Make}/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{content.Make}/{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert!(plan.transfers.is_empty());
         assert_eq!(plan.violations.expansion_failures.len(), 1);
-        assert_eq!(plan.violations.expansion_failures[0].0, "/photos/photo.jpg");
+        let (path, no_place) = &plan.violations.expansion_failures[0];
+        assert_eq!(path, "/photos/photo.jpg");
+        assert_eq!(
+            no_place.causes,
+            [NoPlaceCause::NoFact {
+                subject: "{content.Make}".into(),
+                key: "content.Make".into(),
+            }]
+        );
+        assert_eq!(
+            plan.violations.pattern_gaps.met,
+            [(no_place.causes[0].clone(), 1)]
+        );
     }
 
     // =========================================================================
@@ -1356,13 +1325,12 @@ mod tests {
         );
         let sources: Vec<&LockEntry> = vec![&e1, &e2];
         // Pattern uses only Make + filename → both expand to "Canon/photo.jpg"
-        let pattern = parse_pattern("{content.Make}/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{content.Make}/{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.collisions.len(), 1);
@@ -1386,13 +1354,12 @@ mod tests {
         let e2 = make_lock_entry(src2, root_id, "/photos/b.jpg", Some(obj2), Some("hash2"));
         let sources: Vec<&LockEntry> = vec![&e1, &e2];
         // filename pattern produces different paths
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert!(plan.violations.collisions.is_empty());
@@ -1435,13 +1402,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.archive_conflicts_dest.len(), 1);
@@ -1481,13 +1447,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert!(plan.violations.archive_conflicts_dest.is_empty());
@@ -1540,13 +1505,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.archive_conflicts_dest.len(), 1);
@@ -1579,13 +1543,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert!(plan.violations.archive_conflicts_dest.is_empty());
@@ -1612,13 +1575,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.excluded_sources.len(), 1);
@@ -1661,13 +1623,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.dest_conflicts_in_db.len(), 1);
@@ -1700,13 +1661,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = false;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
@@ -1764,13 +1724,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = true;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
@@ -1854,13 +1813,12 @@ mod tests {
             Some("hash_pending"),
         );
         let sources: Vec<&LockEntry> = vec![&done, &pending];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = true;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
@@ -1903,13 +1861,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.stale_sources.len(), 1);
@@ -1940,13 +1897,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert!(plan.stale_sources.is_empty());
@@ -1997,13 +1953,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = true;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
@@ -2051,13 +2006,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, src_path);
         root_paths.insert(archive_id, archive_path);
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = true;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
@@ -2082,13 +2036,12 @@ mod tests {
 
         let entry = make_lock_entry(src_id, root_id, "/photos/photo.jpg", None, None);
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let result = plan_apply(&mut conn, &params);
 
         assert!(result.is_err());
@@ -2123,13 +2076,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         // Should succeed — unhashed archive files don't block apply
@@ -2146,11 +2098,10 @@ mod tests {
         let archive_id = insert_root(&conn, "/archive", "archive", false);
 
         let sources: Vec<&LockEntry> = vec![];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let root_paths = HashMap::new();
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert!(plan.transfers.is_empty());
@@ -2218,8 +2169,8 @@ mod tests {
                     source_path: format!("/photos/{p}"),
                     source_root_path: "/photos".to_string(),
                     source_rel_path: p.to_string(),
-                    dest_rel_path: p.to_string(),
-                    archive_rel_path: p.to_string(),
+                    dest_rel_path: ContainedPath::new(p).unwrap(),
+                    archive_rel_path: ContainedPath::new(p).unwrap(),
                     object_id: None,
                     partial_hash: "testhash".to_string(),
                     size: 4,
@@ -2291,9 +2242,8 @@ mod tests {
         let (archive_id, entries, root_paths, _sources) =
             ancestor_fixture(&conn, archive.path(), &[("a.jpg", true)]);
         let sources: Vec<&LockEntry> = entries.iter().collect();
-        let pattern = parse_pattern("2024/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let pattern = read(&conn, "2024/{filename}");
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
 
         let plan = plan_apply(&mut conn, &params).unwrap();
 
@@ -2322,9 +2272,8 @@ mod tests {
             &[("day1/a.jpg", true), ("day2/b.jpg", true)],
         );
         let sources: Vec<&LockEntry> = entries.iter().collect();
-        let pattern = parse_pattern("{source.rel_path}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let pattern = read(&conn, "{source.rel_path}");
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
 
         let plan = plan_apply(&mut conn, &params).unwrap();
 
@@ -2363,9 +2312,8 @@ mod tests {
             &[("day1/a.jpg", true), ("day2/b.jpg", false)],
         );
         let sources: Vec<&LockEntry> = entries.iter().collect();
-        let pattern = parse_pattern("{source.rel_path}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let pattern = read(&conn, "{source.rel_path}");
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
 
         let full = plan_apply(&mut conn, &params).unwrap();
         assert_eq!(
@@ -2394,9 +2342,8 @@ mod tests {
         let (archive_id, entries, root_paths, _sources) =
             ancestor_fixture(&conn, archive.path(), &[("a.jpg", true)]);
         let sources: Vec<&LockEntry> = entries.iter().collect();
-        let pattern = parse_pattern("2024/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let pattern = read(&conn, "2024/{filename}");
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
         params.resume = true;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
@@ -2449,10 +2396,10 @@ mod tests {
         let (archive_id, entries, root_paths, _sources) =
             ancestor_fixture(&conn, archive.path(), &[("a.jpg", true)]);
         let sources: Vec<&LockEntry> = entries.iter().collect();
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        params.base_dir_rel = "2024/vacation";
+        let pattern = read(&conn, "{filename}");
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
+        let base = ContainedPath::new("2024/vacation").unwrap();
+        params.base_dir = &base;
 
         let plan = plan_apply(&mut conn, &params).unwrap();
 
@@ -2473,8 +2420,8 @@ mod tests {
             source_path: format!("/photos/{dest_rel_path}"),
             source_root_path: "/photos".to_string(),
             source_rel_path: dest_rel_path.to_string(),
-            dest_rel_path: dest_rel_path.to_string(),
-            archive_rel_path: dest_rel_path.to_string(),
+            dest_rel_path: ContainedPath::new(dest_rel_path).unwrap(),
+            archive_rel_path: ContainedPath::new(dest_rel_path).unwrap(),
             object_id: None,
             partial_hash: "testhash".to_string(),
             size: 4,
@@ -2533,8 +2480,8 @@ mod tests {
         let transfers = vec![ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: "hash".to_string(),
             size: 1000,
@@ -2570,8 +2517,8 @@ mod tests {
         let transfers = vec![ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: "hash".to_string(),
             size: 1000,
@@ -2602,8 +2549,8 @@ mod tests {
         let transfers = vec![ApplyTransfer {
             source_id: 1,
             source_path: "/nonexistent/photo.jpg".to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: "hash".to_string(),
             size: 1000,
@@ -2629,8 +2576,8 @@ mod tests {
         let transfers = vec![ApplyTransfer {
             source_id: 1,
             source_path: "/nonexistent/photo.jpg".to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: "hash".to_string(),
             size: 1000,
@@ -2659,8 +2606,8 @@ mod tests {
         let transfers = vec![ApplyTransfer {
             source_id: 1,
             source_path: "/src/photo.jpg".to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: "hash".to_string(),
             size: 1000,
@@ -2682,77 +2629,6 @@ mod tests {
     // =========================================================================
     // Archive root escape detection
     // =========================================================================
-
-    #[test]
-    fn test_plan_rejects_parent_traversing_base_dir() {
-        let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
-        let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(
-            &conn,
-            root_id,
-            "photo.jpg",
-            Some(obj_id),
-            1000,
-            1704067200,
-        );
-
-        let entry = make_lock_entry(
-            src_id,
-            root_id,
-            "/photos/photo.jpg",
-            Some(obj_id),
-            Some("hash1"),
-        );
-        let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
-
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        params.base_dir_rel = "../../tmp";
-        let err = plan_apply(&mut conn, &params).unwrap_err();
-        assert!(err.to_string().contains("base_dir"));
-        assert!(err.to_string().contains("escapes the archive root"));
-    }
-
-    #[test]
-    fn test_plan_rejects_absolute_base_dir() {
-        let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
-        let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(
-            &conn,
-            root_id,
-            "photo.jpg",
-            Some(obj_id),
-            1000,
-            1704067200,
-        );
-
-        let entry = make_lock_entry(
-            src_id,
-            root_id,
-            "/photos/photo.jpg",
-            Some(obj_id),
-            Some("hash1"),
-        );
-        let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
-
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        params.base_dir_rel = "/tmp/elsewhere";
-        let err = plan_apply(&mut conn, &params).unwrap_err();
-        assert!(err.to_string().contains("escapes the archive root"));
-    }
 
     #[test]
     fn test_plan_accepts_nested_base_dir() {
@@ -2777,76 +2653,46 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let mut params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        params.base_dir_rel = "collections/2020";
-        let plan = plan_apply(&mut conn, &params).unwrap();
-        assert!(plan.violations.escaped_paths.is_empty());
-        assert_eq!(
-            plan.transfers[0].archive_rel_path,
-            "collections/2020/photo.jpg"
-        );
+        // A `.` is read as the operating system reads it, and the recorded path is the one
+        // rebuilt from the parsed names.
+        for (base_dir, recorded) in [
+            ("collections/2020", "collections/2020/photo.jpg"),
+            ("./photos", "photos/photo.jpg"),
+            (".", "photo.jpg"),
+            ("out/./x", "out/x/photo.jpg"),
+        ] {
+            let base = ContainedPath::new(base_dir).unwrap();
+            let params = ApplyPlanParams {
+                base_dir: &base,
+                ..default_params(&sources, &pattern, &root_paths, archive_id)
+            };
+            let plan = plan_apply(&mut conn, &params).unwrap();
+            assert!(plan.violations.not_contained.is_empty());
+            assert_eq!(
+                plan.transfers[0].archive_rel_path.as_str(),
+                recorded,
+                "{base_dir}"
+            );
+        }
     }
 
+    /// A destination that would leave its directory reaches the plan as its own finding, never
+    /// as a transfer: `{source.rel_path[:-1]}../{filename}` for a file at the top of its root
+    /// joins to `../5.avi`. And `{source.rel_path[:-1]}/{filename}` for the same file, which
+    /// once joined to `/5.avi`, places it directly in the destination.
     #[test]
-    fn test_plan_rejects_escaped_destination() {
-        // Manually construct a scenario where archive_rel_path escapes the archive root.
-        // With normalization in place, this shouldn't happen from patterns, but we test
-        // the validation as a defense-in-depth safety net.
-        let mut conn = setup_test_db();
-        let root_id = insert_root(&conn, "/photos", "source", false);
-        let archive_id = insert_root(&conn, "/archive", "archive", false);
-        let obj_id = insert_object(&conn, "hash1", false);
-        let src_id = insert_source_with_metadata(
-            &conn,
-            root_id,
-            "photo.jpg",
-            Some(obj_id),
-            1000,
-            1704067200,
-        );
-
-        let entry = make_lock_entry(
-            src_id,
-            root_id,
-            "/photos/photo.jpg",
-            Some(obj_id),
-            Some("hash1"),
-        );
-        let sources: Vec<&LockEntry> = vec![&entry];
-        // Pattern produces a normal path — no escape expected
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
-        let mut root_paths = HashMap::new();
-        root_paths.insert(root_id, "/photos".to_string());
-        root_paths.insert(archive_id, "/archive".to_string());
-
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
-        let plan = plan_apply(&mut conn, &params).unwrap();
-
-        // Normal path should not escape
-        assert!(plan.violations.escaped_paths.is_empty());
-        assert_eq!(plan.transfers.len(), 1);
-        assert_eq!(plan.transfers[0].dest_rel_path, "photo.jpg");
-    }
-
-    #[test]
-    fn test_normalization_prevents_archive_escape() {
-        // The original bug: pattern {source.rel_path[:-1]}/{filename} on a flat file
-        // produces "/filename" which would escape via PathBuf::join.
-        // With normalization, this becomes "filename" — no escape.
+    fn a_destination_that_would_leave_its_directory_is_refused_at_preflight() {
         let mut conn = setup_test_db();
         let root_id = insert_root(&conn, "/photos", "source", false);
         let archive_id = insert_root(&conn, "/archive", "archive", false);
         let obj_id = insert_object(&conn, "hash1", false);
         let src_id =
             insert_source_with_metadata(&conn, root_id, "5.avi", Some(obj_id), 1000, 1704067200);
-
         let entry = make_lock_entry(
             src_id,
             root_id,
@@ -2855,20 +2701,28 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{source.rel_path[:-1]}/{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let pattern = read(&conn, "{source.rel_path[:-1]}../{filename}");
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
+        assert!(plan.transfers.is_empty());
+        assert_eq!(
+            plan.violations.not_contained,
+            [(
+                "/photos/5.avi".to_string(),
+                "../5.avi".to_string(),
+                NotContained::ParentDirectory
+            )]
+        );
 
-        // Normalization should have cleaned the path — no escape
-        assert!(plan.violations.escaped_paths.is_empty());
-        assert_eq!(plan.transfers.len(), 1);
-        // The dest_rel_path should be "5.avi", not "/5.avi"
-        assert_eq!(plan.transfers[0].dest_rel_path, "5.avi");
+        let pattern = read(&conn, "{source.rel_path[:-1]}/{filename}");
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
+        let plan = plan_apply(&mut conn, &params).unwrap();
+        assert!(plan.violations.not_contained.is_empty());
+        assert_eq!(plan.transfers[0].dest_rel_path.as_str(), "5.avi");
     }
 
     // =========================================================================
@@ -2899,13 +2753,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, "/photos".to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.missing_sources.len(), 1);
@@ -2936,13 +2789,12 @@ mod tests {
             Some("hash1"),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
-        let pattern = parse_pattern("{filename}").unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read(&conn, "{filename}");
         let mut root_paths = HashMap::new();
         root_paths.insert(root_id, root_path.to_string());
         root_paths.insert(archive_id, "/archive".to_string());
 
-        let params = default_params(&sources, &pattern, &needed_keys, &root_paths, archive_id);
+        let params = default_params(&sources, &pattern, &root_paths, archive_id);
         let plan = plan_apply(&mut conn, &params).unwrap();
 
         assert_eq!(plan.violations.missing_sources.len(), 1);

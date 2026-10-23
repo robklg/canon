@@ -89,10 +89,10 @@ allow = []                       # e.g. ["archived", "duplicates"]
 
 [output]
 pattern = "{scope.rel_path}"     # ← Edit this to customize organization
-base_dir = "/Volumes/Archive"
+base_dir = ""
 archive_root_id = 2
 
-# Available facts for pattern (100% coverage on 1234 sources):
+# Keys the 1,234 selected sources share, for use in the pattern:
 # ...
 ```
 
@@ -104,7 +104,7 @@ archive_root_id = 2
 
   Writing the manifest inside the destination is fine, but a manifest whose own path is a directory the pattern needs blocks every file below it. [`apply`](apply.md) rejects the run, and `apply --dry-run` shows it before anything moves. This is easy to hit by naming a manifest after a folder whose name contains a dot: `-o`/`-O` append `.toml` only when the name has no extension, so `-O photos.2024` writes exactly that name.
 - **`zone`** is the time zone used for dates, in the query and in directory names. See [The manifest's time zone](#the-manifests-time-zone).
-- **The facts comment** lists the fact keys every source carries, with their type. If a key's fact type is not uniform, it is listed as `mixed`, followed by a `canon facts convert` line for it; generate and refresh also print such keys as a warning. A time fact not written to the second for every source names its coarsest grain and how many values have it, for example `content.Taken time — 12 known only to the year`: a pattern's `|month` finds no value in those.
+- **The keys comment** lists, in one list, the keys every selected source has a value for: the source facts `canon facts` shows by default, the [built-in keys](../../reference/builtins.md) with their meaning (`hash` among them, the content hash the lock records), and the content facts, each with its type, then `scope.rel_path` where the manifest is scoped. A key some source has no value for is left out: `ext` and `source.ext` where a file has no extension. If a key's fact type is not uniform, it is listed as `mixed`, followed by a `canon facts convert` line for it; generate and refresh also print such keys as a warning. A time fact not written to the second for every source names its coarsest grain and how many values have it, for example `content.Taken time — 12 known only to the year`: a pattern's `|month` finds no value in those.
 - **`version`** field tracks the manifest format version.
 - **`[options]`** records which `--allow` flags were used during generation. [`cluster refresh`](cluster.md) reads them, because it re-selects sources from the same query. [`apply`](apply.md) reads only `duplicates`, which speaks to the content it is about to transfer; `archived` acknowledged a selection that has already happened, and apply selects nothing. What apply needs acknowledged, it asks for on its own flags.
 
@@ -289,8 +289,7 @@ If the only thing a rebuild would change is the *wording* of the message you are
 it is not offered — the report names an act when the act gets you further, not when it merely gives
 the same answer differently. In that case the problem is a pattern the lock cannot answer, so what you get in
 the rebuild's place is the pattern remedy — the same lines [`apply`](apply.md) prints when it
-reaches the pattern, and which pair depends on what the pattern is missing, because each takes
-different advice. `apply` checks the lock before the pattern, so on a lock written before the
+reaches the pattern, one for each cause met, because each takes different advice. `apply` checks the lock before the pattern, so on a lock written before the
 measurement it says to rebuild first. The report offers a rebuild where it clears what stops the
 apply: a lock without a header, a hash mismatch, a lost lock, and a pattern that needs a scope
 the lock lacks when `meta.scope` names a place with sources to measure from. A pattern that fails
@@ -304,48 +303,26 @@ Lock: 2 entries — built before lock files recorded the scopes they were built 
 A pattern that places files relative to the scope, over a lock that records none:
 
 ```
-The pattern places files relative to the scopes declared in the manifest, and this lock records none.
-Use {source.rel_path} to keep each file's own folders, or add paths to meta.scope and refresh.
+Use {source.rel_path} to keep each file's own directories, or add paths to meta.scope and run `canon cluster refresh manifest.toml`.
 ```
 
 Declaring a scope and refreshing is the second remedy taken; a manifest that already declares one
-is offered the refresh directly.
+is offered the refresh directly. Where the pattern needs a scope the lock lacks, this line prints
+alone.
 
 `{scope.rel_path}` is not a fact, so there is no fact coverage to check here. A pattern naming a
 fact your sources do not carry gets the other answer:
 
 ```
-Adjust the pattern in your manifest, or import the facts it names.
-Use 'canon facts' to see which sources carry them.
+Adjust the pattern in your manifest, or import the missing facts; or add "content.Make?" to the manifest's query to leave such sources out, then run `canon cluster refresh manifest.toml`.
+`canon facts` shows which sources have these facts
 ```
 
-A pattern using a file's save time that Canon cannot read, one at the edge of the years
-0000–9999 or beyond, gets a third pair. The file has a save time, so no import supplies it:
-
-```
-1 of 240 entries have no destination:
-  Canon cannot read this file's save time: it lies at the edge of the years 0000–9999 or beyond
-  /photos/2016/IMG_0001.jpg
-```
-
-```
-A save time Canon cannot read gives the pattern no value.
-Add "source.mtime?" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh.
-```
-
-Where both a missing fact and such a save time stop the pattern, both pairs print, the fact pair
-first; where the pattern also needs a scope the lock lacks, the scope pair prints alone. A modifier
-that asks for a finer part than a time carries gets a fourth pair, naming the key and modifier that
-failed as the query entry that leaves such files out:
-
-```
-A time known only to a coarser grain than the pattern uses gives the pattern no value.
-Use a coarser modifier in the pattern, which takes effect at the next apply; or add "content.DateTimeOriginal|month?" to the manifest's query to leave such files out, then refresh.
-```
-
-The query and a file's save time are both evaluated when the lock is built, so those ways out take
-effect at the refresh, and `cluster status` names the apply once the rebuilt lock places every file.
-The pattern is evaluated when files are placed, so a coarser modifier needs no refresh.
+Every other cause has its own line, the same as `apply` prints; see
+[Sources with no place](apply.md). The query and a file's save time are both evaluated when the
+lock is built, so those ways out take effect at the refresh, and `cluster status` names the apply
+once the rebuilt lock places every file. The pattern is evaluated when files are placed, so a
+coarser modifier needs no refresh.
 
 If the recorded scope resolves to nothing — every path in it set aside, so the report has just
 printed `no sources known at …` — a refresh is rejected outright, and pointing at one would only
@@ -377,6 +354,52 @@ The last refresh selected no sources. Update the query or scope in the manifest,
 ```
 
 A manifest that still records a `lock_hash` but whose lock file is gone gets `Lock: missing — the manifest names a lock file that is not there.`, and the rebuild as its step (`To rebuild the lock: canon cluster refresh manifest.toml`). [`apply`](apply.md) stops with an error in both cases: there is nothing to carry across.
+
+## `cluster status`
+
+`canon cluster status manifest.toml` states the state of a manifest: whether the lock still
+matches its sources, how far the manifest has been carried out, and the next step. It does not
+test an apply: none of `apply`'s pre-flight checks run, so it can name an `apply` that
+`apply --dry-run` then refuses. It exits 0, except for a manifest it cannot parse, a manifest
+version it does not support, a lock it cannot read, and a key the pattern names whose type
+changed while it ran, which it states and stops on.
+
+It reads the pattern only to work out each source's destination. Where it cannot work one out,
+each cause is stated once with how many sources met it, then the first sources:
+
+```
+3 of 240 entries have no destination:
+  2 sources: {content.Make} has no value
+  1 source: {content.Taken|month} has no value: the time is known only to the year
+  /photos/2016/IMG_0001.jpg
+  /photos/2016/IMG_0002.jpg
+  /photos/2016/IMG_0003.jpg
+```
+
+A destination that would leave its directory is counted by what the sources share,
+``1 source: the destination contains a `..` directory name``, and never looked for on disk.
+The summary counts such entries apart from the pending ones, for example
+`Summary: 12 at destination, 225 pending, 3 with no destination computable, 0 source files missing.`
+
+A pattern it cannot read is the cause for every source. It is stated under its own line, with
+every problem, and the source files are still checked against the lock:
+
+```
+apply would be rejected: the pattern cannot be used as specified — adjust the pattern in your manifest
+    {Rating}/{filename}
+     ^ `Rating` is an unknown key
+      `canon facts` lists the keys
+...
+Summary: 240 entries with no destination computable: the pattern cannot be used as specified; 0 source files missing.
+```
+
+A `base_dir` that would leave the archive root is stated the same way:
+
+```
+apply would be rejected: base_dir '../x' leaves the archive root — absolute paths, `..` components and null characters are not allowed; edit base_dir in the manifest's [output] section
+...
+Summary: 240 entries with no destination computable: base_dir leaves the archive root; 0 source files missing.
+```
 
 ### The zone in `cluster status`
 
@@ -413,5 +436,5 @@ Time zone: Europe/Kyiv (the lock's)
     apply on the machine that built the lock, or
     change the manifest's zone line to a name this machine knows for the same zone (for example, an older spelling), then canon cluster refresh manifest.toml
 
-Summary: 1 entry with no destination computed, and its source file not checked: the lock records no time zone this machine can read.
+Summary: 1 entry with no destination computable, and its source file not checked: the lock records no time zone this machine can read.
 ```

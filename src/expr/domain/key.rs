@@ -10,13 +10,12 @@
 //! (`size` is `source.size`'s value, `hash` the stored content hash).
 //!
 //! `read_key_name` is the one reader of a key's name, and each command applies
-//! its own rule to the readings it gets. Parsing a written key splits it into
-//! that name, an optional path accessor, and a modifier chain. Two grammars read a written
-//! key: `read_key`, the reader's, and `parse_key_and_accessor` with `parse_modifier`, which
-//! patterns read through (`read_key` also reads a built-in key's own modifier with
-//! `parse_modifier`).
+//! its own rule to the readings it gets. Reading a written key splits it into
+//! that name, an optional path accessor, and a modifier chain: one grammar,
+//! `read_key`, wherever a key stands — a filter, a report key, a pattern's `{…}`
+//! (it reads a built-in key's own modifier with `parse_modifier`).
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use super::bind::{check_read_as, ReadAs, Refused};
 use super::print::quoted;
@@ -41,23 +40,6 @@ use crate::core::domain::time::zone::UserZone;
 /// would widen what a `--where` clause accepts, for a key that could not mean
 /// anything there.
 pub const SCOPE_REL_PATH: &str = "scope.rel_path";
-
-/// The spelling of the pattern-only key `object.hash`, for every site that
-/// writes the key itself.
-///
-/// Not a `Key` either, and for a different reason than `scope.rel_path`: it
-/// names content identity, which no source column answers. A pattern gets it
-/// from the lock entry the manifest recorded; a filter asks
-/// `content.hash.sha256` instead. It has a name here because several places
-/// wrote the literal before this const existed.
-///
-/// One literal survives, below: `HashShort`'s expansion is `"object.hash|short"`,
-/// a composed *expression* rather than a naming of the key, and a
-/// `&'static str` return cannot be built from a const and a suffix. Stated
-/// rather than left for a reader to notice — a const claiming to be the only
-/// spelling while one sits eighty lines under it is the overstatement this
-/// facility exists to avoid.
-pub const OBJECT_HASH: &str = "object.hash";
 
 // ============================================================================
 // The three kinds of key
@@ -121,8 +103,6 @@ impl SourceFact {
 
 /// A built-in key: a short name for a value people use often, neither a source
 /// fact nor a content fact. It may have the same value as another key.
-///
-/// In patterns the first six are also aliases with expansions (`expansion`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
 pub enum BuiltinKey {
     #[strum(serialize = "filename")]
@@ -146,20 +126,6 @@ pub enum BuiltinKey {
 }
 
 impl BuiltinKey {
-    /// Get the pattern expansion for this key (if it's an alias).
-    /// Used when expanding `{key}` in manifest patterns.
-    pub fn expansion(&self) -> Option<&'static str> {
-        match self {
-            BuiltinKey::Filename => Some("source.rel_path[-1]"),
-            BuiltinKey::Stem => Some("source.rel_path[-1]|stem"),
-            BuiltinKey::Ext => Some("source.rel_path[-1]|ext"),
-            BuiltinKey::Hash => Some(OBJECT_HASH),
-            BuiltinKey::HashShort => Some("object.hash|short"),
-            BuiltinKey::Id => Some("source.id"),
-            BuiltinKey::Size | BuiltinKey::Mtime | BuiltinKey::RootId => None,
-        }
-    }
-
     /// The source fact this built-in key has the value of, where it is a short
     /// name for one (`size` is `source.size`). The one place the pairing is
     /// spoken: every reader of the pairing reads it. Exhaustive, so a new
@@ -179,15 +145,15 @@ impl BuiltinKey {
     }
 
     /// The stored key, and the modifier applied before any the writer added,
-    /// that this key is read as outside patterns — where it is an alias of a
-    /// stored fact rather than a name for itself.
+    /// that this key is read as — where it is a short name for a stored fact
+    /// rather than a name for itself.
     ///
-    /// The two hash aliases name content identity, which no source column
-    /// answers. A pattern reads them from the lock entry (`expansion`, above);
-    /// a filter or a `facts` report reads the stored content hash. Without
-    /// this the alias reached the stored-fact lookup under its own name, where
-    /// no fact is ever named `hash`: every comparison was false, and `NOT`
-    /// turned it into every source.
+    /// The two hash keys name content identity, which no source column
+    /// answers: a filter or a `facts` report reads the stored content hash, a
+    /// pattern the hash the lock entry recorded under the same key (the
+    /// context-supplied law). Without this the key reached the stored-fact
+    /// lookup under its own name, where no fact is ever named `hash`: every
+    /// comparison was false, and `NOT` turned it into every source.
     pub(super) fn reading(&self) -> Option<(&'static str, Option<&'static str>)> {
         match self {
             BuiltinKey::Hash => Some((CONTENT_HASH, None)),
@@ -291,17 +257,10 @@ impl KeyName {
     /// built-in key, else the content fact; `None` for a `source.` name that is
     /// no source fact.
     pub fn in_expression(self) -> Option<Key> {
-        let content = self.content_key.clone();
-        self.in_pattern().or(content.map(Key::ContentFact))
-    }
-
-    /// The reading in a pattern: the source fact, else the built-in key, never
-    /// the content fact — a pattern reads a stored key as written, with no
-    /// `content.` default.
-    pub(in crate::expr) fn in_pattern(self) -> Option<Key> {
         self.source_fact
             .map(Key::SourceFact)
             .or(self.builtin.map(Key::BuiltinKey))
+            .or(self.content_key.map(Key::ContentFact))
     }
 }
 
@@ -417,6 +376,15 @@ impl Key {
             },
             Key::ContentFact(_) => false,
         }
+    }
+
+    /// Whether this is a built-in key read as the content hash (`hash`,
+    /// `hash_short`) — which a pattern reads off the hash the lock entry
+    /// records (the context-supplied law). Read off `BuiltinKey::reading`, the
+    /// one place that pairing is spoken.
+    pub fn reads_the_content_hash(&self) -> bool {
+        matches!(self, Key::BuiltinKey(key)
+            if matches!(key.reading(), Some((CONTENT_HASH, _))))
     }
 
     /// The key's type where it is known without reading any of its facts: a
@@ -565,72 +533,6 @@ impl ParsedFactKey {
     }
 }
 
-/// Get pattern expansion for an alias (if it exists)
-pub(super) fn expand_alias(name: &str) -> Option<&'static str> {
-    read_key_name(name).builtin.and_then(|k| k.expansion())
-}
-
-// ============================================================================
-// Key Parsing
-// ============================================================================
-
-/// Parse key with optional accessor: `source.rel_path[-1]` or `source.rel_path[1:3]`
-pub fn parse_key_and_accessor(s: &str) -> Result<(String, Option<PathAccessor>)> {
-    if let Some(bracket_start) = s.find('[') {
-        #[expect(clippy::string_slice, reason = "a `find` position")]
-        let key = s[..bracket_start].to_string();
-        #[expect(clippy::string_slice, reason = "a `find` position")]
-        let rest = &s[bracket_start..];
-
-        if !rest.ends_with(']') {
-            bail!("Unclosed '[' in accessor");
-        }
-        #[expect(
-            clippy::string_slice,
-            reason = "inside a leading `[` and a trailing `]`, both ASCII"
-        )]
-        let inner = &rest[1..rest.len() - 1];
-
-        let accessor = parse_accessor(inner)?;
-        Ok((key, Some(accessor)))
-    } else {
-        Ok((s.to_string(), None))
-    }
-}
-
-/// Parse accessor content: `-1`, `2`, `1:3`, `-3:-1`, `:3`, `1:`
-pub(super) fn parse_accessor(s: &str) -> Result<PathAccessor> {
-    if s.contains(':') {
-        // Slice
-        let parts: Vec<&str> = s.splitn(2, ':').collect();
-        let start = if parts[0].is_empty() {
-            None
-        } else {
-            Some(
-                parts[0]
-                    .parse::<i32>()
-                    .map_err(|_| anyhow::anyhow!("Invalid slice start: '{}'", parts[0]))?,
-            )
-        };
-        let end = if parts[1].is_empty() {
-            None
-        } else {
-            Some(
-                parts[1]
-                    .parse::<i32>()
-                    .map_err(|_| anyhow::anyhow!("Invalid slice end: '{}'", parts[1]))?,
-            )
-        };
-        Ok(PathAccessor::Slice { start, end })
-    } else {
-        // Single index
-        let index = s
-            .parse::<i32>()
-            .map_err(|_| anyhow::anyhow!("Invalid index: '{s}'"))?;
-        Ok(PathAccessor::Index(index))
-    }
-}
-
 /// Read a written base key as the key the asking half evaluates, in the
 /// expression's order (`KeyName::in_expression`): a built-in key with a reading
 /// becomes that stored key plus the modifier it implies (`BuiltinKey::reading`),
@@ -771,6 +673,16 @@ impl InputKey {
         let next = rest.chars().next()?;
         let candidate = match grammar {
             Grammar::Filter => !follows_a_key_in_a_filter(rest),
+            // The text read ends where the `}` stands, so what follows the name is inside the
+            // braces.
+            Grammar::Pattern => {
+                let more = rest.trim_start_matches(is_space).chars().next();
+                if is_space(next) {
+                    more.is_some()
+                } else {
+                    !matches!(next, '[' | '|')
+                }
+            }
             Grammar::Key | Grammar::KeyList => {
                 let more = rest.trim_start_matches(is_space).chars().next();
                 match (is_space(next), grammar) {
@@ -789,7 +701,7 @@ impl InputKey {
         // part starts is stepped over whole.
         let extent = skip_end(text, end, |at, c| match grammar {
             Grammar::Filter => follows_a_key_in_a_filter(at.rest()),
-            Grammar::Key => matches!(c, '[' | '|'),
+            Grammar::Key | Grammar::Pattern => matches!(c, '[' | '|'),
             Grammar::KeyList => matches!(c, '[' | '|' | ','),
         }) - end;
         let name = format!(
@@ -797,7 +709,16 @@ impl InputKey {
             self.input_name,
             cut(rest, 0, extent).trim_end_matches(is_space)
         );
-        Some(quoted(&name))
+        Some(match grammar {
+            // In a pattern the whole `{…}`, its name quoted with `'`, which a manifest's
+            // `pattern = "…"` line holds as it is.
+            Grammar::Pattern => format!(
+                "{{{}{}}}",
+                single_quoted(&name),
+                cut(rest, extent, rest.len())
+            ),
+            Grammar::Filter | Grammar::Key | Grammar::KeyList => quoted(&name),
+        })
     }
 }
 
@@ -826,8 +747,15 @@ fn ends_not_a_key(rest: &str, grammar: Grammar) -> bool {
             _ => false,
         },
         Grammar::KeyList => chars.next() == Some(','),
-        Grammar::Key => false,
+        // A key and a pattern's key are read from a text that ends where they must.
+        Grammar::Key | Grammar::Pattern => false,
     }
+}
+
+/// A key's name in `'…'`, an inner `'` doubled: the quoting a pattern uses, since a manifest
+/// holds it inside `pattern = "…"`.
+pub(in crate::expr) fn single_quoted(name: &str) -> String {
+    format!("'{}'", name.replace('\'', "''"))
 }
 
 /// Whether `c` continues a bare name: letters and digits of any language, `_ . : / -`.
@@ -1115,6 +1043,26 @@ mod tests {
     /// Every key of the vocabulary, the content hash with them.
     fn every_key() -> impl Iterator<Item = Key> {
         Key::all().chain([Key::ContentFact(CONTENT_HASH.to_string())])
+    }
+
+    /// The keys read as the content hash are the two hash keys, and every built-in key is
+    /// either one of them or computed by the resolver, never both and never neither.
+    #[test]
+    fn the_hash_keys_alone_read_the_content_hash() {
+        let reading: Vec<String> = every_key()
+            .filter(Key::reads_the_content_hash)
+            .map(|key| key.name().to_string())
+            .collect();
+        assert_eq!(reading, ["hash", "hash_short"]);
+        // Every built-in key is answered by exactly one of the two, so a reader asking both
+        // meets no built-in key it cannot place.
+        for key in every_key().filter(|key| key.kind() == KeyKind::BuiltinKey) {
+            assert!(
+                key.reads_the_content_hash() != key.is_computed(),
+                "{}",
+                key.name()
+            );
+        }
     }
 
     /// The three readings of a name, from the vocabulary: a plain name is read
@@ -1449,7 +1397,7 @@ mod tests {
                 (
                     p.place.start,
                     p.sentence.clone(),
-                    p.rule_line.clone(),
+                    p.rule_line.as_deref().map(str::to_string),
                     p.fix.clone(),
                 )
             })

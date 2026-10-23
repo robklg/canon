@@ -1207,9 +1207,10 @@ fn architecture_rules_hold() {
 /// deliberate act as admitting a production one.
 #[test]
 fn the_context_supplied_set_is_spelled_only_inside_expr() {
-    // The two prefix tests the old skiplist was built from. `object.hash` is
-    // deliberately absent: it is an exact-match on an ordinary string and
-    // matching it would flag every unrelated mention of the key.
+    // The two prefix tests the old skiplist was built from. The content-hash
+    // key, the listed half's other name, is deliberately absent: it is an
+    // exact-match on an ordinary string and matching it would flag every
+    // unrelated mention of the key.
     const SPELLINGS: &[&str] = &["starts_with(\"source.\")", "starts_with(\"scope.\")"];
 
     /// Each exemption, with the verb it serves and how many times it spells
@@ -3932,14 +3933,15 @@ mod source {
                 "select_sources",
                 "RolePolicy",
                 "SelectionParams",
-                "parse_pattern",
-                "extract_fact_keys",
-                "placement_shape",
+                "read_pattern",
+                "BoundPattern",
                 "evaluate",
-                "Pattern",
+                "Placement",
+                "NotPlaced",
+                "NoPlace",
+                "NoPlaceCause",
                 "EvalContext",
                 "Unmeasured",
-                "PatternNoValue",
                 "ScopeVantage",
                 "prefetch_pattern_facts",
                 "PatternFacts",
@@ -3958,7 +3960,6 @@ mod source {
                 "SourceFact",
                 "CONTENT_HASH",
                 "SCOPE_REL_PATH",
-                "OBJECT_HASH",
                 "Modifier",
                 "ModifierCategory",
                 "rendered",

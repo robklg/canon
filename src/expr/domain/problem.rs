@@ -59,8 +59,16 @@ pub(in crate::expr) struct Problem {
     pub place: Place,
     pub sentence: String,
     /// The line that states the rule, where there is one.
-    pub rule_line: Option<String>,
+    pub rule_line: Option<Box<str>>,
     pub fix: Fix,
+    /// Further bytes of the same line a caret stands under, after the first: one problem met at
+    /// several places, such as every space inside a pattern's `{…}`. Boxed, and the rule line
+    /// beside it, so a problem — which every refusal's cause carries — stays as small as it was.
+    #[expect(
+        clippy::box_collection,
+        reason = "one pointer, so every cause carrying a problem keeps its size"
+    )]
+    pub also: Option<Box<Vec<usize>>>,
 }
 
 impl Problem {
@@ -73,8 +81,9 @@ impl Problem {
         Problem {
             place,
             sentence,
-            rule_line,
+            rule_line: rule_line.map(String::into_boxed_str),
             fix: Fix::None,
+            also: None,
         }
     }
 
@@ -89,6 +98,15 @@ impl Problem {
             Fix::GlobOrExact { glob, exact } => binds(glob) && binds(exact),
         };
         if !keep {
+            self.fix = Fix::None;
+        }
+    }
+
+    /// The same rule for a door whose quoted name rewrites more than the name — a pattern's,
+    /// the whole `{…}` with its modifiers: drop the quoted name unless what it rewrites to
+    /// `binds`. Every other fix is [`Self::keep_fix_that_binds`]'s.
+    pub(in crate::expr) fn keep_quoted_name_that_binds(&mut self, binds: &dyn Fn(&str) -> bool) {
+        if matches!(&self.fix, Fix::KeyName { rewrite } if !binds(rewrite)) {
             self.fix = Fix::None;
         }
     }
@@ -117,7 +135,9 @@ impl Problem {
         let mut lines = if text.trim_matches(is_space).is_empty() {
             vec![format!("{indent}{message}")]
         } else {
-            caret_block(text, self.place.start, &message, indent).to_vec()
+            let mut at = vec![self.place.start];
+            at.extend(self.also.iter().flat_map(|also| also.iter()));
+            carets_block(text, &at, &message, indent).to_vec()
         };
         if let Some(rule) = &self.rule_line {
             lines.push(format!("{indent}  {rule}"));
@@ -140,12 +160,37 @@ pub(in crate::expr) fn cut(text: &str, start: usize, end: usize) -> &str {
 /// one space and a `\r` at the line's end dropped; the caret's column is the display width of
 /// the line before `at` (a wide character two columns, an accent written as its own character
 /// none), a tab counted as one.
-pub(in crate::expr) fn caret_block(
-    text: &str,
-    at: usize,
-    message: &str,
-    indent: &str,
-) -> [String; 2] {
+#[cfg(test)]
+fn caret_block(text: &str, at: usize, message: &str, indent: &str) -> [String; 2] {
+    carets_block(text, &[at], message, indent)
+}
+
+/// [`caret_block`] with a caret under each of the bytes `at` of one line, the first being the
+/// line's: the message follows the last caret.
+fn carets_block(text: &str, at: &[usize], message: &str, indent: &str) -> [String; 2] {
+    let [line, first] = one_caret_block(text, at[0], message, indent);
+    if at.len() == 1 {
+        return [line, first];
+    }
+    let end = text.trim_end_matches(is_space).len();
+    let line_start = cut(text, 0, at[0].min(end))
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let column = |at: usize| {
+        cut(text, line_start, at.min(end))
+            .replace('\t', " ")
+            .width()
+    };
+    let mut carets = String::new();
+    for &at in at {
+        let column = column(at);
+        carets.push_str(&" ".repeat(column.saturating_sub(carets.width())));
+        carets.push('^');
+    }
+    [line, format!("{indent}{carets} {message}")]
+}
+
+fn one_caret_block(text: &str, at: usize, message: &str, indent: &str) -> [String; 2] {
     // A problem at the end sits after the last character that is not a space, so a text that
     // ends in a line break shows the line with the mistake.
     let at = at.min(text.trim_end_matches(is_space).len());
@@ -252,8 +297,9 @@ mod tests {
                 end: start + 1,
             },
             sentence: "`%` needs quotes around the value".to_string(),
-            rule_line: rule_line.map(str::to_string),
+            rule_line: rule_line.map(Into::into),
             fix,
+            also: None,
         };
         let f1 = problem(
             10,

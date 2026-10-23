@@ -19,8 +19,8 @@ needs restating somewhere else, that is the signal something belongs in this fac
 **`domain/`** — the language as pure logic, no I/O anywhere. `key` is the key vocabulary and
 how a written key is read. `read` is the reader — see The reader below — and `problem` what
 it records where a text cannot be read, and how a refusal draws it. `transform` holds the modifiers and path accessors a value can be
-put through. `pattern` parses and evaluates the shaping half, and `vantage` owns the one rule
-that half cannot answer per source — see The scope vantage below. `filter` is the asking
+put through. `pattern` reads, checks and evaluates the shaping half — see A pattern below — and
+`vantage` owns the one rule that half cannot answer per source — see The scope vantage below. `filter` is the asking
 half: the syntax tree the reader builds and the comparisons it reduces to. `glob` is a glob's
 own grammar and its matcher. `bind` reads each clause's value as its key's type — the modifier table, the
 input types, the refusal — and `print` is the printing rule. `cache`
@@ -31,9 +31,9 @@ the aliases file's entries and writes the text a manifest records for a filter t
 
 **`ops/`** — the language applied. `bind` reads the stored keys' types and binds a filter or
 a report's keys, or refuses them. `filter` runs bound filters against real rows, against a
-prefetched cache rather than a query per source. `pattern` is the shaping half's one trip to
-storage — the prefetch that reads a pattern's stored facts, and the place the context-supplied
-law is applied rather than merely stated. `selection` is the set of sources an operation
+prefetched cache rather than a query per source. `pattern` is the shaping half's trips to
+storage — `read_pattern`, binding a pattern against the stored keys' types, and the prefetch that
+reads its stored facts, the place the context-supplied law is applied rather than merely stated. `selection` is the set of sources an operation
 reports over or acts on — it lives here rather than beside any one command because exploring
 and acting must resolve to the same set. `alias` reads the aliases file, the first time a reading meets
 an alias, and hands its entries to the check. `value` reads a stored key's one value for a batch of sources, and any key's as an
@@ -91,7 +91,7 @@ glob, both through `needs_quotes_problem`. `!~` reads as `NOT` of the glob. Pins
 `question_mark_takes_one_visible_character`, `the_matcher_stays_polynomial`.
 
 **Who reads through it**: binding (`--where`, `facts --key` and `--group-by`, a manifest's
-recorded query), the printing rule and the aliases file's check. Its tree is `domain/filter.rs`'s `Expr`.
+recorded query, a pattern's `{…}`), the printing rule and the aliases file's check. Its tree is `domain/filter.rs`'s `Expr`.
 
 **An alias** is `@` and an alias name where a condition starts or a key stands; elsewhere `@`
 follows its position's rule. A command hands `ExpressionText` (its texts, and where their aliases
@@ -146,8 +146,10 @@ gives text, a character that needs quotes, or a wildcard after `=`, `!=` or in a
 sentence; any other type reads the value as that type. A glob binds only where the key gives text
 or a path, its one cause otherwise the type statement. **A fix shown reads back and binds**: each
 fix is read back and bound before it is shown, a filter's as a clause, a report's as a key
-(`keep_fix_that_binds`); a quoted name only where it names a key with facts
-(`every_fix_shown_reads_back_and_binds`, `a_quoted_name_is_offered_only_for_a_key_with_facts`). No
+(`keep_fix_that_binds`), and a pattern's quoted name, which rewrites its whole `{…}`, as a
+pattern (`a_pattern_quoted_name_is_shown_only_where_it_binds`); a quoted name only where it
+names a key with facts (`every_fix_shown_reads_back_and_binds`,
+`a_quoted_name_is_offered_only_for_a_key_with_facts`). No
 other filter is ever offered. A type mismatch on a key of type text carries the bottom line
 (`Conversion`), printed once, last, in the strongest form the refusal holds
 (`the_conversion_line_is_printed_once_in_its_strongest_form`). **Held by discipline**: a new caller
@@ -157,13 +159,46 @@ key that gained its first facts while the run read it — is an answer, printed 
 exactly, times through the time noun's period table, a modifier's part as a whole number, a bucket's
 label by equality.
 
-**Where it does not apply**: a pattern, which reads its keys through `parse_key_and_accessor`
-and meets a wrong-type modifier as a gap when `apply` evaluates it; a manifest's recorded query
-is bound like `--where`, read as specified with no aliases, its refusal's first line saying so,
+A manifest's recorded query is bound like `--where`, read as specified with no aliases, its refusal's first line saying so,
 and an `@name` where an alias would stand refused by name. What a manifest records is
 `BoundFilters::recorded`, built in the reading that bound the filter: each use replaced by a
 filter alias's value in parentheses or a key alias's key, so the recorded query selects what the
 typed text selected (`the_recorded_text_selects_what_the_typed_text_selected`).
+
+## A pattern
+
+**The one key grammar** reads every `{…}`: `domain/key.rs::read_key` at its own position,
+`Grammar::Pattern`, which only the `}` may follow, so a key reads the same in a filter, a report
+key and a pattern, the `content.` default included (verifier
+`a_key_reads_the_same_in_a_filter_a_report_and_a_pattern`). `read_pattern_text` reads the literal
+text — a `}` with no `{`, a leading or trailing `/`, `//`, a whole name `.` or `..` — and each
+`{…}`: a space outside a quoted name and `|bucket( … )` is one problem with a caret under each
+(`Problem::also`), and the key is read on as if the spaces were not there, a space between two
+parts of a bare name read as the quoted name it would be, every place put back where it was typed
+(`ReadText`). `@name` is refused, a status word is not a key, and `scope.rel_path` binds as a
+path. **Binding** is `ops/pattern.rs::read_pattern`, through `bind_pattern_key`
+(`Reads::Pattern`): a key with no facts is unknown, a key of mixed type one of the pattern's
+problems and never an answer (`ExpressionRefused::is_answer`). Every problem and cause is in one
+refusal, first line "cannot use the pattern as specified" (`every_sentence_of_the_pattern_grammar`).
+`BoundPattern` is made only there, and `evaluate` takes nothing else.
+
+**Where a value lands is decided by its type** (`evaluate`): a path value makes one directory per
+segment (`domain/transform.rs::path_segments`, the accessor's rule), a path with no segments none,
+the `/` joining it going with it only where keeping it would leave `//` or a leading `/`; any other
+value, in its one printed form, makes exactly one name and has no place where it holds `/`, is
+empty, is `.` or `..`, or holds a null character; a path with no segments leaves no file name
+where, had every other `{…}` given an ordinary name, the last name it stands in would be empty
+or `.`. The finished text is a `core::domain::path::ContainedPath`, the type the
+destination containment law is carried by, or the source is `NotPlaced::NotContained`
+(`where_a_value_lands`).
+
+**A source with no place carries every cause of every `{…}`** (`NoPlace`): each `NoPlaceCause`
+has its sentence naming the `{…}` as specified, a value's saying "a file or directory name",
+never which; its counted line (`count_line`, naming `/` where the sentence would quote a value);
+and the query entry its remedy names (`query_entry`, read back as a filter by
+`every_remedy_query_entry_binds_as_a_filter`). A remedy is composed by cause, never wording; a
+key's type changing while the run reads it is `NotPlaced::TypeChanged`, an answer, never a source
+with no place (`a_type_change_during_apply_stops_the_run_as_an_answer`).
 
 ## The printing rule
 
@@ -217,8 +252,8 @@ degenerate row where it can only be read beside the rows that make it obviously 
 **A vantage is constructed only where a manifest is written** — `cluster generate` and
 `cluster refresh`, through one shared measure function — which records each entry's measured
 path into the lock file. Pattern evaluation therefore **reads** the settled value rather than
-deriving one: `EvalContext` carries `scope_rel: Option<&str>`, not a vantage, and `get_value`'s
-`SCOPE_REL_PATH` arm is a lookup. The strip happens at write time, through the path law's own
+deriving one: `EvalContext` carries `scope_rel: Option<&str>`, not a vantage, and evaluation's
+`scope.rel_path` arm is a lookup. The strip happens at write time, through the path law's own
 `path_strip_prefix`.
 
 **An absent measurement is refused for exactly two reasons, and each states its own.** A lock
@@ -246,10 +281,10 @@ const rather than a `Key`. The facility itself never reads the manifest or the
 lock; the consumer hands it the measured value.
 
 **Whether a pattern names that key is the facility's answer, not the consumer's**
-(`Pattern::names_scope_rel_path`). A consumer needs it to tell two expansion failures apart — a
+(`BoundPattern::names_scope_rel_path`). A consumer needs it to tell two expansion failures apart — a
 scope it has not got, and a fact no source carries — which take opposite remedies; without it the
 advice is wrong for half the readers. Answered here because the alternative is a consumer matching
-on the key's spelling or on the refusal's wording, which is a second copy of a language rule
+on the key's spelling or on a sentence's wording, which is a second copy of a language rule
 living outside the language.
 
 ## The context-supplied law
@@ -274,8 +309,9 @@ Two owners, one on each side of the seam.
 **The predicate is derived, not listed — but only half of it.** The derived half reads
 `Key::is_computed`, which reads `source_row_value`'s own arms; a hand-written list gets
 `hash`/`hash_short` wrong, built-in keys the source row cannot answer. The other half —
-`SCOPE_REL_PATH` and `OBJECT_HASH` — is named literally, because neither is a `Key`, and it is
-pinned rather than derived. `a_key_is_computed_exactly_when_the_resolver_answers_it`
+`SCOPE_REL_PATH` and `CONTENT_HASH` — is named literally: the first names no key, the second the
+source row cannot answer though the lock entry recorded it, which `{hash}`, `{hash_short}` and
+`{content.hash.sha256}` read; it is pinned rather than derived. `a_key_is_computed_exactly_when_the_resolver_answers_it`
 (`domain/value.rs`) holds the derived half and is deliberately not widened to the other two:
 asserting the equality over them would assert something false.
 
@@ -311,9 +347,9 @@ a built-in key's through a source fact's arm where it is a short name for one (`
 `BuiltinKey::source_fact` alone says — the size buckets, the year grouping and the save-time cause read it too; `--where`,
 `facts --key`, `--emit` and `{source.*}` read it. Readers
 split computed from stored by the key (`Key::is_computed()`, pinned equal to the resolver's answer on a readable source), never
-by its `None` or by listing: a computed key the row cannot answer has no value. Outside patterns, `hash` reads as `content.hash.sha256` and `hash_short` as
-`content.hash.sha256|short` (`BuiltinKey::reading`); patterns keep the lock's `object.hash`.
-Pinned per reader. Not bound: pattern aliases' own modifier chains.
+by its `None` or by listing: a computed key the row cannot answer has no value. `hash` reads as `content.hash.sha256` and `hash_short` as
+`content.hash.sha256|short` (`BuiltinKey::reading`) everywhere, a pattern reading that key off
+the hash the lock entry recorded. Pinned per reader.
 
 **The key-name law**: every command taking a key's name reads it through `read_key_name`
 (`domain/key.rs`) — the source fact, built-in key and content fact it names — and applies its
@@ -321,7 +357,7 @@ own rule: an expression and `--emit` take them in that order, import and `facts 
 content reading alone. A consumer then decides by the key read (`ParsedFactKey::key`), never
 the text, since quoting never changes which key. Verifier
 `a_key_is_read_by_the_name_import_stored_it_under` (`facts/domain.rs`); `--emit`'s leg is in
-`worklist/ops.rs`. Not patterns (`pattern_key`).
+`worklist/ops.rs`.
 
 ## The source-value law
 
@@ -347,8 +383,8 @@ Times read through the frame rule on the clock the facility is handed — `Selec
 `EvalContext`'s `clock`, the display and report functions' `zone` — never the machine's; a
 manifest's run is handed the zone the manifest or its lock records. A modifier answers `Modified`: a value, or
 no value and its `NoValueCause`, which every reader treats as a missing fact, `?` included; a slice
-always has a value; a pattern refuses a too-coarse
-time with `PatternNoValue`, a typed cause the archive's remedy reads, never its sentence. A typed
+always has a value; a pattern gives a too-coarse
+time `NoPlaceCause::TooCoarse`, a typed cause the archive's remedy reads, never its sentence. A typed
 `--where` time is translated to that zone's local time once per run.
 
 A modifier's result is typed — a number part a number; `|date`, `|yearmonth` and `|datetime` a
@@ -363,7 +399,7 @@ that day (`the_table_and_the_chain_agree_on_a_time_of_day`). A text modifier aft
 reads its printed form, so `|time|lowercase|year` reads text and has no value.
 
 **A run says whether it read an instant on the clock** (`Selection.read_an_instant`,
-`EvalContext::read_an_instant`), and the chain answers it at the step that reads
+`Placement::used_an_instant`), and the chain answers it at the step that reads
 (`apply_chain`'s `Chained`): an instant compared or printed with no transform, a time modifier
 given an instant or text that reads as one — after an accessor or another modifier too — and a
 typed time with an offset; never a clock reading or a number. Pinned by

@@ -36,15 +36,16 @@ pub use ops::filter::apply_filters;
 // through, so that what is acted on is what was seen.
 pub use ops::selection::{select_sources, RolePolicy, SelectionParams};
 
-// The shaping half: a pattern, parsed, inspected for the keys it needs, read
-// for the placement it commits to, and evaluated against a source — together
-// with the scope-relative path the run that selected the source settled for
-// it, and, where there is none, the run's own reason there is none.
+// The shaping half: a manifest's pattern, read and checked against the stored keys' types —
+// or refused, with every reason — inspected for the keys it needs and the placement it commits
+// to, and evaluated against a source: where it lands, or every cause it has no place —
+// together with the scope-relative path the run that selected the source settled for it, and,
+// where there is none, the run's own reason there is none.
 pub use domain::pattern::{
-    evaluate, extract_fact_keys, parse_pattern, placement_shape, EvalContext, Pattern,
-    PatternNoValue, Unmeasured,
+    evaluate, BoundPattern, EvalContext, NoPlace, NoPlaceCause, NotPlaced, Placement, Unmeasured,
 };
 pub use domain::vantage::ScopeVantage;
+pub use ops::pattern::read_pattern;
 
 // The facts a pattern needs, read out of the database with the
 // context-supplied law already applied. The law itself stays inside: a
@@ -65,11 +66,11 @@ pub use domain::value::source_values;
 pub use ops::value::{fetch_named_values, fetch_source_values};
 
 // The key vocabulary: the one reader of a key's name, the three kinds of key,
-// and what a written one parsed to — plus the two spellings of the
-// pattern-only keys, which a manifest writes down.
+// and what a written one parsed to — plus the content hash's key and the
+// pattern-only key, which a manifest writes down.
 pub use domain::key::{
     read_key_name, BuiltinKey, Key, KeyKind, Listing, ParsedFactKey, SourceFact, CONTENT_HASH,
-    OBJECT_HASH, SCOPE_REL_PATH,
+    SCOPE_REL_PATH,
 };
 
 // What a modifier gives — a value, or none — and the one printed form of what it gave.

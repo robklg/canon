@@ -28,8 +28,8 @@ use crate::core::domain::time::zone::{RecordedZone, UserZone};
 use crate::core::repo::{self, Connection};
 use crate::expr::BoundFilters;
 use crate::expr::{
-    mixed_type_way_out, source_row_value, source_values, BuiltinKey, Key, Listing, ScopeVantage,
-    SourceAttributes, OBJECT_HASH, SCOPE_REL_PATH,
+    mixed_type_way_out, source_row_value, source_values, Key, KeyKind, Listing, ScopeVantage,
+    SourceAttributes, SCOPE_REL_PATH,
 };
 use crate::expr::{select_sources, RolePolicy, SelectionParams};
 
@@ -60,11 +60,10 @@ pub struct ClusterGeneratePlan {
     pub archived: Vec<(String, String)>,
     /// Stored keys every lock entry has a value for, each with the key's own types.
     pub full_coverage_facts: Vec<FullCoverageFact>,
-    /// The keys `canon facts` shows by default that every lock entry has a value for — the
-    /// shown source facts and `filename`, in vocabulary order — all of them, unless a save time
-    /// Canon cannot read leaves one short. Each with its type and description, which every
-    /// such key has.
-    pub full_coverage_shown_keys: Vec<(Key, FactType, &'static str)>,
+    /// The source facts `canon facts` shows by default and the built-in keys that every lock
+    /// entry has a value for, as a pattern reads them, in vocabulary order. Each with its type
+    /// and description, which every such key has.
+    pub shared_keys: Vec<(Key, FactType, &'static str)>,
     /// Root breakdown: (root_path, count) sorted by path.
     pub root_breakdown: Vec<(String, usize)>,
     /// Sources in plan with no archived copy.
@@ -213,8 +212,10 @@ pub fn plan_generate(
         })
         .collect();
     let lock_ids: HashSet<i64> = lock_entries.iter().map(|e| e.id).collect();
-    let full_coverage_shown_keys =
-        full_coverage_shown_keys(hashed_sources.iter().filter(|s| lock_ids.contains(&s.id)));
+    let shared_keys = shared_keys(
+        hashed_sources.iter().filter(|s| lock_ids.contains(&s.id)),
+        &lock_entries,
+    );
 
     // 10. Compute root breakdown from final lock entries
     let mut root_counts: HashMap<i64, usize> = HashMap::new();
@@ -246,7 +247,7 @@ pub fn plan_generate(
         lock_entries,
         archived,
         full_coverage_facts,
-        full_coverage_shown_keys,
+        shared_keys,
         root_breakdown,
         not_archived_count,
         excluded_count: selection.excluded_count,
@@ -269,7 +270,7 @@ impl ClusterGeneratePlan {
             lock_entries: vec![],
             archived: vec![],
             full_coverage_facts: vec![],
-            full_coverage_shown_keys: vec![],
+            shared_keys: vec![],
             root_breakdown: vec![],
             not_archived_count: 0,
             excluded_count: 0,
@@ -663,7 +664,7 @@ fn assemble_manifest(
     // to enumerate over nothing. The section is absent, not dropped.
     let fact_help = generate_fact_help(
         plan.lock_entries.len(),
-        &plan.full_coverage_shown_keys,
+        &plan.shared_keys,
         &plan.full_coverage_facts,
         !config.meta.scope.is_empty(),
     );
@@ -769,18 +770,33 @@ fn full_coverage_keys(
     covered
 }
 
-/// The keys shown by default that every source has a value for, counted from the resolver's
-/// own answers — never assumed to cover everything, because a save time Canon cannot read
-/// has no value.
-fn full_coverage_shown_keys<'s>(
+/// The source facts shown by default and the built-in keys that every source has a value for,
+/// as a pattern reads them, both answers the facility's: a key the resolver computes, by the
+/// resolver's own answers — never assumed, because a save time Canon cannot read has no value
+/// and a file with no extension has no `ext` — and a key read as the content hash, by the hash
+/// each lock entry records, which is what a pattern reads (`build_eval_context` hands it over).
+/// Every lock entry comes from a hashed source today, so that arm lists them. A built-in key
+/// that is neither is not listed.
+fn shared_keys<'s>(
     sources: impl Iterator<Item = &'s Source> + Clone,
+    entries: &[LockEntry],
 ) -> Vec<(Key, FactType, &'static str)> {
     Key::all_typed()
-        .filter(|(key, _, _)| key.listing() == Listing::Shown)
+        .filter(|(key, _, _)| match key.kind() {
+            KeyKind::SourceFact => key.listing() == Listing::Shown,
+            KeyKind::BuiltinKey => true,
+            KeyKind::ContentFact => false,
+        })
         .filter(|(key, _, _)| {
-            sources
-                .clone()
-                .all(|s| source_row_value(&SourceAttributes::from(s), key).is_some())
+            if key.is_computed() {
+                sources
+                    .clone()
+                    .all(|s| source_row_value(&SourceAttributes::from(s), key).is_some())
+            } else if key.reads_the_content_hash() {
+                entries.iter().all(|entry| entry.hash_value.is_some())
+            } else {
+                false
+            }
         })
         .collect()
 }
@@ -857,7 +873,7 @@ fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
 /// Generate fact help comments for the manifest.
 fn generate_fact_help(
     source_count: usize,
-    full_coverage_shown_keys: &[(Key, FactType, &'static str)],
+    shared_keys: &[(Key, FactType, &'static str)],
     full_coverage_facts: &[FullCoverageFact],
     has_scope: bool,
 ) -> String {
@@ -868,27 +884,60 @@ fn generate_fact_help(
         return String::new();
     }
 
+    // One list: the source facts and built-in keys every source has a value for, then the
+    // content facts, then the scope key where the manifest is scoped.
     let mut help = String::new();
-    help.push_str(&format!(
-        "# Available facts for pattern (100% coverage on {source_count} sources in this cluster):\n"
-    ));
+    let heading = if source_count == 1 {
+        "# Keys the 1 selected source has, for use in the pattern:".to_string()
+    } else {
+        format!(
+            "# Keys the {} selected sources share, for use in the pattern:",
+            crate::core::domain::format_count(source_count)
+        )
+    };
+    help.push_str(&heading);
+    help.push('\n');
     help.push_str("#\n");
-
-    // Built-in facts
-    help.push_str("# Built-in:\n");
-    for (key, fact_type, desc) in full_coverage_shown_keys {
-        let type_word = fact_type.as_str();
+    for (key, fact_type, desc) in shared_keys {
         help.push_str(&format!(
             "#   {:18} {:6} - {}\n",
             key.name(),
-            type_word,
+            fact_type.as_str(),
             desc
         ));
     }
-    help.push_str(&format!(
-        "#   {:18} {:6} - {}\n",
-        OBJECT_HASH, "text", "Content hash (if hashed)"
-    ));
+    for fact in full_coverage_facts {
+        let desc_part = if fact.description.is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", fact.description)
+        };
+        // A time key not all written to the second names its coarsest grain, so a
+        // pattern's finer modifier is not met by surprise at the next refresh or apply.
+        let coarse_part = match fact.coarsest {
+            Some((grain, count)) => format!(
+                " — {} known only to the {}",
+                crate::core::domain::format_count(count),
+                grain.word()
+            ),
+            None => String::new(),
+        };
+        let row = format!(
+            "#   {:18} {:6}{}{}",
+            fact.key,
+            fact.types.word(),
+            desc_part,
+            coarse_part
+        );
+        help.push_str(row.trim_end());
+        help.push('\n');
+        // A key of mixed type is offered with its way out, where the pattern is edited.
+        if fact.types.is_mixed() {
+            for line in mixed_type_way_out(&[(fact.key.as_str(), &fact.types)]) {
+                help.push_str(&format!("#     {line}\n"));
+            }
+        }
+    }
     if has_scope {
         help.push_str(&format!(
             "#   {:18} {:6} - {}\n",
@@ -896,42 +945,6 @@ fn generate_fact_help(
         ));
     }
     help.push_str("#\n");
-
-    // User facts with 100% coverage
-    if !full_coverage_facts.is_empty() {
-        help.push_str("# Content facts:\n");
-        for fact in full_coverage_facts {
-            let desc_part = if fact.description.is_empty() {
-                String::new()
-            } else {
-                format!(" - {}", fact.description)
-            };
-            // A time key not all written to the second names its coarsest grain, so a
-            // pattern's finer modifier is not met by surprise at the next refresh or apply.
-            let coarse_part = match fact.coarsest {
-                Some((grain, count)) => format!(
-                    " — {} known only to the {}",
-                    crate::core::domain::format_count(count),
-                    grain.word()
-                ),
-                None => String::new(),
-            };
-            help.push_str(&format!(
-                "#   {:18} {:6}{}{}\n",
-                fact.key,
-                fact.types.word(),
-                desc_part,
-                coarse_part
-            ));
-            // A key of mixed type is offered with its way out, where the pattern is edited.
-            if fact.types.is_mixed() {
-                for line in mixed_type_way_out(&[(fact.key.as_str(), &fact.types)]) {
-                    help.push_str(&format!("#     {line}\n"));
-                }
-            }
-        }
-        help.push_str("#\n");
-    }
 
     // Modifiers reference: every category, so the manifest's own list of what a pattern can
     // use names every modifier.
@@ -952,16 +965,6 @@ fn generate_fact_help(
         help.push_str(&format!("#   {label}: {}\n", names.join(" ")));
     }
     help.push_str("#   Path: [0] [-1] [1:3] etc.\n");
-    help.push_str("#\n");
-
-    // Aliases
-    help.push_str("# Aliases:\n");
-    for key in BuiltinKey::iter() {
-        if let Some(expansion) = key.expansion() {
-            let name: &'static str = key.into();
-            help.push_str(&format!("#   {{{name}}}  →  {{{expansion}}}\n"));
-        }
-    }
     help.push('\n');
 
     help
@@ -1428,7 +1431,7 @@ mod tests {
         assert_eq!(
             lines[width..width + 3],
             [
-                "#   content.Width      mixed ",
+                "#   content.Width      mixed",
                 "#     To see its values and convert it to one type:",
                 "#       `canon facts convert content.Width`",
             ]
@@ -1472,7 +1475,7 @@ base_dir = \"output\"\n";
         let manifest = std::fs::read_to_string(dir.path().join("cluster.toml")).unwrap();
         assert!(
             manifest.contains(
-                "#   content.Width      mixed \n\
+                "#   content.Width      mixed\n\
                  #     To see its values and convert it to one type:\n\
                  #       `canon facts convert content.Width`\n"
             ),
@@ -1512,6 +1515,98 @@ base_dir = \"output\"\n";
         assert_eq!(stamp, "2023-12-31T23:30:00Z");
     }
 
+    /// **The manifest's comment block lists the keys every selected source shares**, in one
+    /// list under one heading: a built-in key or a source fact only where every source has a
+    /// value for it as a pattern reads it — a file with no extension takes `ext` and
+    /// `source.ext` off, a lock entry with no recorded hash `hash` and `hash_short` — each with
+    /// the meaning `canon facts` prints, then `scope.rel_path` where the manifest is scoped.
+    #[test]
+    fn the_manifest_comment_block_lists_the_keys_every_source_shares() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let a = insert_object(&conn, "hash1", false);
+        let b = insert_object(&conn, "hash2", false);
+        insert_source(&conn, root, "a.jpg", Some(a));
+        insert_source(&conn, root, "README", Some(b));
+        let plan = plan_generate(&mut conn, &default_params()).unwrap();
+        assert_eq!(plan.lock_entries.len(), 2);
+
+        let named = |keys: &[(Key, FactType, &'static str)]| -> Vec<String> {
+            keys.iter()
+                .map(|(key, _, _)| key.name().to_string())
+                .collect()
+        };
+        assert_eq!(
+            named(&plan.shared_keys),
+            [
+                "source.size",
+                "source.mtime",
+                "source.path",
+                "source.rel_path",
+                "filename",
+                "stem",
+                "hash",
+                "hash_short",
+                "id",
+                "size",
+                "mtime",
+                "root_id",
+            ]
+        );
+        let mut unhashed = plan.lock_entries.clone();
+        unhashed[0].hash_value = None;
+        let without_hash = shared_keys(std::iter::empty(), &unhashed);
+        assert!(
+            !named(&without_hash).contains(&"hash".to_string()),
+            "{without_hash:?}"
+        );
+        assert!(
+            !named(&without_hash).contains(&"hash_short".to_string()),
+            "{without_hash:?}"
+        );
+
+        let help = generate_fact_help(2, &plan.shared_keys, &[], true);
+        assert!(
+            help.starts_with("# Keys the 2 selected sources share, for use in the pattern:\n#\n"),
+            "{help}"
+        );
+        let rows: Vec<&str> = help
+            .lines()
+            .skip(2)
+            .take_while(|line| line.starts_with("#   "))
+            .collect();
+        assert_eq!(rows.len(), 13, "one list, no sub-heading: {help}");
+        assert!(
+            rows.last().unwrap().starts_with("#   scope.rel_path "),
+            "{help}"
+        );
+        for (key, _, meaning) in &plan.shared_keys {
+            assert!(
+                rows.iter()
+                    .any(|row| row.starts_with(&format!("#   {} ", key.name()))
+                        && row.ends_with(meaning)),
+                "{}: {help}",
+                key.name()
+            );
+        }
+        for absent in [
+            "coverage",
+            "Built-in",
+            "Content facts:",
+            "Aliases:",
+            "object.hash",
+        ] {
+            assert!(!help.contains(absent), "{absent}: {help}");
+        }
+        assert!(
+            !generate_fact_help(2, &plan.shared_keys, &[], false).contains("scope.rel_path"),
+            "scope.rel_path only where the manifest is scoped"
+        );
+        // One source has its keys; it shares them with nothing.
+        assert!(generate_fact_help(1, &plan.shared_keys, &[], false)
+            .starts_with("# Keys the 1 selected source has, for use in the pattern:\n"));
+    }
+
     /// The manifest's facts comment lists a source fact or `filename` only where every source
     /// has a value for it: a save time Canon cannot read (9999-12-31 23:59:59 UTC here) takes
     /// `source.mtime` off the list and leaves the rest.
@@ -1528,16 +1623,20 @@ base_dir = \"output\"\n";
         let plan = plan_generate(&mut conn, &default_params()).unwrap();
         assert_eq!(plan.lock_entries.len(), 2);
         let shown = |fact: SourceFact| {
-            plan.full_coverage_shown_keys
+            plan.shared_keys
                 .iter()
                 .any(|(key, _, _)| *key == Key::SourceFact(fact))
         };
         assert!(!shown(SourceFact::Mtime));
         assert!(shown(SourceFact::Ext));
 
-        let help = generate_fact_help(2, &plan.full_coverage_shown_keys, &[], false);
-        assert!(!help.contains("source.mtime"), "{help}");
-        assert!(help.contains("source.ext"), "{help}");
+        let help = generate_fact_help(2, &plan.shared_keys, &[], false);
+        let row = |key: &str| {
+            help.lines()
+                .any(|line| line.starts_with(&format!("#   {key} ")))
+        };
+        assert!(!row("source.mtime"), "{help}");
+        assert!(row("source.ext"), "{help}");
     }
 
     /// A manifest's selection reads the zone it was handed, whatever the machine's: a file
@@ -1671,7 +1770,7 @@ base_dir = \"output\"\n";
             lock_entries,
             archived,
             full_coverage_facts: vec![],
-            full_coverage_shown_keys: vec![],
+            shared_keys: vec![],
             root_breakdown,
             not_archived_count,
             excluded_count,
@@ -2266,7 +2365,8 @@ base_dir = \"output\"\n";
     #[test]
     fn the_default_pattern_keeps_a_nested_tree_apart_at_apply_time() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
-        use crate::expr::{extract_fact_keys, parse_pattern};
+        use crate::core::domain::path::ContainedPath;
+        use crate::expr::read_pattern;
 
         let tree = tempfile::tempdir().unwrap();
         let root_path = tree.path().to_str().unwrap().to_string();
@@ -2308,8 +2408,9 @@ base_dir = \"output\"\n";
         .unwrap();
         let config: ManifestConfig =
             toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-        let pattern = parse_pattern(&config.output.pattern).unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read_pattern(&conn, &config.output.pattern)
+            .unwrap()
+            .unwrap();
 
         let sources: Vec<&LockEntry> = gen_plan.lock_entries.iter().collect();
         let mut root_paths = HashMap::new();
@@ -2320,14 +2421,13 @@ base_dir = \"output\"\n";
             &ApplyPlanParams {
                 sources: &sources,
                 pattern: &pattern,
-                needed_keys: &needed_keys,
                 // These two cases plan against a lock generation just wrote,
                 // so every entry is measured and this arm is never taken.
                 unmeasured: Unmeasured::NoScopeRecorded,
                 pattern_needs_a_scope_it_lacks: false,
                 root_paths: &root_paths,
                 archive_root_id: archive,
-                base_dir_rel: "",
+                base_dir: &ContainedPath::default(),
                 resume: false,
                 progress: None,
                 lock_zone: &parse_zone_name("UTC").unwrap(),
@@ -2361,7 +2461,8 @@ base_dir = \"output\"\n";
     #[test]
     fn sibling_scopes_keep_their_own_names_at_the_destination() {
         use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
-        use crate::expr::{extract_fact_keys, parse_pattern};
+        use crate::core::domain::path::ContainedPath;
+        use crate::expr::read_pattern;
 
         let tree = tempfile::tempdir().unwrap();
         let root_path = tree.path().to_str().unwrap().to_string();
@@ -2411,8 +2512,9 @@ base_dir = \"output\"\n";
         let config: ManifestConfig =
             toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
         assert_eq!(config.output.pattern, "{scope.rel_path}");
-        let pattern = parse_pattern(&config.output.pattern).unwrap();
-        let needed_keys = extract_fact_keys(&pattern);
+        let pattern = read_pattern(&conn, &config.output.pattern)
+            .unwrap()
+            .unwrap();
 
         let sources: Vec<&LockEntry> = gen_plan.lock_entries.iter().collect();
         let mut root_paths = HashMap::new();
@@ -2423,14 +2525,13 @@ base_dir = \"output\"\n";
             &ApplyPlanParams {
                 sources: &sources,
                 pattern: &pattern,
-                needed_keys: &needed_keys,
                 // These two cases plan against a lock generation just wrote,
                 // so every entry is measured and this arm is never taken.
                 unmeasured: Unmeasured::NoScopeRecorded,
                 pattern_needs_a_scope_it_lacks: false,
                 root_paths: &root_paths,
                 archive_root_id: archive,
-                base_dir_rel: "",
+                base_dir: &ContainedPath::default(),
                 resume: false,
                 progress: None,
                 lock_zone: &parse_zone_name("UTC").unwrap(),

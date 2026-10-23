@@ -173,24 +173,34 @@ pub(in crate::expr) fn check_read_as(
     value: &FactValue,
     refused: Refused,
 ) -> anyhow::Result<()> {
+    match read_as_changed(read_as, key, value, refused) {
+        Some(refusal) => Err(refusal.into()),
+        None => Ok(()),
+    }
+}
+
+/// [`check_read_as`]'s answer as the refusal itself, where the value is not what the key was
+/// read as: for a caller that carries it as a typed outcome rather than an error.
+pub(in crate::expr) fn read_as_changed(
+    read_as: ReadAs,
+    key: &str,
+    value: &FactValue,
+    refused: Refused,
+) -> Option<ExpressionRefused> {
     let changed = match read_as {
         ReadAs::Any => false,
         ReadAs::Absent => true,
         ReadAs::One(t) => value.kind() != t,
     };
-    if changed {
-        return Err(ExpressionRefused {
-            refused,
-            texts: Vec::new(),
-            typed_at: BTreeMap::new(),
-            causes: vec![BindCause::TypeChanged {
-                key: key.to_string(),
-                had_no_facts: read_as == ReadAs::Absent,
-            }],
-        }
-        .into());
-    }
-    Ok(())
+    changed.then(|| ExpressionRefused {
+        refused,
+        texts: Vec::new(),
+        typed_at: BTreeMap::new(),
+        causes: vec![BindCause::TypeChanged {
+            key: key.to_string(),
+            had_no_facts: read_as == ReadAs::Absent,
+        }],
+    })
 }
 
 /// The parsed tree with every key checked and every value read.
@@ -329,11 +339,24 @@ pub(in crate::expr) fn bind_expr(
 /// **A fix shown reads back and binds**: drop `cause`'s fix where `binds` refuses what it
 /// rewrites to — a filter's clause bound as a clause, a report's key as a key. Every fix is a
 /// [`Fix`], from the closed list, so no rewrite can be shown outside this check at a door that
-/// calls it — today both doors that bind a key (`bind_expr`, `bind_report_key`); a third
-/// caller of `bind_key` must call it too.
+/// calls it — today the three doors that bind a key (`bind_expr`, `bind_report_key`,
+/// `read_pattern`); a fourth caller of `bind_key` must call it too, and
+/// [`keep_quoted_name_that_binds`] as well where its quoted name rewrites more than the name.
 pub(in crate::expr) fn keep_fix_that_binds(cause: &mut BindCause, binds: &dyn Fn(&str) -> bool) {
     if let Some(problem) = cause.problem_mut() {
         problem.keep_fix_that_binds(binds);
+    }
+}
+
+/// **A pattern's quoted name reads back and binds** too: it rewrites the whole `{…}`, modifiers
+/// included, so it is more than a name; drop it where `binds` refuses what it rewrites to
+/// (`Problem::keep_quoted_name_that_binds`).
+pub(in crate::expr) fn keep_quoted_name_that_binds(
+    cause: &mut BindCause,
+    binds: &dyn Fn(&str) -> bool,
+) {
+    if let Some(problem) = cause.problem_mut() {
+        problem.keep_quoted_name_that_binds(binds);
     }
 }
 
@@ -343,6 +366,11 @@ pub(in crate::expr) fn quoted_name_key(problem: &Problem) -> Option<InputKey> {
     let Fix::KeyName { rewrite } = &problem.fix else {
         return None;
     };
+    // A pattern's quoted name is offered as its whole `{…}`.
+    let rewrite = rewrite
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(rewrite);
     let reading = read_keys(rewrite, 0, Grammar::Key, AliasMode::NotLoaded);
     match reading.value {
         Some(mut keys) if reading.problems.is_empty() && keys.len() == 1 => keys.pop(),
@@ -518,6 +546,9 @@ pub(in crate::expr) enum Reads {
     /// A report's key (`facts --key`, `--group-by`): every value it holds, of whatever type;
     /// only a modifier works on one type.
     Report,
+    /// A pattern's key, whose value is placed: a key with no facts is unknown, and a key of
+    /// mixed type is one of the pattern's problems, as for a value compared.
+    Pattern,
 }
 
 /// What a key's chain gives.
@@ -550,7 +581,7 @@ pub(in crate::expr) fn bind_key(
     if Key::read(&key.base).is_none() {
         return Err(unknown());
     }
-    let bare_existence = reads != Reads::Value && !key.has_transforms();
+    let bare_existence = matches!(reads, Reads::Existence | Reads::Report) && !key.has_transforms();
     let unbound = |read_as| {
         Ok((
             BoundKey::of(key, read_as),
@@ -567,7 +598,7 @@ pub(in crate::expr) fn bind_key(
                 Ok((BoundKey::of(key, ReadAs::Absent), chain))
             }
             Reads::Existence | Reads::Report => unbound(ReadAs::Any),
-            Reads::Value => Err(unknown()),
+            Reads::Value | Reads::Pattern => Err(unknown()),
         };
     };
     let Some(base_type) = key_types.single() else {
@@ -585,10 +616,28 @@ pub(in crate::expr) fn bind_key(
     Ok((BoundKey::of(key, read_as), chain))
 }
 
+/// **A pattern's key, bound**: what its value is read as and what its chain gives — a path makes
+/// directories, any other value one name. `scope.rel_path` names no key and is answered by the
+/// lock entry, so it binds here as a path, its chain walked from the path type; every other key
+/// through [`bind_key`], read as a value is. `clause` is the `{…}` as specified.
+pub(in crate::expr) fn bind_pattern_key(
+    key: &InputKey,
+    scope: bool,
+    clause: &str,
+    types: &HashMap<String, KeyTypes>,
+) -> Result<(BoundKey, Gives), BindCause> {
+    if scope {
+        let chain = walk(key, Some(FactType::Path))?;
+        return Ok((BoundKey::of(key, ReadAs::One(FactType::Path)), chain.gives));
+    }
+    bind_key(key, clause, Reads::Pattern, types).map(|(bound, chain)| (bound, chain.gives))
+}
+
 /// The mixed-type answer: the key as typed, its types and their counts on every root.
 fn mixed_type(key: &InputKey, clause: &str, key_types: KeyTypes, reads: Reads) -> BindCause {
     let reader = match reads {
         Reads::Report => "a modifier supports one type only",
+        Reads::Pattern => "a pattern supports one type only",
         Reads::Existence | Reads::Value => "a filter supports one type only",
     };
     let mut counts = key_types.counts().to_vec();
@@ -914,6 +963,7 @@ impl Site<'_> {
             sentence,
             rule_line: None,
             fix,
+            also: None,
         })
     }
 
@@ -1540,6 +1590,8 @@ pub(in crate::expr) enum Refused {
     Filter,
     Key,
     RecordedQuery,
+    /// A manifest's pattern, as specified.
+    Pattern,
 }
 
 /// **An expression Canon will not run**, and every reason, before anything is selected: the
@@ -1562,7 +1614,12 @@ impl ExpressionRefused {
     /// Whether every cause is an answer — what a key is — so the refusal prints without
     /// `Error:`.
     pub fn is_answer(&self) -> bool {
-        self.causes.iter().all(BindCause::is_answer)
+        self.causes.iter().all(|cause| match cause {
+            // A pattern places by the key's value, so a key of mixed type stops `apply` and is
+            // one of the pattern's problems, printed under its first line.
+            BindCause::MixedType(_) if self.refused == Refused::Pattern => false,
+            other => other.is_answer(),
+        })
     }
 
     /// The refusal of names given alone, outside any expression (`worklist --emit`), that name no
@@ -1693,6 +1750,7 @@ impl ExpressionRefused {
             Refused::Filter => "cannot run the filter as given",
             Refused::Key => "cannot use the key as given",
             Refused::RecordedQuery => "cannot run the filter as specified",
+            Refused::Pattern => "cannot use the pattern as specified",
         }
     }
 }
@@ -3093,6 +3151,7 @@ mod tests {
                 fix: Fix::KeyName {
                     rewrite: "\"content.Foo%Bar\"".to_string(),
                 },
+                also: None,
             })],
         };
         assert_eq!(

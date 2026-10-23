@@ -21,7 +21,7 @@ Facts are key-value metadata attached to [sources](source.md) or [objects](objec
 
 ## Reading a Key's Name
 
-When querying, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`. A name that is a [built-in key](../reference/builtins.md#built-in-keys), such as `size`, `filename` or `id`, reads as that key instead, so a content fact imported under such a name is reached only by its full name, `content.size`.
+In a filter, a report key and a pattern alike, the `content.` prefix is optional: `--where 'Make=Apple'` is equivalent to `--where 'content.Make=Apple'`, and `{Make}` to `{content.Make}`. A name that is a [built-in key](../reference/builtins.md#built-in-keys), such as `size`, `filename` or `id`, reads as that key instead, so a content fact imported under such a name is reached only by its full name, `content.size`.
 
 A source has one value for each key. A content fact can be stored on the source as well as on its content; filters, `canon facts`, patterns and `canon worklist` all read the fact stored on the content, and the one stored on the source only where the content has none. A fact stored on the content whose value Canon cannot read still counts as the content's: the source then has no value for the key, and the one stored on the source is not used instead.
 
@@ -116,4 +116,4 @@ Every time keeps the precision it was written at: a year, a month, a day, a minu
 
 `source.mtime` is a file's save time as the file system reports it: an instant, to the second, with no recorded offset.
 
-A save time at the edge of the years 0000–9999 or beyond has no value. The edge is within about a day of either end, because Canon accepts a time only where every time zone shows it inside those years. For such a file, `source.mtime?` is false and `NOT source.mtime?` finds it; [`canon facts --key source.mtime`](../commands/query/facts.md) counts it under `(no value)`; [`ls -l`](../commands/query/ls.md) prints `???` for its date; and `apply` stops for a pattern that uses it (see [Missing Values](../reference/expr.md#missing-values)).
+A save time at the edge of the years 0000–9999 or beyond has no value. The edge is within about a day of either end, because Canon accepts a time only where every time zone shows it inside those years. For such a file, `source.mtime?` is false and `NOT source.mtime?` finds it; [`canon facts --key source.mtime`](../commands/query/facts.md) counts it under `(no value)`; [`ls -l`](../commands/query/ls.md) prints `???` for its date; and `apply` stops for a pattern that uses it (see [Sources with no place](../reference/expr.md#sources-with-no-place)).

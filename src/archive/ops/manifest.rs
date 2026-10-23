@@ -20,7 +20,7 @@ use rusqlite::Connection;
 use crate::archive::domain::{parse_manifest_config, LockEntry, LockHeader, ManifestConfig};
 use crate::core::domain::time::zone::{parse_zone_name, RecordedZone, ZoneNameError};
 use crate::expr::{
-    read_filters, BoundFilters, ExpressionRefused, ExpressionText, Pattern, Unmeasured,
+    read_filters, BoundFilters, BoundPattern, ExpressionRefused, ExpressionText, Unmeasured,
 };
 
 /// Write content to a file and fsync to ensure it's flushed to disk.
@@ -147,13 +147,13 @@ impl LockFile {
     /// Both commands that meet the state read it, so it is asked once, here,
     /// and of the **whole file** — like the reason above it. Two things follow.
     /// The pattern half is the language facility's own reading
-    /// (`Pattern::names_scope_rel_path`), never the refusal's wording. And the
+    /// (`BoundPattern::names_scope_rel_path`), never a sentence's wording. And the
     /// lock half is the lock's, never a run's: `apply --root` carries a subset
     /// of the entries, and a predicate computed over a subset could answer
     /// differently from the file it was cut from, leaving the two commands
     /// naming opposite remedies for one manifest
     /// (`a_pattern_needing_a_scope_is_asked_of_the_whole_lock`).
-    pub fn pattern_needs_a_scope_it_lacks(&self, pattern: &Pattern) -> bool {
+    pub fn pattern_needs_a_scope_it_lacks(&self, pattern: &BoundPattern) -> bool {
         pattern.names_scope_rel_path() && self.entries.iter().any(|e| e.scope_rel_path.is_none())
     }
 
@@ -443,9 +443,10 @@ mod tests {
     /// measured entry alone says no, the file says yes.
     #[test]
     fn a_pattern_needing_a_scope_is_asked_of_the_whole_lock() {
-        use crate::expr::parse_pattern;
-        let scoped = parse_pattern("{scope.rel_path}").unwrap();
-        let unscoped = parse_pattern("{source.rel_path}").unwrap();
+        let conn = crate::core::testing::setup_test_db();
+        let read = |text: &str| crate::expr::read_pattern(&conn, text).unwrap().unwrap();
+        let scoped = read("{scope.rel_path}");
+        let unscoped = read("{source.rel_path}");
         let lock = |entries: Vec<LockEntry>| LockFile {
             header: None,
             entries,

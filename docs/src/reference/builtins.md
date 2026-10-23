@@ -38,7 +38,7 @@ Short names for values used often. Some have the same value as a source fact.
 
 [`canon facts`](../commands/query/facts.md) ends with these keys and their meanings when it is run without `--where`.
 
-A name that is a built-in key reads as that key in `--where`, `--key`, `--group-by` and `worklist --emit`. A content fact imported under such a name (`size`, `filename`, `id`) is stored as `content.size` and so on, and a filter reaches it only by that full name. [`canon facts delete`](../commands/maintain/facts-delete.md) reads every name under `content.`, so `canon facts delete size` deletes `content.size`.
+A name that is a built-in key reads as that key in `--where`, `--key`, `--group-by`, `worklist --emit` and a [pattern](expr.md). A content fact imported under such a name (`size`, `filename`, `id`) is stored as `content.size` and so on, and a filter reaches it only by that full name. [`canon facts delete`](../commands/maintain/facts-delete.md) reads every name under `content.`, so `canon facts delete size` deletes `content.size`.
 
 ## The Content Hash
 
@@ -48,17 +48,8 @@ A name that is a built-in key reads as that key in `--where`, `--key`, `--group-
 
 A content fact like any imported one, stored on the content.
 
-## Pattern Aliases
+## In a Pattern
 
-In [pattern expressions](expr.md), six built-in keys are aliases:
-
-| Alias | Expands To |
-|-------|------------|
-| `filename` | `source.rel_path[-1]` |
-| `stem` | `source.rel_path[-1]\|stem` |
-| `ext` | `source.rel_path[-1]\|ext` |
-| `hash` | `object.hash` |
-| `hash_short` | `object.hash\|short` |
-| `id` | `source.id` |
+A [pattern](expr.md) reads these keys as a filter does. `{hash}`, `{hash_short}` and `{content.hash.sha256}` read the content hash the lock file recorded for the source.
 
 Patterns also have `{scope.rel_path}`, a key no filter has: the source's path below the scope the manifest records (see [pattern expressions](expr.md)).

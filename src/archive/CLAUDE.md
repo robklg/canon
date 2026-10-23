@@ -14,7 +14,7 @@ lock file snapshotting the sources at generation time; **apply** is the act.
 archive.rs        # the barrel; every stratum mod is private
 archive/
   domain.rs       # the manifest format — pure: no I/O, no Connection, no expr
-  cli.rs          # mods, plus the one remedy sentence both commands print
+  cli.rs          # mods, plus the sentences both commands print
   cli/
     apply.rs      # canon apply
     cluster.rs    # canon cluster generate/refresh/status
@@ -202,7 +202,8 @@ The dispositions differ by what each command is about to do, and none of them is
   be turned away — `scope_kept_nothing` and `scope_confirms_nothing`, the two halves of the
   recorded scope the decision table reads. `all_accounted_for()` answers about source files the
   report checked — never over a lock placed nowhere. Whether there is a **next step** is never the
-  scope's business: none with nothing pending or unplaced over a lock that is there, nor where a
+  scope's business: none with nothing pending and no entry lacking a destination over a lock that
+  is there, nor where a
   checked entry found something lost or wrong (`found_nothing_lost_or_wrong`); *which* is the table's.
 
 The recorded-scope resolution itself, and its pins, live in `src/core/CLAUDE.md`.
@@ -329,13 +330,15 @@ the report invited the one command that refuses, in four separate ways.
 - **Two cells are unrepresentable; the third only looks like them.** `LockStanding` is an enum
   because two of a lock's claims are about a file somebody *read*: with no lock there is no
   hash to mismatch and no header to be missing, so those pairs cannot be posed at all. "No lock
-  *and* an unexpandable pattern" reads like a third and is not — `pattern_expands` sits beside the
-  enum, so the pair is constructible and only `compute_manifest_status`'s derivation keeps it from
+  *and* a pattern leaving sources with no place" reads like a third and is not — `pattern` sits
+  beside the enum, so the pair is constructible and only `compute_manifest_status`'s derivation keeps it from
   arising. Both halves are pinned where they hold: the shape's
   (`a_manifest_with_no_lock_raises_exactly_one_obstacle`, which poses the constructible pair
   rather than assuming it away) and the derivation's
-  (`an_absent_lock_is_a_state_the_read_states`, over a real manifest whose pattern cannot expand
-  and whose lock was removed).
+  (`an_absent_lock_is_a_state_the_read_states`, over a real manifest whose pattern places nothing
+  and whose lock was removed). A pattern `cluster status` cannot read and a `base_dir` leaving the
+  archive root are rows of their own (`PatternUnreadable`, `BaseDirNotContained`): each stops
+  `apply`, no rebuild leaves either, and each is stated with its own way back.
 - **A rebuild is named where it would run and would clear every obstacle in the apply's way**. One
   row answers conditionally: a pattern that will not expand is cleared only where the lock predates
   the measurement *and* the recorded scope confirms something to measure from — otherwise the
@@ -347,7 +350,7 @@ the report invited the one command that refuses, in four separate ways.
   the pattern *also* names a fact nothing supplies, so where a rebuild would supply the
   measurement it answers "clears" without knowing.
 - **What the table does not enforce**, named rather than discovered: `apply`'s further refusals —
-  a non-archive destination, an escaping `base_dir`, unhashed entries, every preflight finding —
+  a non-archive destination, unhashed entries, every preflight finding —
   are not raised from it. Each row's doc names the `apply` site that enforces it; a new apply
   refusal with no row is not build-refused.
 - **An absent lock is a state, not a failure.** `read_lock_file` returns `None` for a file that is
@@ -417,7 +420,8 @@ the report invited the one command that refuses, in four separate ways.
   matches its four answers with no rest arm
   (`a_withheld_step_is_never_left_without_an_answer`, walked over every shape the table can take,
   every input varied, the one pair construction rules out skipped by name). **The claim reaches the table's answers and no further**: the
-  interface's outermost gate — nothing pending or unplaced over a lock that is there, or a source
+  interface's outermost gate — nothing pending and no entry lacking a destination over a lock that
+  is there, or a source
   lost, or a destination of the wrong size — returns before the table is asked, and a report stopped there names no act. For a lost
   source the line above has already said to check the volume; for a wrong-sized destination
   nothing has, and `apply --resume` on the same manifest holds the look-before-deleting guidance
@@ -433,19 +437,19 @@ the report invited the one command that refuses, in four separate ways.
   A pattern failing for a fact is cleared by no rebuild, and a lock's age is stated on the
   `Lock:` line in the words `apply`'s refusal will use (`a_locks_age_is_stated_on_its_own_line`)
   — a raised obstacle the step does not answer is never left unspoken.
-  **Each pattern failure is answered by its cause.** `ops/pattern.rs`'s `PatternGaps` records
-  which causes a run met, read off the facility's typed `expr::PatternNoValue`, never off a
-  refusal's wording: a scope the lock lacks, a fact a source does not carry, a save time Canon
-  cannot read, a time coarser than the pattern's modifier. `adjust_pattern_remedy` composes one
-  pair per cause met, and every cause met alone composes one, so the step withheld above always
-  has an answer (`the_pattern_remedy_prints_one_pair_per_cause_met`). A pattern placing files
+  **Each source with no place is answered by its cause.** `ops/pattern.rs`'s `PatternGaps` records
+  every cause a run met with how many sources met it, read off the facility's typed
+  `expr::NoPlaceCause`, never off a sentence's wording, and each way a destination would leave its
+  directory. `adjust_pattern_remedy` matches every cause with no rest arm and composes one line per
+  cause met, each naming the refresh as a command for the manifest, so the step withheld above
+  always has an answer (`the_pattern_remedy_prints_one_pair_per_cause_met`). A pattern placing files
   relative to a scope the **lock** was built without is repaired by `{source.rel_path}` or by
   declaring a scope and refreshing, and never by checking fact coverage — the scope key is not a
   fact, so no import supplies it; a pattern naming a fact no source carries is repaired only by
-  the fact. The save-time and too-coarse pairs leave such files out through a query entry, the
-  too-coarse one naming each key and modifier that failed, or correct the save time; a query and
-  a save time are both read when the lock is built, so those ways name the refresh; the
-  too-coarse pair offers a coarser modifier first, which needs none (`coarse_way_out`). The
+  the fact. A value that is absent or too coarse is left out through its own query entry
+  (`NoPlaceCause::query_entry`), a save time through `source.mtime?`, or corrected; a coarser
+  modifier needs no refresh, being read at the next apply; a value that cannot be a name, and a
+  destination leaving its directory, are met by an edit to the pattern. The
   condition is the lock's, never the manifest's: a manifest may declare a scope its lock has not
   seen, and there the rebuild is the step — the table reads the same lock answer to decide it
   (`a_declared_scope_the_lock_has_not_seen_is_rebuilt_into_it`; the table once read the header's
@@ -455,8 +459,8 @@ the report invited the one command that refuses, in four separate ways.
   differently from the file it was cut from
   (`a_pattern_needing_a_scope_is_asked_of_the_whole_lock`), and carried into the table as its
   own input; its pattern half comes off
-  `expr::Pattern::names_scope_rel_path`, the facility's own reading of the pattern, never off the
-  refusal's wording — a caller matching on either would hold a second copy of a language rule
+  `expr::BoundPattern::names_scope_rel_path`, the facility's own reading of the pattern, never off a
+  sentence's wording — a caller matching on either would hold a second copy of a language rule
   (`a_pattern_that_cannot_expand_names_the_edit_and_no_command`, which asserts each answer absent
   from the other's arm). Where both fail at once the scope answer leads, the scope having to be
   settled either way.
@@ -477,11 +481,11 @@ the report invited the one command that refuses, in four separate ways.
   `ops/manifest.rs::fixtures`, a `#[cfg(test)]` module, serves the tests of `ops/status.rs` and
   `cli/apply.rs`, which stay in-file with the code they exercise. The root's externalized `tests/`
   directory is per stratum, and two strata share this helper.
-- **The manifest's base_dir is gated at plan time** (`plan_apply` precondition, via
-  `core::domain::path::rel_dir_escapes`): absolute or parent-traversing values are refused before
-  any plan is computed — an absolute value replaces the archive root in the filesystem join, a `..`
-  one walks out of it while the recorded paths still claim archive-relative. The per-transfer escape
-  check compares components without normalising and is not a second guard for either.
+- **The manifest's base_dir is read as a destination** (`cli/apply.rs`, via
+  `core::domain::path::ContainedPath::new`): absolute, `..` and null-holding values are refused
+  before any plan is computed — an absolute value replaces the archive root in the filesystem join, a
+  `..` one walks out of it. A `.` is read as the operating system reads it, and what is used
+  is the path rebuilt from the parsed names.
 - **`cluster status` classifies each entry once, in ops** (`EntryStatus`, `classify_entry`): the
   counts, the concerning-entries table, its destination column, and the missing-source warning all
   read that one field. The interface must never re-spell the classification — a second predicate

@@ -11,8 +11,9 @@ use crate::archive::ops::{manifest, pattern, plan, status};
 use crate::ceremony;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
-use crate::core::domain::format::first_chars;
+use crate::core::domain::format::{first_chars, with_visible_nulls};
 use crate::core::domain::format_count;
+use crate::core::domain::path::ContainedPath;
 use crate::core::domain::root::{DoorRefused, DoorVerb, ParkedRoot};
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::time::zone::ReadTimesOn;
@@ -20,9 +21,7 @@ use crate::core::domain::time::zone::RecordedZone;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptPlacement;
 use crate::core::repo::{self, Db};
-use crate::expr::{
-    extract_fact_keys, parse_pattern, placement_shape, prefetch_pattern_facts, Pattern, Unmeasured,
-};
+use crate::expr::{prefetch_pattern_facts, BoundPattern, NotPlaced, Unmeasured};
 
 pub struct ApplyOptions {
     pub dry_run: bool,
@@ -132,15 +131,6 @@ pub fn run(
 
     let conn = db.conn_mut();
 
-    // Parse the pattern once upfront
-    let pattern = parse_pattern(&config.output.pattern)
-        .with_context(|| format!("Failed to parse output pattern: {}", config.output.pattern))?;
-    let needed_keys = extract_fact_keys(&pattern);
-    // Asked of the whole lock, before `--root` cuts it down: which remedy a
-    // failed expansion takes is the manifest's fact, not this run's.
-    let pattern_needs_a_scope_it_lacks = lock.pattern_needs_a_scope_it_lacks(&pattern);
-    let sources = lock.entries;
-
     // Cache all root paths (single query via repo layer)
     let roots = repo::root::fetch_all(conn)?;
     let root_paths: HashMap<i64, String> = roots.iter().map(|r| (r.id, r.path.clone())).collect();
@@ -165,7 +155,7 @@ pub fn run(
     // The whole message is the refusal, on the pattern the lock-hash mismatch
     // above already uses: both say this manifest cannot be applied as it
     // stands and name the way back.
-    let Some(header) = lock.header else {
+    let Some(header) = lock.header.as_ref() else {
         return Err(lock_predates_measurement(&config_path));
     };
     // The lock's zone is the only clock this run reads times on — placement, the samples and
@@ -195,9 +185,23 @@ pub fn run(
     // notice that; the `lock_hash` above already refuses a hand-edited lock.
     let decision_scope: Vec<DecisionScope> = header
         .scope
-        .into_iter()
-        .map(|s| DecisionScope::new(s.root_id, s.root_path, s.rel_prefix))
+        .iter()
+        .map(|s| DecisionScope::new(s.root_id, s.root_path.clone(), s.rel_prefix.clone()))
         .collect();
+
+    // The pattern, read by the one key grammar and checked against the stored
+    // keys' types — after the lock's own checks, before anything is planned. A
+    // refusal is the whole answer: every problem in one run, nothing planned,
+    // no decision row.
+    let pattern = crate::expr::read_pattern(conn, &config.output.pattern)??;
+    // Asked of the whole lock, before `--root` cuts it down: which remedy a
+    // source with no place takes is the manifest's fact, not this run's.
+    let pattern_needs_a_scope_it_lacks = lock.pattern_needs_a_scope_it_lacks(&pattern);
+    let sources = lock.entries;
+    // The manifest's base_dir, read as a directory that cannot leave the archive root.
+    let Ok(base_dir_rel) = ContainedPath::new(&config.output.base_dir) else {
+        bail!("{}", super::base_dir_refusal(&config.output.base_dir));
+    };
 
     // Look up archive root from cached roots, verify it's an archive
     let archive_root = roots
@@ -232,12 +236,8 @@ pub fn run(
     }
     let archive_root_path = &archive_root.path;
 
-    // Construct full base_dir from archive root + relative subdir
-    let base_dir = if config.output.base_dir.is_empty() {
-        PathBuf::from(&archive_root_path)
-    } else {
-        PathBuf::from(&archive_root_path).join(&config.output.base_dir)
-    };
+    // The full base_dir, on disk.
+    let base_dir = base_dir_rel.under(Path::new(archive_root_path));
 
     // Filter sources by root if specified
     let filtered_sources = plan::filter_by_roots(&sources, &options.roots, &roots)?;
@@ -273,7 +273,6 @@ pub fn run(
             conn,
             &filtered_sources,
             &pattern,
-            &needed_keys,
             unmeasured,
             &root_paths,
             &base_dir,
@@ -308,13 +307,12 @@ pub fn run(
         &plan::ApplyPlanParams {
             sources: &filtered_sources,
             pattern: &pattern,
-            needed_keys: &needed_keys,
             unmeasured,
             pattern_needs_a_scope_it_lacks,
             root_paths: &root_paths,
             lock_zone: &lock_zone,
             archive_root_id: config.output.archive_root_id,
-            base_dir_rel: &config.output.base_dir,
+            base_dir: &base_dir_rel,
             resume: options.resume,
             progress: Some(&progress_impl),
         },
@@ -389,25 +387,27 @@ pub fn run(
 
     let v = &plan.violations;
 
+    // Sources with no place, then destinations that would leave their
+    // directory: both are told in the one run, so the pattern can be fixed in
+    // one pass, and the run ends on one line.
     if !v.expansion_failures.is_empty() {
-        eprintln!(
-            "Error: {} sources failed pattern expansion:",
-            v.expansion_failures.len()
-        );
-        for (path, error) in v.expansion_failures.iter().take(10) {
-            eprintln!("  {path}: {error}");
-        }
-        if v.expansion_failures.len() > 10 {
-            eprintln!("  ... and {} more", v.expansion_failures.len() - 10);
-        }
-        let remedy = super::adjust_pattern_remedy(&v.pattern_gaps);
-        if !remedy.is_empty() {
-            eprintln!();
-        }
-        for line in remedy {
+        for line in super::no_place_lines(&v.expansion_failures, &v.pattern_gaps, &config_path) {
             eprintln!("{line}");
         }
+    }
+    if !v.not_contained.is_empty() {
+        if !v.expansion_failures.is_empty() {
+            eprintln!();
+        }
+        for line in super::not_contained_lines(&v.not_contained) {
+            eprintln!("{line}");
+        }
+    }
+    if !v.expansion_failures.is_empty() {
         bail!("Aborting due to pattern expansion failures");
+    }
+    if !v.not_contained.is_empty() {
+        bail!("Aborting due to destination paths with a `..` directory name or a null character");
     }
 
     // A file where a directory has to go blocks every destination beneath it,
@@ -446,23 +446,6 @@ pub fn run(
         eprintln!();
         eprintln!("Move or rename the file in the way, or edit the pattern in your manifest.");
         bail!("Aborting due to files blocking destination directories");
-    }
-
-    if !v.escaped_paths.is_empty() {
-        eprintln!(
-            "Preflight failed: {} destination paths resolve outside the archive root.",
-            v.escaped_paths.len()
-        );
-        eprintln!();
-        for (source_path, resolved_dest) in v.escaped_paths.iter().take(10) {
-            eprintln!("  {resolved_dest} (from source: {source_path})");
-        }
-        if v.escaped_paths.len() > 10 {
-            eprintln!("  ... and {} more", v.escaped_paths.len() - 10);
-        }
-        eprintln!();
-        eprintln!("Check the pattern in your manifest.");
-        bail!("Aborting due to escaped destination paths");
     }
 
     if !v.missing_sources.is_empty() {
@@ -801,8 +784,7 @@ fn summary_zone_line(samples: &Samples, lock_zone: &RecordedZone) -> Option<Stri
 fn compute_sample_destinations(
     conn: &mut repo::Connection,
     sources: &[&LockEntry],
-    pattern: &Pattern,
-    needed_keys: &[String],
+    pattern: &BoundPattern,
     unmeasured: Unmeasured,
     root_paths: &HashMap<i64, String>,
     base_dir: &Path,
@@ -815,7 +797,7 @@ fn compute_sample_destinations(
     // The samples are decoration on a confirmation prompt, not the act, so a
     // database error drops them rather than failing the command.
     let ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
-    let Ok(facts) = prefetch_pattern_facts(conn, &ids, needed_keys) else {
+    let Ok(facts) = prefetch_pattern_facts(conn, &ids, &pattern.stored_keys()) else {
         return Samples::default();
     };
 
@@ -829,18 +811,39 @@ fn compute_sample_destinations(
             &facts,
             lock_zone.clock(),
         );
-        if let Ok(expansion) = &result {
-            samples.used_an_instant |= expansion.used_an_instant;
+        if let Ok(Ok(placement)) = &result {
+            samples.used_an_instant |= placement.used_an_instant;
         }
         if i < SAMPLE_COUNT {
+            // Built through the destination type, so a destination that would leave its
+            // directory shows as refused before the user confirms.
             samples.destinations.push(match result {
-                Ok(expansion) => SampleDestination {
-                    dest_path: base_dir.join(&expansion.rel_path).display().to_string(),
+                Ok(Ok(placement)) => SampleDestination {
+                    dest_path: placement.path.under(base_dir).display().to_string(),
                     error: None,
+                },
+                Ok(Err(NotPlaced::NoPlace(no_place))) => SampleDestination {
+                    dest_path: String::new(),
+                    error: Some(
+                        no_place
+                            .causes
+                            .iter()
+                            .map(|cause| cause.sentence())
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                },
+                Ok(Err(NotPlaced::NotContained { destination, why })) => SampleDestination {
+                    dest_path: String::new(),
+                    error: Some(super::not_contained_sentence(&destination, why)),
+                },
+                Ok(Err(NotPlaced::TypeChanged(refused))) => SampleDestination {
+                    dest_path: String::new(),
+                    error: Some(refused.to_string()),
                 },
                 Err(e) => SampleDestination {
                     dest_path: String::new(),
-                    error: Some(format!("pattern error: {e}")),
+                    error: Some(e.to_string()),
                 },
             });
         }
@@ -877,7 +880,7 @@ fn print_apply_summary(
     eprintln!("=== Apply Summary ===");
     eprintln!("Manifest: {}", config_path.display());
     eprintln!("Destination: {}", destination.base_dir.display());
-    eprintln!("Pattern: {pattern}");
+    eprintln!("Pattern: {}", with_visible_nulls(pattern));
     if let Some(line) = summary_zone_line(samples, lock_zone) {
         eprintln!("{line}");
     }
@@ -956,22 +959,21 @@ struct Destination {
 }
 
 impl Destination {
-    fn compute(base_dir: &Path, pattern: &Pattern) -> Self {
-        let (static_prefix, fans_out) = placement_shape(pattern);
+    fn compute(base_dir: &Path, pattern: &BoundPattern) -> Self {
         Self {
             base_dir: base_dir.to_path_buf(),
-            placement_dir: match static_prefix {
+            placement_dir: match pattern.leading_directory() {
                 Some(prefix) => base_dir.join(prefix),
                 None => base_dir.to_path_buf(),
             },
-            fans_out,
+            fans_out: pattern.may_nest(),
         }
     }
 
     fn placement_label(&self) -> String {
         format!(
             "Destination current contents ({}):",
-            self.placement_dir.display()
+            with_visible_nulls(&self.placement_dir.to_string_lossy())
         )
     }
 }
@@ -1033,7 +1035,7 @@ fn display_dry_run_plan(
         TransferMode::Move => "MOVE",
     };
     for transfer in &plan.transfers {
-        let dest_path = base_dir.join(&transfer.dest_rel_path);
+        let dest_path = transfer.dest_rel_path.under(base_dir);
         if !Path::new(&transfer.source_path).exists() {
             println!("[dry-run] SKIP (missing): {}", transfer.source_path);
         } else {
@@ -1047,7 +1049,7 @@ fn display_dry_run_plan(
     }
     if resume {
         for transfer in &plan.resume_already_there {
-            let dest_path = base_dir.join(&transfer.dest_rel_path);
+            let dest_path = transfer.dest_rel_path.under(base_dir);
             println!("[dry-run] Already there: {}", dest_path.display());
         }
     }
@@ -1187,6 +1189,14 @@ mod tests {
     use crate::core::domain::time::zone::{parse_zone_name, UserZone};
     use crate::expr::BoundFilters;
 
+    /// A pattern read and checked against an empty test database: it must bind.
+    fn read(text: &str) -> BoundPattern {
+        let conn = crate::core::testing::setup_test_db();
+        crate::expr::read_pattern(&conn, text)
+            .unwrap()
+            .unwrap_or_else(|refused| panic!("{text}: {refused}"))
+    }
+
     /// The confirmation's sample destinations read the lock's zone whatever the machine's, as
     /// the placement they preview does: a file saved at 2023-12-31 23:30 UTC is already 2024
     /// in Amsterdam (the lock's zone) and still 2023 in New York (the machine's) and in UTC.
@@ -1211,7 +1221,7 @@ mod tests {
             hash_type: None,
             hash_value: None,
         };
-        let pattern = parse_pattern("{source.mtime|year}/{filename}").unwrap();
+        let pattern = read("{source.mtime|year}/{filename}");
         let root_paths = HashMap::from([(root_id, "/photos".to_string())]);
 
         let lock_zone = parse_zone_name("Europe/Amsterdam").unwrap();
@@ -1221,7 +1231,6 @@ mod tests {
                 &mut conn,
                 &[&entry],
                 &pattern,
-                &[],
                 Unmeasured::NoScopeRecorded,
                 &root_paths,
                 Path::new("/archive"),
@@ -1254,7 +1263,7 @@ mod tests {
     /// manifest's base_dir, which the run may never write a file into.
     #[test]
     fn the_preview_names_the_effective_placement_directory() {
-        let pattern = parse_pattern("2024/{filename}").unwrap();
+        let pattern = read("2024/{filename}");
         let destination = Destination::compute(Path::new("/Volumes/Archive"), &pattern);
 
         assert_eq!(
@@ -1273,7 +1282,7 @@ mod tests {
     /// know, and says so rather than presenting it as the whole answer.
     #[test]
     fn the_preview_states_fan_out_and_falls_back_labeled() {
-        let pattern = parse_pattern("{source.rel_path}").unwrap();
+        let pattern = read("{source.rel_path}");
         let destination = Destination::compute(Path::new("/Volumes/Archive"), &pattern);
 
         assert_eq!(destination.placement_dir, PathBuf::from("/Volumes/Archive"));
@@ -1285,7 +1294,7 @@ mod tests {
 
         // A literal head still narrows the fallback: the fan-out happens under
         // the directory the pattern names, not at the top.
-        let nested = parse_pattern("photos/{source.rel_path}").unwrap();
+        let nested = read("photos/{source.rel_path}");
         let destination = Destination::compute(Path::new("/Volumes/Archive"), &nested);
 
         assert_eq!(
@@ -1421,15 +1430,15 @@ mod tests {
         /// stderr, read where they are data rather than output.
         fn expansion_failures(&mut self) -> Vec<(String, String)> {
             use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
-            use crate::expr::{extract_fact_keys, parse_pattern};
 
             let text = fs::read_to_string(&self.manifest).unwrap();
             let config: crate::archive::domain::ManifestConfig = toml::from_str(&text).unwrap();
             let lock = manifest::read_lock_file(&self.manifest.with_extension("lock"))
                 .unwrap()
                 .expect("the fixture writes a lock");
-            let pattern = parse_pattern(&config.output.pattern).unwrap();
-            let needed_keys = extract_fact_keys(&pattern);
+            let pattern = crate::expr::read_pattern(self.db.conn_mut(), &config.output.pattern)
+                .unwrap()
+                .unwrap();
             let unmeasured = lock.unmeasured_reason();
             let pattern_needs_a_scope_it_lacks = lock.pattern_needs_a_scope_it_lacks(&pattern);
             let entries: Vec<&LockEntry> = lock.entries.iter().collect();
@@ -1445,12 +1454,14 @@ mod tests {
                 &ApplyPlanParams {
                     sources: &entries,
                     pattern: &pattern,
-                    needed_keys: &needed_keys,
                     unmeasured,
                     pattern_needs_a_scope_it_lacks,
                     root_paths: &root_paths,
                     archive_root_id: config.output.archive_root_id,
-                    base_dir_rel: &config.output.base_dir,
+                    base_dir: &crate::core::domain::path::ContainedPath::new(
+                        &config.output.base_dir,
+                    )
+                    .unwrap(),
                     resume: false,
                     progress: None,
                     lock_zone: &parse_zone_name("UTC").unwrap(),
@@ -1461,7 +1472,18 @@ mod tests {
                 !plan.violations.expansion_failures.is_empty(),
                 "the fixture must actually fail to expand, or this proves nothing"
             );
-            plan.violations.expansion_failures.clone()
+            plan.violations
+                .expansion_failures
+                .iter()
+                .map(|(path, no_place)| {
+                    let causes: Vec<String> = no_place
+                        .causes
+                        .iter()
+                        .map(|cause| cause.sentence())
+                        .collect();
+                    (path.clone(), causes.join("; "))
+                })
+                .collect()
         }
 
         fn decision_count(&mut self) -> i64 {

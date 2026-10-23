@@ -12,10 +12,11 @@ use std::path::Path;
 
 use crate::archive::domain::ZoneRefusal;
 use crate::archive::ops::pattern::PatternGaps;
-use crate::core::domain::format::shell_quote;
+use crate::core::domain::format::{shell_quote, with_visible_nulls};
 use crate::core::domain::format_count;
+use crate::core::domain::path::NotContained;
 use crate::core::domain::time::zone::{RecordedZone, Unrecordable, UserZone, ZoneNameError};
-use crate::expr::ExpressionRefused;
+use crate::expr::{ExpressionRefused, NoPlace, NoPlaceCause};
 
 /// Whether a `cluster refresh` would run, as far as the caller telling the
 /// user about one knows.
@@ -422,99 +423,269 @@ fn zone_refusal(refusal: &ZoneRefusal) -> String {
     }
 }
 
-/// The way back from a pattern that cannot expand, where no rebuild would
-/// change that.
+/// The way back from sources the pattern gives no place, where no rebuild would change that.
 ///
-/// **One pair per cause the run met, and none is right for another.** A
-/// pattern that places files relative to the manifest's scope fails when there
-/// is no scope to place them from, and nothing about facts helps: the scope
-/// key is not a fact, so checking fact coverage sends the reader to look for
-/// something that was never missing. A pattern naming a fact no source carries
-/// fails for the opposite reason, and scoping the manifest does nothing for
-/// it. A save time Canon cannot read is neither: the file has one, so
-/// importing facts cannot supply it. Which ones the run met comes off the
-/// language facility's typed causes (`ops::pattern::PatternGaps`), never off
-/// the wording of a refusal.
+/// **One line per cause the run met, each worded for that cause, and none is right for
+/// another.** A pattern that places files relative to the manifest's scope fails where there is
+/// no scope to place them from, and nothing about facts helps: the scope key is not a fact. A
+/// stored fact a source does not carry is supplied by importing it; a value Canon works out and
+/// a value that cannot be a name are not. A save time Canon cannot read is neither: the file has
+/// one. A time too coarse for its modifier is met by a coarser modifier, which needs no refresh.
+/// A destination that would leave its directory is met by an edit to the pattern alone. Which
+/// ones the run met comes off the facility's typed causes (`ops::pattern::PatternGaps`), matched
+/// with no catch-all arm, never off the wording of a sentence.
 ///
-/// The scope answer stands alone where it is met, because the scope must be
-/// settled whatever else is wrong. A value too coarse for its modifier gets a
-/// pair naming each key and modifier that failed as the query entry that leaves
-/// such files out. That entry and a corrected save time are both read when the
-/// lock is built, so those two pairs name the refresh.
+/// The scope answer stands alone where it is met, because the scope must be settled whatever
+/// else is wrong. Each query entry is the cause's own (`NoPlaceCause::query_entry`), and every
+/// line naming a refresh names it as a command, for this manifest.
 ///
-/// Both commands say it because both meet the state: `apply` refuses on it,
-/// and `cluster status` reaches it as a withheld step whose cause names no act
-/// of its own. One composition, so the two cannot drift — which is what the
-/// two invitations to apply did before [`apply_command`] existed.
-fn adjust_pattern_remedy(gaps: &PatternGaps) -> Vec<String> {
+/// Both commands say it because both meet the state: `apply` refuses on it, and `cluster
+/// status` reaches it as a withheld step whose cause names no act of its own. One composition,
+/// so the two cannot drift.
+fn adjust_pattern_remedy(gaps: &PatternGaps, manifest: &Path) -> Vec<String> {
+    let refresh = refresh_command(manifest, false);
+    let scope = format!(
+        "Use {{source.rel_path}} to keep each file's own directories, or add paths to meta.scope \
+         and run `{refresh}`."
+    );
     if gaps.needs_a_scope_it_lacks {
-        return vec![
-            "The pattern places files relative to the scopes declared in the manifest, and this lock records none.".to_string(),
-            "Use {source.rel_path} to keep each file's own folders, or add paths to meta.scope and refresh.".to_string(),
-        ];
+        return vec![scope];
+    }
+    let mut stored = Vec::new();
+    let mut absent = Vec::new();
+    let mut coarse = Vec::new();
+    let (mut save_time, mut scoped, mut shape) = (false, false, false);
+    let add = |entries: &mut Vec<String>, cause: &NoPlaceCause| {
+        if let Some(entry) = cause.query_entry() {
+            let entry = toml::Value::String(entry).to_string();
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+    };
+    for (cause, _) in &gaps.met {
+        match cause {
+            NoPlaceCause::NoFact { .. } => add(&mut stored, cause),
+            NoPlaceCause::NoValue { .. } => add(&mut absent, cause),
+            NoPlaceCause::TooCoarse { .. } => add(&mut coarse, cause),
+            NoPlaceCause::UnreadableSaveTime => save_time = true,
+            NoPlaceCause::NoScopeRecorded | NoPlaceCause::LockPredatesMeasurement => scoped = true,
+            NoPlaceCause::ContainsSlash { .. }
+            | NoPlaceCause::Empty { .. }
+            | NoPlaceCause::DotName { .. }
+            | NoPlaceCause::NoSegments { .. }
+            | NoPlaceCause::NullChar { .. } => shape = true,
+        }
     }
     let mut lines = Vec::new();
-    if gaps.fact_not_carried {
-        lines
-            .push("Adjust the pattern in your manifest, or import the facts it names.".to_string());
-        lines.push("Use 'canon facts' to see which sources carry them.".to_string());
+    if !stored.is_empty() {
+        lines.push(format!(
+            "Adjust the pattern in your manifest, or import the missing facts; or add {} to the \
+             manifest's query to leave such sources out, then run `{refresh}`.",
+            stored.join(" and ")
+        ));
+        lines.push("`canon facts` shows which sources have these facts".to_string());
     }
-    // Both ways out below change what the lock holds, a query edit and a save time alike
-    // (placement reads the lock entry's), so each names the refresh that rebuilds it.
-    if gaps.unreadable_save_time {
-        lines.push("A save time Canon cannot read gives the pattern no value.".to_string());
-        lines.push(
-            "Add \"source.mtime?\" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh."
-                .to_string(),
-        );
+    if !absent.is_empty() {
+        lines.push(format!(
+            "Adjust the pattern in your manifest; or add {} to the manifest's query to leave such \
+             sources out, then run `{refresh}`.",
+            absent.join(" and ")
+        ));
     }
-    if !gaps.too_coarse.is_empty() {
-        lines.push(
-            "A time known only to a coarser grain than the pattern uses gives the pattern no value."
-                .to_string(),
-        );
-        lines.push(coarse_way_out(gaps));
+    if save_time {
+        lines.push(format!(
+            "Add \"source.mtime?\" to the manifest's query to leave such sources out, or correct \
+             the file's save time and scan again; then run `{refresh}`."
+        ));
+    }
+    if scoped {
+        lines.push(scope);
+    }
+    if !coarse.is_empty() {
+        lines.push(format!(
+            "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \
+             {} to the manifest's query to leave such sources out, then run `{refresh}`.",
+            coarse.join(" and ")
+        ));
+    }
+    if shape {
+        lines.push(format!(
+            "Adjust the pattern in your manifest; or leave such sources out with the manifest's \
+             query, then run `{refresh}`."
+        ));
+    }
+    if !gaps.not_contained.is_empty() {
+        lines.push(ADJUST_THE_PATTERN.to_string());
     }
     lines
 }
 
-/// The two ways out of a time too coarse for the pattern's modifier, one sentence for
-/// every command that states the cause. A coarser modifier takes effect at the next apply
-/// with no refresh, because the pattern is read when files are placed; a query entry
-/// changes what the lock holds, so only that way names the refresh.
-fn coarse_way_out(gaps: &PatternGaps) -> String {
-    let entries: Vec<String> = gaps
-        .too_coarse_chains()
-        .iter()
-        .map(|c| format!("\"{c}?\""))
-        .collect();
+/// The way back from a destination that would leave its directory.
+const ADJUST_THE_PATTERN: &str = "Adjust the pattern in your manifest.";
+
+/// `apply`'s block for the sources the pattern gives no place: how many, each source with every
+/// cause it met, then the way back for the causes met.
+fn no_place_lines(
+    failures: &[(String, NoPlace)],
+    gaps: &PatternGaps,
+    manifest: &Path,
+) -> Vec<String> {
+    let sources = if failures.len() == 1 {
+        "1 source".to_string()
+    } else {
+        format!("{} sources", format_count(failures.len()))
+    };
+    let mut lines = vec![format!("Error: {sources} failed pattern expansion:")];
+    for (path, no_place) in failures.iter().take(10) {
+        let causes: Vec<String> = no_place.causes.iter().map(NoPlaceCause::sentence).collect();
+        lines.push(format!("  {path}: {}", causes.join("; ")));
+    }
+    if failures.len() > 10 {
+        lines.push(format!(
+            "  ... and {} more",
+            format_count(failures.len() - 10)
+        ));
+    }
+    // The way back for destinations that would leave their directory follows their own block.
+    let met = PatternGaps {
+        not_contained: Vec::new(),
+        ..gaps.clone()
+    };
+    let remedy = adjust_pattern_remedy(&met, manifest);
+    if !remedy.is_empty() {
+        lines.push(String::new());
+    }
+    lines.extend(remedy);
+    lines
+}
+
+/// `apply`'s preflight block for destinations that would leave their directory: one heading per
+/// way they would, each destination listed whole (a null character as `\0`), then the way back.
+fn not_contained_lines(found: &[(String, String, NotContained)]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let met: std::collections::BTreeSet<NotContained> =
+        found.iter().map(|(_, _, why)| *why).collect();
+    for why in met {
+        let these: Vec<&(String, String, NotContained)> =
+            found.iter().filter(|(_, _, w)| *w == why).collect();
+        let one = these.len() == 1;
+        let count = if one {
+            "1 destination path".to_string()
+        } else {
+            format!("{} destination paths", format_count(these.len()))
+        };
+        let what = match (why, one) {
+            (NotContained::ParentDirectory, true) => "contains a `..` directory name",
+            (NotContained::ParentDirectory, false) => "contain a `..` directory name",
+            (NotContained::NullChar, true) => "contains a null character",
+            (NotContained::NullChar, false) => "contain a null character",
+            (NotContained::Rooted, true) => "is absolute",
+            (NotContained::Rooted, false) => "are absolute",
+        };
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("Preflight failed: {count} {what}:"));
+        lines.push(String::new());
+        for (source, destination, _) in these.iter().take(10) {
+            lines.push(format!(
+                "  {} (from source: {source})",
+                with_visible_nulls(destination)
+            ));
+        }
+        if these.len() > 10 {
+            lines.push(format!("  ... and {} more", format_count(these.len() - 10)));
+        }
+    }
+    lines.push(String::new());
+    lines.push(ADJUST_THE_PATTERN.to_string());
+    lines
+}
+
+/// One destination that would leave its directory, named whole — what a sample destination
+/// shows in its place before the user confirms.
+fn not_contained_sentence(destination: &str, why: NotContained) -> String {
+    let destination = with_visible_nulls(destination);
+    match why {
+        NotContained::ParentDirectory => {
+            format!("the destination `{destination}` contains a `..` directory name")
+        }
+        NotContained::NullChar => {
+            format!("the destination `{destination}` contains a null character")
+        }
+        NotContained::Rooted => format!("the destination `{destination}` is an absolute path"),
+    }
+}
+
+/// `cluster status`'s counted line for destinations that would leave their directory: what the
+/// sources share, since each has its own destination.
+fn not_contained_count_line(why: NotContained, sources: usize) -> String {
+    let count = if sources == 1 {
+        "1 source".to_string()
+    } else {
+        format!("{} sources", format_count(sources))
+    };
+    let what = match why {
+        NotContained::ParentDirectory => "contains a `..` directory name",
+        NotContained::NullChar => "contains a null character",
+        NotContained::Rooted => "is an absolute path",
+    };
+    format!("{count}: the destination {what}")
+}
+
+/// The clause both commands say about a `base_dir` that would leave the archive root, the value
+/// quoted as the manifest specifies it.
+fn base_dir_leaves(base_dir: &str) -> String {
     format!(
-        "Use a coarser modifier in the pattern, which takes effect at the next apply; or add {} \
-         to the manifest's query to leave such files out, then refresh.",
-        entries.join(" and ")
+        "base_dir '{}' leaves the archive root — absolute paths, `..` components and null \
+         characters are not allowed",
+        with_visible_nulls(base_dir)
     )
 }
 
-/// One line per key, modifier and grain a time was too coarse for, with how many sources
-/// hold it — read by `cluster status`; the ways out follow in its own place.
-fn coarse_value_counts(gaps: &PatternGaps) -> Vec<String> {
-    gaps.too_coarse
-        .iter()
-        .map(|((chain, grain), count)| {
-            let key = chain.split('|').next().unwrap_or(chain);
-            let (sources, them) = if *count == 1 {
-                ("source holds", "it")
-            } else {
-                ("sources hold", "them")
-            };
-            format!(
-                "{} {sources} {key} only to the {}, so {{{chain}}} has no value for {them}",
-                format_count(*count),
-                grain.word()
-            )
-        })
-        .collect()
+/// `apply`'s refusal of a `base_dir` that would leave the archive root.
+fn base_dir_refusal(base_dir: &str) -> String {
+    format!(
+        "Manifest {}.\nEdit base_dir in the manifest's [output] section to a directory inside \
+         the archive root.",
+        base_dir_leaves(base_dir)
+    )
 }
+
+/// `cluster status`'s line for the same: the act it turns away, the cause, the way back.
+fn base_dir_status_line(base_dir: &str) -> String {
+    format!(
+        "apply would be rejected: {}; edit base_dir in the manifest's [output] section",
+        base_dir_leaves(base_dir)
+    )
+}
+
+/// `cluster status`'s summary where no entry has a destination worked out, because of the
+/// pattern or `base_dir`: the entries named once with why, and the source files, which were
+/// checked.
+fn no_destination_summary(
+    count: usize,
+    because: crate::archive::ops::status::NoDestination,
+    missing: usize,
+) -> String {
+    use crate::archive::ops::status::NoDestination;
+    let entries = if count == 1 { "entry" } else { "entries" };
+    let why = match because {
+        NoDestination::PatternUnreadable => "the pattern cannot be used as specified",
+        NoDestination::BaseDirNotContained => "base_dir leaves the archive root",
+    };
+    format!(
+        "Summary: {} {entries} with no destination computable: {why}; {} source files missing.",
+        format_count(count),
+        format_count(missing)
+    )
+}
+
+/// `cluster status`'s line for a pattern it cannot read, before the pattern's own problems.
+const PATTERN_UNREADABLE: &str =
+    "apply would be rejected: the pattern cannot be used as specified — adjust the pattern in \
+     your manifest";
 
 /// What `cluster refresh` says about the zone a manifest had no line for.
 fn zone_line_recorded_statement(zone: &RecordedZone) -> String {
@@ -658,7 +829,7 @@ fn unplaced_statement(count: usize) -> String {
         ("entries", "their source files")
     };
     format!(
-        "{} {entries} with no destination computed, and {files} not checked: the lock records no \
+        "{} {entries} with no destination computable, and {files} not checked: the lock records no \
          time zone this machine can read.",
         format_count(count)
     )
@@ -666,6 +837,8 @@ fn unplaced_statement(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     /// The bypass this file exists to refuse: a remedy that spells a command
     /// and pastes a path into it on its own, rather than through the two
     /// spellings above.
@@ -741,92 +914,294 @@ mod tests {
     /// One pair per cause the run met, and every pair a run can meet says something; the
     /// scope pair stands alone where it is met; each way out that changes what the lock holds
     /// names the refresh.
+    /// **Each cause met has its own way back, worded as the no-place table writes it**, the
+    /// refresh named as a command for this manifest. Walked over every cause: the match below
+    /// has no rest arm, so a new cause fails the build here until it joins the walk.
     #[test]
     fn the_pattern_remedy_prints_one_pair_per_cause_met() {
         use super::adjust_pattern_remedy;
         use crate::archive::ops::pattern::PatternGaps;
+        use crate::core::domain::path::NotContained;
         use crate::core::domain::time::value::Precision;
+        use crate::expr::{Modifier, NoPlaceCause};
 
-        let save_time = [
-            "A save time Canon cannot read gives the pattern no value.",
-            "Add \"source.mtime?\" to the manifest's query to leave such files out, or correct the file's save time and scan again; then refresh.",
-        ];
-        let facts = [
-            "Adjust the pattern in your manifest, or import the facts it names.",
-            "Use 'canon facts' to see which sources carry them.",
-        ];
-        let coarse = |keys: &[&str]| -> PatternGaps {
-            PatternGaps {
-                too_coarse: keys
-                    .iter()
-                    .map(|k| ((k.to_string(), Precision::Year), 1))
-                    .collect(),
-                ..Default::default()
-            }
-        };
-
-        let only_save_time = PatternGaps {
-            unreadable_save_time: true,
+        let manifest = Path::new("/m/trip.toml");
+        let refresh = "`canon cluster refresh /m/trip.toml`";
+        let met = |causes: Vec<NoPlaceCause>| PatternGaps {
+            met: causes.into_iter().map(|c| (c, 1)).collect(),
             ..Default::default()
         };
-
-        // A withheld step still answers: every cause a run can meet alone composes a way
-        // back, so `cluster status` never ends on a cause with nothing after it. The
-        // destructure names every cause with no rest, so a new one fails the build here
-        // until it joins the walk below.
-        let PatternGaps {
-            needs_a_scope_it_lacks: _,
-            unreadable_save_time: _,
-            too_coarse: _,
-            fact_not_carried: _,
-        } = PatternGaps::default();
-        for alone in [
-            PatternGaps::for_lock(true),
-            only_save_time.clone(),
-            coarse(&["content.DateTimeOriginal|month"]),
-            PatternGaps {
-                fact_not_carried: true,
-                ..Default::default()
+        let every = [
+            NoPlaceCause::NoFact {
+                subject: "{content.Make}".into(),
+                key: "content.Make".into(),
             },
-        ] {
-            assert!(!adjust_pattern_remedy(&alone).is_empty(), "{alone:?}");
+            NoPlaceCause::NoValue {
+                subject: "{source.ext}".into(),
+                reason: None,
+            },
+            NoPlaceCause::UnreadableSaveTime,
+            NoPlaceCause::NoScopeRecorded,
+            NoPlaceCause::LockPredatesMeasurement,
+            NoPlaceCause::TooCoarse {
+                subject: "{content.Taken|month}".into(),
+                modifier: Modifier::Month,
+                precision: Precision::Year,
+            },
+            NoPlaceCause::ContainsSlash {
+                subject: "{content.Make}".into(),
+                value: "AC/DC".into(),
+            },
+            NoPlaceCause::Empty {
+                subject: "{content.Make}".into(),
+            },
+            NoPlaceCause::DotName {
+                subject: "{content.Make}".into(),
+                value: "..".into(),
+                in_path: false,
+            },
+            NoPlaceCause::NoSegments {
+                subject: "{source.rel_path[1:]}".into(),
+            },
+            NoPlaceCause::NullChar {
+                subject: "{content.Make}".into(),
+            },
+        ];
+        let shape = format!(
+            "Adjust the pattern in your manifest; or leave such sources out with the manifest's \
+             query, then run {refresh}."
+        );
+        let scope = format!(
+            "Use {{source.rel_path}} to keep each file's own directories, or add paths to \
+             meta.scope and run {refresh}."
+        );
+        for cause in every {
+            let expected: Vec<String> = match &cause {
+                NoPlaceCause::NoFact { .. } => vec![
+                    format!(
+                        "Adjust the pattern in your manifest, or import the missing facts; or add \
+                         \"content.Make?\" to the manifest's query to leave such sources out, then \
+                         run {refresh}."
+                    ),
+                    "`canon facts` shows which sources have these facts".to_string(),
+                ],
+                NoPlaceCause::NoValue { .. } => vec![format!(
+                    "Adjust the pattern in your manifest; or add \"source.ext?\" to the manifest's \
+                     query to leave such sources out, then run {refresh}."
+                )],
+                NoPlaceCause::UnreadableSaveTime => vec![format!(
+                    "Add \"source.mtime?\" to the manifest's query to leave such sources out, or \
+                     correct the file's save time and scan again; then run {refresh}."
+                )],
+                NoPlaceCause::NoScopeRecorded | NoPlaceCause::LockPredatesMeasurement => {
+                    vec![scope.clone()]
+                }
+                NoPlaceCause::TooCoarse { .. } => vec![format!(
+                    "Use a coarser modifier in the pattern, which takes effect at the next apply; \
+                     or add \"content.Taken|month?\" to the manifest's query to leave such sources \
+                     out, then run {refresh}."
+                )],
+                NoPlaceCause::ContainsSlash { .. }
+                | NoPlaceCause::Empty { .. }
+                | NoPlaceCause::DotName { .. }
+                | NoPlaceCause::NoSegments { .. }
+                | NoPlaceCause::NullChar { .. } => vec![shape.clone()],
+            };
+            assert_eq!(
+                adjust_pattern_remedy(&met(vec![cause.clone()]), manifest),
+                expected,
+                "{cause:?}"
+            );
         }
 
-        assert_eq!(adjust_pattern_remedy(&only_save_time), save_time);
-
-        let both = PatternGaps {
-            unreadable_save_time: true,
-            fact_not_carried: true,
+        // A destination that would leave its directory: an edit to the pattern alone.
+        let escaped = PatternGaps {
+            not_contained: vec![(NotContained::ParentDirectory, 1)],
             ..Default::default()
         };
-        assert_eq!(adjust_pattern_remedy(&both), [facts, save_time].concat());
+        assert_eq!(
+            adjust_pattern_remedy(&escaped, manifest),
+            ["Adjust the pattern in your manifest."]
+        );
 
+        // Where the pattern needs a scope the lock lacks, the scope's line stands alone: the
+        // scope must be settled whatever else is wrong.
         let with_scope = PatternGaps {
             needs_a_scope_it_lacks: true,
-            unreadable_save_time: true,
-            fact_not_carried: true,
-            ..coarse(&["content.DateTimeOriginal|month"])
+            ..met(vec![NoPlaceCause::UnreadableSaveTime])
         };
-        let scope_alone = adjust_pattern_remedy(&with_scope);
-        assert_eq!(scope_alone.len(), 2);
-        assert!(
-            scope_alone[1].contains("{source.rel_path}"),
-            "{scope_alone:?}"
-        );
+        assert_eq!(adjust_pattern_remedy(&with_scope, manifest), [scope]);
 
-        // A too-coarse failure gives both ways out: a coarser modifier, read at the next
-        // apply, or each key and modifier it met as a query entry, in order, because that
-        // entry is what the user types — and only that way names the refresh.
+        // Each query entry once, in the order met, joined with " and ".
+        let two = met(vec![
+            NoPlaceCause::TooCoarse {
+                subject: "{content.b|day}".into(),
+                modifier: Modifier::Day,
+                precision: Precision::Month,
+            },
+            NoPlaceCause::TooCoarse {
+                subject: "{content.a|month}".into(),
+                modifier: Modifier::Month,
+                precision: Precision::Year,
+            },
+        ]);
+        assert!(adjust_pattern_remedy(&two, manifest)[0]
+            .contains("add \"content.b|day?\" and \"content.a|month?\" to the manifest's query"));
+    }
+
+    /// Each entry a remedy names for the manifest's query reads, pasted into the query's TOML
+    /// list as printed, as the cause's own entry: a key that needs quotes and a `{…}` specified
+    /// with `"` both included.
+    #[test]
+    fn a_remedy_query_entry_pastes_into_the_manifest_as_printed() {
+        use super::adjust_pattern_remedy;
+        use crate::archive::ops::pattern::PatternGaps;
+        use crate::expr::NoPlaceCause;
+
+        let causes = [
+            NoPlaceCause::NoFact {
+                subject: "{'content.File Size'}".into(),
+                key: "content.File Size".into(),
+            },
+            NoPlaceCause::NoValue {
+                subject: "{\"content.File Size\"|year}".into(),
+                reason: None,
+            },
+            NoPlaceCause::NoFact {
+                subject: "{content.Make}".into(),
+                key: "content.Make".into(),
+            },
+        ];
+        for cause in causes {
+            let gaps = PatternGaps {
+                met: vec![(cause.clone(), 1)],
+                ..Default::default()
+            };
+            let line = adjust_pattern_remedy(&gaps, Path::new("/m/trip.toml")).remove(0);
+            let printed = line
+                .split_once("add ")
+                .and_then(|(_, rest)| rest.split_once(" to the manifest's query"))
+                .map(|(entry, _)| entry)
+                .unwrap_or_else(|| panic!("no query entry in {line}"));
+            let query: toml::Value = toml::from_str(&format!("query = [{printed}]"))
+                .unwrap_or_else(|e| panic!("{printed} is not a TOML string: {e}"));
+            assert_eq!(
+                query["query"][0].as_str(),
+                cause.query_entry().as_deref(),
+                "{line}"
+            );
+        }
+    }
+
+    /// `apply`'s count says "1 source" for one, and each source carries every cause it met.
+    #[test]
+    fn the_no_place_block_counts_its_sources() {
+        use super::no_place_lines;
+        use crate::archive::ops::pattern::PatternGaps;
+        use crate::expr::{NoPlace, NoPlaceCause};
+
+        let manifest = Path::new("/m/trip.toml");
+        let no_fact = |subject: &str, key: &str| NoPlaceCause::NoFact {
+            subject: subject.into(),
+            key: key.into(),
+        };
+        let one = vec![(
+            "/photos/a.jpg".to_string(),
+            NoPlace {
+                causes: vec![
+                    no_fact("{content.Make}", "content.Make"),
+                    no_fact("{content.Lens}", "content.Lens"),
+                ],
+            },
+        )];
+        let lines = no_place_lines(&one, &PatternGaps::default(), manifest);
+        assert_eq!(lines[0], "Error: 1 source failed pattern expansion:");
         assert_eq!(
-            adjust_pattern_remedy(&coarse(&["content.DateTimeOriginal|month"])),
+            lines[1],
+            "  /photos/a.jpg: {content.Make} has no value; {content.Lens} has no value"
+        );
+        let two = [one.clone(), one].concat();
+        assert_eq!(
+            no_place_lines(&two, &PatternGaps::default(), manifest)[0],
+            "Error: 2 sources failed pattern expansion:"
+        );
+    }
+
+    /// `apply`'s preflight block for destinations that would leave their directory: one heading
+    /// per way, the count in its own number, each destination whole with a null character as
+    /// `\0`, then the way back.
+    #[test]
+    fn the_containment_block_names_each_destination_whole() {
+        use super::not_contained_lines;
+        use crate::core::domain::path::NotContained;
+
+        let found = vec![
+            (
+                "/photos/README".to_string(),
+                "../README".to_string(),
+                NotContained::ParentDirectory,
+            ),
+            (
+                "/photos/x".to_string(),
+                "a\0b/x".to_string(),
+                NotContained::NullChar,
+            ),
+            (
+                "/photos/y".to_string(),
+                "a\0b/y".to_string(),
+                NotContained::NullChar,
+            ),
+        ];
+        assert_eq!(
+            not_contained_lines(&found),
             [
-                "A time known only to a coarser grain than the pattern uses gives the pattern no value.",
-                "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.DateTimeOriginal|month?\" to the manifest's query to leave such files out, then refresh.",
+                "Preflight failed: 1 destination path contains a `..` directory name:",
+                "",
+                "  ../README (from source: /photos/README)",
+                "",
+                "Preflight failed: 2 destination paths contain a null character:",
+                "",
+                "  a\\0b/x (from source: /photos/x)",
+                "  a\\0b/y (from source: /photos/y)",
+                "",
+                "Adjust the pattern in your manifest.",
             ]
         );
+    }
+
+    /// A `base_dir` that would leave the archive root is refused by `apply` in one sentence,
+    /// the value quoted as the manifest specifies it — a null character as `\0` — and is no
+    /// `ContainedPath`, so no plan can be built below it.
+    #[test]
+    fn a_base_dir_leaving_the_archive_root_is_refused_in_one_sentence() {
+        use crate::core::domain::path::{ContainedPath, NotContained};
         assert_eq!(
-            adjust_pattern_remedy(&coarse(&["content.b|day", "content.a|month"]))[1],
-            "Use a coarser modifier in the pattern, which takes effect at the next apply; or add \"content.a|month?\" and \"content.b|day?\" to the manifest's query to leave such files out, then refresh."
+            ContainedPath::new("../../tmp"),
+            Err(NotContained::ParentDirectory)
         );
+        assert_eq!(
+            super::base_dir_refusal("../../tmp"),
+            "Manifest base_dir '../../tmp' leaves the archive root — absolute paths, `..` \
+             components and null characters are not allowed.\n\
+             Edit base_dir in the manifest's [output] section to a directory inside the archive root."
+        );
+        assert!(super::base_dir_refusal("a\0b").starts_with("Manifest base_dir 'a\\0b' leaves"));
+        assert_eq!(
+            super::base_dir_status_line("../x"),
+            "apply would be rejected: base_dir '../x' leaves the archive root — absolute paths, \
+             `..` components and null characters are not allowed; edit base_dir in the \
+             manifest's [output] section"
+        );
+    }
+
+    #[test]
+    fn an_absolute_base_dir_is_refused_in_one_sentence() {
+        use crate::core::domain::path::{ContainedPath, NotContained};
+        assert_eq!(
+            ContainedPath::new("/tmp/elsewhere"),
+            Err(NotContained::Rooted)
+        );
+        assert!(super::base_dir_refusal("/tmp/elsewhere")
+            .starts_with("Manifest base_dir '/tmp/elsewhere' leaves the archive root"));
     }
 }

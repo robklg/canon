@@ -34,6 +34,7 @@ positive half alone, is what gets reviewed when either changes.
 | **Standing** | the two-register resolution account — `domain::resolution::{classify_present, classify_absent, build_account}` | **the asymmetric verdict** — unresolved is provable, ready never is. Coverage is a containment fact: precise about content, silent about shape and worth |
 | **Happening** | decision, receipt, transition — `ops::decision`, `ops::receipt`, `domain::fate` | **the posture law** — an observation must never read as an act. `domain::fate::fate_posture` is the one derivation, keyed on `(family, aspect)` |
 | **Place** | path and scope mechanics — `domain::path`, `domain::scope`, `ops::scope` | **exactness at the edge** — a place claim is a boundary claim, and nearly-under is not under. `domain::path::path_is_under` is where that boundary is decided — `/a/bc` is not under `/a/b` — and `Source::matches_scope` asks it rather than deciding again; `repo::db::path_at_or_under_sql`/`path_strictly_under_sql` are its registered SQL projections, the one sanctioned rel_path boundary spelling |
+| **Containment** | a destination is a `domain::path::ContainedPath`, made of ordinary names only, so joined under a directory its names cannot leave it | **lexical only** — the disk is never read, so a link below the directory can still lead outside it (`no_destination_escapes_the_destination_directory`) |
 
 ## What's here, by verb
 
@@ -469,13 +470,13 @@ recorded, and `domain::path::resolve_containing_root_as_written` its reading for
 somewhere content is *going* — the root bends to be found, the folder below it is being created
 and keeps the bytes the caller typed. None of the three spells any of it themselves. Carrying a
 healed remainder back out as a whole path is the law's last step and has its own owner,
-`domain::path::join_under_root`, read by `domain::extraction::join_prefix` and, in archive,
-`ops::plan::compute_archive_rel_path`. What it owns is the **empty-remainder rule**: a remainder
+`domain::path::join_under_root`, read by `domain::extraction::join_prefix` and
+`domain::path::ContainedPath`. What it owns is the **empty-remainder rule**: a remainder
 that is empty gives the root back unchanged. `Path::join` is not a spelling of it — it puts a
 separator after an empty remainder and hands back a root with a trailing slash. **The tree still
-hand-spells that branch in several places** (apply's and cluster status's `base_dir`, plan's two
-destination joins, trail's scope-row display), each a standing second spelling rather than an
-exemption; route new ones through the owner. The
+hand-spells that branch** in many places, among them `domain::source::Source::path` and trail's
+scope-row display, each a standing second spelling rather than an exemption; route new ones
+through the owner. The
 *remainder* half is `ops::scope::known_form_of_rel`: the **loop** is the contract — as-given
 first, first-confirmed wins, `None` where no form is — and the question is a parameter, because
 two questions exist. **A root-level remainder is asked about like any other**: whether an empty

@@ -14,6 +14,12 @@ pub fn format_count(n: impl std::fmt::Display) -> String {
     result.chars().rev().collect()
 }
 
+/// A path as a sentence shows it: each null character as `\0`, which a
+/// terminal would otherwise show as nothing at all.
+pub fn with_visible_nulls(path: &str) -> String {
+    path.replace('\0', "\\0")
+}
+
 /// Format a byte count as a human-readable size (decimal units, one decimal
 /// place above bytes: 4_080_218_931 → "4.1 GB").
 ///

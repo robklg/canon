@@ -329,7 +329,7 @@ pub fn execute_apply(
                 receipt_items.push(ApplyReceiptItem {
                     source_root: transfer.source_root_path.clone(),
                     source_rel_path: transfer.source_rel_path.clone(),
-                    destination_rel_path: transfer.archive_rel_path.clone(),
+                    destination_rel_path: transfer.archive_rel_path.as_str().to_string(),
                     hash: transfer.hash.clone(),
                     size: transfer.size,
                     mtime: transfer.mtime,
@@ -358,7 +358,7 @@ pub fn execute_apply(
             }
         }
 
-        let dest_full = params.base_dir.join(&transfer.dest_rel_path);
+        let dest_full = transfer.dest_rel_path.under(&params.base_dir);
         let dest_str = dest_full.display().to_string();
         progress.on_transfer(i, total, &transfer.source_path, &dest_str, &outcome);
 
@@ -386,7 +386,7 @@ pub fn execute_apply(
         for transfer in &plan.resume_already_there {
             let new_source = build_new_source_from_lock(
                 params.archive_root_id,
-                &transfer.archive_rel_path,
+                transfer.archive_rel_path.as_str(),
                 transfer.object_id,
                 &transfer.partial_hash,
                 transfer.size,
@@ -626,7 +626,7 @@ fn execute_single_transfer(
     clock: &RecordedZone,
 ) -> Result<(TransferOutcome, Option<i64>)> {
     let src_path = Path::new(&transfer.source_path);
-    let dest_path = base_dir.join(&transfer.dest_rel_path);
+    let dest_path = transfer.dest_rel_path.under(base_dir);
 
     // Check if source exists
     if !src_path.exists() {
@@ -642,7 +642,7 @@ fn execute_single_transfer(
     let prev_decision_id = crate::archive::repo::fetch_decision_id_at_path(
         conn,
         archive_root_id,
-        &transfer.archive_rel_path,
+        transfer.archive_rel_path.as_str(),
     )?;
 
     // Create parent directories
@@ -654,7 +654,7 @@ fn execute_single_transfer(
             let new_source = build_new_source(
                 &dest_path,
                 archive_root_id,
-                &transfer.archive_rel_path,
+                transfer.archive_rel_path.as_str(),
                 transfer.object_id,
                 &transfer.partial_hash,
                 decision_id,
@@ -668,7 +668,7 @@ fn execute_single_transfer(
                 conn,
                 transfer.source_id,
                 archive_root_id,
-                &transfer.archive_rel_path,
+                transfer.archive_rel_path.as_str(),
                 decision_id,
             )?;
             Ok((TransferOutcome::Renamed, prev_decision_id))
@@ -679,7 +679,7 @@ fn execute_single_transfer(
                     conn,
                     transfer.source_id,
                     archive_root_id,
-                    &transfer.archive_rel_path,
+                    transfer.archive_rel_path.as_str(),
                     decision_id,
                 )?;
                 Ok((TransferOutcome::Renamed, prev_decision_id))
@@ -693,7 +693,7 @@ fn execute_single_transfer(
                 let new_source = build_new_source(
                     &dest_path,
                     archive_root_id,
-                    &transfer.archive_rel_path,
+                    transfer.archive_rel_path.as_str(),
                     transfer.object_id,
                     &transfer.partial_hash,
                     decision_id,
@@ -894,6 +894,7 @@ fn build_new_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::path::ContainedPath;
     use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 
     /// The zone a test lock records: the reference zone, never the machine's.
@@ -945,8 +946,8 @@ mod tests {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            dest_rel_path: "dest.jpg".to_string(),
-            archive_rel_path: "dest.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("dest.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("dest.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: partial_hash.to_string(),
             size,
@@ -1100,8 +1101,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(obj_id),
             partial_hash: hash,
             size,
@@ -1156,8 +1157,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: hash,
             size,
@@ -1215,8 +1216,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: hash,
             size,
@@ -1266,8 +1267,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: "/nonexistent/photo.jpg".to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: Some(1),
             partial_hash: "hash".to_string(),
             size: 1000,
@@ -1322,8 +1323,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: None,
             partial_hash: hash,
             size,
@@ -1383,8 +1384,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: None,
             partial_hash: hash.clone(),
             size,
@@ -1426,8 +1427,8 @@ mod tests {
         let transfer2 = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: None,
             partial_hash: hash2,
             size: size2,
@@ -1489,8 +1490,8 @@ mod tests {
         let transfer = ApplyTransfer {
             source_id: 1,
             source_path: src_file.display().to_string(),
-            dest_rel_path: "photo.jpg".to_string(),
-            archive_rel_path: "photo.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
             object_id: None,
             partial_hash: hash,
             size,
@@ -1587,8 +1588,8 @@ mod tests {
                 ApplyTransfer {
                     source_id: 1,
                     source_path: src1.display().to_string(),
-                    dest_rel_path: "a.jpg".to_string(),
-                    archive_rel_path: "a.jpg".to_string(),
+                    dest_rel_path: ContainedPath::new("a.jpg").unwrap(),
+                    archive_rel_path: ContainedPath::new("a.jpg").unwrap(),
                     object_id: Some(obj1),
                     partial_hash: hash1,
                     size: size1,
@@ -1600,8 +1601,8 @@ mod tests {
                 ApplyTransfer {
                     source_id: 2,
                     source_path: src2.display().to_string(),
-                    dest_rel_path: "b.jpg".to_string(),
-                    archive_rel_path: "b.jpg".to_string(),
+                    dest_rel_path: ContainedPath::new("b.jpg").unwrap(),
+                    archive_rel_path: ContainedPath::new("b.jpg").unwrap(),
                     object_id: Some(obj2),
                     partial_hash: hash2,
                     size: size2,
@@ -1744,8 +1745,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -1846,8 +1847,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.display().to_string(),
                 source_rel_path: rel_path.to_string(),
-                dest_rel_path: archive_rel_path.to_string(),
-                archive_rel_path: archive_rel_path.to_string(),
+                dest_rel_path: ContainedPath::new(archive_rel_path).unwrap(),
+                archive_rel_path: ContainedPath::new(archive_rel_path).unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -2314,8 +2315,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -2401,8 +2402,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -2473,8 +2474,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -2572,8 +2573,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "Media/2024/photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("Media/2024/photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -2679,8 +2680,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: "deadbeef".to_string(),
                 size: 999_999,
@@ -2770,8 +2771,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.path().display().to_string(),
                 source_rel_path: "photo.jpg".to_string(),
-                dest_rel_path: "photo.jpg".to_string(),
-                archive_rel_path: "photo.jpg".to_string(),
+                dest_rel_path: ContainedPath::new("photo.jpg").unwrap(),
+                archive_rel_path: ContainedPath::new("photo.jpg").unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,
@@ -3295,8 +3296,8 @@ mod tests {
                     source_path: src1.display().to_string(),
                     source_root_path: src_dir.path().display().to_string(),
                     source_rel_path: "a.jpg".to_string(),
-                    dest_rel_path: "a.jpg".to_string(),
-                    archive_rel_path: "a.jpg".to_string(),
+                    dest_rel_path: ContainedPath::new("a.jpg").unwrap(),
+                    archive_rel_path: ContainedPath::new("a.jpg").unwrap(),
                     object_id: Some(obj1),
                     partial_hash: hash1,
                     size: size1,
@@ -3308,8 +3309,8 @@ mod tests {
                     source_path: src2.display().to_string(),
                     source_root_path: src_dir.path().display().to_string(),
                     source_rel_path: "b.jpg".to_string(),
-                    dest_rel_path: "b.jpg".to_string(),
-                    archive_rel_path: "b.jpg".to_string(),
+                    dest_rel_path: ContainedPath::new("b.jpg").unwrap(),
+                    archive_rel_path: ContainedPath::new("b.jpg").unwrap(),
                     object_id: Some(obj2),
                     partial_hash: hash2,
                     size: size2,
@@ -3481,8 +3482,8 @@ mod tests {
             source_path: src_file.display().to_string(),
             source_root_path: archive_dir.path().display().to_string(),
             source_rel_path: "original.jpg".to_string(),
-            dest_rel_path: "renamed.jpg".to_string(),
-            archive_rel_path: "dest/renamed.jpg".to_string(),
+            dest_rel_path: ContainedPath::new("renamed.jpg").unwrap(),
+            archive_rel_path: ContainedPath::new("dest/renamed.jpg").unwrap(),
             object_id: None,
             partial_hash: hash,
             size,

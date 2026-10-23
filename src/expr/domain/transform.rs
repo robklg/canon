@@ -168,6 +168,12 @@ pub fn parse_modifier(s: &str) -> Result<ModifierCall> {
 
 /// Apply a path accessor to a value: a path, or text read as one. An accessor that finds no
 /// segment — an index or a slice bound past the end — gives no value.
+/// **A path's segments**: the names between `/`, a leading `/` and an empty name between `//`
+/// not counted. What an accessor counts and what a pattern makes a directory of.
+pub(in crate::expr) fn path_segments(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
 fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Result<Modified> {
     let path_str = match value {
         FactValue::Path(p) => p,
@@ -179,7 +185,7 @@ fn apply_accessor(value: &FactValue, accessor: &PathAccessor, key: &str) -> Resu
         ),
     };
 
-    let segments: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+    let segments = path_segments(path_str);
     let len = segments.len() as i32;
     let found = |value: FactValue| Ok(Modified::Value(value));
 

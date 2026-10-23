@@ -32,6 +32,7 @@ pub(super) struct ApplyReceiptItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::path::ContainedPath;
     use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 
     /// The zone a test lock records: the reference zone, never the machine's.
@@ -228,8 +229,8 @@ mod tests {
                 source_path: src_file.display().to_string(),
                 source_root_path: src_dir.display().to_string(),
                 source_rel_path: rel_path.to_string(),
-                dest_rel_path: archive_rel_path.to_string(),
-                archive_rel_path: archive_rel_path.to_string(),
+                dest_rel_path: ContainedPath::new(archive_rel_path).unwrap(),
+                archive_rel_path: ContainedPath::new(archive_rel_path).unwrap(),
                 object_id: None,
                 partial_hash: hash,
                 size,

@@ -23,12 +23,14 @@ pub(in crate::expr) fn is_space(c: char) -> bool {
 }
 
 /// What a text is read as: a filter (`--where`, a recorded query), one key (`facts --key`),
-/// or keys separated by commas (`--group-by`).
+/// keys separated by commas (`--group-by`), or the key inside a pattern's `{…}`, which only the
+/// `}` may follow.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::expr) enum Grammar {
     Filter,
     Key,
     KeyList,
+    Pattern,
 }
 
 /// What `@` and an alias name read as where an alias may stand — where a condition starts or a
@@ -183,9 +185,18 @@ impl<'t> Cursor<'t> {
         self.problems.push(Problem {
             place,
             sentence: sentence.into(),
-            rule_line: rule_line.map(str::to_string),
+            rule_line: rule_line.map(Into::into),
             fix,
+            also: None,
         });
+    }
+
+    /// Record a problem found elsewhere — read from another text of the same refusal and placed
+    /// back where it was typed. Nothing is recorded once reading has stopped.
+    pub(in crate::expr) fn push_problem(&mut self, problem: Problem) {
+        if !self.stopped {
+            self.problems.push(problem);
+        }
     }
 
     pub(in crate::expr) fn problem_count(&self) -> usize {
@@ -209,7 +220,7 @@ impl<'t> Cursor<'t> {
 
     /// The reading: `value`, and every problem and alias use recorded; no value where reading
     /// waits for the aliases file.
-    fn into_reading<T>(self, value: Option<T>) -> Reading<T> {
+    pub(in crate::expr) fn into_reading<T>(self, value: Option<T>) -> Reading<T> {
         Reading {
             value: value.filter(|_| !self.waits_for_aliases),
             problems: self.problems,
@@ -406,7 +417,7 @@ pub(in crate::expr) fn read_keys(
             break;
         }
         if let Some(key) = &key {
-            report_key_position(&mut cursor, key);
+            key_position(&mut cursor, key, grammar);
         }
         let key_end = cursor.at();
         cursor.skip_spaces();
@@ -453,9 +464,10 @@ pub(in crate::expr) fn read_keys(
     cursor.into_reading(Some(keys))
 }
 
-/// What a report key may not be, though the key grammar reads it: a status word, bare (a status
-/// word is not a key), and a key only patterns have.
-fn report_key_position(cursor: &mut Cursor, key: &InputKey) {
+/// What a key may not be where only a key stands — a report key, or a pattern's `{…}` — though
+/// the key grammar reads it: a status word, bare (a status word is not a key), and, outside a
+/// pattern, the key only patterns have.
+pub(in crate::expr) fn key_position(cursor: &mut Cursor, key: &InputKey, grammar: Grammar) {
     let (start, end) = (key.name_place.start, key.name_place.end);
     if let Some((word, _)) = STATUS_KEYWORDS
         .iter()
@@ -469,7 +481,7 @@ fn report_key_position(cursor: &mut Cursor, key: &InputKey) {
             Fix::None,
         );
     }
-    if key.names(SCOPE_REL_PATH) {
+    if grammar != Grammar::Pattern && key.names(SCOPE_REL_PATH) {
         cursor.problem(
             start,
             end,
@@ -1317,7 +1329,7 @@ mod tests {
                 (
                     p.place.start,
                     p.sentence.clone(),
-                    p.rule_line.clone(),
+                    p.rule_line.as_deref().map(str::to_string),
                     p.fix.clone(),
                 )
             })
