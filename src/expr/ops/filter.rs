@@ -14,6 +14,8 @@
 //! whole-period table on the user's clock, parts and bucket labels as read. A source with no
 //! value fails every comparison, and `NOT` is everything else.
 
+use std::cell::{Cell, OnceCell};
+
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 
@@ -30,6 +32,7 @@ use crate::expr::domain::key::{Key, SourceFact};
 use crate::expr::domain::transform::{apply_chain, InstantRecord, Modified};
 use crate::expr::domain::value::source_row_value;
 use crate::expr::ops::bind::BoundFilters;
+use crate::expr::ops::notes::NoteMarks;
 use crate::expr::repo::{fetch_source_row, prefetch_facts, prefetch_status_data, SourceRow};
 
 // ============================================================================
@@ -44,13 +47,52 @@ pub fn apply_filters(
     filters: &BoundFilters,
     zone: &UserZone,
 ) -> Result<FilterResult> {
+    Ok(run(conn, source_ids, filters, zone, None)?.result)
+}
+
+/// [`apply_filters`], recording beside each source's evaluation what the plan's lines count
+/// ([`NoteMarks`]): from the same cache and the same source row, in the same loop, so the
+/// lines count what the selection decided.
+pub fn apply_filters_noting(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    filters: &BoundFilters,
+    zone: &UserZone,
+) -> Result<(FilterResult, NoteMarks)> {
+    let mut marks = NoteMarks::of(&filters.trees, zone);
+    let run = run(conn, source_ids, filters, zone, Some(&mut marks))?;
+    Ok((run.result, marks))
+}
+
+/// One run of the filters: what it selected, and how many source rows it read — a count
+/// only the row-once pin reads.
+struct Run {
+    result: FilterResult,
+    #[cfg_attr(not(test), allow(dead_code))]
+    rows_read: usize,
+}
+
+/// Run the filters over `source_ids`, recording each source's marks where `marks` is given.
+fn run(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    filters: &BoundFilters,
+    zone: &UserZone,
+    mut marks: Option<&mut NoteMarks>,
+) -> Result<Run> {
     let used_status = filters.used_status.clone();
 
     if filters.trees.is_empty() {
-        return Ok(FilterResult {
-            source_ids: source_ids.to_vec(),
-            used_status,
-            read_an_instant: false,
+        if let Some(marks) = marks {
+            marks.select_all(source_ids);
+        }
+        return Ok(Run {
+            result: FilterResult {
+                source_ids: source_ids.to_vec(),
+                used_status,
+                read_an_instant: false,
+            },
+            rows_read: 0,
         });
     }
 
@@ -69,25 +111,79 @@ pub fn apply_filters(
     let offset_typed = typed
         .iter()
         .any(|test| matches!(test, Test::Period(tv) if tv.form() != TimeForm::Clock));
-
     let mut result = Vec::new();
+    let mut rows_read = 0;
     for &source_id in source_ids {
+        let source = OneSource::new(conn, source_id, &cache, zone);
         let mut selected = true;
         for tree in &local {
-            if !eval(conn, source_id, tree, &cache, zone)? {
+            if !eval(&source, tree)? {
                 selected = false;
                 break;
             }
         }
+        if let Some(marks) = marks.as_deref_mut() {
+            marks.record(&source, selected)?;
+        }
         if selected {
             result.push(source_id);
         }
+        rows_read += source.rows_read();
     }
-    Ok(FilterResult {
-        source_ids: result,
-        used_status,
-        read_an_instant: offset_typed || cache.instant_read.read(),
+    Ok(Run {
+        result: FilterResult {
+            source_ids: result,
+            used_status,
+            read_an_instant: offset_typed || cache.instant_read.read(),
+        },
+        rows_read,
     })
+}
+
+/// One source as a run reads it: its id, the run's cache and clock, and its row, read at
+/// most once whatever reads it — evaluation and the marks beside it.
+pub(super) struct OneSource<'a> {
+    conn: &'a Connection,
+    id: i64,
+    cache: &'a FactCache,
+    zone: &'a UserZone,
+    row: OnceCell<Option<SourceRow>>,
+    reads: Cell<usize>,
+}
+
+impl<'a> OneSource<'a> {
+    fn new(conn: &'a Connection, id: i64, cache: &'a FactCache, zone: &'a UserZone) -> Self {
+        OneSource {
+            conn,
+            id,
+            cache,
+            zone,
+            row: OnceCell::new(),
+            reads: Cell::new(0),
+        }
+    }
+
+    pub(super) fn id(&self) -> i64 {
+        self.id
+    }
+
+    pub(super) fn zone(&self) -> &UserZone {
+        self.zone
+    }
+
+    /// The source's row, read the first time it is asked for.
+    fn row(&self) -> Result<Option<&SourceRow>> {
+        if self.row.get().is_none() {
+            self.reads.set(self.reads.get() + 1);
+            let _ = self.row.set(fetch_source_row(self.conn, self.id)?);
+        }
+        Ok(self.row.get().and_then(Option::as_ref))
+    }
+
+    /// How many times the row was read from storage.
+    fn rows_read(&self) -> usize {
+        self.reads.get()
+    }
 }
 
 /// A bound tree with its typed periods translated to the user's local time, once per run.
@@ -132,17 +228,12 @@ fn to_local<'a>(tree: &'a Bound, zone: &UserZone) -> Local<'a> {
 }
 
 /// Evaluate a tree in local time for one source.
-fn eval(
-    conn: &Connection,
-    source_id: i64,
-    tree: &Local,
-    cache: &FactCache,
-    zone: &UserZone,
-) -> Result<bool> {
+fn eval(source: &OneSource, tree: &Local) -> Result<bool> {
+    let (cache, zone) = (source.cache, source.zone);
     match tree {
         Local::And(all) => {
             for t in all {
-                if !eval(conn, source_id, t, cache, zone)? {
+                if !eval(source, t)? {
                     return Ok(false);
                 }
             }
@@ -150,23 +241,23 @@ fn eval(
         }
         Local::Or(all) => {
             for t in all {
-                if eval(conn, source_id, t, cache, zone)? {
+                if eval(source, t)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        Local::Not(inner) => Ok(!eval(conn, source_id, inner, cache, zone)?),
-        Local::Exists(key) => check_exists(conn, source_id, key, cache, zone),
+        Local::Not(inner) => Ok(!eval(source, inner)?),
+        Local::Exists(key) => check_exists(source, key, &cache.instant_read),
         Local::Compare(key, op, value) => {
-            let read = read_value(conn, source_id, key, cache, zone)?;
+            let read = read_value(source, key, &cache.instant_read)?;
             match read {
                 Some(v) => compare(&v, *op, value, zone),
                 None => Ok(false),
             }
         }
         Local::In(key, values) => {
-            let Some(v) = read_value(conn, source_id, key, cache, zone)? else {
+            let Some(v) = read_value(source, key, &cache.instant_read)? else {
                 return Ok(false);
             };
             for value in values {
@@ -176,26 +267,26 @@ fn eval(
             }
             Ok(false)
         }
-        Local::Glob(key, glob) => match read_value(conn, source_id, key, cache, zone)? {
+        Local::Glob(key, glob) => match read_value(source, key, &cache.instant_read)? {
             Some(FactValue::Text(s) | FactValue::Path(s)) => Ok(glob.matches(&s)),
             Some(value) => Err(not_bound_for(&value)),
             None => Ok(false),
         },
         Local::Status(predicate) => Ok(match predicate {
-            StatusPredicate::Hashed => cache.get_object_id(source_id).is_some(),
+            StatusPredicate::Hashed => cache.get_object_id(source.id).is_some(),
             StatusPredicate::Archived => {
                 let archived_set = cache.archived_objects.as_ref().unwrap();
                 cache
-                    .get_object_id(source_id)
+                    .get_object_id(source.id)
                     .is_some_and(|oid| archived_set.contains(&oid))
             }
             StatusPredicate::Excluded => {
                 let excluded_set = cache.excluded_sources.as_ref().unwrap();
-                excluded_set.contains(&source_id)
+                excluded_set.contains(&source.id)
             }
             StatusPredicate::Enriched => {
                 let enriched_set = cache.enriched_sources.as_ref().unwrap();
-                enriched_set.contains(&source_id)
+                enriched_set.contains(&source.id)
             }
         }),
     }
@@ -232,34 +323,28 @@ fn not_bound_for(value: &FactValue) -> anyhow::Error {
 /// The value a comparison reads for one source: the key's value through its accessor and
 /// modifiers, or `None` where there is none — no fact, a built-in key the row cannot answer, a
 /// modifier that gave no value. A stored value of another type than the key was bound for
-/// stops the run: the key's type changed while the filter ran.
-fn read_value(
-    conn: &Connection,
-    source_id: i64,
+/// stops the run: the key's type changed while the filter ran. Whether the chain read an
+/// instant is noted on `record`.
+pub(super) fn read_value(
+    source: &OneSource,
     key: &BoundKey,
-    cache: &FactCache,
-    zone: &UserZone,
+    record: &InstantRecord,
 ) -> Result<Option<FactValue>> {
-    let Some(base) = base_value(conn, source_id, key, cache)? else {
+    let Some(base) = base_value(source, key)? else {
         return Ok(None);
     };
-    through_chain(base, key, zone, &cache.instant_read)
+    through_chain(base, key, source.zone, record)
 }
 
 /// The key's base value for one source: a key the source row computes, through its
 /// resolver; any other key (the content hash included) the source's one value from the cache,
 /// checked against the type the key was bound for.
-fn base_value(
-    conn: &Connection,
-    source_id: i64,
-    key: &BoundKey,
-    cache: &FactCache,
-) -> Result<Option<FactValue>> {
+fn base_value(source: &OneSource, key: &BoundKey) -> Result<Option<FactValue>> {
     let base = &key.base;
     if let Some(computed) = Key::read(base).filter(Key::is_computed) {
-        return Ok(fetch_source_row(conn, source_id)?.and_then(|row| row_value(&row, &computed)));
+        return Ok(source.row()?.and_then(|row| row_value(row, &computed)));
     }
-    let Some(value) = cache.value(source_id, base) else {
+    let Some(value) = source.cache.value(source.id, base) else {
         return Ok(None);
     };
     check_read_as(key.read_as, base, value, Refused::Filter)?;
@@ -301,21 +386,21 @@ fn row_value(row: &SourceRow, key: &Key) -> Option<FactValue> {
 /// that is not a time. A bare `K?` reads no value, so it reads no clock and checks
 /// no type. Every key alike — the content hash, which the hash keys are read as, included —
 /// exists where it has a value; a computed key where its resolver answers (`?` reads a NULL
-/// device or inode as 0, as `facts` reports it).
-fn check_exists(
-    conn: &Connection,
-    source_id: i64,
+/// device or inode as 0, as `facts` reports it). Whether the chain read an instant is noted
+/// on `record`.
+pub(super) fn check_exists(
+    source: &OneSource,
     key: &BoundKey,
-    cache: &FactCache,
-    zone: &UserZone,
+    record: &InstantRecord,
 ) -> Result<bool> {
     let base = &key.base;
     let value = match Key::read(base) {
-        Some(computed) if computed.is_computed() => fetch_source_row(conn, source_id)?
+        Some(computed) if computed.is_computed() => source
+            .row()?
             .and_then(|row| source_row_value(&row.attributes, &computed)),
         _ => match key.read_as {
-            ReadAs::Any => cache.value(source_id, base).cloned(),
-            ReadAs::Absent | ReadAs::One(_) => base_value(conn, source_id, key, cache)?,
+            ReadAs::Any => source.cache.value(source.id, base).cloned(),
+            ReadAs::Absent | ReadAs::One(_) => base_value(source, key)?,
         },
     };
     let Some(value) = value else {
@@ -324,7 +409,7 @@ fn check_exists(
     if !key.has_transforms() {
         return Ok(true);
     }
-    Ok(through_chain(value, key, zone, &cache.instant_read)?.is_some())
+    Ok(through_chain(value, key, source.zone, record)?.is_some())
 }
 
 // ============================================================================
@@ -348,6 +433,103 @@ mod tests {
 
     fn setup_test_db() -> RawConnection {
         open_in_memory_for_test()
+    }
+
+    /// The battery's `apply_filters`: the real one, run beside the noting run on the same
+    /// input, which must select exactly the same sources or refuse where it refuses — so
+    /// every filter in this battery holds `noting_selects_exactly_what_apply_filters_selects`.
+    fn apply_filters(
+        conn: &mut Connection,
+        source_ids: &[i64],
+        filters: &BoundFilters,
+        zone: &UserZone,
+    ) -> Result<FilterResult> {
+        let plain = super::apply_filters(conn, source_ids, filters, zone);
+        let noting = apply_filters_noting(conn, source_ids, filters, zone);
+        match (&plain, &noting) {
+            (Ok(plain), Ok((noted, _))) => {
+                assert_eq!(
+                    plain.source_ids, noted.source_ids,
+                    "noting selected otherwise"
+                );
+                assert_eq!(plain.read_an_instant, noted.read_an_instant);
+            }
+            (Err(_), Err(_)) => {}
+            _ => panic!("noting refused where the plain run did not, or the reverse"),
+        }
+        plain
+    }
+
+    /// Noting changes nothing a selection decides: every filter of this battery runs through
+    /// both entry points (the battery's `apply_filters` above), and so do these, which reach
+    /// each kind of condition, negated and not.
+    #[test]
+    fn noting_selects_exactly_what_apply_filters_selects() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let mut ids = Vec::new();
+        for (i, (name, make, taken)) in [
+            ("a.jpg", Some("Canon"), Some("2024")),
+            ("b.JPG", Some("Nikon"), Some("2024-06-15")),
+            ("c.png", None, Some("2024-03")),
+            ("d.jpg", Some("Canon"), None),
+            ("e.txt", None, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = insert_source(&conn, root, &format!("dir{i}/{name}"));
+            if let Some(make) = make {
+                crate::core::testing::insert_fact(&conn, id, "content.Make", make);
+            }
+            if let Some(taken) = taken {
+                insert_time_fact(&conn, id, "content.Taken", taken);
+            }
+            ids.push(id);
+        }
+        for text in [
+            "Make = Canon",
+            "Make != Canon",
+            "NOT (Make = Canon OR Make = Nikon)",
+            "Make IN (Canon, Nikon)",
+            "Make NOT IN (Canon)",
+            "Make ~ C*",
+            "Make !~ C*",
+            "Make?",
+            "NOT Make?",
+            "Taken < 2024-06",
+            "NOT Taken >= 2024-06",
+            "Taken != 2024-06",
+            "Taken IN (2024-06)",
+            "Taken|year = 2024",
+            "source.ext != jpg",
+            "source.ext|lowercase = jpg AND NOT source.rel_path[0] = dir0",
+            "hashed? OR source.size > 10",
+        ] {
+            let filter = bound(&conn, text);
+            apply_filters(&mut conn, &ids, &filter, &UserZone::utc()).unwrap();
+        }
+    }
+
+    /// A computed key's row is read once per source, whatever reads it: every leaf of the
+    /// evaluation and the marks beside it.
+    #[test]
+    fn noting_reads_each_source_row_once() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos");
+        let ids: Vec<i64> = (0..2_000)
+            .map(|i| {
+                let ext = if i % 2 == 0 { "jpg" } else { "png" };
+                insert_source(&conn, root, &format!("{i}.{ext}"))
+            })
+            .collect();
+        let filter = bound(&conn, "source.ext != jpg AND source.size > 10");
+        let mut marks = NoteMarks::of(&filter.trees, &UserZone::utc());
+        let noted = run(&mut conn, &ids, &filter, &UserZone::utc(), Some(&mut marks)).unwrap();
+        assert_eq!(noted.result.source_ids.len(), 1_000);
+        assert!(noted.rows_read <= ids.len(), "{} rows", noted.rows_read);
+        let plain = run(&mut conn, &ids, &filter, &UserZone::utc(), None).unwrap();
+        assert!(plain.rows_read <= ids.len(), "{} rows", plain.rows_read);
     }
 
     fn insert_root(conn: &RawConnection, path: &str) -> i64 {

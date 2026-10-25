@@ -9,6 +9,7 @@ use crate::exclude::ops::types::{
     DuplicateGroupData, ExcludeClearPlan, ExcludeDuplicatesPlan, ExcludeSetObjectsPlan,
     ExcludeSetPlan, ObjectPlanEntry, ReceiptDestination,
 };
+use crate::expr::{NoteUnit, SelectionNotes};
 
 use super::fixtures::item;
 
@@ -24,6 +25,7 @@ fn test_execute_set_marks_excluded() {
     let id2 = insert_source(&conn, root, "b.jpg", None);
 
     let plan = ExcludeSetPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id1, "/photos", "a.jpg"), item(id2, "/photos", "b.jpg")],
         root_count: 1,
         not_archived_count: 2,
@@ -43,6 +45,7 @@ fn test_execute_clear_clears_excluded() {
     let id2 = insert_source_excluded(&conn, root, "b.jpg", None);
 
     let plan = ExcludeClearPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id1, "/photos", "a.jpg"), item(id2, "/photos", "b.jpg")],
         root_count: 1,
     };
@@ -60,6 +63,7 @@ fn test_execute_set_returns_count() {
     let id1 = insert_source(&conn, root, "a.jpg", None);
 
     let plan = ExcludeSetPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id1, "/photos", "a.jpg")],
         root_count: 1,
         not_archived_count: 1,
@@ -77,6 +81,7 @@ fn test_execute_clear_returns_count() {
     let id2 = insert_source_excluded(&conn, root, "b.jpg", None);
 
     let plan = ExcludeClearPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id1, "/photos", "a.jpg"), item(id2, "/photos", "b.jpg")],
         root_count: 1,
     };
@@ -97,6 +102,7 @@ fn test_execute_duplicates_marks_excluded() {
     let id2 = insert_source(&conn, root, "b.jpg", None);
 
     let plan = ExcludeDuplicatesPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         groups: vec![DuplicateGroupData {
             hash: "sha256:dup".to_string(),
             kept: vec![],
@@ -124,6 +130,7 @@ fn test_execute_duplicates_returns_count() {
     let id1 = insert_source(&conn, root, "a.jpg", None);
 
     let plan = ExcludeDuplicatesPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         groups: vec![DuplicateGroupData {
             hash: "sha256:dup".to_string(),
             kept: vec![],
@@ -156,6 +163,7 @@ fn test_execute_set_objects_marks_excluded() {
     insert_source(&conn, root, "b.jpg", Some(obj2));
 
     let plan = ExcludeSetObjectsPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         objects: vec![
             ObjectPlanEntry {
                 object_id: obj1,
@@ -191,6 +199,7 @@ fn test_execute_set_objects_returns_count() {
     let obj = insert_object(&conn, "count_obj_hash_xxx", false);
 
     let plan = ExcludeSetObjectsPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         objects: vec![ObjectPlanEntry {
             object_id: obj,
             hash_prefix: "count_obj_hash_x".to_string(),
@@ -223,6 +232,7 @@ fn an_exclude_execute_refuses_a_root_parked_since_the_plan() {
     let id2 = insert_source(&conn, root, "b.jpg", None);
 
     let plan = ExcludeSetPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id1, "/photos", "a.jpg"), item(id2, "/photos", "b.jpg")],
         root_count: 1,
         not_archived_count: 2,

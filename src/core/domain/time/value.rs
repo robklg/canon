@@ -446,6 +446,18 @@ impl ClockSpan {
         }
     }
 
+    /// Whether the typed period's boundary for `op` falls strictly inside this period, so this
+    /// value is on neither side of it: `<` and `>=` test the typed start, `<=` and `>` the typed
+    /// end, `=` both. The third side of the whole-period table ([`satisfies`](Self::satisfies)).
+    pub fn spans(&self, op: PeriodOp, period: &ClockSpan) -> bool {
+        let strictly_inside = |at: DateTime| self.start < at && at < self.end();
+        match op {
+            PeriodOp::EndsByStart | PeriodOp::StartsAtOrAfterStart => strictly_inside(period.start),
+            PeriodOp::EndsByEnd | PeriodOp::StartsAtOrAfterEnd => strictly_inside(period.end()),
+            PeriodOp::Inside => strictly_inside(period.start) || strictly_inside(period.end()),
+        }
+    }
+
     /// The one printed spelling of a time: `2024`, `2024-06`, `2024-06-15`,
     /// `2024-06-15 14:30`, `2024-06-15 14:30:05`. A fraction prints to the second, truncated,
     /// never rounded. Never an offset.
@@ -758,6 +770,74 @@ mod tests {
                     assert_eq!(holds(&value, "<=", &period), lt || eq, "{v} <= {p}");
                     assert_eq!(holds(&value, ">=", &period), gt || eq, "{v} >= {p}");
                 }
+            }
+        }
+    }
+
+    /// `spans` is the table's third side: for `<` against `>=` and `<=` against `>`, every
+    /// value satisfies one of the pair or spans the boundary they share, never two of the three;
+    /// for `=`, a value spans exactly where it is coarser than the period and holds it.
+    #[test]
+    fn spans_is_the_third_side_of_the_period_table() {
+        let periods = [
+            "2024",
+            "2024-06",
+            "2024-06-15",
+            "2024-06-15 14:30",
+            "2024-06-15 14:30:05",
+            "2024-06-15 14:30:05.5",
+        ];
+        let values = [
+            "2023",
+            "2024",
+            "2025",
+            "2024-01",
+            "2024-05",
+            "2024-06",
+            "2024-07",
+            "2024-12",
+            "2024-06-01",
+            "2024-06-14",
+            "2024-06-15",
+            "2024-06-16",
+            "2024-06-30",
+            "2024-06-15 14:29",
+            "2024-06-15 14:30",
+            "2024-06-15 14:31",
+            "2024-06-15 14:30:04",
+            "2024-06-15 14:30:05",
+            "2024-06-15 14:30:06",
+            "2024-06-15 14:30:05.4",
+            "2024-06-15 14:30:05.5",
+            "2024-06-15 14:30:05.6",
+        ];
+        let pairs = [
+            (PeriodOp::EndsByStart, PeriodOp::StartsAtOrAfterStart),
+            (PeriodOp::EndsByEnd, PeriodOp::StartsAtOrAfterEnd),
+        ];
+        for p in periods {
+            let period = span(p);
+            for v in values {
+                let value = span(v);
+                for (op, opposite) in pairs {
+                    let held = [
+                        value.satisfies(op, &period),
+                        value.satisfies(opposite, &period),
+                        value.spans(op, &period),
+                    ];
+                    assert_eq!(
+                        held.iter().filter(|b| **b).count(),
+                        1,
+                        "{v} {op:?}/{opposite:?} {p}: {held:?}"
+                    );
+                    assert_eq!(value.spans(op, &period), value.spans(opposite, &period));
+                }
+                let holds_the_period = value.precision() < period.precision() && p.starts_with(v);
+                assert_eq!(
+                    value.spans(PeriodOp::Inside, &period),
+                    holds_the_period,
+                    "{v} = {p}"
+                );
             }
         }
     }

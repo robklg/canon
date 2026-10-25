@@ -31,7 +31,7 @@ use crate::expr::{
     mixed_type_way_out, source_row_value, source_values, Key, KeyKind, Listing, ScopeVantage,
     SourceAttributes, SCOPE_REL_PATH,
 };
-use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{select_sources, NoteUnit, RolePolicy, SelectionNotes, SelectionParams};
 
 use super::manifest::{write_and_sync, write_lock_file};
 
@@ -75,6 +75,9 @@ pub struct ClusterGeneratePlan {
     /// Whether the query read an instant on the clock — what decides whether the zone it
     /// was read on is worth a sentence.
     pub query_read_an_instant: bool,
+    /// What the selection's evaluation noted, counted over the lock entries: unhashed and
+    /// already-archived sources are in neither spanning direction.
+    pub notes: SelectionNotes,
 }
 
 // ============================================================================
@@ -101,9 +104,11 @@ pub fn plan_generate(
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: params.clock.clone(),
+        notes: true,
     };
     let selection = select_sources(conn, &selection_params)?;
     let query_read_an_instant = selection.read_an_instant;
+    let marks = selection.marks;
 
     // 2. Separate hashed from unhashed sources
     let mut unhashed_count = 0usize;
@@ -243,6 +248,8 @@ pub fn plan_generate(
         })
         .count();
 
+    let notes = SelectionNotes::of(marks.as_ref(), &source_ids, NoteUnit::Sources);
+
     Ok(ClusterGeneratePlan {
         lock_entries,
         archived,
@@ -253,6 +260,7 @@ pub fn plan_generate(
         excluded_count: selection.excluded_count,
         unhashed_count,
         query_read_an_instant,
+        notes,
     })
 }
 
@@ -276,6 +284,7 @@ impl ClusterGeneratePlan {
             excluded_count: 0,
             unhashed_count: 0,
             query_read_an_instant: false,
+            notes: SelectionNotes::none(NoteUnit::Sources),
         }
     }
 
@@ -381,11 +390,14 @@ pub struct ExecuteGenerateResult {
     pub source_count: usize,
     pub root_breakdown: Vec<(String, usize)>,
     pub not_archived_count: usize,
+    /// The plan's notes, under the count they qualify.
+    pub notes: SelectionNotes,
 }
 
 impl ExecuteGenerateResult {
     /// Compose the cluster summary given a header line (provided by interface
-    /// since it includes display paths that ops doesn't know).
+    /// since it includes display paths that ops doesn't know). The note lines stand
+    /// directly under the header, whose count they qualify.
     pub fn compose_summary(&self, header: &str) -> String {
         use crate::core::domain::format_count;
         let root_word = if self.root_breakdown.len() == 1 {
@@ -393,7 +405,7 @@ impl ExecuteGenerateResult {
         } else {
             "roots"
         };
-        let mut lines = vec![header.to_string()];
+        let mut lines = vec![self.notes.under(header)];
         lines.push(format!(
             "  From {} {}:",
             self.root_breakdown.len(),
@@ -515,6 +527,7 @@ pub fn execute_generate(
         source_count: plan.lock_entries.len(),
         root_breakdown: plan.root_breakdown.clone(),
         not_archived_count: plan.not_archived_count,
+        notes: plan.notes.clone(),
     })
 }
 
@@ -590,6 +603,7 @@ pub fn execute_refresh(
             source_count: plan.lock_entries.len(),
             root_breakdown: plan.root_breakdown.clone(),
             not_archived_count: plan.not_archived_count,
+            notes: plan.notes.clone(),
         }),
     })
 }
@@ -829,19 +843,26 @@ fn generate_summary_comments(plan: &ClusterGeneratePlan) -> String {
     let mut s = String::new();
     s.push_str("# === Cluster Summary ===\n");
 
-    let root_word = if plan.root_breakdown.len() == 1 {
-        "root"
-    } else {
-        "roots"
-    };
-    s.push_str(&format!(
-        "# {} sources from {} {}:\n",
-        format_count(source_count),
-        plan.root_breakdown.len(),
-        root_word
-    ));
-    for (path, count) in &plan.root_breakdown {
-        s.push_str(&format!("#   {}  ({})\n", path, format_count(*count)));
+    // Stdout's order: the count, the notes qualifying it, then where the sources are. A
+    // note at the roots' indent would read as a share of the last root.
+    s.push_str(&format!("# {} sources\n", format_count(source_count)));
+    for line in plan.notes.lines() {
+        s.push_str(&format!("# {line}\n"));
+    }
+    if !plan.root_breakdown.is_empty() {
+        let root_word = if plan.root_breakdown.len() == 1 {
+            "root"
+        } else {
+            "roots"
+        };
+        s.push_str(&format!(
+            "# From {} {}:\n",
+            plan.root_breakdown.len(),
+            root_word
+        ));
+        for (path, count) in &plan.root_breakdown {
+            s.push_str(&format!("#   {}  ({})\n", path, format_count(*count)));
+        }
     }
     s.push_str(&format!(
         "# {} have no archived copy\n",
@@ -1776,6 +1797,7 @@ base_dir = \"output\"\n";
             excluded_count,
             unhashed_count,
             query_read_an_instant: false,
+            notes: SelectionNotes::none(NoteUnit::Sources),
         }
     }
 
@@ -1783,7 +1805,7 @@ base_dir = \"output\"\n";
     fn test_generate_summary_single_root() {
         let plan = make_plan_for_summary(42, vec![("/photos".to_string(), 42)], 42, 0, 0, 0);
         let summary = generate_summary_comments(&plan);
-        assert!(summary.contains("42 sources from 1 root:"));
+        assert!(summary.contains("# 42 sources\n# From 1 root:\n"));
         assert!(summary.contains("#   /photos  (42)"));
         assert!(summary.contains("# 42 have no archived copy"));
         assert!(!summary.contains("Skipped"));
@@ -1800,7 +1822,7 @@ base_dir = \"output\"\n";
             0,
         );
         let summary = generate_summary_comments(&plan);
-        assert!(summary.contains("150 sources from 2 roots:"));
+        assert!(summary.contains("# 150 sources\n# From 2 roots:\n"));
         let backup_pos = summary.find("/backup").unwrap();
         let photos_pos = summary.find("/photos").unwrap();
         assert!(backup_pos < photos_pos);
@@ -2712,9 +2734,10 @@ base_dir = \"output\"\n";
         );
         // The 0 match is stated, not left to be inferred from an absent lock.
         assert!(
-            manifest.contains("# 0 sources from 0 roots:"),
+            manifest.contains("# 0 sources\n# 0 have no archived copy\n"),
             "got: {manifest}"
         );
+        assert!(!manifest.contains("# From "), "got: {manifest}");
         assert!(manifest.contains("# === Notes ==="), "got: {manifest}");
 
         // Still a manifest the next refresh can read.
@@ -2733,6 +2756,7 @@ base_dir = \"output\"\n";
             source_count: 3,
             root_breakdown: vec![("/photos".to_string(), 3)],
             not_archived_count: 1,
+            notes: SelectionNotes::none(NoteUnit::Sources),
         };
         let summary = one.compose_summary("Generated manifest: cluster.toml");
         assert!(summary.contains("From 1 root:"), "got: {summary}");
@@ -2742,6 +2766,7 @@ base_dir = \"output\"\n";
             source_count: 5,
             root_breakdown: vec![("/photos".to_string(), 3), ("/scans".to_string(), 2)],
             not_archived_count: 4,
+            notes: SelectionNotes::none(NoteUnit::Sources),
         };
         let summary = several.compose_summary("Generated manifest: cluster.toml");
         assert!(summary.contains("From 2 roots:"), "got: {summary}");
@@ -2754,6 +2779,7 @@ base_dir = \"output\"\n";
             source_count: 2,
             root_breakdown: vec![("/photos".to_string(), 2)],
             not_archived_count: 2,
+            notes: SelectionNotes::none(NoteUnit::Sources),
         };
         let summary = result.compose_summary("Generated manifest: cluster.toml (2 sources)");
         let lines: Vec<&str> = summary.lines().collect();
@@ -2829,6 +2855,139 @@ base_dir = \"output\"\n";
         assert!(
             !raw.contains("# === "),
             "notes block ran into the next section"
+        );
+    }
+
+    // =========================================================================
+    // The plan's notes — counted over the lock entries
+    // =========================================================================
+
+    fn plan_with(conn: &mut Connection, filters: &[&str]) -> ClusterGeneratePlan {
+        let params = ClusterGenerateParams {
+            filters: crate::expr::read_filters(conn, &ExpressionText::plain(filters)).unwrap(),
+            ..default_params()
+        };
+        plan_generate(conn, &params).unwrap()
+    }
+
+    /// **The notes stand under the count they qualify**, on the screen and in the
+    /// manifest's block, which takes the screen's order: the count, the notes, then where
+    /// the sources are and how many have no archived copy. Here `Make != Canon` takes two
+    /// sources with no `Make`; `NOT Taken >= 2024-06` negates `Taken` too, which one of them
+    /// has no value for, and meets two values known only to 2024: one in the lock
+    /// (selected), one whose source the filter did not select.
+    #[test]
+    fn the_generate_summary_and_manifest_block_carry_the_notes() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let id = |name: &str| {
+            let obj = insert_object(&conn, &format!("hash-{name}"), false);
+            insert_source(&conn, root, name, Some(obj))
+        };
+        let (canon, nikon, coarse, bare, late, coarse_canon) = (
+            id("a.jpg"),
+            id("b.jpg"),
+            id("c.jpg"),
+            id("d.jpg"),
+            id("e.jpg"),
+            id("f.jpg"),
+        );
+        for (source, make) in [(canon, "Canon"), (nikon, "Nikon"), (late, "Nikon")] {
+            insert_fact(&conn, source, "content.Make", make);
+        }
+        insert_fact(&conn, coarse_canon, "content.Make", "Canon");
+        for (source, when) in [
+            (nikon, "2024-03-01T10:00:00"),
+            (coarse, "2024"),
+            (late, "2024-08-01T10:00:00"),
+            (coarse_canon, "2024"),
+        ] {
+            insert_time_fact(&conn, source, "content.Taken", when);
+        }
+
+        let mut plan = plan_with(&mut conn, &["Make != Canon", "NOT Taken >= 2024-06"]);
+        let mut entries: Vec<i64> = plan.lock_entries.iter().map(|e| e.id).collect();
+        entries.sort();
+        assert_eq!(entries, vec![nikon, coarse, bare]);
+        let notes = [
+            "  of which 2 have no Make",
+            "  of which 1 has no Taken",
+            "  2 sources have a time that spans 2024-06 (coarser than a month): 1 not selected, 1 selected",
+        ];
+        assert_eq!(plan.notes.lines(), notes);
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("cluster.toml");
+        let params = ExecuteGenerateParams {
+            lock_path: dir.path().join("cluster.lock"),
+            manifest_path: manifest_path.clone(),
+            query: vec![],
+            query_as_given: vec![],
+            scope: scope_of(&conn, &[]),
+            roots: crate::core::repo::root::fetch_all(&conn).unwrap(),
+            archive_root_id: 1,
+            base_dir: String::new(),
+            allow: vec![],
+            zone: parse_zone_name("UTC").unwrap(),
+        };
+        let result = execute_generate(&mut plan, &params).unwrap();
+
+        let summary = result.compose_summary("Generated manifest: cluster.toml (3 sources)");
+        let lines: Vec<&str> = summary.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "Generated manifest: cluster.toml (3 sources)",
+                notes[0],
+                notes[1],
+                notes[2],
+                "  From 1 root:",
+                "    /photos  (3)",
+                "  3 have no archived copy",
+            ]
+        );
+
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        let block = format!(
+            "# === Cluster Summary ===\n\
+             # 3 sources\n\
+             # {}\n\
+             # {}\n\
+             # {}\n\
+             # From 1 root:\n\
+             #   /photos  (3)\n\
+             # 3 have no archived copy\n",
+            notes[0], notes[1], notes[2]
+        );
+        assert!(manifest.contains(&block), "got: {manifest}");
+    }
+
+    /// **What the filter selected and the lock leaves out is in neither spanning direction.**
+    /// Three sources hold a value known only to 2024 and `NOT Taken >= 2024-06` selects all
+    /// three, but one is unhashed and one already archived: only the lock entry counts, as
+    /// selected, and neither of the others is counted as not selected.
+    #[test]
+    fn archived_and_unhashed_sources_are_in_neither_spanning_direction() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let archive = insert_root(&conn, "/archive", "archive", false);
+        let fresh = insert_object(&conn, "fresh", false);
+        let kept = insert_object(&conn, "kept", false);
+        let entry = insert_source(&conn, root, "entry.jpg", Some(fresh));
+        let unhashed = insert_source(&conn, root, "unhashed.jpg", None);
+        let archived = insert_source(&conn, root, "archived.jpg", Some(kept));
+        insert_source(&conn, archive, "copy.jpg", Some(kept));
+        for source in [entry, unhashed, archived] {
+            insert_time_fact(&conn, source, "content.Taken", "2024");
+        }
+
+        let plan = plan_with(&mut conn, &["NOT Taken >= 2024-06"]);
+        assert_eq!(plan.lock_entries.len(), 1);
+        assert_eq!(plan.unhashed_count, 1);
+        assert_eq!(plan.archived.len(), 1);
+        assert_eq!(
+            plan.notes.lines(),
+            ["  1 source has a time that spans 2024-06 (coarser than a month): 1 selected"]
         );
     }
 }

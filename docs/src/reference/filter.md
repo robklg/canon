@@ -127,7 +127,7 @@ Canon's message prints each value and key so that, copied back into a filter, it
 
 A time you type covers a span of time in [your local time](../concepts/facts.md#how-canon-shows-a-time): `2024` is the whole of that year, `2024-06` that month, `2024-06-15` that day, `"2024-06-15 14:30"` that minute, `"2024-06-15 14:30:05"` that second. A stored time also covers a span, at the precision it was written. A comparison selects a value when its whole span satisfies the operator, as the [operator table](#basic) says.
 
-A stored value coarser than the time you typed is in none of `<`, `=` and `>`: a photo dated only `2024` is not `=2024-06`, and not before or after it. It is selected by `!=` and `NOT`, like a source with no value.
+A stored value coarser than the time you typed is in none of `<`, `=` and `>`: a photo dated only `2024` is not `=2024-06`, and not before or after it. It is selected by `!=` and `NOT`, like a source with no value. A command that acts states how many such values a comparison could not place ([What an Acting Command States](#what-an-acting-command-states)).
 
 | You type | Selects the same as |
 |----------|---------------------|
@@ -152,6 +152,18 @@ A stored value coarser than the time you typed is in none of `<`, `=` and `>`: a
 ```
 
 For the same reason, `content.DateTimeOriginal<2024` and `NOT content.DateTimeOriginal>=2024` differ: the second also selects every source with no `DateTimeOriginal`.
+
+## What an Acting Command States
+
+A command that acts on a `--where` selection (`exclude set`, `exclude clear`, `exclude duplicates`, `exclude set-object`, `cluster generate`, `cluster refresh`, `facts delete`) states two counts under the number of sources it acts on: how many of them have no value for each negated key, and which stored times a comparison could not place:
+
+```
+Would exclude 2,140 sources:
+  of which 312 have no Make
+  12 sources have a time that spans 2024-06 (coarser than a month): 9 not selected, 3 selected
+```
+
+A key is negated under `NOT`, `!=`, `!~` or `NOT IN`, and two negations cancel. The key is named as you typed it. A time line counts the stored times whose span holds the boundary of the time you typed: "selected" are those the command acts on, "not selected" those the filter left out. A count of zero prints no line. The lines print under `--yes` too, and are kept in the decision's summary, which [`canon trail show`](../commands/query/trail.md) prints. Where the command acts on nothing, a time line with sources not selected still prints, under the command's "no sources" sentence.
 
 ## When a Filter Is Rejected
 

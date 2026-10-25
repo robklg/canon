@@ -421,6 +421,46 @@ fn the_new_year_is_read_in_the_manifests_zone_on_any_machine() {
     }
 }
 
+/// **Every plain date a manifest's query types reads on the manifest's zone.** The file saved at
+/// 23:30 UTC on New Year's Eve 2023 is 2024 in Amsterdam and 2023 in New York. With the zone
+/// line Amsterdam, a refresh on a New York machine selects it under a year, a day and a month
+/// typed plainly; with the zone line New York, under none of them.
+#[test]
+fn a_plain_date_in_a_recorded_query_reads_on_the_manifests_zone() {
+    let queries = [
+        "source.mtime = 2024",
+        "source.mtime >= 2024-01-01",
+        "source.mtime IN (2024-01)",
+    ];
+    for (zone, selects) in [("Europe/Amsterdam", true), ("America/New_York", false)] {
+        for query in queries {
+            let home = Home::new();
+            let manifest = home.manifest_made_in("Europe/Amsterdam");
+            home.edit_manifest(&manifest, "query = ", &format!("query = [{query:?}]"));
+            home.edit_manifest(&manifest, "zone = ", &format!("zone = {zone:?}"));
+
+            let refreshed = home.run("America/New_York", &["cluster", "refresh", &manifest], None);
+            let lock = std::path::Path::new(&manifest).with_extension("lock");
+            let selected = lock.exists()
+                && std::fs::read_to_string(&lock)
+                    .unwrap()
+                    .contains("saved.jpg");
+            assert_eq!(
+                selected, selects,
+                "{zone}, {query}: {}{}",
+                refreshed.stdout, refreshed.stderr
+            );
+            if !selects {
+                assert!(
+                    refreshed.stdout.contains("No sources matched the query"),
+                    "{zone}, {query}: {}",
+                    refreshed.stdout
+                );
+            }
+        }
+    }
+}
+
 /// **An old lock is refused in friendly words**: a lock written before lock files recorded
 /// the zone is refused by `apply` naming the rebuild, never as a parse error — and a
 /// manifest command prints no unknown-zone notice, since it reads the recorded zone.
@@ -553,8 +593,9 @@ fn a_refresh_states_the_clock_for_a_time_read_through_an_accessor() {
 }
 
 /// **A refresh states the scope's refusal first**: a scope line on a suspended root, beside a
-/// zone line Canon cannot read, prints the door, then the zone's cause, then the abort once —
-/// exit 1 with no `Error:`, nothing written.
+/// zone line Canon cannot read, prints the door on stdout, then the zone's cause on stderr with
+/// `Error:` before it — a line Canon cannot read is never an answer — then the abort once;
+/// exit 1, nothing written.
 #[test]
 fn a_refresh_states_the_door_before_the_zone_cause() {
     let home = Home::new();
@@ -571,16 +612,19 @@ fn a_refresh_states_the_door_before_the_zone_cause() {
     let refused = home.attempt("UTC", &["cluster", "refresh", &manifest]);
     assert!(!refused.success);
     let out = refused.stdout;
-    let door = out.find("suspended").unwrap_or_else(|| panic!("{out}"));
-    let zone = out
-        .find("Europe/Amsterdm")
-        .unwrap_or_else(|| panic!("{out}"));
-    let aborted = out
-        .find("Refresh aborted")
-        .unwrap_or_else(|| panic!("{out}"));
-    assert!(door < zone && zone < aborted, "{out}");
-    assert_eq!(out.matches("Refresh aborted").count(), 1, "{out}");
-    assert!(!refused.stderr.contains("Error:"), "{}", refused.stderr);
+    assert!(out.contains("suspended"), "{out}");
+    assert!(
+        !out.contains("Error:") && !out.contains("Europe/Amsterdm"),
+        "{out}"
+    );
+    let err = refused.stderr;
+    let (_, after_error) = err.split_once("Error: ").unwrap_or_else(|| panic!("{err}"));
+    let (cause, _) = after_error
+        .split_once("Refresh aborted")
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(cause.contains("Europe/Amsterdm"), "{err}");
+    assert_eq!(err.matches("Error:").count(), 1, "{err}");
+    assert_eq!(err.matches("Refresh aborted").count(), 1, "{err}");
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), before);
 }
 

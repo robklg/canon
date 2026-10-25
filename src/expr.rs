@@ -30,11 +30,19 @@ mod repo;
 pub use domain::bind::ExpressionRefused;
 pub use domain::filter::UsedStatus;
 pub use ops::bind::{read_filters, read_report, BoundFilters, ExpressionText};
-pub use ops::filter::apply_filters;
+pub use ops::filter::{apply_filters, apply_filters_noting};
 
 // The language applied within a scope — the selector every command resolves
 // through, so that what is acted on is what was seen.
 pub use ops::selection::{select_sources, RolePolicy, SelectionParams};
+
+// What a selecting run recorded beside its evaluation, and the lines an acting command's
+// plan states from it: how many of what it acts on have no value for a negated key, and which
+// stored times a comparison could not place. `NoteMarks` is carried as a parameter type
+// alone: `SelectionNotes::of` takes it, and a caller factoring a helper must name it.
+#[allow(unused_imports)]
+pub use ops::notes::NoteMarks;
+pub use ops::notes::{NoteUnit, SelectionNotes};
 
 // The shaping half: a manifest's pattern, read and checked against the stored keys' types —
 // or refused, with every reason — inspected for the keys it needs and the placement it commits

@@ -70,7 +70,12 @@ impl RefreshStanding {
     /// [`Unasked`](Self::Unasked) names the refresh: a remedy withheld on a
     /// question nobody asked would leave the user with no way forward at all,
     /// which is worse than naming one they may have to open a door for.
-    fn way_back(self, manifest: &Path, set_aside: &[String]) -> Vec<String> {
+    fn way_back(
+        self,
+        manifest: &Path,
+        set_aside: &[String],
+        query: Option<&ExpressionRefused>,
+    ) -> Vec<String> {
         match self {
             RefreshStanding::Runs | RefreshStanding::Unasked => {
                 vec![format!(
@@ -84,7 +89,9 @@ impl RefreshStanding {
             // The set-aside line beside this one carries no act, so this owes
             // one — the same pair the refresh prints when it refuses here, led
             // by the sentence that says which line they answer.
-            RefreshStanding::ScopeKeptNothing => scope_kept_nothing_way_back(manifest, set_aside),
+            RefreshStanding::ScopeKeptNothing => {
+                scope_kept_nothing_way_back(manifest, set_aside, query)
+            }
         }
     }
 
@@ -263,8 +270,9 @@ fn source_lost_remedy(
     manifest: &Path,
     refresh: RefreshStanding,
     set_aside: &[String],
+    query: Option<&ExpressionRefused>,
 ) -> Vec<String> {
-    let way_back = refresh.way_back(manifest, set_aside);
+    let way_back = refresh.way_back(manifest, set_aside, query);
     if way_back.is_empty() {
         return vec!["Check if the source volume is connected.".to_string()];
     }
@@ -296,12 +304,25 @@ fn source_lost_remedy(
 /// It names the consequence rather than repeating the cause: the skipped line
 /// already said what happened, and what the reader does not know is that it
 /// has cost them the rebuild.
-fn scope_kept_nothing_way_back(manifest: &Path, set_aside: &[String]) -> Vec<String> {
+///
+/// **A recorded query the refresh would also refuse takes its way back last,
+/// here**, as at `cluster refresh`'s own exit for this cause: the scope's two
+/// answers, then the query's, so the lines read as steps and the refresh the
+/// query's line names comes after the step that lets it run. The report's
+/// query block leaves its way back to this answer where the scope is what
+/// turns the refresh away first; `query` is that refusal, and `None` anywhere
+/// else.
+fn scope_kept_nothing_way_back(
+    manifest: &Path,
+    set_aside: &[String],
+    query: Option<&ExpressionRefused>,
+) -> Vec<String> {
     let mut lines = vec![
         "No sources are known under the scopes declared in this manifest, so the lock cannot be rebuilt:"
             .to_string(),
     ];
     lines.extend(scan_or_edit_scope(manifest, set_aside));
+    lines.extend(query.map(|refusal| query_way_back(refusal, manifest)));
     lines
 }
 
@@ -787,29 +808,51 @@ fn manifest_zone_line_deleted(zone: &RecordedZone, manifest: &Path) -> String {
     )
 }
 
-/// The way back from a recorded query that cannot run, as `cluster refresh` and `cluster
-/// status` state it.
-fn query_way_back(manifest: &Path) -> String {
-    format!(
-        "`{}` to fix the query and select again",
-        refresh_command(manifest, true)
-    )
+/// The way back from a recorded query that cannot run, by cause, as `cluster refresh` and
+/// `cluster status` state it: `--edit` where the query holds input Canon cannot read; the
+/// conversion the refusal names, then a plain refresh, where a key holds two types — never
+/// `--edit` for a query that is correct; and where both stand, one line taking both steps in
+/// order, so neither meets a second refusal.
+fn query_way_back(refusal: &ExpressionRefused, manifest: &Path) -> String {
+    let edit = !refusal.is_answer();
+    match (refusal.has_answer(), edit) {
+        (true, true) => format!(
+            "After converting, `{}` to fix the query and select again",
+            refresh_command(manifest, true)
+        ),
+        (true, false) => format!(
+            "After converting, `{}` to select again",
+            refresh_command(manifest, false)
+        ),
+        (false, _) => format!(
+            "`{}` to fix the query and select again",
+            refresh_command(manifest, true)
+        ),
+    }
 }
 
 /// The recorded query's refusal as `cluster refresh` states it: the refusal — its first line,
 /// then each cause under the typed line it sits in — and the way back.
 fn query_refusal_block(refusal: &ExpressionRefused, manifest: &Path) -> String {
-    format!("{refusal}\n{}", query_way_back(manifest))
+    format!("{refusal}\n{}", query_way_back(refusal, manifest))
 }
 
 /// The recorded query's refusal as `cluster status` states it: what the refresh would be
-/// rejected for and the way back on one line, then each cause under it, four spaces further in.
-fn query_status_lines(refusal: &ExpressionRefused, manifest: &Path) -> Vec<String> {
-    let mut lines = vec![refresh_would_refuse(&format!(
-        "the recorded query cannot run — {}",
-        query_way_back(manifest)
-    ))];
+/// rejected for, then each cause under it four spaces further in, then the way back at the
+/// causes' indent — after them, since with two causes there are two steps. Where the
+/// scope's terminal rule is what turns the refresh away first, the way back is not named
+/// here: the refresh it names would be turned away, so it follows the scope's own answer
+/// instead ([`scope_kept_nothing_way_back`]), wherever the report owes that one.
+fn query_status_lines(
+    refusal: &ExpressionRefused,
+    manifest: &Path,
+    follows_the_scope: bool,
+) -> Vec<String> {
+    let mut lines = vec![refresh_would_refuse("the recorded query cannot run")];
     lines.extend(refusal.render("    "));
+    if !follows_the_scope {
+        lines.push(format!("    {}", query_way_back(refusal, manifest)));
+    }
     lines
 }
 

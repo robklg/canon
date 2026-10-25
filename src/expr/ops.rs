@@ -9,11 +9,13 @@
 //! reader and checked as pure logic; reading the file they come from is this
 //! layer's, the first time a reading meets one. Reading a
 //! stored key's one value per source is the fourth: the rule that picks it is
-//! domain, the trip to storage is here.
+//! domain, the trip to storage is here. The notes are the fifth: what one selecting
+//! run recorded beside its evaluation, counted for an acting command's plan.
 
 pub(super) mod alias;
 pub(super) mod bind;
 pub(super) mod filter;
+pub(super) mod notes;
 pub(super) mod pattern;
 pub(super) mod selection;
 pub(super) mod value;

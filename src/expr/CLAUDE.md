@@ -12,7 +12,7 @@ needs restating somewhere else, that is the signal something belongs in this fac
 **Modules**: `domain/key`, `domain/read`, `domain/problem`, `domain/transform`,
 `domain/pattern`, `domain/vantage`, `domain/filter`, `domain/glob`, `domain/bind`, `domain/print`,
 `domain/cache`, `domain/value`, `domain/alias`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
-`ops/value`, `repo`.
+`ops/value`, `ops/notes`, `repo`.
 
 ## Strata
 
@@ -35,7 +35,8 @@ prefetched cache rather than a query per source. `pattern` is the shaping half's
 storage — `read_pattern`, binding a pattern against the stored keys' types, and the prefetch that
 reads its stored facts, the place the context-supplied law is applied rather than merely stated. `selection` is the set of sources an operation
 reports over or acts on — it lives here rather than beside any one command because exploring
-and acting must resolve to the same set. `alias` reads the aliases file, the first time a reading meets
+and acting must resolve to the same set. `notes` is what a selecting run recorded beside its
+evaluation and the lines an acting command's plan states from it — see Selection notes below. `alias` reads the aliases file, the first time a reading meets
 an alias, and hands its entries to the check. `value` reads a stored key's one value for a batch of sources, and any key's as an
 expression reads it (`fetch_named_values`, for `worklist --emit`).
 
@@ -50,9 +51,10 @@ row, and
 engine writes down. The surface is pinned exactly — `subsystem_barrels_seal_to_their_pinned_surfaces`
 (`tests/architecture.rs`) — so changing it means editing the pin in the same commit.
 Everything else is private, and the strata are private modules: how the facility divides
-itself is its own business, and rearranging it must not be visible to any caller. No item is
-carried only as a parameter type today; under the parameter-type rule one would join when an
-exported item takes a type nothing outside names, and return types never do.
+itself is its own business, and rearranging it must not be visible to any caller. One item is
+carried only as a parameter type, `NoteMarks`: `SelectionNotes::of` takes it and no consumer
+names it, so it rides with `#[allow(unused_imports)]` under the parameter-type rule; return
+types never join that way.
 
 **Every inbound reach is at the front door.** Nothing outside names `expr::domain::…` or
 `expr::ops::…`, and nothing inside reaches a sibling subsystem's internals in either
@@ -336,7 +338,8 @@ such a row, which is why the widening is unreachable in practice and pinned anyw
 
 `ops/filter.rs` speaks no SQL. A key the source row computes, compared or tested for existence,
 is resolved per source, and the row it is resolved from — the source's attributes — comes from
-`repo.rs`'s `fetch_source_row`. Every other key, the content hash included, is compared on the source's one
+`repo.rs`'s `fetch_source_row`, read at most once per source for the evaluation and the notes
+together (`noting_reads_each_source_row_once`). Every other key, the content hash included, is compared on the source's one
 value, read from the prefetched cache (`FactCache::value`). The comparison stays in `ops`;
 moving it into `repo` would put comparison logic in the repository instead.
 
@@ -358,6 +361,32 @@ content reading alone. A consumer then decides by the key read (`ParsedFactKey::
 the text, since quoting never changes which key. Verifier
 `a_key_is_read_by_the_name_import_stored_it_under` (`facts/domain.rs`); `--emit`'s leg is in
 `worklist/ops.rs`.
+
+## Selection notes
+
+**The selection notes law**: an acting command's plan counts what its selection's own
+evaluation decided, by one rule, in `ops/notes.rs`. A key is negated when its comparison sits
+under an odd number of negations in the bound tree — each `NOT`, `!=`, `!~` and `NOT IN` counting
+one, since the reader reads each negated operator as `NOT` of its positive form — and `of which N
+have no <key>` counts, among the sources the command acts on, those `?` on the key as written
+does not select; on `exclude set-object` an object counts when none of its selected sources has
+a value. A time compared against a typed period finer than the time spans it when the boundary
+falls strictly inside its period (`ClockSpan::spans`, the time noun's, beside the period table
+and pinned against it); its line counts "selected" over what the command acts on and "not
+selected" over what the filter did not select, so a source the filter selected and the command
+leaves alone is in neither. Why: a count taken over the whole selection reports values entering
+an act that does not touch them.
+
+The marks are taken in the selecting loop itself, over the same cache and row read, through
+`apply_filters_noting` where `SelectionParams.notes` asks: a second evaluation could read values
+changed in between, and the line would disagree with the act. The lines are composed here once,
+since the decision record, the receipt and the manifest carry them — the key as typed, the period
+through the printing rule, no line at zero — and joined under a count by `SelectionNotes::under`. Verifier `the_notes_count_what_the_selection_decided`.
+
+Where it does **not** apply: a command that does not act never asks (`notes: false`) — `ls`,
+`facts`, `coverage`, `worklist`, `compare`, `survey`, and `cluster status`, which selects
+nothing; nor single-target exclusion, which no filter selects. A bare `NOT key?` gives no line,
+since it already selects exactly what has no value.
 
 ## The source-value law
 

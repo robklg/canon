@@ -49,6 +49,7 @@ pub fn run(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: crate::user_zone().clone(),
+        notes: false,
     };
     let sel = select_sources(conn, &params)?;
 
@@ -190,6 +191,7 @@ pub fn show_duplicates(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: crate::user_zone().clone(),
+        notes: false,
     };
     let sel = select_sources(conn, &params)?;
 

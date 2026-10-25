@@ -11,6 +11,7 @@ use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptKind;
 use crate::core::repo::{self, Connection};
 use crate::exclude::repo as exclude_repo;
+use crate::expr::{NoteUnit, SelectionNotes};
 
 use super::receipt::{
     counts_all, exclude_receipt_items, item_for_source, object_exclude_receipt,
@@ -135,6 +136,7 @@ pub fn execute_set_source(
         true,
         counts_all(1),
         &summary,
+        &SelectionNotes::none(NoteUnit::Sources),
         |tx, decision_id| {
             exclude_repo::source::set_excluded(tx, item.source_id, true, decision_id)?;
             Ok(
@@ -276,6 +278,7 @@ pub fn execute_set_object(
         true,
         counts_all(1),
         &summary,
+        &SelectionNotes::none(NoteUnit::Sources),
         |tx, decision_id| {
             // Capture the stamp-set before stamping (pre-stamp provenance links).
             let stamp_set = match (decision, decision_id) {
@@ -367,6 +370,7 @@ pub fn execute_clear_object(
         true,
         counts_all(1),
         &summary,
+        &SelectionNotes::none(NoteUnit::Sources),
         |tx, decision_id| {
             // Capture the stamp-set before stamping (pre-stamp provenance links).
             let stamp_set = match (decision, decision_id) {

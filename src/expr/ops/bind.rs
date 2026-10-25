@@ -737,6 +737,19 @@ mod tests {
     /// modifier table: a wrong-type modifier is refused (no "skipped N values" report), a
     /// modifier on a key of mixed type is refused as an answer, and the bare key runs. A key with
     /// no facts has its chain checked like any other.
+    /// `has_answer` beside `is_answer`: a typo alone is no answer; a key of two types alone is
+    /// one; both together are not all answers, but some are.
+    #[test]
+    fn has_answer_is_true_where_some_cause_is_an_answer() {
+        let (conn, _) = world();
+        let typo = refusal(&conn, &["source.ext ="]);
+        assert!(!typo.has_answer() && !typo.is_answer());
+        let two_types = refusal(&conn, &[r#""content.File Size" = 380"#]);
+        assert!(two_types.has_answer() && two_types.is_answer());
+        let both = refusal(&conn, &["source.ext =", r#""content.File Size" = 380"#]);
+        assert!(both.has_answer() && !both.is_answer());
+    }
+
     #[test]
     fn a_report_key_is_read_and_checked_like_a_filter_key() {
         let (conn, _) = world();

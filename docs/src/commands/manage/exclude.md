@@ -36,6 +36,18 @@ canon exclude clear --yes
 
 When excluding or clearing more than one source, a confirmation prompt shows the count, root spread, and (for `exclude set`) archive coverage before proceeding. Use `--yes` to skip the prompt, or `--dry-run` to preview without executing.
 
+`!=`, `!~`, `NOT IN` and `NOT` select sources with no value too, so the count under a negated key says how many of them there are, and a time compared with a finer date says how many values it could not place ([What an Acting Command States](../../reference/filter.md#what-an-acting-command-states)):
+
+```
+$ canon exclude set /photos --where 'Make != Canon' --dry-run
+Would exclude 2,140 sources:
+  of which 312 have no Make
+  /photos/2011/a.jpg
+  ...
+```
+
+The lines stand under the count in the preview, the confirmation and the summary `--yes` prints, and the decision's summary keeps them. `exclude duplicates` counts the copies it would exclude. Where nothing is excluded, a time line with sources not selected still prints, under the sentence saying there is nothing to exclude or clear.
+
 Given several paths, one that holds no known sources (an empty folder matched by a shell glob, say) is skipped and named before the ceremony, and the rest proceed:
 
 ```
@@ -97,7 +109,7 @@ Would exclude 2 objects affecting 5 sources (4 in source roots, 1 in archives):
   of which 1 on suspended roots
 ```
 
-The line prints whether you are previewing or running with `--yes`.
+The line prints whether you are previewing or running with `--yes`. Under a negated key, the count below it is in objects: an object counts when none of its selected sources has a value (`of which 290 objects have no Make`).
 
 Nothing else is said about suspended roots. Suspending is how you take content out of scope, so `exclude` — like every other act — passes over what stands behind a closed door without remarking on it. A run that finds nothing outside them says so plainly.
 

@@ -971,8 +971,10 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
 /// than unconditionally on stderr. A [`crate::expr::ExpressionRefused`] that is
 /// only an answer about what a key is (mixed type, a type changed mid-run) is
 /// stated the same way; one holding input Canon cannot read prints with
-/// `Error:` on stderr. Everything else is a real failure and renders exactly
-/// as before.
+/// `Error:` on stderr. A refused `cluster refresh` ([`archive::RefreshRefused`])
+/// carries `Error:` in its own text where it belongs and prints as it stands,
+/// on the same rule. Everything else is a real failure and renders exactly as
+/// before.
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let channel = door_channel_for(&cli.command);
@@ -983,6 +985,18 @@ fn main() -> std::process::ExitCode {
                 match channel {
                     scope::DoorChannel::Stdout => println!("{refusal}"),
                     scope::DoorChannel::Stderr => eprintln!("{refusal}"),
+                }
+            } else if let Some(refusal) = err.downcast_ref::<archive::RefreshRefused>() {
+                // A refused refresh carries `Error:` in its own text where a cause holds
+                // input Canon cannot read, so it prints as it stands: on the command's
+                // channel where it is an answer, on stderr otherwise.
+                if refusal.is_answer() {
+                    match channel {
+                        scope::DoorChannel::Stdout => println!("{refusal}"),
+                        scope::DoorChannel::Stderr => eprintln!("{refusal}"),
+                    }
+                } else {
+                    eprintln!("{refusal}");
                 }
             } else if let Some(refusal) = err.downcast_ref::<crate::expr::ExpressionRefused>() {
                 // A filter Canon will not run: an answer about what a key is prints as it

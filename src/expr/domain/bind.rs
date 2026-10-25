@@ -1614,12 +1614,23 @@ impl ExpressionRefused {
     /// Whether every cause is an answer — what a key is — so the refusal prints without
     /// `Error:`.
     pub fn is_answer(&self) -> bool {
-        self.causes.iter().all(|cause| match cause {
+        self.causes.iter().all(|cause| self.answers(cause))
+    }
+
+    /// Whether some cause is an answer about what a key is — beside which a refused manifest's
+    /// way back names the conversion.
+    pub fn has_answer(&self) -> bool {
+        self.causes.iter().any(|cause| self.answers(cause))
+    }
+
+    /// Whether one cause of this refusal is an answer.
+    fn answers(&self, cause: &BindCause) -> bool {
+        match cause {
             // A pattern places by the key's value, so a key of mixed type stops `apply` and is
             // one of the pattern's problems, printed under its first line.
             BindCause::MixedType(_) if self.refused == Refused::Pattern => false,
             other => other.is_answer(),
-        })
+        }
     }
 
     /// The refusal of names given alone, outside any expression (`worklist --emit`), that name no

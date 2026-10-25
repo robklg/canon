@@ -14,6 +14,7 @@ mod repo;
 
 pub use cli::apply::{run, ApplyOptions};
 pub use cli::cluster::{generate, refresh, status, GenerateOptions};
+pub use domain::RefreshRefused;
 pub use ops::execute::TransferMode;
 
 // These two have no production caller — the contentless-law canary

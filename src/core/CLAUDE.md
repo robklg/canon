@@ -66,7 +66,9 @@ padded — and `FactValue::Time` carries it. Its owners:
   fraction) and the comparisons, one whole-period table (`satisfies`), read by `--where` and
   the trail alike: a value is selected when its whole period satisfies the operator, a value
   coarser than the typed period is in none of `<`, `=`, `>`, and a fraction is a point one
-  nanosecond long. It reads only spans, so nothing converts a clock reading to an instant. A
+  nanosecond long. Beside the table, `spans` is its third side: a value whose period holds a
+  comparison's boundary strictly inside it, on neither side — what an acting command counts
+  (`spans_is_the_third_side_of_the_period_table`). It reads only spans, so nothing converts a clock reading to an instant. A
   time of day (`reading::read_time_of_day`) is a clock reading on `REFERENCE_DAY`, so the one
   table compares it too. `clock_secs_as_if_utc` counts a reading as if UTC
   for storage's encoding (its inverse is `repo::fact`'s read) and a speed path's bounds,

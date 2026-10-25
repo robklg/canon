@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::archive::domain::{
     parse_manifest_allow, parse_manifest_config, settle_manifest_zone, LockHeaderStanding,
     LockStanding, ManifestConfig, ManifestZone, NextStep, OwedWayBack, RefreshRefusal,
+    RefreshRefused,
 };
 use crate::archive::ops::generate::{
     ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteRefreshParams,
@@ -28,7 +29,7 @@ use crate::core::ops::scope::{
     classify_all, no_sources_known, resolve_archive_path, resolve_recorded_scope,
 };
 use crate::core::repo::{self, Connection, Db};
-use crate::expr::{read_filters, ExpressionText};
+use crate::expr::{read_filters, ExpressionRefused, ExpressionText};
 
 pub struct GenerateOptions {
     pub force: bool,
@@ -129,6 +130,9 @@ pub fn generate(
 
     if plan.lock_entries.is_empty() {
         println!("No sources matched the query");
+        for line in plan.notes.lines() {
+            println!("{line}");
+        }
         return Ok(());
     }
 
@@ -376,12 +380,17 @@ fn refresh_with_editor(
     // written until every cause is clear.
     let settled_zone = settle_manifest_zone(config.meta.zone.as_deref(), machine);
     let recorded_query = parse_recorded_query(conn, &config.meta.query)?;
-    let mut causes: Vec<String> = Vec::new();
+    // Each cause with whether it is an answer: a zone Canon cannot settle never is, a query
+    // refusal is where every cause in it is about what a key is.
+    let mut causes: Vec<(String, bool)> = Vec::new();
     if let Err(refusal) = &settled_zone {
-        causes.push(super::zone_refusal(refusal));
+        causes.push((super::zone_refusal(refusal), false));
     }
     if let Err(refusal) = &recorded_query {
-        causes.push(super::query_refusal_block(refusal, config_path));
+        causes.push((
+            super::query_refusal_block(refusal, config_path),
+            refusal.is_answer(),
+        ));
     }
     let aborted = format!(
         "Refresh aborted — {} and its lock file are unchanged.",
@@ -395,41 +404,33 @@ fn refresh_with_editor(
     // what collection is being assembled, so a lock rebuilt from half of one
     // is a wrong artifact that reads as whole, and the apply after it would
     // archive a partial collection under a manifest claiming the full one.
-    // Exit 1 with no `Error:` prefix — nothing went wrong; the user closed the
-    // door — and no decision row, because nothing was done.
+    // Exit 1, and no decision row, because nothing was done. A door is an
+    // answer — nothing went wrong; the user closed it — so beside answers alone
+    // it carries no `Error:`; beside a cause holding input Canon cannot read,
+    // `Error:` stands before that cause, the door lines staying as they are.
     //
-    // The door's own lines went out above; the other causes follow them on
-    // the same stream, then the abort once.
+    // The door's own lines went out above; the other causes follow them, then
+    // the abort once.
     if !doors.is_empty() {
-        for cause in &causes {
-            println!("{cause}");
-        }
-        println!("{aborted}");
-        std::process::exit(1);
+        return Err(RefreshRefused::from_causes(causes, aborted).into());
     }
 
-    // This refusal is itself a legitimate answer — the recorded scope named
-    // places Canon knows no sources under, and saying so *is* the answer — so
-    // by the root register's rule it should exit 1 without the `Error:` prefix
-    // a raised error wears, exactly as the door arm above it does. It does not
-    // yet. The door arm gets there by calling `std::process::exit` from inside
-    // this function, which no test can reach without dying with it; the shape
-    // that works is a typed refusal returned to `main`, as `survey` and
-    // `trail` do. That mints a type and changes a pinned barrel, so it is
-    // recorded rather than done here.
+    // A scope that kept nothing is an error, as it is at the argument door,
+    // which raises the same sentence: Canon cannot tell a folder it has never
+    // scanned from one named by mistake, and `no_sources_known` speaks the rule
+    // for both doors. Every other cause joins it under the one `Error:`. The
+    // scope's way back stands under its sentence and the query's comes last, so
+    // the lines read as steps in order; the abort ends it, as at every exit.
     if refusing {
         let mut lines = vec![no_sources_known(scope.set_aside())];
-        lines.extend(causes);
-        lines.push(aborted);
         lines.extend(super::scan_or_edit_scope(config_path, scope.set_aside()));
+        lines.extend(causes.into_iter().map(|(cause, _)| cause));
+        lines.push(aborted);
         bail!("{}", lines.join("\n"));
     }
     let manifest_zone = match settled_zone {
         Ok(zone) if causes.is_empty() => zone,
-        _ => {
-            causes.push(aborted);
-            bail!("{}", causes.join("\n"));
-        }
+        _ => return Err(RefreshRefused::from_causes(causes, aborted).into()),
     };
     let zone = manifest_zone.zone().clone();
     // A query that cannot run was refused above with every cause; it is never selected on.
@@ -501,6 +502,9 @@ fn refresh_with_editor(
     if plan.lock_entries.is_empty() {
         generate_ops::execute_refresh(&mut plan, &exec_params)?;
         println!("No sources matched the query");
+        for line in plan.notes.lines() {
+            println!("{line}");
+        }
         let statements = refresh_zone_statements(
             &manifest_zone,
             old_lock_zone.as_ref(),
@@ -706,9 +710,11 @@ fn write_next_step(
         NextStep::None => {
             let lines = match status.owed_way_back() {
                 OwedWayBack::Stated => Vec::new(),
-                OwedWayBack::ScanOrEditScope => {
-                    super::scope_kept_nothing_way_back(manifest_path, &status.set_aside_scope)
-                }
+                OwedWayBack::ScanOrEditScope => super::scope_kept_nothing_way_back(
+                    manifest_path,
+                    &status.set_aside_scope,
+                    query_after_the_scope(status),
+                ),
                 OwedWayBack::AdjustPattern => {
                     super::adjust_pattern_remedy(&status.pattern_gaps, manifest_path)
                 }
@@ -871,6 +877,25 @@ fn zone_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<Strin
 /// own. The causes can hold at once — a scope line naming a closed root, entries standing behind
 /// one, the destination, the zone, each query line — and each names the act it turns away, in
 /// the conditional; composed in one place so a root reached more than one way is stated once.
+/// The recorded query's refusal, where its way back follows the scope's answer rather than
+/// standing in the query's own block: where the scope's terminal rule is what turns the refresh
+/// away first. The table's answer (`refresh_refused_by`), read rather than re-tested from
+/// `scope_kept_nothing`, which holds beside a closed door too — and there the door outranks the
+/// scope, its line names the act that opens it, and the query's block names its own way back,
+/// as the refresh does.
+fn query_after_the_scope(status: &status_ops::ManifestStatus) -> Option<&ExpressionRefused> {
+    match status.refresh_refused_by() {
+        Some(RefreshRefusal::ScopeKeptNothing) => status.query_refusal.as_ref(),
+        None
+        | Some(
+            RefreshRefusal::Door
+            | RefreshRefusal::ZoneLine
+            | RefreshRefusal::NoMachineZone
+            | RefreshRefusal::Query,
+        ) => None,
+    }
+}
+
 fn state_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<u8> {
     let mut out = Vec::new();
     for line in manifest_door_lines(status) {
@@ -882,7 +907,8 @@ fn state_lines(status: &status_ops::ManifestStatus, manifest: &Path) -> Vec<u8> 
         let _ = writeln!(out, "{line}");
     }
     if let Some(refusal) = &status.query_refusal {
-        for line in super::query_status_lines(refusal, manifest) {
+        let follows_the_scope = query_after_the_scope(status).is_some();
+        for line in super::query_status_lines(refusal, manifest, follows_the_scope) {
             let _ = writeln!(out, "{line}");
         }
     }
@@ -1331,7 +1357,12 @@ pub fn status(
                     | RefreshRefusal::Query,
                 ) => super::RefreshStanding::WayBackStated,
             };
-            for line in super::source_lost_remedy(manifest_path, refresh, &status.set_aside_scope) {
+            for line in super::source_lost_remedy(
+                manifest_path,
+                refresh,
+                &status.set_aside_scope,
+                query_after_the_scope(&status),
+            ) {
                 println!("{line}");
             }
         }
@@ -1986,6 +2017,7 @@ mod tests {
             Path::new("m.toml"),
             super::super::RefreshStanding::Runs,
             &set_aside,
+            None,
         );
         assert_eq!(
             runs,
@@ -2000,6 +2032,7 @@ mod tests {
             Path::new("m.toml"),
             super::super::RefreshStanding::WayBackStated,
             &set_aside,
+            None,
         );
         assert_eq!(
             way_back_stated,
@@ -2013,6 +2046,7 @@ mod tests {
             Path::new("m.toml"),
             super::super::RefreshStanding::ScopeKeptNothing,
             &set_aside,
+            None,
         );
         assert_eq!(
             kept_nothing,
@@ -2037,6 +2071,7 @@ mod tests {
                 Path::new("m.toml"),
                 super::super::RefreshStanding::Unasked,
                 &[],
+                None,
             ),
             runs,
             "a caller that has not asked still names the way forward"
@@ -2194,11 +2229,13 @@ mod tests {
                 path,
                 super::super::RefreshStanding::Runs,
                 &set_aside,
+                None,
             ));
             sentences.extend(super::super::source_lost_remedy(
                 path,
                 super::super::RefreshStanding::ScopeKeptNothing,
                 &set_aside,
+                None,
             ));
 
             let mut checked = 0;
@@ -3343,6 +3380,58 @@ mod tests {
         assert_eq!(lock_header_zone(&lock).as_deref(), Some("Europe/Amsterdam"));
     }
 
+    /// **A refresh rewrites the notes in the manifest's Cluster Summary**, so the count follows
+    /// the selection: two sources with no `Make`, then one once the other gains a value. A
+    /// query whose comparison places none of its values selects nothing, and the block still
+    /// says what the comparison could not place, under `# 0 sources`.
+    #[test]
+    fn a_refresh_rewrites_the_notes_in_the_cluster_summary() {
+        use crate::core::testing::{insert_fact, insert_time_fact};
+        let dir = tempfile::tempdir().unwrap();
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let mut ids = Vec::new();
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            let obj = insert_object(&conn, &format!("hash-{name}"), false);
+            ids.push(insert_source(&conn, root, name, Some(obj)));
+        }
+        insert_fact(&conn, ids[0], "content.Make", "Canon");
+        for id in &ids {
+            insert_time_fact(&conn, *id, "content.Taken", "2024");
+        }
+        let mut db = Db::from_connection(conn);
+        let manifest = dir.path().join("cluster.toml");
+        fs::write(&manifest, manifest_text("Make != Canon")).unwrap();
+
+        run_refresh(&mut db, &manifest, None).unwrap();
+        let text = fs::read_to_string(&manifest).unwrap();
+        assert!(
+            text.contains("# 2 sources\n#   of which 2 have no Make\n# From 1 root:\n"),
+            "got: {text}"
+        );
+
+        insert_fact(db.conn(), ids[2], "content.Make", "Nikon");
+        run_refresh(&mut db, &manifest, None).unwrap();
+        let text = fs::read_to_string(&manifest).unwrap();
+        assert!(
+            text.contains("# 2 sources\n#   of which 1 has no Make\n# From 1 root:\n"),
+            "got: {text}"
+        );
+        assert!(!text.contains("2 have no Make"), "got: {text}");
+
+        fs::write(&manifest, manifest_text("Taken < 2024-06")).unwrap();
+        run_refresh(&mut db, &manifest, None).unwrap();
+        let text = fs::read_to_string(&manifest).unwrap();
+        assert!(
+            text.contains(
+                "# 0 sources\n\
+                 #   3 sources have a time that spans 2024-06 (coarser than a month): 3 not selected\n\
+                 # 0 have no archived copy\n"
+            ),
+            "got: {text}"
+        );
+    }
+
     /// **With no zone line a refresh records this machine's**, in both files, and says so.
     #[test]
     fn refresh_without_a_zone_line_records_the_machines_and_says_so() {
@@ -3396,7 +3485,8 @@ mod tests {
             let err = format!("{:#}", run_refresh(&mut db, &manifest, None).unwrap_err());
             assert!(
                 err.starts_with(&format!(
-                    "cannot run the filter as specified\n  {line}\n  {}^ `@img` is an alias; a \
+                    "Error: cannot run the filter as specified\n  {line}\n  {}^ `@img` is an \
+                     alias; a \
                      manifest's query cannot contain aliases\n`canon cluster refresh --edit ",
                     " ".repeat(at)
                 )),
@@ -3765,7 +3855,7 @@ mod tests {
     }
 
     /// **The report states the causes in the order `cluster refresh` does**: a door first, then
-    /// the zone, then each query line — each query line naming itself and the way back.
+    /// the zone, then each query line naming itself, and the query's way back after them.
     #[test]
     fn status_states_the_door_then_the_zone_then_the_query() {
         let mut status = status_with(1, 0, 0, sound_lock());
@@ -3803,10 +3893,10 @@ mod tests {
         assert!(door < zone && zone < query, "{text}");
         assert!(
             text.ends_with(
-                "cluster refresh would be rejected: the recorded query cannot run — `canon cluster \
-                 refresh --edit /m/c.toml` to fix the query and select again
+                "cluster refresh would be rejected: the recorded query cannot run
     source.ext =
                 ^ a value is missing after `=`
+    `canon cluster refresh --edit /m/c.toml` to fix the query and select again
 "
             ),
             "{text}"

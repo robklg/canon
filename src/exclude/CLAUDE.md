@@ -73,8 +73,9 @@ strata — is private or `pub(super)` at most, visible only within `exclude/`.
 - **A receipt that could not be placed states its reason *in* the summary, not beside it.**
   `cli.rs::resolve_placement` conjugates `LedgerRootOutcome` into a placement and, when there is
   none, the reason; `run_exclusion` joins it onto the summary — the one place that join is
-  spelled — so the printed line, the decision row and the trail's narration stay one composition
-  (self-explaining gaps). A gap means no placement, and no placement means the `mutate` closure
+  spelled (`recorded_summary`) — so the printed line, the decision row and the trail's narration
+  stay one composition (self-explaining gaps). The reason qualifies the head and stays on the first
+  line, which is all the trail's list shows; the plan's note lines follow it, one per line. A gap means no placement, and no placement means the `mutate` closure
   builds no receipt, so the body's own copy cannot disagree. A receipt never owed (`Records`
   mode, `--no-receipt`, a dry run) is no gap. No way back is named: nothing is blocked, and
   unsuspending later does not write the receipt this decision did not.
@@ -92,8 +93,8 @@ included: the stamp-set is the receipt-set, so filtering a sharer would break th
 `ObjectSourceInfo.is_suspended` and the plan's `total_suspended_count` carry the fact out
 (`object_exclusion_counts_parked_sharers_without_filtering_them`), and the ceremony states
 `of which N on suspended roots` **directly under the sources line it qualifies**,
-on the preview path and the executing one alike. It is a share of that number and reads as one
-only beside it; a `--yes` user is the one who most needs it, and a preview they may have skipped
+on the preview path and the executing one alike, with the plan's notes (`expr::SelectionNotes`)
+below it. It is a share of that number and reads as one only beside it; a `--yes` user is the one who most needs it, and a preview they may have skipped
 is no place to keep it. That count is owed because it is a fact about **what the act does** — the
 judgment is about the content everywhere, and it lands on copies standing in a place the user
 closed.
@@ -139,6 +140,7 @@ user earned. The filter-driven arms take the door at the front door instead, wit
 | Stamp-set captured **pre-stamp, in-transaction**; tombstones included | `test_object_exclude_receipt_lists_stamp_set_including_tombstones` |
 | A failure inside `mutate` rolls back the `started` row and the flips together | `run_exclusion_rolls_back_on_error` |
 | An unplaceable receipt's reason reaches the row; a placed one leaves the summary alone | `an_unplaceable_receipt_records_its_reason_on_the_row` |
+| The reason joins the summary's first line, the notes follow it | `a_gap_reason_joins_the_first_line_and_notes_follow` |
 | `plan_clear` finds source-level-excluded rows only | `test_plan_clear_returns_source_level_only` |
 | Contentless set-aside in `plan_set_objects` | `test_plan_set_objects_skips_empty` |
 | Contentless refusal in `check_set_object_by_file` | `test_check_object_by_file_empty` |

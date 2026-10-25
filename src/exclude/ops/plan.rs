@@ -13,8 +13,9 @@ use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
 use crate::exclude::domain::find_excludable_duplicates;
-use crate::expr::apply_filters;
-use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{
+    apply_filters_noting, select_sources, NoteUnit, RolePolicy, SelectionNotes, SelectionParams,
+};
 
 use super::types::{
     object_source_info, DuplicateGroupData, ExcludeClearParams, ExcludeClearPlan,
@@ -39,8 +40,14 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
         // The same policy guards plan_duplicates and plan_set_objects.
         role_policy: RolePolicy::SourceOnly,
         clock: params.clock.clone(),
+        notes: true,
     };
     let selection = select_sources(conn, &sel_params)?;
+    let notes = SelectionNotes::of(
+        selection.marks.as_ref(),
+        &selection.source_ids(),
+        NoteUnit::Sources,
+    );
 
     // select_sources() with default IncludeSet already filters out excluded sources
     let sources = selection.sources;
@@ -50,6 +57,7 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
             items: Vec::new(),
             root_count: 0,
             not_archived_count: 0,
+            notes,
         });
     }
 
@@ -78,6 +86,7 @@ pub fn plan_set(conn: &mut Connection, params: &ExcludeSetParams) -> Result<Excl
         items,
         root_count: root_ids.len(),
         not_archived_count,
+        notes,
     })
 }
 
@@ -100,6 +109,7 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
         return Ok(ExcludeClearPlan {
             items: Vec::new(),
             root_count: 0,
+            notes: SelectionNotes::none(NoteUnit::Sources),
         });
     }
 
@@ -114,20 +124,21 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
         .filter(|s| s.excluded)
         .collect();
 
-    // Apply --where filters if present
-    let filtered = if params.filters.is_empty() {
-        filtered
+    // Apply --where filters if present, noting what the plan's lines count
+    let (filtered, marks) = if params.filters.is_empty() {
+        (filtered, None)
     } else {
         let ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-        let filtered_ids: HashSet<i64> = apply_filters(conn, &ids, &params.filters, &params.clock)?
-            .source_ids
-            .into_iter()
-            .collect();
-        filtered
+        let (result, marks) = apply_filters_noting(conn, &ids, &params.filters, &params.clock)?;
+        let filtered_ids: HashSet<i64> = result.source_ids.into_iter().collect();
+        let filtered = filtered
             .into_iter()
             .filter(|s| filtered_ids.contains(&s.id))
-            .collect()
+            .collect();
+        (filtered, Some(marks))
     };
+    let acted: Vec<i64> = filtered.iter().map(|s: &Source| s.id).collect();
+    let notes = SelectionNotes::of(marks.as_ref(), &acted, NoteUnit::Sources);
 
     let root_ids: HashSet<i64> = filtered.iter().map(|s| s.root_id).collect();
 
@@ -142,6 +153,7 @@ pub fn plan_clear(conn: &mut Connection, params: &ExcludeClearParams) -> Result<
     Ok(ExcludeClearPlan {
         items,
         root_count: root_ids.len(),
+        notes,
     })
 }
 
@@ -160,6 +172,7 @@ pub fn plan_duplicates(
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceOnly,
         clock: params.clock.clone(),
+        notes: true,
     };
     let selection = select_sources(conn, &sel_params)?;
     let scope_count = selection.sources.len();
@@ -174,6 +187,7 @@ pub fn plan_duplicates(
             skipped_in_prefer: 0,
             skipped_not_covered: 0,
             skipped_multiple: 0,
+            notes: SelectionNotes::of(selection.marks.as_ref(), &[], NoteUnit::Sources),
         });
     }
 
@@ -257,6 +271,13 @@ pub fn plan_duplicates(
     }
 
     let group_count = groups.len();
+    // Counted over the sources it would exclude: the kept copies and the selected sources
+    // that are no duplicate are in neither direction of a spanning count.
+    let acted: Vec<i64> = groups
+        .iter()
+        .flat_map(|g| g.excluded.iter().map(|i| i.source_id))
+        .collect();
+    let notes = SelectionNotes::of(selection.marks.as_ref(), &acted, NoteUnit::Sources);
 
     Ok(ExcludeDuplicatesPlan {
         groups,
@@ -267,6 +288,7 @@ pub fn plan_duplicates(
         skipped_in_prefer: result.skipped_in_prefer,
         skipped_not_covered: result.skipped_not_covered,
         skipped_multiple: result.skipped_multiple,
+        notes,
     })
 }
 
@@ -288,8 +310,10 @@ pub fn plan_set_objects(
         filters: params.filters.clone(),
         role_policy: RolePolicy::SourceOnly,
         clock: params.clock.clone(),
+        notes: true,
     };
     let selection = select_sources(conn, &sel_params)?;
+    let marks = selection.marks.as_ref();
     // **What this plan searches and what its act reaches are different sets.**
     // The selection is source-side and passes over every closed door in
     // silence, like any other act; the *act* reaches every sharer of a
@@ -306,10 +330,13 @@ pub fn plan_set_objects(
             skipped_no_hash: 0,
             skipped_empty: 0,
             skipped_already_excluded: 0,
+            notes: SelectionNotes::of_objects(marks, &[], &[]),
         });
     }
 
-    // Collect unique object_ids from selected sources, counting skips
+    // Collect unique object_ids from selected sources, counting skips, and which selected
+    // sources brought each object in.
+    let mut selected_by_object: HashMap<i64, Vec<i64>> = HashMap::new();
     let mut seen_objects: HashSet<i64> = HashSet::new();
     let mut object_ids_to_check: Vec<i64> = Vec::new();
     let mut skipped_no_hash = 0;
@@ -329,6 +356,10 @@ pub fn plan_set_objects(
             skipped_empty += 1;
             continue;
         }
+        selected_by_object
+            .entry(object_id)
+            .or_default()
+            .push(source.id);
         if !seen_objects.insert(object_id) {
             continue;
         }
@@ -344,6 +375,7 @@ pub fn plan_set_objects(
             skipped_no_hash,
             skipped_empty,
             skipped_already_excluded: 0,
+            notes: SelectionNotes::of_objects(marks, &[], &[]),
         });
     }
 
@@ -402,6 +434,15 @@ pub fn plan_set_objects(
         });
     }
 
+    // Counted over the selected sources whose objects the plan excludes: its skips are in
+    // neither direction, and a sharer the filter did not select is never "selected".
+    let selected_sources: Vec<Vec<i64>> = objects
+        .iter()
+        .map(|o| selected_by_object.remove(&o.object_id).unwrap_or_default())
+        .collect();
+    let acted: Vec<i64> = selected_sources.iter().flatten().copied().collect();
+    let notes = SelectionNotes::of_objects(marks, &selected_sources, &acted);
+
     Ok(ExcludeSetObjectsPlan {
         objects,
         total_source_count,
@@ -410,5 +451,6 @@ pub fn plan_set_objects(
         skipped_no_hash,
         skipped_empty,
         skipped_already_excluded,
+        notes,
     })
 }

@@ -330,9 +330,11 @@ pub fn resolve_ledger_root(roots: &[Root], config: &LedgerConfig) -> LedgerRootO
 
 /// Write a receipt to disk as an `.incomplete` file.
 ///
-/// Prepends a comment header (`# Canon Decision Receipt` + summary line),
-/// serializes to TOML, then writes via `write_file_incomplete`. The
-/// `.incomplete` file survives crashes as recoverable evidence.
+/// Prepends a comment header (`# Canon Decision Receipt`, then each line of the
+/// summary as a comment line of its own, so a summary of several lines never
+/// leaves the comment), serializes to TOML, then writes via
+/// `write_file_incomplete`. The `.incomplete` file survives crashes as
+/// recoverable evidence.
 ///
 /// Returns `Err` on failure — the caller decides whether to warn or propagate.
 /// Receipt writing failure never halts a command.
@@ -340,7 +342,11 @@ pub fn write_receipt<T: Serialize>(path: &Path, receipt: &T, comment_summary: &s
     let toml_body = toml::to_string_pretty(receipt)
         .with_context(|| format!("Failed to serialize receipt to TOML: {}", path.display()))?;
 
-    let content = format!("# Canon Decision Receipt\n# {comment_summary}\n\n{toml_body}");
+    let header: String = comment_summary
+        .split('\n')
+        .map(|line| format!("# {line}\n"))
+        .collect();
+    let content = format!("# Canon Decision Receipt\n{header}\n{toml_body}");
 
     write_file_incomplete(path, content.as_bytes())
         .with_context(|| format!("Failed to write receipt: {}", path.display()))
@@ -531,6 +537,28 @@ mod tests {
     // =========================================================================
     // write_receipt + finalize_receipt
     // =========================================================================
+
+    /// A summary of several lines stays inside the header comment, one comment line each, and
+    /// the file still reads as TOML.
+    #[test]
+    fn a_summary_of_several_lines_stays_in_the_header_comment() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("000043-apply.toml");
+        write_receipt(
+            &path,
+            &make_receipt(),
+            "Applied 2 files\n  of which 1 has no Make",
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(dir.path().join("000043-apply.incomplete")).unwrap();
+        assert!(
+            content.starts_with(
+                "# Canon Decision Receipt\n# Applied 2 files\n#   of which 1 has no Make\n\n"
+            ),
+            "wrong header:\n{content}"
+        );
+        assert!(toml::from_str::<toml::Value>(&content).is_ok(), "{content}");
+    }
 
     #[test]
     fn test_write_receipt_creates_incomplete_with_header() {

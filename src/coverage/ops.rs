@@ -228,6 +228,7 @@ pub fn compute_scoped(
         filters: filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: zone.clone(),
+        notes: false,
     };
     let sel = select_sources(conn, &params)?;
     let used_status = sel.used_status.clone();
@@ -264,6 +265,7 @@ pub fn compute_per_root(
         filters: filters.clone(),
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: zone.clone(),
+        notes: false,
     };
     let all_sel = select_sources(conn, &params)?;
     let all_sources = all_sel.sources;

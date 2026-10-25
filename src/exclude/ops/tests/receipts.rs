@@ -10,6 +10,8 @@ use crate::core::testing::{
 };
 use crate::exclude::ops::receipt::ExcludeReceipt;
 use crate::exclude::repo as exclude_repo;
+use crate::expr::ExpressionText;
+use crate::expr::{NoteUnit, SelectionNotes};
 use tempfile::{tempdir, TempDir};
 
 use crate::exclude::ops::execute::{
@@ -95,6 +97,7 @@ fn run_exclusion_rolls_back_on_error() {
         true,
         counts_all(1),
         "test",
+        &SelectionNotes::none(NoteUnit::Sources),
         |tx, decision_id| {
             // Flip the source inside the transaction, then fail.
             exclude_repo::source::set_excluded(tx, id, true, decision_id)?;
@@ -119,6 +122,7 @@ fn decision_scopes_populated_for_scoped_exclude() {
     let root = insert_root(&conn, "/photos", "source", false);
     let id = insert_source(&conn, root, "a.jpg", None);
     let plan = ExcludeSetPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id, "/photos", "a.jpg")],
         root_count: 1,
         not_archived_count: 1,
@@ -161,6 +165,7 @@ fn decision_scopes_empty_for_global_exclude() {
     let root = insert_root(&conn, "/photos", "source", false);
     let id = insert_source(&conn, root, "a.jpg", None);
     let plan = ExcludeSetPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![item(id, "/photos", "a.jpg")],
         root_count: 1,
         not_archived_count: 1,
@@ -599,6 +604,7 @@ fn test_execute_set_empty_plan_records_nothing() {
     let mut conn = setup_test_db();
     let (_archive, _dir, placement) = ledger_root(&conn);
     let plan = ExcludeSetPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
         items: vec![],
         root_count: 0,
         not_archived_count: 0,
@@ -673,4 +679,66 @@ fn a_placed_receipt_leaves_the_summary_alone() {
     let result = execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
 
     assert_eq!(result.summary, "Excluded 1 source");
+}
+
+/// A plan with notes: two sources selected by `Make != Canon`, one with no `Make`.
+fn noted_plan(conn: &mut Connection) -> crate::exclude::ops::types::ExcludeSetPlan {
+    let root = insert_root(conn, "/src", "source", false);
+    let canon = insert_source(conn, root, "a.jpg", None);
+    crate::core::testing::insert_fact(conn, canon, "content.Make", "Canon");
+    let nikon = insert_source(conn, root, "b.jpg", None);
+    crate::core::testing::insert_fact(conn, nikon, "content.Make", "Nikon");
+    insert_source(conn, root, "c.jpg", None);
+    let mut params = make_set_params(vec![]);
+    params.filters =
+        crate::expr::read_filters(conn, &ExpressionText::plain(&["Make != Canon"])).unwrap();
+    plan_set(conn, &params).unwrap()
+}
+
+/// The gap's reason joins the head line, which the trail narrates; the notes follow it on
+/// lines of their own — on the printed summary and the decision row alike.
+#[test]
+fn a_gap_reason_joins_the_first_line_and_notes_follow() {
+    let mut conn = setup_test_db();
+    let plan = noted_plan(&mut conn);
+    let decision = full_decision(DecisionCommand::ExcludeSet);
+    let unplaceable = ReceiptDestination {
+        placement: None,
+        gap: Some("receipt not written: every archive root is suspended (/archive)".to_string()),
+    };
+    let result = execute_set(&mut conn, &plan, &unplaceable, Some(&decision)).unwrap();
+    assert_eq!(
+        result.summary,
+        "Excluded 2 sources — receipt not written: every archive root is suspended (/archive)\n  of which 1 has no Make"
+    );
+    assert_eq!(fetch_decision_summary(&conn, "exclude_set"), result.summary);
+}
+
+/// The receipt's `[meta]` summary carries every line, and the receipt still reads back, by
+/// TOML and by the ledger's lenient reader.
+#[test]
+fn a_receipt_carries_a_multi_line_summary_and_reads_back() {
+    let mut conn = setup_test_db();
+    let (_archive, dir, placement) = ledger_root(&conn);
+    let plan = noted_plan(&mut conn);
+    let decision = full_decision(DecisionCommand::ExcludeSet);
+    let result = execute_set(&mut conn, &plan, &placed(&placement), Some(&decision)).unwrap();
+    assert_eq!(
+        result.summary,
+        "Excluded 2 sources\n  of which 1 has no Make"
+    );
+
+    let content =
+        std::fs::read_to_string(dir.path().join(".canon-ledger/000001-exclude_set.toml")).unwrap();
+    let value: toml::Value = toml::from_str(&content).unwrap();
+    assert_eq!(
+        value["meta"]["summary"].as_str(),
+        Some(result.summary.as_str())
+    );
+    #[derive(serde::Deserialize)]
+    struct MetaOnly {
+        meta: crate::core::ops::ledger::ReceiptMetaDoc,
+    }
+    let lenient: MetaOnly = toml::from_str(&content).unwrap();
+    assert_eq!(lenient.meta.decision_id, 1);
 }

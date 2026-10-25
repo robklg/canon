@@ -52,6 +52,20 @@ Generated manifest: manifest.toml (1,234 sources in manifest.lock)
 Time zone: Europe/Amsterdam, recorded in the manifest's zone line.
 ```
 
+Where the query has a [negated key or a time it could not place](../../reference/filter.md#what-an-acting-command-states), the counts stand under the head line, over the sources in the lock:
+
+```
+Generated manifest: manifest.toml (1,234 sources in manifest.lock)
+  of which 312 have no Make
+  12 sources have a time that spans 2024-06 (coarser than a month): 9 not selected, 3 selected
+  From 2 roots:
+    /Volumes/Drive1  (800)
+    /Volumes/Drive2  (434)
+  1,234 have no archived copy
+```
+
+Unhashed and already-archived sources are not in the lock, so they are counted on neither side of a time line. Where nothing matches, `No sources matched the query` prints, a time line with sources not selected follows it, and no manifest is written.
+
 **Empty files are never skipped as "already archived".** A zero-byte file is
 [contentless](../../concepts/object.md#empty-files-are-contentless), so
 archive detection ignores it and the manifest carries it with its folder.
@@ -68,7 +82,8 @@ The generated manifest includes a cluster summary, a notes section for your own 
 # Other fields are managed by Canon — do not edit.
 #
 # === Cluster Summary ===
-# 1,234 sources from 2 roots:
+# 1,234 sources
+# From 2 roots:
 #   /Volumes/Drive1  (800)
 #   /Volumes/Drive2  (434)
 # 1,234 have no archived copy
@@ -189,6 +204,19 @@ Error: cannot run the filter as specified
 Refresh aborted — manifest.toml and its lock file are unchanged.
 ```
 
+The last line before the abort is the way back, and it follows the cause. A problem in what is written takes `--edit`, as above. Where a key holds [two types](../../concepts/facts.md#value-types), the query is correct as written: the refusal is printed on stdout with no `Error:`, and the way back is the conversion, then a plain refresh:
+
+```
+Model=EOS: Model is of mixed type (text and number); a filter supports one type only
+  text: 1 fact   numbers: 1 fact   (every fact of the key, on every root)
+To see its values and convert it to one type:
+  `canon facts convert content.Model`
+After converting, `canon cluster refresh manifest.toml` to select again
+Refresh aborted — manifest.toml and its lock file are unchanged.
+```
+
+Where the query has both, `Error:` stands before it and one line takes both steps: ``After converting, `canon cluster refresh --edit manifest.toml` to fix the query and select again``. The refresh exits with code 1 in every case.
+
 The query is used as it is written in the manifest, and an `@name` in it is refused ("`@image` is an alias; a manifest's query cannot contain aliases"). `cluster generate` records each [alias](../../reference/filter.md#aliases) replaced: a filter alias as its value in parentheses, a key alias as its key, with the filter as given on an `# Original:` line above the query. To copy a fix into the manifest, paste it between `'''` and `'''`, which holds both quote marks and backslashes as written: `query = ['''filename="a%b.jpg"''']`.
 
 **What "the same on any machine" rests on.** Zone rules come from each machine's own time zone data. Two machines put a file in the same folder when their data agree for the manifest's zone. `apply --dry-run` on the machine that applies shows the destinations that run will use.
@@ -208,7 +236,7 @@ canon cluster refresh --edit manifest.toml
 This re-runs the manifest's query and updates `manifest.lock` with the current matching sources. The manifest settings (`[options]`, `[output]`) remain unchanged.
 
 On refresh:
-- The **Cluster Summary** is regenerated with current counts
+- The **Cluster Summary** is regenerated with current counts. Lines like `#   of which 312 have no Make` stand under `# 1,234 sources`, as on the screen; they describe the run that wrote the block. Where nothing matches, the block reads `# 0 sources`, and a time line with sources not selected follows it
 - The **Notes** section is preserved verbatim
 - The same root breakdown and archive coverage summary is printed to stdout
 - **`meta.scope` is rewritten in the byte-form the index stores**, which is what `cluster generate` records for the same paths — root and the part below it alike. A path retyped in the other Unicode normalization is repaired in the file by the refresh.
@@ -246,7 +274,7 @@ Refresh aborted — manifest.toml and its lock file are unchanged.
 
 Refreshing part of it is not offered, and neither is refreshing a scope with one suspended line
 beside live ones: a scope is a declaration of what you are assembling, so a lock rebuilt from half
-of one would look whole. Exit code 1, with no `Error:` prefix.
+of one would look whole. Exit code 1, with no `Error:` prefix where the suspended root stands alone or beside a key holding two types. Beside a zone line or a query Canon cannot read, the suspended-root line stays as above, and that cause prints on stderr with `Error:` before it.
 [`canon roots unsuspend`](../roots/roots.md) is the way back.
 
 **Lock entries on a suspended root are not a refresh's business.** The lock is Canon's snapshot of
@@ -415,13 +443,14 @@ Time zone: America/New_York (the lock's)
   the manifest has no zone line; a refresh on this machine would record Europe/Paris: canon cluster refresh manifest.toml
 ```
 
-A zone line Canon does not recognize, and a query Canon cannot run (taken with no aliases), are named as what stops the refresh (`cluster refresh would be rejected: …`, in the refresh's own words), and the report then names no rebuild. A query's problems are shown under that line as a refresh shows them:
+A zone line Canon does not recognize, and a query Canon cannot run (taken with no aliases), are named as what stops the refresh (`cluster refresh would be rejected: …`, in the refresh's own words), and the report's next step is not a rebuild. A query's problems are shown under that line as a refresh shows them, followed by the way back a refresh gives, chosen by cause; where no sources are known under the manifest's scope and the scope names no suspended root, that way back comes after the scope's own (the scan, or the scope edit) wherever the report gives those, since until the scope is fixed the refresh it names would be rejected:
 
 ```
-cluster refresh would be rejected: the recorded query cannot run — `canon cluster refresh --edit manifest.toml` to fix the query and select again
+cluster refresh would be rejected: the recorded query cannot run
     source.ext=jpg AND Model=EOS 5D
                                 ^ a space separates values
       After a value: AND, OR, ) or the end
+    `canon cluster refresh --edit manifest.toml` to fix the query and select again
 ```
 
 A fix is copied into the manifest as for a refresh, between `'''` and `'''`. Neither stops an apply, which uses the lock's time zone and re-selects nothing.

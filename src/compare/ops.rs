@@ -142,6 +142,7 @@ fn select_and_build_map(
         filters: filters.clone(),
         role_policy: RolePolicy::AnyRole,
         clock: zone.clone(),
+        notes: false,
     };
     let sel = select_sources(conn, &params)?;
 

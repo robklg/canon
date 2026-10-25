@@ -14,7 +14,7 @@ use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
 use crate::expr::{read_filters, read_report, ExpressionText};
-use crate::expr::{select_sources, RolePolicy, SelectionParams};
+use crate::expr::{select_sources, RolePolicy, SelectionNotes, SelectionParams};
 use crate::expr::{Key, KeyKind, Listing, ParsedFactKey};
 use crate::facts::domain::{delete_key, names_the_root};
 use crate::facts::ops::maintain::{
@@ -75,6 +75,7 @@ pub fn run(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: crate::user_zone().clone(),
+        notes: false,
     };
     let sel = select_sources(conn, &params)?;
     let source_ids = sel.source_ids();
@@ -550,22 +551,21 @@ pub fn delete_facts(
         filters,
         role_policy: RolePolicy::SourceUnlessIncluded,
         clock: crate::user_zone().clone(),
+        notes: true,
     };
-    let source_ids = select_sources(conn, &params)?.source_ids();
-
-    if source_ids.is_empty() {
-        println!("No sources match the given filters.");
-        return Ok(());
-    }
-
-    // Plan
     let plan = plan_delete(
         conn,
-        &source_ids,
+        &params,
         &key,
         &options.entity_type,
         options.value_type,
     )?;
+
+    if plan.source_ids.is_empty() {
+        println!("No sources match the given filters.");
+        print_notes(&plan.notes);
+        return Ok(());
+    }
 
     let entity_label = if options.entity_type == "source" {
         "sources"
@@ -575,6 +575,7 @@ pub fn delete_facts(
 
     if plan.fact_count == 0 {
         println!("No '{key}' facts found on matching {entity_label}.");
+        print_notes(&plan.notes);
     } else if options.dry_run {
         println!(
             "Would delete {} '{}' fact rows across {} {}",
@@ -583,6 +584,7 @@ pub fn delete_facts(
             format_count(plan.entity_count),
             entity_label
         );
+        print_notes(&plan.notes);
     } else {
         // Execute
         let roots = crate::core::repo::root::fetch_all(conn)?;
@@ -600,7 +602,6 @@ pub fn delete_facts(
         };
         let result = execute_delete(
             conn,
-            &source_ids,
             &options.entity_type,
             options.value_type,
             &plan,
@@ -610,6 +611,13 @@ pub fn delete_facts(
     }
 
     Ok(())
+}
+
+/// The plan's line about its selection, directly under the count it qualifies.
+fn print_notes(notes: &SelectionNotes) {
+    for line in notes.lines() {
+        println!("{line}");
+    }
 }
 
 // ============================================================================

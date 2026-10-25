@@ -351,6 +351,7 @@ pub fn run(
                 config_path.as_ref(),
                 super::RefreshStanding::Unasked,
                 &[],
+                None,
             ) {
                 eprintln!("{line}");
             }

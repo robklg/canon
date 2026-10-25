@@ -44,7 +44,7 @@ depth, so prose is the only guard here. `execute.rs` would have been the zero-ed
 corpus, and is already the subsystem's largest file — the same reason `receipt.rs` exists at all.
 
 **The barrel** is `run`/`ApplyOptions` and `generate`/`refresh`/`status`/`GenerateOptions` from
-`cli`, `TransferMode` from `ops::execute`, and `plan_generate`/`ClusterGenerateParams`, which have
+`cli`, `TransferMode` from `ops::execute`, `RefreshRefused` from `domain` (which `main.rs` prints), and `plan_generate`/`ClusterGenerateParams`, which have
 no production caller and serve the contentless-law canary. Those two carry
 `#[allow(unused_imports)]` with a comment naming the consumer; `TransferMode` stays on its own
 un-allowed line, because it has a real production caller (`main.rs`'s dispatch) and must not hide
@@ -286,7 +286,10 @@ rewrites the whole document, so a v1 stamp on the v2 body it emits would be fals
 `ManifestOptions.allow: Vec<String>` stores `--allow` and is always written; `cluster refresh` reads
 it (there is no `--allow` on refresh). `--show-archived` is CLI-only — output verbosity, not stored.
 
-**Comment sections**: `# === Cluster Summary ===` (regenerated on refresh). `# === Notes ===`
+**Comment sections**: `# === Cluster Summary ===` (regenerated on refresh, in the order
+`cluster generate` prints: the count, the plan's note lines under it — they describe the run that
+wrote the block — then the roots and the unarchived count; `# 0 sources` with no roots line when
+nothing matched). `# === Notes ===`
 (empty on generate, **preserved verbatim on refresh** — extracted via string matching since TOML
 strips comments; `extract_notes_raw()` keeps `#` markers, `extract_notes()` strips them for the
 decision reason). **The section markers are a split contract**: the writer lives in
@@ -327,6 +330,21 @@ the report invited the one command that refuses, in four separate ways.
   with its way back; a scope that kept nothing as `no sources known at <p> — skipped`, naming no
   act — so a remedy falling silent at the first leaves the reader holding something and at the
   second nothing.
+- **A query line's way back follows its cause, at refresh and status alike** (`cli.rs`'s
+  `query_way_back`): an entry Canon cannot read takes `--edit`; a key holding two types takes the
+  conversion its refusal names and then a plain refresh, never `--edit` for a correct query; both
+  at once, one line taking both steps. It comes last, after the other causes' own ways back, so
+  the lines read as steps — at the terminal rule's exit too, where the scan-or-edit pair stands
+  under `no sources known`. Where that rule turns the refresh away first (`refresh_refused_by`; a
+  door outranks it), status names the query's way back after the scope's two answers
+  (`scope_kept_nothing_way_back`), never in the query's block, where the empty scope turns it away. **A refused refresh leaves as `RefreshRefused`** (`domain.rs`, built from its causes so its text
+  and its answer cannot disagree), from
+  the parked-scope exit and the zone/query exit: `Error:` stands in its text before the first cause
+  Canon cannot read — a zone line always, the query block where a cause in it is not an answer —
+  never before an answer, and `main` prints it as it stands, on stdout where it is an answer. Why:
+  a joined string cannot tell `main` which. The "no sources known" exit stays a raised error, as at
+  the argument door. Pinned by `a_refused_refresh_names_the_way_back_by_cause`
+  (`tests/typed_values.rs`).
 - **Two cells are unrepresentable; the third only looks like them.** `LockStanding` is an enum
   because two of a lock's claims are about a file somebody *read*: with no lock there is no
   hash to mismatch and no header to be missing, so those pairs cannot be posed at all. "No lock

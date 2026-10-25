@@ -1115,7 +1115,7 @@ fn manifest_with_query(fx: &Fixture, query: &str) -> PathBuf {
 
 /// **A recorded query is refused as specified**: `cluster refresh` gives the filter's first
 /// line for a manifest, the caret blocks, the way back alone after them and the abort; `cluster
-/// status` names the refresh it would reject and the way back on one line, the blocks under it.
+/// status` names the refresh it would reject, the blocks under it and the way back after them.
 #[test]
 fn a_recorded_query_is_refused_as_specified_at_refresh_and_nested_at_status() {
     let fx = Fixture::new();
@@ -1136,10 +1136,10 @@ fn a_recorded_query_is_refused_as_specified_at_refresh_and_nested_at_status() {
     );
     let status = fx.run(&["cluster", "status", &m]);
     let block = format!(
-        "\ncluster refresh would be rejected: the recorded query cannot run — `canon cluster \
-         refresh --edit {m}` to fix the query and select again\n\
+        "\ncluster refresh would be rejected: the recorded query cannot run\n\
          \x20   source.ext =\n\
-         \x20               ^ a value is missing after `=`\n"
+         \x20               ^ a value is missing after `=`\n\
+         \x20   `canon cluster refresh --edit {m}` to fix the query and select again\n"
     );
     assert!(
         status.stdout.contains(&block),
@@ -1151,8 +1151,10 @@ fn a_recorded_query_is_refused_as_specified_at_refresh_and_nested_at_status() {
 }
 
 /// **The query block stands at the query's place in every arm of a refusing refresh**: after a
-/// parked scope's door lines (stdout, no `Error:`, exit 1) and after "no sources known" for a
-/// scope that kept nothing — the block whole, then the abort once.
+/// parked scope's door lines and after "no sources known" for a scope that kept nothing — the
+/// block whole, then the abort once. Beside the door the query holds input Canon cannot read,
+/// so the door lines stay on stdout with no `Error:`, and the refusal goes to stderr with
+/// `Error:` before the query block; exit 1.
 #[test]
 fn the_refresh_query_block_stands_at_the_querys_place_in_every_arm() {
     let order = |out: &str, parts: &[&str]| {
@@ -1182,8 +1184,25 @@ fn the_refresh_query_block_stands_at_the_querys_place_in_every_arm() {
     );
     let refresh = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
     assert_eq!(refresh.code, 1, "{}{}", refresh.stdout, refresh.stderr);
-    assert!(!refresh.stdout.contains("Error:") && !refresh.stderr.contains("Error:"));
-    order(&refresh.stdout, &["suspended", block[0], block[1]]);
+    assert!(refresh.stdout.contains("suspended"), "{}", refresh.stdout);
+    assert!(!refresh.stdout.contains("Error:"), "{}", refresh.stdout);
+    assert!(
+        !refresh.stdout.contains("Refresh aborted"),
+        "{}",
+        refresh.stdout
+    );
+    assert!(
+        refresh.stderr.contains(&format!("\nError: {}", block[0])),
+        "{}",
+        refresh.stderr
+    );
+    assert_eq!(
+        refresh.stderr.matches("Error:").count(),
+        1,
+        "{}",
+        refresh.stderr
+    );
+    order(&refresh.stderr, &["Error: ", block[0], block[1]]);
 
     let fx = Fixture::new();
     std::fs::create_dir_all(fx.path("src/empty")).unwrap();
@@ -1210,6 +1229,672 @@ fn the_refresh_query_block_stands_at_the_querys_place_in_every_arm() {
     order(
         &refresh.stderr,
         &["no sources known at", block[0], block[1]],
+    );
+}
+
+/// A manifest whose recorded query is `query`, over two files of different content where
+/// `Model` holds text on `a.jpg` and a number on `b.jpg` — a key of two types.
+fn mixed_model_manifest(query: &str) -> (Fixture, PathBuf) {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    fx.import(&[
+        ("a.jpg", serde_json::json!({"Model": "EOS"})),
+        ("b.jpg", serde_json::json!({"Model": "R5"})),
+    ]);
+    // Import keeps a key to one type, so the second type is written as an older Canon could.
+    let db = rusqlite::Connection::open(fx.path("home/canon.db")).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE facts SET value_text = NULL, value_num = 5 \
+             WHERE key = 'content.Model' AND value_text = 'R5'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(db);
+    std::fs::create_dir_all(fx.path("arc")).unwrap();
+    let run = fx.run(&["scan", "--add", "--role", "archive", &fx.path_str("arc")]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let manifest = manifest_with_query(&fx, query);
+    (fx, manifest)
+}
+
+/// **A refused refresh names the way back that fits the cause**, and `cluster status` names the
+/// same one after the blocks. A value that is not a number is input Canon cannot read: `Error:`
+/// on stderr, and `--edit`. A key holding two types is an answer: on stdout with no `Error:`,
+/// the conversion the refusal names and then a plain refresh, never `--edit`. Both at once:
+/// `Error:`, and one line taking both steps. The manifest and its lock are unchanged to the
+/// byte; status exits 0.
+#[test]
+fn a_refused_refresh_names_the_way_back_by_cause() {
+    let typo = "source.size = garbage";
+    let two_types = "Model = EOS";
+    let both = "Model = EOS AND source.size = garbage";
+    for query in [typo, two_types, both] {
+        let (fx, manifest) = mixed_model_manifest(query);
+        let m = manifest.to_string_lossy().into_owned();
+        let lock = manifest.with_extension("lock");
+        let (config, lock_bytes) = (
+            std::fs::read(&manifest).unwrap(),
+            std::fs::read(&lock).unwrap(),
+        );
+        let edit = format!("`canon cluster refresh --edit {m}` to fix the query and select again");
+        let convert_then_refresh =
+            format!("After converting, `canon cluster refresh {m}` to select again");
+        let convert_then_edit =
+            format!("After converting, `canon cluster refresh --edit {m}` to fix the query and select again");
+        let way_back = match query {
+            q if q == typo => edit.clone(),
+            q if q == two_types => convert_then_refresh.clone(),
+            _ => convert_then_edit.clone(),
+        };
+
+        let refresh = fx.run(&["cluster", "refresh", &m]);
+        assert_ne!(refresh.code, 0, "{query}");
+        let said = format!("{}{}", refresh.stdout, refresh.stderr);
+        // Whole lines: the plain `--edit` line is part of the combined one.
+        assert_eq!(lines_saying(&said, &way_back), 1, "{query}: {said}");
+        for other in [&edit, &convert_then_refresh, &convert_then_edit] {
+            if *other != way_back {
+                assert_eq!(lines_saying(&said, other), 0, "{query}: {said}");
+            }
+        }
+        if query == two_types {
+            assert!(!said.contains("Error:"), "{said}");
+            assert!(!said.contains("--edit"), "{said}");
+            assert!(
+                refresh.stdout.contains("Model is of mixed type")
+                    && refresh
+                        .stdout
+                        .contains("`canon facts convert content.Model`")
+                    && refresh.stdout.contains(&way_back)
+                    && refresh.stdout.contains("Refresh aborted"),
+                "{said}"
+            );
+            let convert = refresh.stdout.find("canon facts convert").unwrap();
+            assert!(convert < refresh.stdout.find(&way_back).unwrap(), "{said}");
+        } else {
+            assert!(!refresh.stdout.contains("Error:"), "{query}: {said}");
+            assert_eq!(
+                refresh.stderr.matches("Error:").count(),
+                1,
+                "{query}: {said}"
+            );
+            assert!(refresh.stderr.contains(&way_back), "{query}: {said}");
+        }
+        assert_eq!(std::fs::read(&manifest).unwrap(), config, "{query}");
+        assert_eq!(std::fs::read(&lock).unwrap(), lock_bytes, "{query}");
+
+        let status = fx.run(&["cluster", "status", &m]);
+        assert_eq!(
+            status.code, 0,
+            "{query}: {}{}",
+            status.stdout, status.stderr
+        );
+        let lead = "cluster refresh would be rejected: the recorded query cannot run\n";
+        let (_, after) = status
+            .stdout
+            .split_once(lead)
+            .unwrap_or_else(|| panic!("{query}: {}", status.stdout));
+        let line = format!("\n    {way_back}\n");
+        assert!(after.contains(&line), "{query}: {}", status.stdout);
+        assert!(
+            !status.stdout.contains("Error:"),
+            "{query}: {}",
+            status.stdout
+        );
+        for other in [&edit, &convert_then_refresh, &convert_then_edit] {
+            if *other != way_back {
+                assert_eq!(
+                    lines_saying(&status.stdout, other),
+                    0,
+                    "{query}: {}",
+                    status.stdout
+                );
+            }
+        }
+    }
+}
+
+/// Rewrite a manifest's `meta.scope` to the given paths.
+fn set_scope(manifest: &std::path::Path, paths: &[String]) {
+    let config = std::fs::read_to_string(manifest).unwrap();
+    let edited: Vec<String> = config
+        .lines()
+        .map(|line| {
+            if line.starts_with("scope = ") {
+                format!("scope = {paths:?}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(manifest, edited.join("\n") + "\n").unwrap();
+}
+
+/// The lines of `out` equal, once trimmed, to `line`.
+fn lines_saying(out: &str, line: &str) -> usize {
+    out.lines().filter(|l| l.trim() == line).count()
+}
+
+/// **Beside a scope that kept nothing, the scope's way back comes first and no refresh it turns
+/// away is named.** A manifest scoped to a folder Canon has no sources under, whose query names
+/// a key of two types or holds a value Canon cannot read: `cluster refresh` prints `no sources
+/// known`, the scan-or-edit pair, the query's refusal and its way back last, then the abort.
+/// `cluster status` states the query's refusal without its way back; where the report owes the
+/// scope's way back — no lock, so no step is named — the scope's two answers come first and the
+/// query's way back last, once, as in the remedy for a source file the world has lost. Where the
+/// report names a step (`To apply`), neither refresh cause owes an act and none is named.
+#[test]
+fn a_scope_that_kept_nothing_leads_the_steps_and_no_turned_away_refresh_is_named() {
+    for query in ["Model = EOS", "source.size = garbage"] {
+        let (fx, manifest) = mixed_model_manifest(query);
+        std::fs::create_dir_all(fx.path("src/empty")).unwrap();
+        set_scope(&manifest, &[fx.path_str("src/empty")]);
+        let m = manifest.to_string_lossy().into_owned();
+        let way_back = if query == "Model = EOS" {
+            format!("After converting, `canon cluster refresh {m}` to select again")
+        } else {
+            format!("`canon cluster refresh --edit {m}` to fix the query and select again")
+        };
+
+        let refresh = fx.run(&["cluster", "refresh", &m]);
+        assert_ne!(refresh.code, 0, "{}{}", refresh.stdout, refresh.stderr);
+        let mut rest = refresh.stderr.as_str();
+        for part in [
+            "Error: no sources known at",
+            "If the files are there",
+            "If not, edit meta.scope",
+            query,
+            way_back.as_str(),
+            "Refresh aborted",
+        ] {
+            rest = rest
+                .split_once(part)
+                .map(|(_, after)| after)
+                .unwrap_or_else(|| panic!("{part} missing or out of order:\n{}", refresh.stderr));
+        }
+        assert!(
+            !rest.trim_end().contains('\n'),
+            "the abort ends it:\n{}",
+            refresh.stderr
+        );
+
+        // Entries pending: the step is the apply, and neither refresh cause owes an act.
+        let status = fx.run(&["cluster", "status", &m]);
+        assert_eq!(status.code, 0, "{}{}", status.stdout, status.stderr);
+        let out = status.stdout.as_str();
+        assert!(
+            out.contains("no sources known at")
+                && out.contains("cluster refresh would be rejected: the recorded query cannot run")
+                && out.contains("To apply:"),
+            "{query}: {out}"
+        );
+        assert!(
+            !out.contains("canon cluster refresh"),
+            "{query}: a step is named, so no refresh is: {out}"
+        );
+
+        std::fs::rename(fx.path("src/a.jpg"), fx.path("a.moved")).unwrap();
+        // A source file lost: its remedy carries the scope's way back, and the query's after it.
+        let lost = fx.run(&["cluster", "status", &m]);
+        std::fs::rename(fx.path("a.moved"), fx.path("src/a.jpg")).unwrap();
+        let out = lost.stdout.as_str();
+        assert_eq!(lines_saying(out, &way_back), 1, "{query}: {out}");
+        let tail = out
+            .split_once("Check if the source volume is connected.")
+            .map(|(_, after)| after.trim())
+            .unwrap_or_else(|| panic!("{query}: no remedy:\n{out}"));
+        assert!(
+            tail.split_once("If not, edit meta.scope")
+                .is_some_and(|(_, after)| after.trim_end().ends_with(way_back.as_str())),
+            "{query}: the query's way back follows the scope's:\n{out}"
+        );
+        // No lock: no step is named, so the scope's way back is owed, and the query's follows it.
+        std::fs::remove_file(manifest.with_extension("lock")).unwrap();
+        let status = fx.run(&["cluster", "status", &m]);
+        assert_eq!(status.code, 0, "{}{}", status.stdout, status.stderr);
+        let out = status.stdout.as_str();
+        assert_eq!(lines_saying(out, &way_back), 1, "{query}: {out}");
+        let mut rest = out;
+        for part in [
+            "no sources known at",
+            "cluster refresh would be rejected: the recorded query cannot run",
+            "No sources are known under the scopes declared in this manifest",
+            "If the files are there",
+            "If not, edit meta.scope",
+            way_back.as_str(),
+        ] {
+            rest = rest
+                .split_once(part)
+                .map(|(_, after)| after)
+                .unwrap_or_else(|| panic!("{query}: {part} missing or out of order:\n{out}"));
+        }
+        assert!(
+            rest.trim().is_empty(),
+            "{query}: the query's way back ends it:\n{out}"
+        );
+    }
+}
+
+/// **A closed door outranks the scope that kept nothing, so the query's block names its own way
+/// back at status as the refresh does.** Scope: a suspended root and a folder Canon has no
+/// sources under. The refresh is turned away at the door, whose line names `canon roots
+/// unsuspend`; once it is open the scope keeps that root's sources and the query is what turns the
+/// refresh away. Both commands name the query's way back, once.
+#[test]
+fn beside_a_door_the_query_names_its_way_back_though_the_scope_kept_nothing() {
+    let (fx, manifest) = mixed_model_manifest("Model = EOS");
+    std::fs::create_dir_all(fx.path("other")).unwrap();
+    std::fs::write(fx.path("other/c.jpg"), "c").unwrap();
+    let other = fx.path_str("other");
+    let by_path = format!("path:{other}");
+    for args in [
+        ["scan", "--add", "--role", "source", other.as_str()].as_slice(),
+        ["roots", "suspend", by_path.as_str()].as_slice(),
+    ] {
+        let run = fx.run(args);
+        assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    }
+    std::fs::create_dir_all(fx.path("src/empty")).unwrap();
+    set_scope(&manifest, &[fx.path_str("other"), fx.path_str("src/empty")]);
+    let m = manifest.to_string_lossy().into_owned();
+    let way_back = format!("After converting, `canon cluster refresh {m}` to select again");
+
+    let refresh = fx.run(&["cluster", "refresh", &m]);
+    assert_eq!(refresh.code, 1, "{}{}", refresh.stdout, refresh.stderr);
+    assert_eq!(
+        lines_saying(&refresh.stdout, &way_back),
+        1,
+        "{}{}",
+        refresh.stdout,
+        refresh.stderr
+    );
+
+    let status = fx.run(&["cluster", "status", &m]);
+    assert_eq!(status.code, 0, "{}{}", status.stdout, status.stderr);
+    let out = status.stdout.as_str();
+    assert!(out.contains("canon roots unsuspend"), "{out}");
+    assert_eq!(lines_saying(out, &way_back), 1, "{out}");
+}
+
+/// **A closed door beside a key holding two types is an answer**: the door lines, the refusal,
+/// the plain way back and the abort, all on stdout, with no `Error:`; exit 1.
+#[test]
+fn a_door_beside_a_two_type_key_is_an_answer() {
+    let (fx, manifest) = mixed_model_manifest("Model = EOS");
+    let m = manifest.to_string_lossy().into_owned();
+    let suspended = fx.run(&["roots", "suspend", &format!("path:{}", fx.path_str("src"))]);
+    assert_eq!(
+        suspended.code, 0,
+        "{}{}",
+        suspended.stdout, suspended.stderr
+    );
+
+    let refresh = fx.run(&["cluster", "refresh", &m]);
+    assert_eq!(refresh.code, 1, "{}{}", refresh.stdout, refresh.stderr);
+    let way_back = format!("After converting, `canon cluster refresh {m}` to select again");
+    let mut rest = refresh.stdout.as_str();
+    for part in [
+        "suspended",
+        "Model is of mixed type",
+        &way_back,
+        "Refresh aborted",
+    ] {
+        rest = rest
+            .split_once(part)
+            .map(|(_, after)| after)
+            .unwrap_or_else(|| panic!("{part} missing or out of order:\n{}", refresh.stdout));
+    }
+    assert!(!refresh.stdout.contains("Error:"), "{}", refresh.stdout);
+    assert!(!refresh.stderr.contains("Error:"), "{}", refresh.stderr);
+    assert!(!refresh.stderr.contains("mixed type"), "{}", refresh.stderr);
+    assert!(!refresh.stdout.contains("--edit"), "{}", refresh.stdout);
+}
+
+/// Scan an archive root beside the fixture's sources, for the manifest commands.
+fn with_archive(fx: &Fixture) {
+    std::fs::create_dir_all(fx.path("arc")).unwrap();
+    let run = fx.run(&["scan", "--add", "--role", "archive", &fx.path_str("arc")]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+}
+
+/// The line directly under the first line of `out` that starts, once trimmed, with `count`.
+fn under<'a>(out: &'a str, count: &str) -> &'a str {
+    let mut lines = out.lines();
+    lines
+        .find(|l| l.trim_start().starts_with(count))
+        .unwrap_or_else(|| panic!("{count:?} missing:\n{out}"));
+    lines
+        .next()
+        .unwrap_or_else(|| panic!("nothing under {count:?}:\n{out}"))
+}
+
+/// **Every command that acts on a `--where` selection says how much of "everything else" has
+/// no value**, directly under its count: `Make != Canon` selects five sources, four with no
+/// `Make`. On `exclude set` under `--dry-run`, at the confirmation answered `n` and under
+/// `--yes`; on `exclude clear`, `exclude duplicates` (the one copy it would exclude), `exclude
+/// set-object` (counted in objects), `cluster generate` (on the screen and in the manifest),
+/// `cluster refresh`, and `facts delete` in its own count, dry run and `--yes`. The trail lists
+/// the head alone; `trail show` gives the note under it.
+#[test]
+fn the_plan_says_how_much_of_everything_else_has_no_value() {
+    let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"];
+    let files: Vec<(&str, i64)> = names.iter().map(|n| (*n, OLD)).collect();
+    let fx = photos("UTC", &files);
+    // A second copy of `e.jpg`'s content, for the duplicates command.
+    std::fs::create_dir_all(fx.path("src/dup")).unwrap();
+    std::fs::write(fx.path("src/dup/e.jpg"), "e.jpg").unwrap();
+    let run = fx.run(&["scan", &fx.path_str("src")]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    fx.import(&[
+        ("a.jpg", serde_json::json!({"Make": "Canon"})),
+        ("b.jpg", serde_json::json!({"Make": "Nikon"})),
+    ]);
+    with_archive(&fx);
+    let src = fx.path_str("src");
+    let filter = "Make != Canon";
+    let note = "  of which 4 have no Make";
+
+    let dry = fx.run(&["exclude", "set", "--where", filter, "--dry-run", &src]);
+    assert_eq!(
+        under(&dry.stdout, "Would exclude 5 sources"),
+        note,
+        "{}",
+        dry.stdout
+    );
+    let declined = fx.run_with_input(&["exclude", "set", "--where", filter, &src], Some("n\n"));
+    assert_eq!(
+        under(&declined.stderr, "Will exclude 5 sources"),
+        note,
+        "{}{}",
+        declined.stdout,
+        declined.stderr
+    );
+    let objects = fx.run(&["exclude", "set-object", "--where", filter, &src]);
+    assert_eq!(
+        under(&objects.stdout, "Would exclude 4 objects"),
+        "  of which 3 objects have no Make",
+        "{}",
+        objects.stdout
+    );
+    let prefer = fx.path_str("src/dup");
+    let duplicates = fx.run(&[
+        "exclude",
+        "duplicates",
+        "--where",
+        filter,
+        "--prefer",
+        &prefer,
+        "--dry-run",
+        &src,
+    ]);
+    assert_eq!(
+        under(&duplicates.stdout, "Would exclude 1 sources"),
+        "  of which 1 has no Make",
+        "{}",
+        duplicates.stdout
+    );
+
+    let manifest = fx.path("m.toml");
+    let m = manifest.to_string_lossy().into_owned();
+    let dest = format!("{}/out", fx.path_str("arc"));
+    let generated = fx.run(&[
+        "cluster",
+        "generate",
+        &src,
+        "--dest",
+        &dest,
+        "--where",
+        filter,
+        "--allow",
+        "duplicates",
+        "--no-edit",
+        "--output",
+        &m,
+    ]);
+    assert_eq!(
+        under(&generated.stdout, "Generated manifest"),
+        note,
+        "{}",
+        generated.stdout
+    );
+    let written = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        written.contains("\n# 5 sources\n#   of which 4 have no Make\n"),
+        "{written}"
+    );
+    let refreshed = fx.run(&["cluster", "refresh", &m]);
+    assert_eq!(
+        under(&refreshed.stdout, "Refreshed lock file"),
+        note,
+        "{}",
+        refreshed.stdout
+    );
+
+    let acted = fx.run(&["exclude", "set", "--where", filter, "--yes", &src]);
+    assert_eq!(
+        under(&acted.stdout, "Excluded 5 sources"),
+        note,
+        "{}",
+        acted.stdout
+    );
+    let listed = fx.run(&["trail", "--global"]);
+    let line = listed
+        .stdout
+        .lines()
+        .find(|l| l.contains("Excluded 5 sources"))
+        .unwrap_or_else(|| panic!("{}", listed.stdout));
+    assert!(line.ends_with("Excluded 5 sources"), "{line}");
+    assert!(!listed.stdout.contains("of which"), "{}", listed.stdout);
+    let jsonl = fx.run(&["trail", "--global", "--jsonl"]);
+    let id = jsonl
+        .stdout
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|v| v["command"] == "exclude_set")
+        .and_then(|v| v["id"].as_i64())
+        .unwrap_or_else(|| panic!("{}", jsonl.stdout));
+    let shown = fx.run(&["trail", "show", &id.to_string()]);
+    assert_eq!(under(&shown.stdout, "summary:"), note, "{}", shown.stdout);
+
+    let cleared = fx.run(&["exclude", "clear", "--where", filter, "--yes", &src]);
+    assert_eq!(
+        under(&cleared.stdout, "Cleared exclusions for 5 sources"),
+        note,
+        "{}",
+        cleared.stdout
+    );
+
+    let deletes = [
+        "facts",
+        "delete",
+        "--on",
+        "object",
+        "content.Make",
+        "--where",
+        filter,
+        &src,
+    ];
+    let facts_note = "  from 5 matching sources, 4 of which have no Make";
+    let would = fx.run(&deletes);
+    assert_eq!(
+        under(&would.stdout, "Would delete 1"),
+        facts_note,
+        "{}",
+        would.stdout
+    );
+    let mut yes = deletes.to_vec();
+    yes.push("--yes");
+    let deleted = fx.run(&yes);
+    assert_eq!(
+        under(&deleted.stdout, "Deleted 1"),
+        facts_note,
+        "{}",
+        deleted.stdout
+    );
+}
+
+/// **A stored time coarser than the date typed is named where the comparison could not place
+/// it**: two values known only to 2024 against `2024-06`. Under `Taken < 2024-06` they are not
+/// selected; under `NOT Taken >= 2024-06` and `Taken != 2024-06` they are; under `Taken IN
+/// (2024-06)` nothing is, and the line stands under the "no sources" sentence — on `exclude
+/// set --dry-run` and `--yes` alike. Where only coarse values stand, `Taken < 2024-06` empties
+/// the selection, and `cluster refresh` says so on the screen and in the manifest.
+#[test]
+fn the_spanning_line_names_values_the_comparison_could_not_place() {
+    let line = |direction: &str| {
+        format!("  2 sources have a time that spans 2024-06 (coarser than a month): 2 {direction}")
+    };
+    let rows = [
+        (
+            "Taken < 2024-06",
+            Some("Would exclude 1 sources"),
+            Some("Excluded 1 source"),
+            "not selected",
+        ),
+        (
+            "NOT Taken >= 2024-06",
+            Some("Would exclude 3 sources"),
+            Some("Excluded 3 sources"),
+            "selected",
+        ),
+        (
+            "Taken != 2024-06",
+            Some("Would exclude 4 sources"),
+            Some("Excluded 4 sources"),
+            "selected",
+        ),
+        ("Taken IN (2024-06)", None, None, "not selected"),
+    ];
+    for (filter, would, did, direction) in rows {
+        for flag in ["--dry-run", "--yes"] {
+            let fx = photos(
+                "UTC",
+                &[
+                    ("a.jpg", OLD),
+                    ("b.jpg", OLD),
+                    ("c.jpg", OLD),
+                    ("d.jpg", OLD),
+                ],
+            );
+            fx.import(&[
+                ("a.jpg", serde_json::json!({"Taken": {"value": "2024", "type": "datetime"}})),
+                ("b.jpg", serde_json::json!({"Taken": {"value": "2024", "type": "datetime"}})),
+                ("c.jpg", serde_json::json!({"Taken": {"value": "2024-03-01T10:00:00", "type": "datetime"}})),
+                ("d.jpg", serde_json::json!({"Taken": {"value": "2024-08-01T10:00:00", "type": "datetime"}})),
+            ]);
+            let run = fx.run(&[
+                "exclude",
+                "set",
+                "--where",
+                filter,
+                flag,
+                &fx.path_str("src"),
+            ]);
+            let count = match (flag, would, did) {
+                ("--dry-run", Some(count), _) | ("--yes", _, Some(count)) => count,
+                _ => "No sources to exclude",
+            };
+            assert_eq!(
+                under(&run.stdout, count),
+                line(direction),
+                "{filter} {flag}: {}",
+                run.stdout
+            );
+        }
+    }
+
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    fx.import(&[
+        (
+            "a.jpg",
+            serde_json::json!({"Taken": {"value": "2024", "type": "datetime"}}),
+        ),
+        (
+            "b.jpg",
+            serde_json::json!({"Taken": {"value": "2024", "type": "datetime"}}),
+        ),
+    ]);
+    let set = fx.run(&[
+        "exclude",
+        "set",
+        "--where",
+        "Taken < 2024-06",
+        "--dry-run",
+        &fx.path_str("src"),
+    ]);
+    assert_eq!(
+        under(&set.stdout, "No sources to exclude"),
+        line("not selected"),
+        "{}",
+        set.stdout
+    );
+    with_archive(&fx);
+    let manifest = manifest_with_query(&fx, "Taken < 2024-06");
+    let refreshed = fx.run(&["cluster", "refresh", &manifest.to_string_lossy()]);
+    assert_eq!(
+        under(&refreshed.stdout, "No sources matched the query"),
+        line("not selected"),
+        "{}",
+        refreshed.stdout
+    );
+    let written = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        written.contains(&format!(
+            "\n# 0 sources\n# {}\n# 0 have no archived copy\n",
+            line("not selected")
+        )),
+        "{written}"
+    );
+}
+
+/// **On `exclude set-object --yes` the suspended share stays under the line it qualifies, and
+/// the notes follow it**: the head, then the copies on suspended roots, then the "of which"
+/// line in objects.
+#[test]
+fn set_object_states_the_suspended_share_before_the_notes_under_yes() {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD), ("c.jpg", OLD)]);
+    fx.import(&[
+        ("a.jpg", serde_json::json!({"Make": "Canon"})),
+        ("b.jpg", serde_json::json!({"Make": "Nikon"})),
+    ]);
+    // A copy of `c.jpg`'s content on a root the user then parks.
+    std::fs::create_dir_all(fx.path("other")).unwrap();
+    std::fs::write(fx.path("other/c.jpg"), "c.jpg").unwrap();
+    let other = fx.path_str("other");
+    let parked = format!("path:{other}");
+    for args in [
+        ["scan", "--add", "--role", "source", other.as_str()].as_slice(),
+        ["roots", "suspend", parked.as_str()].as_slice(),
+    ] {
+        let run = fx.run(args);
+        assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    }
+
+    let run = fx.run(&[
+        "exclude",
+        "set-object",
+        "--where",
+        "Make != Canon",
+        "--yes",
+        &fx.path_str("src"),
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    let head = lines
+        .iter()
+        .position(|l| l.starts_with("Excluded 2 objects"))
+        .unwrap_or_else(|| panic!("{}", run.stdout));
+    assert_eq!(
+        lines.get(head + 1..head + 3),
+        Some(
+            &[
+                "  of which 1 on suspended roots",
+                "  of which 1 object has no Make"
+            ][..]
+        ),
+        "{}",
+        run.stdout
     );
 }
 

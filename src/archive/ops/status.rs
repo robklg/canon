@@ -1353,7 +1353,8 @@ mod tests {
     }
 
     /// **A query that cannot run is named as what stops the refresh, beside the zone's cause**,
-    /// read by the refresh's own binding — so the report names no rebuild the query turns away.
+    /// read by the refresh's own binding — so the report's next step names no rebuild the query
+    /// turns away.
     #[test]
     fn status_names_a_refused_query_as_what_stops_the_refresh() {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["a.jpg"]);

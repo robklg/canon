@@ -21,7 +21,8 @@ use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::{self, Connection};
 use crate::expr::domain::filter::UsedStatus;
 use crate::expr::ops::bind::BoundFilters;
-use crate::expr::ops::filter::apply_filters;
+use crate::expr::ops::filter::{apply_filters, apply_filters_noting};
+use crate::expr::ops::notes::NoteMarks;
 
 /// How to handle root role filtering during source selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,9 @@ pub struct SelectionParams {
     pub role_policy: RolePolicy,
     /// The user's clock, which every time in a filter is read on.
     pub clock: UserZone,
+    /// Whether to record, beside the selection, what an acting command's plan lines count
+    /// ([`NoteMarks`]).
+    pub notes: bool,
 }
 
 /// Result of source selection — filtered sources plus visibility metadata.
@@ -69,6 +73,9 @@ pub struct Selection {
     /// Whether the filters read an instant on the clock
     /// (`expr::domain::transform::Chained`'s answer).
     pub read_an_instant: bool,
+    /// What the selecting run recorded for the plan's lines: `Some` exactly where they were
+    /// asked for and filters are present.
+    pub marks: Option<NoteMarks>,
 }
 
 impl Selection {
@@ -130,12 +137,20 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
             included_archived_count,
             used_status: UsedStatus::default(),
             read_an_instant: false,
+            marks: None,
         });
     }
 
     // Apply --where filters: get passing IDs, then keep matching sources
     let source_ids: Vec<i64> = filtered.iter().map(|s| s.id).collect();
-    let filter_result = apply_filters(conn, &source_ids, &params.filters, &params.clock)?;
+    let (filter_result, marks) = if params.notes {
+        let (result, marks) =
+            apply_filters_noting(conn, &source_ids, &params.filters, &params.clock)?;
+        (result, Some(marks))
+    } else {
+        let result = apply_filters(conn, &source_ids, &params.filters, &params.clock)?;
+        (result, None)
+    };
     let passing_set: HashSet<i64> = filter_result.source_ids.into_iter().collect();
 
     let result: Vec<Source> = filtered
@@ -150,6 +165,7 @@ pub fn select_sources(conn: &mut Connection, params: &SelectionParams) -> Result
         included_archived_count,
         used_status: filter_result.used_status,
         read_an_instant: filter_result.read_an_instant,
+        marks,
     })
 }
 
@@ -168,6 +184,7 @@ mod tests {
             filters: BoundFilters::none(),
             role_policy,
             clock: UserZone::utc(),
+            notes: false,
         }
     }
 

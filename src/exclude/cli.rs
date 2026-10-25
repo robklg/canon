@@ -26,7 +26,7 @@ use crate::exclude::ops::types::{
     ExcludeClearParams, ExcludeDuplicatesParams, ExcludeSetObjectsParams, ExcludeSetParams,
     ObjectSourceInfo, ReceiptDestination,
 };
-use crate::expr::{read_filters, ExpressionText};
+use crate::expr::{read_filters, ExpressionText, SelectionNotes};
 
 /// Build the decision params, decomposing the given canonical scope prefixes to
 /// their roots (the one funnel). Pass an empty slice for a global decision. A
@@ -95,6 +95,20 @@ fn resolve_placement(
     Ok(ReceiptDestination { placement, gap })
 }
 
+/// The plan's lines about its selection, directly under the count they qualify.
+fn print_notes(notes: &SelectionNotes) {
+    for line in notes.lines() {
+        println!("{line}");
+    }
+}
+
+/// [`print_notes`], for the confirmation, which is on stderr.
+fn eprint_notes(notes: &SelectionNotes) {
+    for line in notes.lines() {
+        eprintln!("{line}");
+    }
+}
+
 /// Print receipt-write warnings (one per line) to stderr.
 fn print_warnings(warnings: &[String]) {
     for w in warnings {
@@ -149,11 +163,13 @@ pub fn set(
 
     if plan.source_ids().is_empty() {
         println!("No sources to exclude (0 matching non-excluded sources)");
+        print_notes(&plan.notes);
         return Ok(());
     }
 
     if options.dry_run {
         println!("Would exclude {} sources:", plan.source_ids().len());
+        print_notes(&plan.notes);
         for path in &plan.paths() {
             println!("  {path}");
         }
@@ -164,6 +180,7 @@ pub fn set(
     if plan.source_ids().len() > 1 {
         if !options.yes {
             eprintln!("Will exclude {} sources", plan.source_ids().len());
+            eprint_notes(&plan.notes);
             eprintln!("  Across {} roots", plan.root_count);
             eprintln!("  {} have no archived copy", plan.not_archived_count);
         }
@@ -222,6 +239,7 @@ pub fn clear(
 
     if plan.source_ids().is_empty() {
         println!("No excluded sources match the given filters");
+        print_notes(&plan.notes);
         return Ok(());
     }
 
@@ -230,6 +248,7 @@ pub fn clear(
             "Would clear exclusions for {} sources:",
             plan.source_ids().len()
         );
+        print_notes(&plan.notes);
         for path in &plan.paths() {
             println!("  {path}");
         }
@@ -243,6 +262,7 @@ pub fn clear(
                 "Will clear exclusions for {} sources",
                 plan.source_ids().len()
             );
+            eprint_notes(&plan.notes);
             eprintln!("  Across {} roots", plan.root_count);
         }
 
@@ -450,6 +470,7 @@ pub fn exclude_duplicates(
         } else {
             println!("Nothing to exclude.");
         }
+        print_notes(&plan.notes);
         return Ok(());
     }
 
@@ -475,6 +496,7 @@ pub fn exclude_duplicates(
         }
         eprintln!();
         println!("Would exclude {} sources:", plan.source_ids().len());
+        print_notes(&plan.notes);
         for path in &plan.paths() {
             println!("  {path}");
         }
@@ -489,6 +511,7 @@ pub fn exclude_duplicates(
                 plan.source_ids().len(),
                 plan.group_count
             );
+            eprint_notes(&plan.notes);
             eprintln!("  Keeping copies in: {}", plan.prefer_prefix);
             if plan.skipped_not_covered > 0 {
                 eprintln!(
@@ -709,6 +732,7 @@ pub fn set_objects_by_filter(
 
     if plan.objects.is_empty() {
         println!("No objects to exclude.");
+        print_notes(&plan.notes);
         if plan.skipped_no_hash > 0 {
             println!("  {} sources have no hash yet", plan.skipped_no_hash);
         }
@@ -742,6 +766,7 @@ pub fn set_objects_by_filter(
             plan.total_archive_count
         );
         print_suspended_share(plan.total_suspended_count);
+        print_notes(&plan.notes);
         for entry in &plan.objects {
             let archive_count = entry.sources.iter().filter(|s| s.is_archive).count();
             let src_count = entry.sources.len() - archive_count;
@@ -788,8 +813,16 @@ pub fn set_objects_by_filter(
     )?;
     let destination = resolve_placement(conn, config, &decision)?;
     let result = execute_set_objects(conn, &plan, &destination, Some(&decision))?;
-    println!("{}", result.summary);
+    // The suspended share qualifies the sources count on the summary's first line, so it
+    // stands directly under that line, above the notes the summary carries below it.
+    let mut summary = result.summary.lines();
+    if let Some(head) = summary.next() {
+        println!("{head}");
+    }
     print_suspended_share(plan.total_suspended_count);
+    for line in summary {
+        println!("{line}");
+    }
     print_warnings(&result.warnings);
     Ok(())
 }

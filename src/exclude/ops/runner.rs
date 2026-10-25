@@ -10,6 +10,7 @@ use super::types::ReceiptDestination;
 use crate::core::domain::decision::DecisionStatus;
 use crate::core::ops::decision::{DecisionCounts, DecisionParams, DecisionRecorder};
 use crate::core::repo::Connection;
+use crate::expr::SelectionNotes;
 
 /// The outcome of one exclusion run: the summary as it was recorded, and the
 /// warnings the caller must surface.
@@ -22,6 +23,17 @@ pub(super) struct ExclusionRun {
     pub warnings: Vec<String>,
 }
 
+/// The summary an exclusion records: its head line, the receipt gap's reason joined onto it
+/// where there is one — the one place that join is spelled — then the plan's note lines
+/// under it (`SelectionNotes::under`). The head and the gap stay the first line, which the trail narrates;
+/// the notes qualify the count, below it.
+pub(super) fn recorded_summary(head: &str, gap: Option<&str>, notes: &SelectionNotes) -> String {
+    match gap {
+        Some(reason) => notes.under(&format!("{head} — {reason}")),
+        None => notes.under(head),
+    }
+}
+
 /// Run an exclusion execution transactionally. Opens a transaction, performs the
 /// DB mutations via `mutate` (which also builds the receipt body from the
 /// now-known `decision_id`), completes the decision record inside the
@@ -29,23 +41,26 @@ pub(super) struct ExclusionRun {
 /// Returns the recorded summary and accumulated warnings.
 ///
 /// `destination` carries the placement and, when there is none, the reason. The
-/// reason is joined onto `summary` here — the one place the join is spelled —
-/// and never onto the receipt body's own copy: a gap means no placement, and no
-/// placement means the `mutate` closure builds no receipt at all, so the two can
-/// never disagree.
+/// reason is joined onto `head` here, through [`recorded_summary`], and never
+/// onto the receipt body's own copy: a gap means no placement, and no placement
+/// means the `mutate` closure builds no receipt at all, so the two can never
+/// disagree. `head` is the summary's first line, the whole of it for a
+/// single-target act, and `notes` are the plan's lines, below the head in both.
 ///
 /// Per the write-path-atomicity ADR: the transaction covers DB mutations only.
 /// The receipt file is a durable artifact written after the DB is committed, so a
 /// receipt-write failure is a warning, never a rollback. A failure inside
 /// `mutate` (or the commit) drops the transaction — the `started` decision row
 /// and any partial flips roll back together, leaving no half-state.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_exclusion<T, F>(
     conn: &mut Connection,
     decision: Option<&DecisionParams>,
     destination: &ReceiptDestination,
     has_items: bool,
     counts: DecisionCounts,
-    summary: &str,
+    head: &str,
+    notes: &SelectionNotes,
     mutate: F,
 ) -> Result<ExclusionRun>
 where
@@ -53,10 +68,8 @@ where
     F: FnOnce(&Connection, Option<i64>) -> Result<Option<T>>,
 {
     // A run that records nothing has no row to explain, so it states no gap.
-    let summary = match destination.gap.as_deref() {
-        Some(reason) if has_items => format!("{summary} — {reason}"),
-        _ => summary.to_string(),
-    };
+    let gap = destination.gap.as_deref().filter(|_| has_items);
+    let summary = recorded_summary(head, gap, notes);
     let summary = summary.as_str();
 
     let tx = conn.transaction()?;

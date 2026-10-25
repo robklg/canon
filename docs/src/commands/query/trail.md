@@ -60,7 +60,7 @@ Decision trail: /mnt/old-drive/photos
 
 A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear. That rule applies to a decision's *acted-on scope*. The extraction and arrival lines below follow recorded *placements* instead, which appear only in views that contain them (see [the extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction)).
 
-Each line carries the decision id, timestamp, the act, the place, the completion summary, and your `--reason` (quoted). Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[refused]`, `[started]`).
+Each line carries the decision id, timestamp, the act, the place, the first line of the completion summary, and your `--reason` (quoted). Decisions that did not complete cleanly are marked (`[partial]`, `[interrupted]`, `[refused]`, `[started]`).
 
 The **act** is the registered transition word where the decision has one (`archived`, `excluded`, `restored`, `deleted`) and the stored command identifier otherwise (`scan`, `cluster_generate`). Notes carry no act; the `~` marks them.
 
@@ -496,6 +496,13 @@ Decision #61 — exclude_duplicates
 
 `time zone:` names the time zone the decision used for times, as its record states it ([decisions](../../concepts/decisions.md#the-time-zone-a-decision-uses)).
 
+`summary:` prints the whole summary. Its later lines, such as the counts a plan stated under its number ([What an Acting Command States](../../reference/filter.md#what-an-acting-command-states)), follow the first line:
+
+```
+  summary:  Excluded 2,140 sources
+  of which 312 have no Make
+```
+
 For an `apply` decision, a `drew from:` section lists what it took from each source root: path, files, and size. The path is a snapshot recorded at apply time, so it renders even after the root itself is gone from Canon. A root Canon no longer indexes ends its line with `(root removed)`: the path stays primary (it is the answer to "where did this come from?"), and the marker states that the path is history, not a place you can visit. For a copy, the originals may still exist at the origin, but they are no longer part of Canon's universe:
 
 ```
@@ -574,10 +581,12 @@ The statement answers the question asked, so the command exits 0. A path that wa
 
 ## Machine output
 
-`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. An `apply` event additionally carries `extractions`: one entry per recorded placement, a source root's origin directory paired with the destination directory it fed (`root`, `rel_prefix`, `files`, `bytes`, `destination`, `disposition`). It is populated regardless of view, including `--global`, so machine consumers never have to re-derive it from a scoped run. (Rows recorded before directory precision are one per source root, with common-prefix locations: the same fields, coarser values.) The field is absent (not `[]`) for decisions that drew from nothing. The scope header moves to stderr so stdout stays clean:
+`--jsonl` emits one JSON object per timeline event, with a `type` field (`"decision"` or `"note"`), the raw command identifier, timestamps, counts, reason, scope, summary, and receipt location. An `apply` event additionally carries `extractions`: one entry per recorded placement, a source root's origin directory paired with the destination directory it fed (`root`, `rel_prefix`, `files`, `bytes`, `destination`, `disposition`). It is populated regardless of view, including `--global`, so machine consumers never have to re-derive it from a scoped run. (Rows recorded before directory precision are one per source root, with common-prefix locations: the same fields, coarser values.) The field is absent (not `[]`) for decisions that drew from nothing. A `summary` can span several lines; its first line is the one the timeline shows. The scope header moves to stderr so stdout stays clean:
 
 ```bash
 canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summary'
+# the timeline's line alone
+canon trail --today --global --jsonl | jq -r 'select(.type=="decision") | .summary | split("\n")[0]'
 ```
 
 ## Flags

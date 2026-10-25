@@ -16,7 +16,7 @@ use super::receipt::{
     counts_all, duplicate_receipt_groups, exclude_receipt_items, object_stamp_set_entries,
     DuplicatesReceipt, ExcludeReceipt, ObjectExcludeEntry, ObjectExcludeReceipt,
 };
-use super::runner::run_exclusion;
+use super::runner::{recorded_summary, run_exclusion};
 use super::types::{
     ExcludeClearPlan, ExcludeDuplicatesPlan, ExcludeSetObjectsPlan, ExcludeSetPlan,
     ReceiptDestination,
@@ -82,7 +82,8 @@ pub fn execute_set(
     let count = source_ids.len();
     let has_items = !plan.items.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
-    let summary = format!("Excluded {} {noun}", format_count(count));
+    let head = format!("Excluded {} {noun}", format_count(count));
+    let summary = recorded_summary(&head, None, &plan.notes);
 
     let run = run_exclusion(
         conn,
@@ -90,7 +91,8 @@ pub fn execute_set(
         destination,
         has_items,
         counts_all(count),
-        &summary,
+        &head,
+        &plan.notes,
         |tx, decision_id| {
             refuse_if_a_door_closed(tx, plan.items.iter().map(|i| i.root.as_str()))?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
@@ -140,7 +142,8 @@ pub fn execute_clear(
     let count = source_ids.len();
     let has_items = !plan.items.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
-    let summary = format!("Cleared exclusions for {} {noun}", format_count(count));
+    let head = format!("Cleared exclusions for {} {noun}", format_count(count));
+    let summary = recorded_summary(&head, None, &plan.notes);
 
     let run = run_exclusion(
         conn,
@@ -148,7 +151,8 @@ pub fn execute_clear(
         destination,
         has_items,
         counts_all(count),
-        &summary,
+        &head,
+        &plan.notes,
         |tx, decision_id| {
             refuse_if_a_door_closed(tx, plan.items.iter().map(|i| i.root.as_str()))?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, false, decision_id)?;
@@ -198,7 +202,8 @@ pub fn execute_duplicates(
     let count = source_ids.len();
     let has_items = !plan.groups.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
-    let summary = format!("Excluded {} {noun}", format_count(count));
+    let head = format!("Excluded {} {noun}", format_count(count));
+    let summary = recorded_summary(&head, None, &plan.notes);
 
     let run = run_exclusion(
         conn,
@@ -206,7 +211,8 @@ pub fn execute_duplicates(
         destination,
         has_items,
         counts_all(count),
-        &summary,
+        &head,
+        &plan.notes,
         |tx, decision_id| {
             refuse_if_a_door_closed(
                 tx,
@@ -262,10 +268,11 @@ pub fn execute_set_objects(
     let count = plan.objects.len();
     let has_items = !plan.objects.is_empty();
     let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
-    let summary = format!(
+    let head = format!(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
         count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
     );
+    let summary = recorded_summary(&head, None, &plan.notes);
 
     let run = run_exclusion(
         conn,
@@ -273,7 +280,8 @@ pub fn execute_set_objects(
         destination,
         has_items,
         counts_all(count),
-        &summary,
+        &head,
+        &plan.notes,
         |tx, decision_id| {
             // Capture each object's stamp-set before stamping: the receipt must
             // list exactly the sources the stamp touches, with pre-stamp

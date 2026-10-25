@@ -11,7 +11,7 @@ use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::ops::receipt::ReceiptPlacement;
-use crate::expr::BoundFilters;
+use crate::expr::{BoundFilters, SelectionNotes};
 
 /// Where an exclusion's receipt lands — or why it lands nowhere.
 ///
@@ -111,6 +111,9 @@ pub struct ExcludeSetPlan {
     pub root_count: usize,
     /// Sources with no archived copy (unhashed or not in any archive root).
     pub not_archived_count: usize,
+    /// The plan's lines about its selection: how many of what it acts on have no value for a
+    /// negated key, and which stored times a comparison could not place.
+    pub notes: SelectionNotes,
 }
 
 impl ExcludeSetPlan {
@@ -136,6 +139,9 @@ pub struct ExcludeClearPlan {
     pub items: Vec<ExcludeItemData>,
     /// Distinct root count across sources to clear.
     pub root_count: usize,
+    /// The plan's lines about its selection: how many of what it acts on have no value for a
+    /// negated key, and which stored times a comparison could not place.
+    pub notes: SelectionNotes,
 }
 
 impl ExcludeClearPlan {
@@ -177,6 +183,9 @@ pub struct ExcludeDuplicatesPlan {
     pub skipped_not_covered: usize,
     /// Sources skipped because multiple copies exist in prefer path.
     pub skipped_multiple: usize,
+    /// The plan's lines about its selection: how many of what it acts on have no value for a
+    /// negated key, and which stored times a comparison could not place.
+    pub notes: SelectionNotes,
 }
 
 impl ExcludeDuplicatesPlan {
@@ -223,6 +232,9 @@ pub struct ExcludeSetObjectsPlan {
     pub skipped_empty: usize,
     /// Objects already excluded.
     pub skipped_already_excluded: usize,
+    /// The plan's lines about its selection: how many of what it acts on have no value for a
+    /// negated key, and which stored times a comparison could not place.
+    pub notes: SelectionNotes,
 }
 
 /// A single object entry in the exclusion plan.

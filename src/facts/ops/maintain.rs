@@ -12,6 +12,7 @@ use crate::core::ops::decision::{
 };
 use crate::core::repo::object::OrphanedStats;
 use crate::core::repo::{Connection, Db};
+use crate::expr::{select_sources, NoteUnit, SelectionNotes, SelectionParams};
 use crate::facts::repo as facts_repo;
 
 /// Plan result for fact deletion.
@@ -25,6 +26,11 @@ pub struct DeletePlan {
     pub entity_type: String,
     pub fact_count: i64,
     pub entity_count: i64,
+    /// The matching sources: what the selection chose, and what the delete runs over.
+    pub source_ids: Vec<i64>,
+    /// The plan's line about its selection: of the matching sources, how many have no value
+    /// for a negated key; and which stored times a comparison could not place.
+    pub notes: SelectionNotes,
 }
 
 /// Plan result for stale fact pruning.
@@ -54,23 +60,55 @@ impl PruneExcludedPlan {
     }
 }
 
-/// Plan fact deletion: count matching facts without performing the delete.
-/// `key` is the one `facts::domain::delete_key` read.
+/// Plan fact deletion: select the matching sources and count their facts, without
+/// performing the delete. `key` is the one `facts::domain::delete_key` read. The selection is
+/// the one `ls --where` at this scope would list, so a delete never reaches a source no
+/// preview of it showed.
 pub fn plan_delete(
     conn: &mut Connection,
-    source_ids: &[i64],
+    selection: &SelectionParams,
     key: &str,
     entity_type: &str,
     value_type: Option<FactType>,
 ) -> Result<DeletePlan> {
-    let (fact_count, entity_count) =
-        facts_repo::count_by_criteria(conn, source_ids, key, entity_type, value_type)?;
+    let selection = select_sources(conn, selection)?;
+    let source_ids = selection.source_ids();
+    let mut plan = plan_delete_over(conn, source_ids, key, entity_type, value_type)?;
+    // A plan that deletes nothing acts on no source, so it counts none as acted on.
+    let acted: &[i64] = if plan.fact_count == 0 {
+        &[]
+    } else {
+        &plan.source_ids
+    };
+    plan.notes = SelectionNotes::of(
+        selection.marks.as_ref(),
+        acted,
+        NoteUnit::OfMatching(plan.source_ids.len()),
+    );
+    Ok(plan)
+}
+
+/// The counting half of [`plan_delete`], over sources already chosen.
+fn plan_delete_over(
+    conn: &mut Connection,
+    source_ids: Vec<i64>,
+    key: &str,
+    entity_type: &str,
+    value_type: Option<FactType>,
+) -> Result<DeletePlan> {
+    let (fact_count, entity_count) = if source_ids.is_empty() {
+        (0, 0)
+    } else {
+        facts_repo::count_by_criteria(conn, &source_ids, key, entity_type, value_type)?
+    };
 
     Ok(DeletePlan {
         key: key.to_string(),
         entity_type: entity_type.to_string(),
         fact_count,
         entity_count,
+        source_ids,
+        notes: SelectionNotes::none(NoteUnit::OfMatching(0)),
     })
 }
 
@@ -104,7 +142,6 @@ pub struct DeleteResult {
 /// sit outside the settlement.
 pub fn execute_delete(
     conn: &mut Connection,
-    source_ids: &[i64],
     entity_type: &str,
     value_type: Option<FactType>,
     plan: &DeletePlan,
@@ -112,7 +149,7 @@ pub fn execute_delete(
 ) -> Result<DeleteResult> {
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
-    match delete_body(conn, source_ids, entity_type, value_type, plan) {
+    match delete_body(conn, entity_type, value_type, plan) {
         Ok(summary) => {
             if let Some(recorder) = recorder.as_mut() {
                 recorder.complete(
@@ -152,24 +189,24 @@ pub fn execute_delete(
 /// current.
 fn delete_body(
     conn: &mut Connection,
-    source_ids: &[i64],
     entity_type: &str,
     value_type: Option<FactType>,
     plan: &DeletePlan,
 ) -> Result<String> {
-    facts_repo::delete_by_criteria(conn, source_ids, &plan.key, entity_type, value_type)?;
+    facts_repo::delete_by_criteria(conn, &plan.source_ids, &plan.key, entity_type, value_type)?;
     let entity_label = if entity_type == "source" {
         "sources"
     } else {
         "objects"
     };
-    Ok(format!(
+    let head = format!(
         "Deleted {} '{}' fact rows across {} {}",
         format_count(plan.fact_count),
         plan.key,
         format_count(plan.entity_count),
         entity_label
-    ))
+    );
+    Ok(plan.notes.under(&head))
 }
 
 /// Plan stale fact pruning: count facts with mismatched basis_rev.
@@ -400,6 +437,46 @@ mod tests {
     use super::*;
     use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::expr::{ExpressionText, RolePolicy};
+
+    /// The plan selects the population `ls --where` would list, runs the delete over it, and says
+    /// how many of the matching sources have no value for a negated key — including the key
+    /// deleted, whose sources with no value lose nothing.
+    #[test]
+    fn plan_delete_selects_and_states_its_matching_count() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let canon = insert_source(&conn, root_id, "a.jpg", None);
+        let nikon = insert_source(&conn, root_id, "b.jpg", None);
+        let bare = insert_source(&conn, root_id, "c.jpg", None);
+        crate::core::testing::insert_fact(&conn, canon, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, nikon, "content.Make", "Nikon");
+        let filters =
+            crate::expr::read_filters(&conn, &ExpressionText::plain(&["Make != Canon"])).unwrap();
+        let params = SelectionParams {
+            scopes: vec![],
+            include: crate::core::domain::include::IncludeSet::default(),
+            filters,
+            role_policy: RolePolicy::SourceUnlessIncluded,
+            clock: UserZone::utc(),
+            notes: true,
+        };
+        let plan = plan_delete(&mut conn, &params, "content.Make", "source", None).unwrap();
+        assert_eq!(plan.source_ids, vec![nikon, bare]);
+        assert_eq!(plan.fact_count, 1);
+        assert_eq!(
+            plan.notes.lines(),
+            ["  from 2 matching sources, 1 of which has no Make"]
+        );
+
+        let decision =
+            recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
+        let result = execute_delete(&mut conn, "source", None, &plan, Some(&decision)).unwrap();
+        assert_eq!(
+            result.summary,
+            "Deleted 1 'content.Make' fact rows across 1 sources\n  from 2 matching sources, 1 of which has no Make"
+        );
+    }
 
     #[test]
     fn test_plan_delete_counts() {
@@ -413,7 +490,8 @@ mod tests {
         crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
         crate::core::testing::insert_fact(&conn, s2, "content.Make", "Nikon");
 
-        let plan = plan_delete(&mut conn, &[s1, s2], "content.Make", "source", None).unwrap();
+        let plan =
+            plan_delete_over(&mut conn, vec![s1, s2], "content.Make", "source", None).unwrap();
 
         assert_eq!(plan.fact_count, 2);
         assert_eq!(plan.entity_count, 2);
@@ -486,11 +564,10 @@ mod tests {
         let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
         crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
 
-        let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
+        let plan = plan_delete_over(&mut conn, vec![s1], "content.Make", "source", None).unwrap();
         let decision =
             recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
-        let result =
-            execute_delete(&mut conn, &[s1], "source", None, &plan, Some(&decision)).unwrap();
+        let result = execute_delete(&mut conn, "source", None, &plan, Some(&decision)).unwrap();
 
         let (command, status, attempted, completed, summary) = only_decision(&conn);
         assert_eq!(command, "facts_delete");
@@ -518,12 +595,11 @@ mod tests {
         crate::core::testing::insert_fact(&conn, s1, "content.Model", "EOS");
 
         let key = crate::facts::domain::delete_key("Make").unwrap();
-        let plan = plan_delete(&mut conn, &[s1, s2], &key, "source", None).unwrap();
+        let plan = plan_delete_over(&mut conn, vec![s1, s2], &key, "source", None).unwrap();
         assert_eq!(plan.fact_count, 2);
         let decision =
             recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
-        let result =
-            execute_delete(&mut conn, &[s1, s2], "source", None, &plan, Some(&decision)).unwrap();
+        let result = execute_delete(&mut conn, "source", None, &plan, Some(&decision)).unwrap();
 
         assert_eq!(
             result.summary,
@@ -647,7 +723,7 @@ mod tests {
         let obj = insert_object(&conn, "h1", false);
         let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
         crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
-        let plan = plan_delete(&mut conn, &[s1], "content.Make", "source", None).unwrap();
+        let plan = plan_delete_over(&mut conn, vec![s1], "content.Make", "source", None).unwrap();
         // A `BEFORE DELETE` trigger over an empty result set never fires, so
         // the row the delete must match is asserted rather than assumed.
         assert_eq!(plan.fact_count, 1);
@@ -655,7 +731,7 @@ mod tests {
             recording_decision(crate::core::domain::decision::DecisionCommand::FactsDelete);
         crate::core::testing::plant_failure(&conn, "DELETE", "facts");
 
-        assert!(execute_delete(&mut conn, &[s1], "source", None, &plan, Some(&decision)).is_err());
+        assert!(execute_delete(&mut conn, "source", None, &plan, Some(&decision)).is_err());
 
         let (status, summary) = settled_row(&conn);
         assert_eq!(status, "interrupted");

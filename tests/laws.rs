@@ -878,6 +878,18 @@ const LAWS: &[Law] = &[
         record: "2026-10-22",
     },
     Law {
+        // An acting command's plan lines count what the selection's own evaluation decided: a
+        // key is negated under an odd number of negations in the bound tree, "no value" is
+        // counted over what the command acts on, and a spanning value is "selected" where the
+        // command acts on it and "not selected" where the filter did not select it.
+        name: "selection notes",
+        owner: "expr/ops/notes.rs",
+        verifier: "the_notes_count_what_the_selection_decided",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Recognised,
+        record: "2026-10-23",
+    },
+    Law {
         // No file is placed outside the destination directory: every destination, and a
         // manifest's `base_dir`, is a `ContainedPath`, whose one constructor refuses a root, a
         // `..` and a null character, so a destination that could leave its directory cannot be

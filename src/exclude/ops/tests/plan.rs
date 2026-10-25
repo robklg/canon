@@ -1,9 +1,10 @@
 use crate::core::ops::scope::classify_all;
 use crate::core::testing::{
-    insert_object, insert_root, insert_source, insert_source_excluded, insert_source_with_size,
-    setup_test_db,
+    insert_fact, insert_object, insert_root, insert_source, insert_source_excluded,
+    insert_source_with_size, insert_time_fact, setup_test_db,
 };
 use crate::exclude::ops::plan::{plan_clear, plan_duplicates, plan_set, plan_set_objects};
+use crate::expr::ExpressionText;
 
 use super::fixtures::{
     make_clear_params, make_duplicates_params, make_set_objects_params, make_set_params,
@@ -796,4 +797,158 @@ fn test_plan_set_objects_cuts_a_hash_prefix_between_characters() {
 
     assert_eq!(plan.objects.len(), 1);
     assert_eq!(plan.objects[0].hash_prefix, format!("a{}", "é".repeat(15)));
+}
+
+// =========================================================================
+// The plans' notes
+// =========================================================================
+
+/// A `--where` string bound against the database, as the commands bind it.
+fn filters(conn: &crate::core::repo::Connection, text: &str) -> crate::expr::BoundFilters {
+    crate::expr::read_filters(conn, &ExpressionText::plain(&[text])).unwrap()
+}
+
+#[test]
+fn plan_set_states_its_notes() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    for (name, make) in [
+        ("a.jpg", Some("Canon")),
+        ("b.jpg", Some("Nikon")),
+        ("c.jpg", None),
+        ("d.jpg", None),
+    ] {
+        let id = insert_source(&conn, root, name, None);
+        if let Some(make) = make {
+            insert_fact(&conn, id, "content.Make", make);
+        }
+    }
+    let mut params = make_set_params(vec![]);
+    params.filters = filters(&conn, "Make != Canon");
+    let plan = plan_set(&mut conn, &params).unwrap();
+    assert_eq!(plan.source_ids().len(), 3);
+    assert_eq!(plan.notes.lines(), ["  of which 2 have no Make"]);
+
+    // A plan that acts on nothing still says which times it could not place.
+    let dated = insert_source(&conn, root, "e.jpg", None);
+    insert_time_fact(&conn, dated, "content.Taken", "2024");
+    params.filters = filters(&conn, "Taken < 2024-06");
+    let plan = plan_set(&mut conn, &params).unwrap();
+    assert!(plan.source_ids().is_empty());
+    assert_eq!(
+        plan.notes.lines(),
+        ["  1 source has a time that spans 2024-06 (coarser than a month): 1 not selected"]
+    );
+}
+
+#[test]
+fn plan_clear_states_its_notes() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let canon = insert_source_excluded(&conn, root, "a.jpg", None);
+    insert_fact(&conn, canon, "content.Make", "Canon");
+    insert_source_excluded(&conn, root, "b.jpg", None);
+    insert_source(&conn, root, "c.jpg", None);
+    let mut params = make_clear_params(vec![]);
+    params.filters = filters(&conn, "Make != Nikon");
+    let plan = plan_clear(&mut conn, &params).unwrap();
+    assert_eq!(plan.source_ids().len(), 2);
+    assert_eq!(plan.notes.lines(), ["  of which 1 has no Make"]);
+}
+
+/// Counted over the sources it would exclude: a selected source that is no duplicate is in
+/// neither direction of the spanning count.
+#[test]
+fn plan_duplicates_counts_what_it_would_exclude() {
+    let mut conn = setup_test_db();
+    let source_root = insert_root(&conn, "/source", "source", false);
+    let archive_root = insert_root(&conn, "/archive", "archive", false);
+    let shared = insert_object(&conn, "same_hash", false);
+    let unique = insert_object(&conn, "unique_hash", false);
+    let duplicate = insert_source(&conn, source_root, "photo.jpg", Some(shared));
+    insert_source(&conn, archive_root, "photo.jpg", Some(shared));
+    let alone = insert_source(&conn, source_root, "unique.jpg", Some(unique));
+    for id in [duplicate, alone] {
+        insert_time_fact(&conn, id, "content.Taken", "2024");
+    }
+    let canon = insert_source(&conn, source_root, "other.jpg", None);
+    insert_fact(&conn, canon, "content.Make", "Canon");
+
+    let mut params = make_duplicates_params(vec![], "/archive");
+    params.filters = filters(&conn, "Make != Canon");
+    let plan = plan_duplicates(&mut conn, &params).unwrap();
+    assert_eq!(plan.source_ids(), vec![duplicate]);
+    assert_eq!(plan.notes.lines(), ["  of which 1 has no Make"]);
+
+    params.filters = filters(&conn, "Taken != 2024-06");
+    let plan = plan_duplicates(&mut conn, &params).unwrap();
+    assert_eq!(plan.scope_count, 3);
+    assert_eq!(
+        plan.notes.lines(),
+        ["  1 source has a time that spans 2024-06 (coarser than a month): 1 selected"]
+    );
+}
+
+/// An object has no value only when none of its selected sources has one; the spanning count
+/// reads the selected sources whose objects the plan excludes, and a sharer the filter
+/// rejected stays "not selected" only.
+#[test]
+fn plan_set_objects_counts_objects() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let both = insert_object(&conn, "both_hash", false);
+    let lone = insert_object(&conn, "lone_hash", false);
+    insert_source(&conn, root, "s1.jpg", Some(both));
+    let s2 = insert_source(&conn, root, "s2.jpg", Some(both));
+    insert_fact(&conn, s2, "content.Make", "Canon");
+    let s3 = insert_source(&conn, root, "s3.jpg", Some(lone));
+    insert_time_fact(&conn, s3, "content.Taken", "2024");
+    let s4 = insert_source(&conn, root, "s4.jpg", Some(lone));
+    insert_fact(&conn, s4, "content.Make", "Nikon");
+    insert_time_fact(&conn, s4, "content.Taken", "2024");
+
+    let mut params = make_set_objects_params(vec![]);
+    params.filters = filters(&conn, "Make != Nikon");
+    let plan = plan_set_objects(&mut conn, &params).unwrap();
+    assert_eq!(plan.objects.len(), 2);
+    assert_eq!(plan.notes.lines(), ["  of which 1 object has no Make"]);
+
+    params.filters = filters(&conn, "Make != Nikon AND Taken != 2024-06");
+    let plan = plan_set_objects(&mut conn, &params).unwrap();
+    assert_eq!(
+        plan.notes.lines(),
+        [
+            "  of which 1 object has no Make",
+            "  of which 1 object has no Taken",
+            "  2 sources have a time that spans 2024-06 (coarser than a month): 1 not selected, 1 selected"
+        ]
+    );
+}
+
+/// **What `set-object` skips is on neither side of a time line**: an unhashed source, an empty
+/// one and one whose content is already excluded each hold a value known only to 2024 that
+/// `Taken != 2024-06` cannot place, and only the source whose object the plan excludes counts.
+#[test]
+fn set_object_skips_are_in_neither_spanning_direction() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let kept = insert_object(&conn, "kept_hash", false);
+    let empty = insert_object(&conn, "empty_hash", false);
+    let dismissed = insert_object(&conn, "dismissed_hash", true);
+    let acted = insert_source(&conn, root, "acted.jpg", Some(kept));
+    let unhashed = insert_source(&conn, root, "unhashed.jpg", None);
+    let zero = insert_source_with_size(&conn, root, "zero.jpg", Some(empty), 0);
+    let excluded = insert_source(&conn, root, "excluded.jpg", Some(dismissed));
+    for source in [acted, unhashed, zero, excluded] {
+        insert_time_fact(&conn, source, "content.Taken", "2024");
+    }
+
+    let mut params = make_set_objects_params(vec![]);
+    params.filters = filters(&conn, "Taken != 2024-06");
+    let plan = plan_set_objects(&mut conn, &params).unwrap();
+    assert_eq!(plan.objects.len(), 1);
+    assert_eq!(
+        plan.notes.lines(),
+        ["  1 source has a time that spans 2024-06 (coarser than a month): 1 selected"]
+    );
 }

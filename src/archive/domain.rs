@@ -397,6 +397,56 @@ pub fn settle_manifest_zone(
     }
 }
 
+/// **A refused `cluster refresh`, carried out to `main`**: its causes in their own words, the
+/// way back and the abort, as one text, and whether it is an answer. The text carries `Error:`
+/// itself, before the first cause holding input Canon cannot read, so `main` prints it as it
+/// stands — on the command's channel where it is an answer, on stderr otherwise. A joined
+/// string cannot say which it is, and an answer must not wear `Error:`.
+#[derive(Debug)]
+pub struct RefreshRefused {
+    text: String,
+    answer: bool,
+}
+
+impl RefreshRefused {
+    /// A refresh's refusal from its causes, each with whether it is an answer, in order:
+    /// `Error:` before the first one that is not and never before one that is, then the
+    /// abort. An answer exactly where every cause is one.
+    pub fn from_causes(causes: Vec<(String, bool)>, aborted: String) -> Self {
+        let answer = causes.iter().all(|(_, is_answer)| *is_answer);
+        let mut marked = false;
+        let mut lines: Vec<String> = causes
+            .into_iter()
+            .map(|(cause, is_answer)| {
+                if is_answer || marked {
+                    cause
+                } else {
+                    marked = true;
+                    format!("Error: {cause}")
+                }
+            })
+            .collect();
+        lines.push(aborted);
+        RefreshRefused {
+            text: lines.join("\n"),
+            answer,
+        }
+    }
+
+    /// Whether every cause is an answer — no `Error:` stands in the text.
+    pub fn is_answer(&self) -> bool {
+        self.answer
+    }
+}
+
+impl fmt::Display for RefreshRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.text)
+    }
+}
+
+impl std::error::Error for RefreshRefused {}
+
 /// `apply`'s pre-flight line for a file whose save time moved since the lock was built: both
 /// save times on the lock's clock, the zone named on the line —
 /// `mtime (Europe/Amsterdam): 2024-06-15 14:30:05 → 2024-06-15 14:31:12`.
@@ -2487,5 +2537,33 @@ base_dir = "photos"
         };
         assert_eq!(old_lock.next_step(), NextStep::None);
         assert_eq!(old_lock.owed_way_back(), OwedWayBack::Stated);
+    }
+
+    /// **A refused refresh says `Error:` exactly where a cause is not an answer**: once, before
+    /// the first such cause and never before an answer, the abort last; an answer otherwise.
+    #[test]
+    fn a_refresh_refusal_says_error_exactly_where_it_is_not_an_answer() {
+        let aborted = "Refresh aborted".to_string();
+        type Case<'a> = (&'a [(&'a str, bool)], &'a str, bool);
+        let cases: [Case; 4] = [
+            (&[], "Refresh aborted", true),
+            (&[("two types", true)], "two types\nRefresh aborted", true),
+            (
+                &[("two types", true), ("a typo", false), ("a zone", false)],
+                "two types\nError: a typo\na zone\nRefresh aborted",
+                false,
+            ),
+            (
+                &[("a zone", false), ("two types", true)],
+                "Error: a zone\ntwo types\nRefresh aborted",
+                false,
+            ),
+        ];
+        for (causes, text, answer) in cases {
+            let causes = causes.iter().map(|(c, a)| (c.to_string(), *a)).collect();
+            let refused = RefreshRefused::from_causes(causes, aborted.clone());
+            assert_eq!(refused.to_string(), text);
+            assert_eq!(refused.is_answer(), answer, "{text}");
+        }
     }
 }
