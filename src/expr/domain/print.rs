@@ -63,9 +63,17 @@ fn is_its_own_base_key(key: &str) -> bool {
 
 /// The command that shows a key's values and converts it to one type, as printed: backticked,
 /// the full stored key quoted for the shell only, so it runs as pasted
-/// (`` `canon facts convert 'content.File Size'` ``).
-pub(in crate::expr) fn convert_command(key: &str) -> String {
-    format!("`canon facts convert {}`", shell_quote(key))
+/// (`` `canon facts convert 'content.File Size'` ``), and the target type where one is named
+/// (`` `canon facts convert content.Width --to text` ``).
+pub fn convert_command(key: &str, to: Option<FactType>) -> String {
+    match to {
+        Some(to) => format!(
+            "`canon facts convert {} --to {}`",
+            shell_quote(key),
+            to.as_str()
+        ),
+        None => format!("`canon facts convert {}`", shell_quote(key)),
+    }
 }
 
 /// The types a key of mixed type holds, in the words the type column uses, the most common
@@ -118,7 +126,7 @@ pub fn mixed_type_way_out(keys: &[(&str, &KeyTypes)]) -> Vec<String> {
     std::iter::once(header.to_string())
         .chain(
             keys.iter()
-                .map(|(key, _)| format!("  {}", convert_command(key))),
+                .map(|(key, _)| format!("  {}", convert_command(key, None))),
         )
         .collect()
 }
@@ -552,8 +560,16 @@ mod tests {
             ),
             ("content.Make#2", "`canon facts convert 'content.Make#2'`"),
         ] {
-            assert_eq!(convert_command(key), command, "{key}");
-            assert!(!convert_command(key).contains('"'), "{key}");
+            assert_eq!(convert_command(key, None), command, "{key}");
+            assert!(!convert_command(key, None).contains('"'), "{key}");
         }
+        assert_eq!(
+            convert_command("content.File Size", Some(FactType::Text)),
+            "`canon facts convert 'content.File Size' --to text`"
+        );
+        assert_eq!(
+            convert_command("content.Width", Some(FactType::Time)),
+            "`canon facts convert content.Width --to time`"
+        );
     }
 }

@@ -893,10 +893,6 @@ mod tests {
     /// leaves — a kill or crash, a settlement the database refused, and a row
     /// from a version before every exit settled — so the line must not promise
     /// any one of them.
-    ///
-    /// *Smoke*: return the line for every status (a settled row then carries
-    /// an outcome line contradicting its own summary), or return `None`
-    /// always.
     #[test]
     fn a_started_row_states_its_outcome_was_never_written() {
         let line = started_outcome_line("started").expect("a started row earns the line");

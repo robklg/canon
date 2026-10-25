@@ -64,6 +64,32 @@ impl NumberForm<'_> {
         self.text.parse::<f64>().ok().filter(|n| n.is_finite())
     }
 
+    /// The digits before the decimal point, as written, without the sign (`01234` → `01234`,
+    /// `-2.50` → `2`, `1.5e3` → `1`).
+    pub fn whole(&self) -> &str {
+        self.mantissa().split('.').next().unwrap_or_default()
+    }
+
+    /// The digits after the decimal point, as written, where there is one (`2.50` → `50`,
+    /// `1.50e2` → `50`, `12` → none).
+    pub fn fraction(&self) -> Option<&str> {
+        self.mantissa()
+            .split_once('.')
+            .map(|(_, fraction)| fraction)
+    }
+
+    /// Whether it is written as an integer: no decimal point and no exponent (`12`, `-0`; not
+    /// `12.0` or `12e0`).
+    pub fn written_as_integer(&self) -> bool {
+        !self.text.contains(['.', 'e', 'E'])
+    }
+
+    /// The number as written without its sign and exponent.
+    fn mantissa(&self) -> &str {
+        let unsigned = self.text.strip_prefix('-').unwrap_or(self.text);
+        unsigned.split(['e', 'E']).next().unwrap_or_default()
+    }
+
     /// **The fit**: the number, where Canon holds it exactly as written — held, then spelled
     /// again ([`spelled`]), it is the same decimal number.
     pub fn exact(&self) -> Result<f64, NotExact> {
@@ -222,6 +248,37 @@ mod tests {
         // Import's reading is the nearest number: only a number too large to hold is refused.
         assert_eq!(read_number("1e-400"), Ok(0.0));
         assert_eq!(read_number("1.0000000000000001"), Ok(1.0));
+    }
+
+    #[test]
+    fn a_form_gives_its_whole_part_and_fraction_as_written() {
+        for (text, whole, fraction) in [
+            ("01234", "01234", None),
+            ("-2.50", "2", Some("50")),
+            ("1.50e2", "1", Some("50")),
+            ("1E5", "1", None),
+            ("-0", "0", None),
+            ("00.5", "00", Some("5")),
+        ] {
+            let form = number_form(text).unwrap_or_else(|| panic!("{text}: no form"));
+            assert_eq!((form.whole(), form.fraction()), (whole, fraction), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_form_says_whether_it_is_written_as_an_integer() {
+        for (text, integer) in [
+            ("12", true),
+            ("-0", true),
+            ("9007199254740993", true),
+            ("12.0", false),
+            ("9007199254740993e0", false),
+            ("1E5", false),
+            ("-0.00", false),
+        ] {
+            let form = number_form(text).unwrap_or_else(|| panic!("{text}: no form"));
+            assert_eq!(form.written_as_integer(), integer, "{text}");
+        }
     }
 
     #[test]

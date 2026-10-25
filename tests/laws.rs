@@ -901,6 +901,17 @@ const LAWS: &[Law] = &[
         authority: Authority::Recognised,
         record: "2026-10-22",
     },
+    Law {
+        // Whether reading text as a number drops what the text carried, judged by what is
+        // lost — a number not held exactly, a leading whole-part zero, a trailing fraction
+        // zero — never by which characters differ. Import skips such a value.
+        name: "loss judgment",
+        owner: "core/domain/conversion.rs",
+        verifier: "the_loss_judgment_reads_what_is_lost_never_characters",
+        reach: Reach::Unit("core"),
+        authority: Authority::Recognised,
+        record: "2026-10-25",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

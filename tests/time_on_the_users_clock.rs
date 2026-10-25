@@ -102,7 +102,7 @@ impl Home {
         }
         let run = home.run("UTC", &["import-facts"], Some(&input));
         assert!(
-            run.stdout.contains("7 facts imported"),
+            run.stdout.contains("imported 7 facts"),
             "{}{}",
             run.stdout,
             run.stderr

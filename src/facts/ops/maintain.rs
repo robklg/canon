@@ -701,10 +701,10 @@ mod tests {
     // is `cli/import.rs`, which carries its own)
     //
     // Each plants a failure inside the window and reads the row afterwards.
-    // Red-smoked by removing `.armed(..)` at the site — or, at `facts delete`,
-    // by deleting the wrapper's `Err` arm: the row then reads `started`.
-    // `summary` is read nullable so that smoke fails on the status assertion
-    // rather than on a NULL column, where the message would say nothing.
+    // Without `.armed(..)` at the site — or, at `facts delete`, without the
+    // wrapper's `Err` arm — the row reads `started`. `summary` is read
+    // nullable so that case fails on the status assertion rather than on a
+    // NULL column, where the message would say nothing.
     // =========================================================================
 
     fn settled_row(conn: &Connection) -> (String, Option<String>) {

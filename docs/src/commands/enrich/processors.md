@@ -60,7 +60,7 @@ canon worklist | canonargs --fact mime -- file -b --mime-type {} | canon import-
 
 The `{}` is replaced with the file path. The command's stdout becomes the fact value.
 
-**Default behavior:** Values are stored as text. To specify a type, add `--type`:
+**Default behavior:** Each value is passed on as a string, and the import reads it as the key's type; for a new key, it is stored as text. To specify a type, add `--type`:
 
 ```bash
 # Store as datetime (enables |year, |month modifiers)
@@ -72,6 +72,8 @@ canon worklist | canonargs --fact width --type number -- identify -format '%w' {
 
 Valid types: `datetime`, `duration`, `number`
 
+With `--type number`, a value written as a JSON number is passed on exactly as written, so the import sees the number the command printed. Any other value is passed on with its `number` hint. A `number` hint is the tool's statement that the value is a number, so its spelling is not judged for loss: for a number key or a new key, `01234` is stored as `1234`, and the first such value makes a new key a number key, while the same text with no hint is skipped for a number key as losing what it carried. Send zip codes and other zero-padded codes without `--type number`.
+
 ### Key-Value Mode
 
 When your command outputs `key=value` pairs (one per line):
@@ -80,7 +82,7 @@ When your command outputs `key=value` pairs (one per line):
 canon worklist | canonargs --kv -- my-extractor {} | canon import-facts
 ```
 
-**Default behavior:** All values are stored as text. To specify types, use `key:type=value` syntax:
+**Default behavior:** Each value is passed on as a string, and the import reads it as the key's type; for a new key, it is stored as text. To specify types, use `key:type=value` syntax:
 
 ```
 width:number=1920
@@ -102,9 +104,9 @@ Example extractor output:
 {"Make": "Apple", "Model": "iPhone 12", "DateTimeOriginal": "2024:07:23 14:30:00"}
 ```
 
-**JSON mode auto-detects numbers.** If your command outputs `"width": 1920` (a JSON number), it's stored as a number. If it outputs `"width": "1920"` (a quoted string), it's stored as text.
+Each value is passed on exactly as the command wrote it. A JSON number such as `"width": 1920` is a number for a number key or a new key. A quoted string such as `"width": "1920"` is read as the key's type, and is stored as text for a new key.
 
-For datetime fields, you still need to use the typed hint format:
+For a time field on a new key, use the typed hint format; a key that already holds times reads a date string as a time:
 ```json
 {"DateTimeOriginal": {"value": "2024:07:23 14:30:00", "type": "datetime"}}
 ```
@@ -120,7 +122,7 @@ canon worklist \
   | canon import-facts
 ```
 
-The facts `canonargs` passes through include every field `worklist --emit` wrote, so they are imported again under their names as given. A source fact such as `source.mtime` is skipped and counted as `skipped (reserved)`. A [built-in key](../../reference/builtins.md#built-in-keys) such as `filename` or `size` is stored as a content fact, `content.filename`, on the content of a hashed source, so every copy of that content shares it; a filter on `filename` still reads the built-in key.
+The facts `canonargs` passes through include every field `worklist --emit` wrote, so they are imported again under their names as given. A fact the command writes replaces a passed-through fact of the same name; under another name for the same key, such as `Model` beside `content.Model`, the import takes neither (see [What Is Skipped](import-facts.md#what-is-skipped)). A source fact such as `source.mtime` is not imported, and is counted in the summary. A [built-in key](../../reference/builtins.md#built-in-keys) such as `filename` or `size` is stored as a content fact, `content.filename`, on the content of a hashed source, so every copy of that content shares it; a filter on `filename` still reads the built-in key.
 
 ## Using Existing Facts
 
@@ -157,11 +159,13 @@ When no output is unconditional, emit a marker for every file handled, including
 
 `NOT content.exif.scanned?` then selects exactly the unprocessed sources, and storing the tool version lets a later pass reselect on it.
 
+A value the import skips at every run, such as the empty EXIF date `0000:00:00 00:00:00` for a key that holds times, leaves its file selected by a `NOT <key>?` gate on that key every time. A gate on a fact the processor writes for every file selects it once.
+
 The `enriched?` predicate does not serve as a gate: it is true as soon as a source has any fact beyond the content hash, including facts from a different processor.
 
 ## Type Hints
 
-The stored type of a fact determines how a filter compares it: times as spans of time, numbers as numbers, text in character order. If your processor outputs dates as strings, or numbers as quoted strings, add type hints; without them, `--where 'width>1000'` gives an error against the text key, and a date or number question has to be asked through a modifier (`width|number>1000`, `DateTimeOriginal|year=2024`).
+The stored type of a fact determines how a filter compares it: times as spans of time, numbers as numbers, text in character order. A key's type is set by its first import, and every later value is read as that type ([The Key Decides](import-facts.md#the-key-decides)). So hints matter for a key's first values: a date string, or a number in a quoted string, with no hint makes a new key a text key. A filter then gives an error for `--where 'width>1000'` against it, and a date or number question has to be asked through a modifier (`width|number>1000`, `DateTimeOriginal|year=2024`). `canon facts convert` changes the type of a key already imported with the wrong one.
 
 See [import-facts](import-facts.md#type-hints) for the hint format and full details.
 
@@ -228,5 +232,5 @@ A folder of mixed content often belongs in different places in the archive. Tags
 - Always pass through `source_id` and `basis_rev` unchanged
 - Use `jq -c` for compact JSON output (one object per line)
 - Handle errors gracefully—skip files that can't be processed
-- Use type hints for datetime fields so modifiers work correctly
-- Ensure numbers are actual JSON numbers, not quoted strings
+- Use type hints for a new key's dates, so its first value makes it a time key
+- Write numbers as JSON numbers, not quoted strings, so a new key becomes a number key

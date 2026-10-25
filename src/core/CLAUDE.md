@@ -107,7 +107,20 @@ one reading of text as a number — Canon's grammar, no `inf`, no leading `+`, n
 nothing too large to hold — and `spelled` the one writing, the shortest plain decimal that reads
 back as the same number, never an exponent. Pinned beside it, every spelling read back;
 recognised here, with no roster row. **Form first, fit second**: `number_form` asks the
-grammar, `NumberForm::exact` the fit, which filter values and their printing ask.
+grammar, `NumberForm::exact` the fit, which filter values and their printing ask. The form also
+answers for its parts as written — `whole`, `fraction`, `written_as_integer` — which
+the loss judgment and import's reading of a JSON number ask rather than reading characters.
+
+**What a value becomes as another type is one table** (`domain::conversion::convert`): text
+read as a number or a time, a number or a time written as text, and no conversion between a
+number and a time or to or from a derived path — every arm named, none by `_`. Its text →
+number arm carries **the loss judgment**: text read as a number loses what it carried where the
+number held is not exactly the number written, where the whole part has a leading zero
+(`01234`), or where the fraction ends in a zero (`2.50`) — judged by what is lost, never by
+characters, so an exponent's spelling (`1e5`) and `-0` lose nothing. Import skips a value it
+would lose. Pinned by `the_loss_judgment_reads_what_is_lost_never_characters`, which fails
+against "lossy when the respelled text differs". **Where it does not apply**: text read as a
+time is unchanged or does not read, and every type read as text is unchanged.
 
 **Text is cut by characters, never by byte index**, because a cut inside a multi-byte
 character panics. `domain::format::first_chars` owns the cut. `Cargo.toml` denies

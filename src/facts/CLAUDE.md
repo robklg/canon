@@ -5,15 +5,19 @@
 reaches in, and it reaches no sibling.
 
 **Strata**: `domain.rs` — the import-vocabulary half of the fact noun (`ContentFactOnSource`,
-`is_content_fact`, `import_key`, `delete_key`, `names_the_root`). `repo.rs` — the SQL only facts
-performs: the type map, upsert, key counting, the fact-promotion reads and writes,
+`is_content_fact`, `import_key`, `delete_key`, `names_the_root`), and what arrives and what
+becomes of it: `JsonFact` (a value as the JSON its tool wrote, a number in its own spelling),
+and `decide`, which fits one value to its key's type as a `Disposition` — stored, or skipped
+for a `SkipCause`. Text is read through `core::domain::conversion`'s table, times through
+`core::domain::time::reading`, never as epoch seconds. `repo.rs` — the SQL only facts
+performs: upsert, key counting, the fact-promotion reads and writes,
 counting and deleting by criteria, and the stale/excluded prunes, plus the private
 `value_type_clause`. `ops/report.rs` — the read-only distribution and enumeration
 computations (`compute_all_keys`, `compute_distribution`, `compute_grouped_distribution`,
 `compute_root_distribution`). `ops/maintain.rs` — the delete and prune plan/execute
-pairs. `ops/import.rs` — `process_record`, per-record import, reading times
-through `core::domain::time::reading`, never as epoch seconds; durations through `core::domain::number`. `cli.rs` — the
-`canon facts` command surface. `cli/import.rs` — the `canon import-facts` one.
+pairs. `ops/import.rs` — `import_batch`, one batch of records, and the summary's
+composition. `cli.rs` — the `canon facts` command surface. `cli/import.rs` — the
+`canon import-facts` one: the reader thread, the batch loop, and the way-out lines.
 
 **The fact noun is split, not moved.** `FactEntry`, `FactType` and `FactValue` stay in
 `core::domain::fact`, and `batch_fetch_for_sources` stays in `core/repo/fact.rs`, because
@@ -31,10 +35,22 @@ refusal that keeps those fills out of an outer transaction for a runtime error, 
 `a_failed_fact_delete_settles_interrupted` is its declaring test, and the architecture test's
 census carries the file's two shapes as two rows.
 
-**`import_run` takes its input as `impl BufRead`.** The caller passes `stdin.lock()`; a test
-passes a reader that breaks partway, which is the only way to reach the command's own `?` at
-all. Both of those arms settle explicitly rather than leaving it to the armed recorder behind
-them, because there — and nowhere else in this subsystem — the counts, the touched roots and
+**A batch is one write transaction.** `import_batch` takes the write lock (`IMMEDIATE`) before it
+reads the batch's key types, so another writer changing a key's type cannot interleave with the
+decision, and each record runs in a savepoint: a record that fails is undone whole, its facts,
+counts and any first type it gave a key. The batch loop closes a batch at `BATCH_RECORDS` or
+`BATCH_WINDOW` after its first record; the input is read on a detached thread so a batch never
+holds the lock waiting on a slow pipeline. `an_import_and_a_type_change_never_interleave_on_one_key`
+pins the lock.
+
+**The way-out lines live in the interface; the summary does not.** The per-key lines are for the
+screen alone, so `cli/import.rs` words them, one exhaustive `match` over `SkipCause`. The summary
+is also the decision record's, so `ops/import.rs` composes it.
+
+**`import_run` takes its input as `impl BufRead + Send`, and its stderr as a writer.** The caller
+passes stdin and stderr; a test passes a reader that breaks partway or is held open, and a buffer
+it reads. A run that stops early, on a broken input or a batch that cannot be written, settles
+explicitly rather than leaving it to the armed recorder behind it, because there — and nowhere else in this subsystem — the counts, the touched roots and
 the error text are all in hand. The scopes are the load-bearing part: `record_scopes` otherwise
 runs only after the loop, so a run that died mid-stream would leave a scope-less row, hidden
 from a scoped `trail` view behind its "global decisions not shown" footer — invisible from the
@@ -45,7 +61,7 @@ dispatch, display" is a property every cli file has, not a bond between these tw
 entry points are `run` and `import_run`, because one barrel cannot carry two `run`s.
 
 **The import takes the closed default per record, not per run.** A record naming a source behind
-a door the user closed is set aside and counted (`ImportStats.skipped_suspended`, stated in the
+a door the user closed is set aside and counted (`RecordSkip::Suspended`, stated in the
 summary), never written and never fatal: refusing the whole batch over one parked root would break
 an import that is otherwise entirely legitimate, while writing the facts would be a write inside
 the closet. The check stands ahead of the object link and the fact promotion, so the parked root

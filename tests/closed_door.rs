@@ -1218,11 +1218,11 @@ fn an_import_record_behind_a_door_is_counted_not_written() {
 
     let spoken = format!("{}{}", run.stdout, run.stderr);
     assert!(
-        spoken.contains("1 skipped (on suspended roots)"),
+        spoken.contains("skipped 1 record: 1 on suspended roots"),
         "counted, and stated: {spoken}"
     );
     assert!(
-        spoken.contains("1 facts imported"),
+        spoken.contains("imported 1 fact;"),
         "the batch ran on: {spoken}"
     );
 

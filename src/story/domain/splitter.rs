@@ -549,8 +549,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
     // context's register, and by deepest-match that register holds only
     // what isn't claimed deeper — so the divergence test must compare
     // against what the child would actually fold into, or forced-out
-    // siblings dilute the context and same-story children split (the
-    // home-dir dotfolder over-emission caught on first smoke test).
+    // siblings dilute the context and same-story children split.
     // `res_narratable` counts non-exclusion act files — the act-side
     // question gate (excluded is never a question, in standing or in
     // acts: a child whose acts are exclusion-only has nothing narratable

@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -14,7 +15,7 @@ struct Cli {
     #[arg(long, group = "mode")]
     fact: Option<String>,
 
-    /// Type hint for --fact mode (datetime or duration)
+    /// Type hint for --fact mode (datetime, duration, number)
     #[arg(long, requires = "fact")]
     r#type: Option<String>,
 
@@ -38,9 +39,9 @@ struct InputEntry {
     source_id: i64,
     path: String,
     basis_rev: i64,
-    // Optional fields from enriched input (for chaining)
+    // Optional fields from enriched input (for chaining), passed on as written
     #[serde(default)]
-    facts: HashMap<String, serde_json::Value>,
+    facts: HashMap<String, Box<RawValue>>,
     // observed_at is ignored on input - we always use current time
 }
 
@@ -50,7 +51,7 @@ struct FactOutput {
     path: String, // Include path to enable chaining
     basis_rev: i64,
     observed_at: i64,
-    facts: HashMap<String, serde_json::Value>,
+    facts: HashMap<String, Box<RawValue>>,
 }
 
 fn main() -> Result<()> {
@@ -168,27 +169,38 @@ fn process_entry(
     })
 }
 
-/// Create a typed fact value with type hint
-fn typed_value(value: &str, type_hint: &str) -> serde_json::Value {
-    // For number type, store it as a JSON number where it is one. A value with no JSON number
-    // (`inf`, `NaN`, too large to hold) or none at all is forwarded as given, never replaced,
-    // so the import refuses it with a warning.
-    if type_hint == "number" {
-        if let Some(n) = value
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-        {
-            return serde_json::Value::Number(n);
-        }
+/// The text as a JSON number, written as given, where JSON reads it as one: serde_json
+/// decides, and a number starts with `-` or a digit. Never read through a float, so Canon
+/// sees the number the tool wrote.
+fn json_number(value: &str) -> Option<Box<RawValue>> {
+    if !matches!(value.chars().next(), Some('-' | '0'..='9')) {
+        return None;
     }
-    serde_json::json!({
-        "value": value,
-        "type": type_hint
-    })
+    serde_json::from_str::<&RawValue>(value)
+        .ok()
+        .map(|raw| raw.to_owned())
 }
 
-fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde_json::Value>> {
+fn made(value: serde_json::Value) -> Box<RawValue> {
+    serde_json::value::to_raw_value(&value).expect("a JSON value serializes")
+}
+
+/// Create a typed fact value with type hint
+fn typed_value(value: &str, type_hint: &str) -> Box<RawValue> {
+    // For number type, pass it on as a JSON number where it is one. Any other text (`inf`,
+    // `NaN`, `+5`, a word) is forwarded with its hint, never replaced, so the import states it.
+    if type_hint == "number" {
+        if let Some(n) = json_number(value) {
+            return n;
+        }
+    }
+    made(serde_json::json!({
+        "value": value,
+        "type": type_hint
+    }))
+}
+
+fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, Box<RawValue>>> {
     let mut facts = HashMap::new();
 
     match mode {
@@ -199,7 +211,7 @@ fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde
             }
             let fact_value = match type_hint {
                 Some(t) => typed_value(value, t),
-                None => serde_json::Value::String(value.to_string()),
+                None => made(serde_json::Value::String(value.to_string())),
             };
             facts.insert(key.clone(), fact_value);
         }
@@ -223,7 +235,7 @@ fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde
                     };
                     let fact_value = match type_hint {
                         Some(t) => typed_value(value, t),
-                        None => serde_json::Value::String(value.to_string()),
+                        None => made(serde_json::Value::String(value.to_string())),
                     };
                     facts.insert(key.to_string(), fact_value);
                 } else {
@@ -232,17 +244,13 @@ fn parse_output(stdout: &str, mode: &OutputMode) -> Result<HashMap<String, serde
             }
         }
         OutputMode::Json => {
-            let parsed: serde_json::Value =
+            // Each value is passed on as the extractor wrote it.
+            let parsed: &RawValue =
                 serde_json::from_str(stdout.trim()).context("Failed to parse JSON output")?;
-
-            match parsed {
-                serde_json::Value::Object(map) => {
-                    for (key, value) in map {
-                        facts.insert(key, value);
-                    }
-                }
-                _ => bail!("JSON output must be an object"),
+            if !parsed.get().starts_with('{') {
+                bail!("JSON output must be an object");
             }
+            facts = serde_json::from_str(parsed.get()).context("Failed to parse JSON output")?;
         }
     }
 
@@ -260,18 +268,69 @@ fn current_timestamp() -> i64 {
 mod tests {
     use super::*;
 
-    /// A number is stored as a JSON number; a value that has none is forwarded as given with
-    /// its hint, never replaced. The defect it names: `inf`, `NaN` and `1e400` were written as
-    /// `0`, so the import stored a zero nobody measured, with no warning.
+    /// A number is passed on as the JSON number it is; any other text is forwarded with its
+    /// hint, never replaced. The defects it names: a value with no JSON number written as `0`,
+    /// a zero nobody measured; and a number respelled through a float, `12` as `12.0`.
     #[test]
     fn a_number_with_no_json_number_is_forwarded_never_replaced() {
-        assert_eq!(typed_value("12", "number"), serde_json::json!(12.0));
-        for written in ["inf", "-inf", "NaN", "1e400", "twelve"] {
+        assert_eq!(typed_value("12", "number").get(), "12");
+        assert_eq!(typed_value("1e400", "number").get(), "1e400");
+        for written in ["+5", "inf", "-inf", "NaN", "twelve"] {
+            let forwarded: serde_json::Value =
+                serde_json::from_str(typed_value(written, "number").get()).unwrap();
             assert_eq!(
-                typed_value(written, "number"),
+                forwarded,
                 serde_json::json!({"value": written, "type": "number"}),
                 "{written}"
             );
         }
+    }
+
+    #[test]
+    fn a_json_number_is_passed_on_as_written() {
+        for written in ["9007199254740993", "1920", "1.10", "-0"] {
+            assert_eq!(typed_value(written, "number").get(), written);
+        }
+    }
+
+    /// A fact from an earlier stage reaches the output byte for byte.
+    #[test]
+    fn a_number_passed_through_a_chain_is_unchanged() {
+        let entry: InputEntry = serde_json::from_str(
+            r#"{"source_id":1,"path":"a.jpg","basis_rev":0,"facts":{"content.A":1.10,"content.B":1e5,"content.C":-0,"content.D":123456789012345678901}}"#,
+        )
+        .unwrap();
+        let output = process_entry(
+            &entry,
+            &["echo".to_string(), "x".to_string()],
+            &OutputMode::SingleFact {
+                key: "content.E".to_string(),
+                type_hint: None,
+            },
+        )
+        .unwrap();
+        let line = serde_json::to_string(&output).unwrap();
+        for written in [
+            r#""content.A":1.10"#,
+            r#""content.B":1e5"#,
+            r#""content.C":-0"#,
+            r#""content.D":123456789012345678901"#,
+            r#""content.E":"x""#,
+        ] {
+            assert!(line.contains(written), "{written} in {line}");
+        }
+    }
+
+    #[test]
+    fn a_json_extractor_number_is_passed_on_as_written() {
+        let facts = parse_output(
+            r#"{"A": 1.10, "B": -0, "C": 123456789012345678901}"#,
+            &OutputMode::Json,
+        )
+        .unwrap();
+        assert_eq!(facts["A"].get(), "1.10");
+        assert_eq!(facts["B"].get(), "-0");
+        assert_eq!(facts["C"].get(), "123456789012345678901");
+        assert!(parse_output("[1]", &OutputMode::Json).is_err());
     }
 }

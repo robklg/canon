@@ -1,32 +1,43 @@
-//! Import facts operations — per-record processing for JSONL fact import.
+//! Import facts operations — batches of JSONL records, each one write transaction.
 //!
-//! `init_state()` loads the existing fact type map from the database.
-//! `process_record()` handles all business logic for a single import record:
-//! source validation, key normalization, hash linking, fact promotion, type
-//! checking, reading each value once as its hint says, and fact upsert.
+//! `import_batch()` takes the write lock before it reads anything, reads the types of the
+//! batch's keys under it, and runs each record inside a savepoint: source validation, key
+//! reading, hash linking, fact promotion, and each value decided by its key's type
+//! (`facts::domain::decide`) before it is stored. A record that fails is undone whole — its
+//! facts, its counts and any type it gave a key — and the batch goes on.
 //!
-//! No stdout/stderr/stdin — the interface reads stdin and displays outcomes.
+//! No stdout/stderr/stdin — the interface reads stdin, closes batches and displays outcomes.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Duration;
 
 use anyhow::Result;
+use rusqlite::{Transaction, TransactionBehavior};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::value::RawValue;
 
-use crate::core::domain::fact::{FactType, FactValue};
-use crate::core::domain::number::read_number;
+use crate::core::domain::fact::KeyTypes;
+use crate::core::domain::format_count;
 use crate::core::domain::time::now_epoch_secs;
-use crate::core::domain::time::reading::{self, TimeReadError};
 use crate::core::repo::{self, Connection};
 use crate::expr::CONTENT_HASH;
-use crate::facts::domain::{import_key, is_content_fact};
+use crate::facts::domain::{
+    decide, import_key, is_content_fact, keys_named_twice, reserved_name_cause, Disposition,
+    JsonFact, SkipCause,
+};
 use crate::facts::repo as facts_repo;
+
+/// A batch closes at this many records…
+pub const BATCH_RECORDS: usize = 500;
+/// …or this long after its first record, whichever comes first.
+pub const BATCH_WINDOW: Duration = Duration::from_secs(1);
 
 // ============================================================================
 // Types
 // ============================================================================
 
-/// Deserialized JSONL record from stdin.
+/// Deserialized JSONL record from stdin. Each fact's value is kept as the JSON its tool
+/// wrote, so a number arrives in its own spelling.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)] // Worklist pass-through fields are intentionally accepted but not read
@@ -35,7 +46,7 @@ pub struct ImportRecord {
     pub basis_rev: i64,
     #[serde(default = "now_epoch_secs")]
     pub observed_at: i64,
-    pub facts: HashMap<String, Value>,
+    pub facts: BTreeMap<String, Box<RawValue>>,
     // Optional fields from worklist pass-through (allowed but ignored)
     #[serde(default)]
     path: Option<String>,
@@ -47,115 +58,461 @@ pub struct ImportRecord {
     mtime: Option<i64>,
 }
 
-/// Mutable state accumulated across records during an import session.
-pub struct ImportState {
-    pub fact_type_map: HashMap<String, FactType>,
-    pub type_mismatch_keys: HashMap<String, (FactType, FactType)>,
-    pub stats: ImportStats,
-    /// Roots whose sources this import acted on — the decision's durable
-    /// scope (one whole-root entry per root, recorded at completion).
-    pub touched_roots: BTreeSet<i64>,
+/// Why a whole record is set aside, in the order the summary names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecordSkip {
+    /// Written for a version of the file that has since changed.
+    Stale,
+    /// Naming a source behind a door the user closed.
+    ///
+    /// A batch surface takes the closed default per **record**, not per run: refusing the
+    /// whole import would break a pipeline over one parked root, while writing the facts
+    /// would be a write inside the closet. So the record is set aside, counted, and stated in
+    /// the summary — never silent, never fatal.
+    Suspended,
+    /// Naming a source in an archive root, without `--allow archived`.
+    Archived,
+}
+
+/// The values of one key skipped for one cause: how many, and how many times each was
+/// written as it was (its raw JSON), so a line can name the most frequent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Skipped {
+    pub count: u64,
+    pub values: BTreeMap<String, u64>,
+}
+
+impl Skipped {
+    /// The value written most often; between equally frequent values, the first in text order.
+    pub fn most_frequent(&self) -> Option<&str> {
+        let mut best: Option<(&str, u64)> = None;
+        for (value, &n) in &self.values {
+            if best.is_none_or(|(_, top)| n > top) {
+                best = Some((value, n));
+            }
+        }
+        best.map(|(value, _)| value)
+    }
 }
 
 /// Counters for the import summary.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ImportStats {
-    pub lines_processed: u64,
+    /// Records read, in committed batches.
+    pub records: u64,
     pub facts_imported: u64,
-    pub skipped_stale: u64,
-    pub skipped_reserved: u64,
-    pub skipped_archived: u64,
-    /// Records naming a source that stands behind a door the user closed.
-    ///
-    /// A batch surface takes the closed default per **record**, not per run:
-    /// refusing the whole import would break a pipeline over one parked root,
-    /// while writing the facts would be a write inside the closet. So the
-    /// record is set aside, counted, and stated in the summary — never
-    /// silent, never fatal.
-    pub skipped_suspended: u64,
-    pub skipped_type_mismatch: u64,
     pub objects_created: u64,
-    pub facts_promoted: u64,
+    /// Facts stored on a source before its content was known, moved to the content.
+    pub facts_moved: u64,
+    /// Such facts dropped instead, the content already having a value for their key.
+    pub facts_dropped: u64,
+    pub skipped_records: BTreeMap<RecordSkip, u64>,
+    /// Keyed by the key (the name as written, for a name no content fact has) and the cause.
+    pub skipped_values: BTreeMap<(String, SkipCause), Skipped>,
+}
+
+/// What the summary calls a skip cause, in the order it names them; `None` outside the
+/// skipped group (a null value and a source fact passed back are nothing to fix).
+fn summary_class(cause: &SkipCause) -> Option<(u8, &'static str, &'static str)> {
+    Some(match cause {
+        SkipCause::NoValue | SkipCause::SourceFact => return None,
+        SkipCause::DoesNotRead(_) => (
+            0,
+            "that does not read as its key's type",
+            "that do not read as their key's type",
+        ),
+        SkipCause::WouldLose(_) => (
+            1,
+            "that would lose what the text carried",
+            "that would lose what the text carried",
+        ),
+        SkipCause::NumberForTime => (
+            2,
+            "that is a number for a time key",
+            "that are numbers for a time key",
+        ),
+        SkipCause::NotExact => (
+            3,
+            "that is a number Canon cannot hold exactly",
+            "that are numbers Canon cannot hold exactly",
+        ),
+        SkipCause::BoolForTime => (
+            4,
+            "that is true or false for a time key",
+            "that are true or false for a time key",
+        ),
+        SkipCause::Structure(_) => (
+            5,
+            "that is a list or object for a number or time key",
+            "that are lists or objects for a number or time key",
+        ),
+        SkipCause::HintMisfit(_) => (
+            6,
+            "with a hint its key does not take",
+            "with a hint their key does not take",
+        ),
+        SkipCause::HintDoesNotRead(_) => (
+            7,
+            "that does not read as its hint",
+            "that do not read as their hint",
+        ),
+        SkipCause::UnknownHint(_) => (
+            8,
+            "with a hint Canon does not read",
+            "with a hint Canon does not read",
+        ),
+        SkipCause::MixedKey => (9, "for a key of mixed type", "for keys of mixed type"),
+        SkipCause::NamedTwice => (
+            10,
+            "for a key named twice in one record",
+            "for keys named twice in one record",
+        ),
+        SkipCause::SourceName => (
+            11,
+            "under a name reserved for source facts",
+            "under names reserved for source facts",
+        ),
+    })
+}
+
+/// `n` with its unit, singular for one.
+fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", format_count(n), if n == 1 { one } else { many })
 }
 
 impl ImportStats {
-    /// Compose the import summary message.
+    /// Add a committed batch's counts.
+    pub fn add(&mut self, other: ImportStats) {
+        self.records += other.records;
+        self.facts_imported += other.facts_imported;
+        self.objects_created += other.objects_created;
+        self.facts_moved += other.facts_moved;
+        self.facts_dropped += other.facts_dropped;
+        for (skip, n) in other.skipped_records {
+            *self.skipped_records.entry(skip).or_default() += n;
+        }
+        for (at, skipped) in other.skipped_values {
+            let mine = self.skipped_values.entry(at).or_default();
+            mine.count += skipped.count;
+            for (value, n) in skipped.values {
+                *mine.values.entry(value).or_default() += n;
+            }
+        }
+    }
+
+    /// Records set aside whole.
+    pub fn records_skipped(&self) -> u64 {
+        self.skipped_records.values().sum()
+    }
+
+    /// Values skipped for a cause there is something to fix about.
+    pub fn values_skipped(&self) -> u64 {
+        self.skipped_values
+            .iter()
+            .filter(|((_, cause), _)| summary_class(cause).is_some())
+            .map(|(_, skipped)| skipped.count)
+            .sum()
+    }
+
+    fn values_for(&self, wanted: &SkipCause) -> u64 {
+        self.skipped_values
+            .iter()
+            .filter(|((_, cause), _)| cause == wanted)
+            .map(|(_, skipped)| skipped.count)
+            .sum()
+    }
+
+    /// The import summary: one line, only counts above zero named, each with its unit.
     pub fn compose_summary(&self) -> String {
-        use crate::core::domain::format_count;
+        let mut clauses = vec![format!(
+            "imported {}",
+            counted(self.facts_imported, "fact", "facts")
+        )];
+        let records = self.records_skipped();
+        if records > 0 {
+            let parts: Vec<String> = self
+                .skipped_records
+                .iter()
+                .filter(|(_, &n)| n > 0)
+                .map(|(skip, &n)| {
+                    let phrase = match skip {
+                        RecordSkip::Stale => "stale",
+                        RecordSkip::Suspended => "on suspended roots",
+                        RecordSkip::Archived => "in archive roots",
+                    };
+                    format!("{} {phrase}", format_count(n))
+                })
+                .collect();
+            clauses.push(format!(
+                "skipped {}: {}",
+                counted(records, "record", "records"),
+                parts.join(", ")
+            ));
+        }
+        let values = self.values_skipped();
+        if values > 0 {
+            let mut by_class: BTreeMap<u8, (u64, &str, &str)> = BTreeMap::new();
+            for ((_, cause), skipped) in &self.skipped_values {
+                if let Some((order, one, many)) = summary_class(cause) {
+                    by_class.entry(order).or_insert((0, one, many)).0 += skipped.count;
+                }
+            }
+            let parts: Vec<String> = by_class
+                .values()
+                .map(|&(n, one, many)| {
+                    format!("{} {}", format_count(n), if n == 1 { one } else { many })
+                })
+                .collect();
+            clauses.push(format!(
+                "skipped {}: {}",
+                counted(values, "value", "values"),
+                parts.join(", ")
+            ));
+        }
+        let nulls = self.values_for(&SkipCause::NoValue);
+        if nulls > 0 {
+            clauses.push(format!(
+                "{} (nothing stored)",
+                counted(nulls, "null value", "null values")
+            ));
+        }
+        let source_facts = self.values_for(&SkipCause::SourceFact);
+        if source_facts > 0 {
+            clauses.push(format!(
+                "{}, which Canon records itself",
+                counted(
+                    source_facts,
+                    "value for a source fact",
+                    "values for source facts"
+                )
+            ));
+        }
+        if self.objects_created > 0 {
+            clauses.push(counted(
+                self.objects_created,
+                "object created",
+                "objects created",
+            ));
+        }
+        let dropped = (self.facts_dropped > 0).then(|| {
+            format!(
+                "{} (the content already had a value for {})",
+                counted(self.facts_dropped, "fact dropped", "facts dropped"),
+                if self.facts_dropped == 1 {
+                    "its key"
+                } else {
+                    "their key"
+                }
+            )
+        });
+        match (self.facts_moved > 0, dropped) {
+            (true, Some(dropped)) => clauses.push(format!(
+                "{}, {dropped}",
+                counted(
+                    self.facts_moved,
+                    "fact moved to the content",
+                    "facts moved to the content"
+                )
+            )),
+            (true, None) => clauses.push(counted(
+                self.facts_moved,
+                "fact moved to the content",
+                "facts moved to the content",
+            )),
+            (false, Some(dropped)) => clauses.push(dropped),
+            (false, None) => {}
+        }
         format!(
-            "Processed {} lines: {} facts imported, {} skipped (stale), {} skipped (reserved), {} skipped (archived), {} skipped (on suspended roots), {} skipped (type mismatch), {} objects created, {} facts promoted",
-            format_count(self.lines_processed),
-            format_count(self.facts_imported),
-            format_count(self.skipped_stale),
-            format_count(self.skipped_reserved),
-            format_count(self.skipped_archived),
-            format_count(self.skipped_suspended),
-            format_count(self.skipped_type_mismatch),
-            format_count(self.objects_created),
-            format_count(self.facts_promoted),
+            "Read {}: {}.",
+            counted(self.records, "record", "records"),
+            clauses.join("; ")
+        )
+    }
+
+    /// The summary of an import that ended before its input did: what the committed batches
+    /// hold, and the error.
+    pub fn compose_early_stop(&self, error: &anyhow::Error) -> String {
+        if self.records == 0 {
+            return format!("Import ended early before anything was imported: {error:#}");
+        }
+        let mut skipped = Vec::new();
+        let records = self.records_skipped();
+        if records > 0 {
+            skipped.push(counted(records, "record", "records"));
+        }
+        let values = self.values_skipped();
+        if values > 0 {
+            skipped.push(counted(values, "value", "values"));
+        }
+        let skipped = match skipped.as_slice() {
+            [] => String::new(),
+            [one] => format!("; {one} skipped"),
+            [first, second, ..] => format!("; {first} and {second} skipped"),
+        };
+        format!(
+            "Import ended early after {} ({} imported in committed batches, which stand{skipped}): {error:#}",
+            counted(self.records, "record", "records"),
+            counted(self.facts_imported, "fact", "facts"),
         )
     }
 }
 
-/// Outcome of processing a single import record.
-pub struct RecordOutcome {
+/// One line of `--verbose` detail, as data: the interface words it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerboseLine {
+    /// The file the lines below it are about.
+    Source { root_path: String, rel_path: String },
+    /// A value stored, as the tool wrote it.
+    Stored {
+        key: String,
+        written: String,
+        on_content: bool,
+    },
+    /// A value skipped, as the tool wrote it, and why.
+    Skipped {
+        key: String,
+        written: String,
+        cause: SkipCause,
+    },
+}
+
+/// What a committed batch did.
+#[derive(Debug, Default)]
+pub struct BatchOutcome {
+    pub stats: ImportStats,
+    /// Roots whose sources this batch acted on — the decision's durable scope (one
+    /// whole-root entry per root, recorded at completion).
+    pub touched_roots: BTreeSet<i64>,
     /// Warning messages for display.
     pub warnings: Vec<String>,
-    /// Verbose progress lines.
-    pub verbose_lines: Vec<String>,
+    pub verbose: Vec<VerboseLine>,
+}
+
+impl BatchOutcome {
+    fn absorb(&mut self, other: BatchOutcome) {
+        self.stats.add(other.stats);
+        self.touched_roots.extend(other.touched_roots);
+        self.warnings.extend(other.warnings);
+        self.verbose.extend(other.verbose);
+    }
+
+    fn skip_value(&mut self, key: &str, cause: SkipCause, written: &str) {
+        let skipped = self
+            .stats
+            .skipped_values
+            .entry((key.to_string(), cause.clone()))
+            .or_default();
+        skipped.count += 1;
+        *skipped.values.entry(written.to_string()).or_default() += 1;
+        self.verbose.push(VerboseLine::Skipped {
+            key: key.to_string(),
+            written: written.to_string(),
+            cause,
+        });
+    }
 }
 
 // ============================================================================
 // Public functions
 // ============================================================================
 
-/// Initialize import state by loading the existing fact type map from the database.
-pub fn init_state(conn: &Connection) -> Result<ImportState> {
-    let fact_type_map = facts_repo::fetch_type_map(conn)?;
-    Ok(ImportState {
-        fact_type_map,
-        type_mismatch_keys: HashMap::new(),
-        stats: ImportStats::default(),
-        touched_roots: BTreeSet::new(),
-    })
+/// Import one batch of records in one write transaction.
+///
+/// `IMMEDIATE` takes the write lock before anything is read, so the key types read here are
+/// the committed ones and nothing changes them before the commit: a conversion committed
+/// before the batch is seen, and one waiting for the lock sees what the batch wrote. Each
+/// record runs between a savepoint and its release; a record whose processing fails is rolled
+/// back to its savepoint — its facts, counts and any first type it gave a key with it —
+/// reported, and the batch goes on. Takes a shared connection so the command's armed recorder
+/// can hold one for the whole run.
+pub fn import_batch(
+    conn: &Connection,
+    records: &[ImportRecord],
+    allow_archived: bool,
+) -> Result<BatchOutcome> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let keys: BTreeSet<String> = records
+        .iter()
+        .flat_map(|record| record.facts.keys())
+        .filter_map(|name| import_key(name))
+        .collect();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let mut types = repo::fact::key_types(&tx, &keys)?;
+
+    let mut outcome = BatchOutcome::default();
+    for record in records {
+        outcome.stats.records += 1;
+        tx.execute_batch("SAVEPOINT record")?;
+        let mut staged = BatchOutcome::default();
+        let mut first_types = HashMap::new();
+        match process_record(
+            &tx,
+            record,
+            allow_archived,
+            &types,
+            &mut staged,
+            &mut first_types,
+        ) {
+            Ok(()) => {
+                tx.execute_batch("RELEASE record")?;
+                for (key, first) in first_types {
+                    types.entry(key).or_insert(first);
+                }
+                outcome.absorb(staged);
+            }
+            Err(e) => {
+                tx.execute_batch("ROLLBACK TO record; RELEASE record")?;
+                outcome.warnings.push(format!(
+                    "Failed to process source_id {}: {e:#}",
+                    record.source_id
+                ));
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(outcome)
 }
 
-/// Process a single import record. Returns structured outcome — no stdout/stderr.
-/// Takes a shared connection so the command's armed recorder can hold one for
-/// the whole run. The one transaction below opens with `unchecked_transaction`
-/// for that reason; nesting is what SQLite refuses at runtime, and nothing
-/// here is reached from inside another transaction.
-pub fn process_record(
+/// The types the named keys hold now, read after the last committed batch — what a key ended
+/// the run as, which decides the way out of a number Canon could not hold exactly.
+pub fn types_at_end(conn: &Connection, keys: &[&str]) -> Result<HashMap<String, KeyTypes>> {
+    repo::fact::key_types(conn, keys)
+}
+
+// ============================================================================
+// Private helpers
+// ============================================================================
+
+/// One record, inside its savepoint. What it does is staged in `out`, and each key it gives
+/// a first type in `first_types`; the caller keeps both only once the savepoint is released.
+fn process_record(
     conn: &Connection,
     record: &ImportRecord,
-    state: &mut ImportState,
     allow_archived: bool,
-) -> Result<RecordOutcome> {
-    let mut outcome = RecordOutcome {
-        warnings: Vec::new(),
-        verbose_lines: Vec::new(),
-    };
-
+    types: &HashMap<String, KeyTypes>,
+    out: &mut BatchOutcome,
+    first_types: &mut HashMap<String, KeyTypes>,
+) -> Result<()> {
     // Check if source exists and get its data
     let source = match repo::source::fetch_by_id(conn, record.source_id)? {
         Some(s) => s,
         None => {
-            outcome
-                .warnings
+            out.warnings
                 .push(format!("source_id {} not found", record.source_id));
-            return Ok(outcome);
+            return Ok(());
         }
     };
 
-    let current_basis_rev = source.basis_rev;
     let current_object_id = source.object_id;
-    let root_path = &source.root_path;
-    let rel_path = &source.rel_path;
+
+    let set_aside = |out: &mut BatchOutcome, skip: RecordSkip| {
+        *out.stats.skipped_records.entry(skip).or_default() += 1;
+    };
 
     // Check if source is in an archive root
     if source.is_from_role("archive") && !allow_archived {
-        state.stats.skipped_archived += 1;
-        return Ok(outcome);
+        set_aside(out, RecordSkip::Archived);
+        return Ok(());
     }
 
     // The door, per record. Writing a fact onto a source behind a root the
@@ -165,277 +522,137 @@ pub fn process_record(
     // never touched — including the object link and the fact promotion below,
     // which is why this stands ahead of every one of them.
     if !source.is_active() {
-        state.stats.skipped_suspended += 1;
-        return Ok(outcome);
+        set_aside(out, RecordSkip::Suspended);
+        return Ok(());
     }
 
-    if current_basis_rev != record.basis_rev {
-        outcome.warnings.push(format!(
+    if source.basis_rev != record.basis_rev {
+        out.warnings.push(format!(
             "source_id {} has basis_rev {} but import has {}, skipping",
-            record.source_id, current_basis_rev, record.basis_rev
+            record.source_id, source.basis_rev, record.basis_rev
         ));
-        state.stats.skipped_stale += 1;
-        return Ok(outcome);
+        set_aside(out, RecordSkip::Stale);
+        return Ok(());
     }
 
     // Past the gates — this record will act on the source's root.
-    state.touched_roots.insert(source.root_id);
+    out.touched_roots.insert(source.root_id);
 
-    // Read every fact key under its content reading first, collecting valid ones: a name
-    // starting with `source.` has none and is skipped.
-    let mut normalized_facts: Vec<(String, &Value)> = Vec::new();
-    for (key, value) in &record.facts {
-        match import_key(key) {
-            Some(content_key) => normalized_facts.push((content_key, value)),
-            None => {
-                outcome.warnings.push(format!(
-                    "skipping fact '{key}': names starting with 'source.' cannot be imported"
-                ));
-                state.stats.skipped_reserved += 1;
-            }
+    // The file's header comes before any line about its values, the skipped names included.
+    if !record.facts.is_empty() {
+        out.verbose.push(VerboseLine::Source {
+            root_path: source.root_path.clone(),
+            rel_path: source.rel_path.clone(),
+        });
+    }
+
+    // Read every name under its content reading first: a name starting with `source.` has
+    // none, and is skipped by what it names.
+    let mut arrived: Vec<(String, JsonFact, &RawValue)> = Vec::new();
+    for (name, raw) in &record.facts {
+        let fact = JsonFact::from_raw(raw)?;
+        match import_key(name) {
+            Some(key) => arrived.push((key, fact, raw)),
+            None => out.skip_value(name, reserved_name_cause(name), fact.written(raw)),
         }
+    }
+
+    let named_twice = keys_named_twice(arrived.iter().map(|(key, fact, _)| (key.as_str(), fact)));
+    let (twice, arrived): (Vec<_>, Vec<_>) = arrived
+        .into_iter()
+        .partition(|(key, _, _)| named_twice.contains(key));
+    for (key, fact, raw) in &twice {
+        out.skip_value(key, SkipCause::NamedTwice, fact.written(raw));
     }
 
     // Check for content hash and process it first
     let mut object_id = current_object_id;
-    let hash_value = normalized_facts
-        .iter()
-        .find(|(k, _)| k == CONTENT_HASH)
-        .map(|(_, v)| *v);
+    let hash = arrived.iter().find_map(|(key, fact, _)| match fact {
+        JsonFact::Text(hash) if key == CONTENT_HASH => Some(hash.as_str()),
+        JsonFact::Text(_)
+        | JsonFact::Number(_)
+        | JsonFact::Bool(_)
+        | JsonFact::Null
+        | JsonFact::Structure(_)
+        | JsonFact::Hinted { .. } => None,
+    });
+    if let Some(hash) = hash {
+        let (obj, created) = repo::object::get_or_create_reporting_creation(conn, "sha256", hash)?;
+        if created {
+            out.stats.objects_created += 1;
+        }
+        object_id = Some(obj.id);
 
-    if let Some(hash_val) = hash_value {
-        if let Some(hash_str) = hash_val.as_str() {
-            let (obj, created) =
-                repo::object::get_or_create_reporting_creation(conn, "sha256", hash_str)?;
-            if created {
-                state.stats.objects_created += 1;
-            }
-            object_id = Some(obj.id);
-
-            // Link source to object AND promote existing facts in a single transaction
-            if current_object_id.is_none() {
-                let tx = conn.unchecked_transaction()?;
-                repo::source::set_object_id(&tx, record.source_id, obj.id)?;
-                let promoted = promote_content_facts(&tx, record.source_id, obj.id)?;
-                tx.commit()?;
-                state.stats.facts_promoted += promoted;
-            } else if current_object_id != object_id {
-                repo::source::set_object_id(conn, record.source_id, obj.id)?;
-            }
+        // Link source to object AND promote existing facts, inside the record's savepoint.
+        if current_object_id.is_none() {
+            repo::source::set_object_id(conn, record.source_id, obj.id)?;
+            let (moved, dropped) = promote_content_facts(conn, record.source_id, obj.id)?;
+            out.stats.facts_moved += moved;
+            out.stats.facts_dropped += dropped;
+        } else if current_object_id != object_id {
+            repo::source::set_object_id(conn, record.source_id, obj.id)?;
         }
     }
 
-    // Import facts
-    if !normalized_facts.is_empty() {
-        outcome
-            .verbose_lines
-            .push(format!("[{root_path}] {rel_path}"));
-    }
-    for (key, value) in &normalized_facts {
-        let fact_value = match read_hinted(&TypedValue::parse(value)) {
-            Ok(v) => v,
-            Err(refusal) => {
-                outcome
-                    .warnings
-                    .push(refusal.warning(key, &format!("{root_path}/{rel_path}")));
-                state.stats.skipped_type_mismatch += 1;
+    for (key, fact, raw) in &arrived {
+        let written = fact.written(raw);
+        let held = types.get(key);
+        let first = held.is_none();
+        let value = match decide(held, fact) {
+            Disposition::Store(value) => value,
+            Disposition::Skip(cause) => {
+                out.skip_value(key, cause, written);
                 continue;
             }
         };
-
-        // Check type consistency
-        let new_type = fact_value.kind();
-
-        if let Some(&existing_type) = state.fact_type_map.get(key) {
-            if existing_type != new_type {
-                let is_new_key = !state.type_mismatch_keys.contains_key(key);
-                state
-                    .type_mismatch_keys
-                    .entry(key.clone())
-                    .or_insert((existing_type, new_type));
-                if is_new_key {
-                    outcome.warnings.push(format!(
-                        "type mismatch for '{key}' in {root_path}/{rel_path}: existing {}, got {} (value: {value})",
-                        existing_type.as_str(),
-                        new_type.as_str()
-                    ));
-                }
-                state.stats.skipped_type_mismatch += 1;
-                continue;
+        if first {
+            if let Some(gave) = KeyTypes::from_counts([(value.kind(), 1)]) {
+                first_types.insert(key.clone(), gave);
             }
-        } else {
-            state.fact_type_map.insert(key.clone(), new_type);
         }
-
-        if let Some(oid) = object_id {
-            outcome
-                .verbose_lines
-                .push(format!("  {key}: {value} (on object)"));
-            facts_repo::upsert(
-                conn,
-                "object",
-                oid,
-                key,
-                &fact_value,
-                record.observed_at,
-                None,
-            )?;
-            // Counted as imported, never as promoted: this fact arrived on the
-            // object directly. Promotion is the separate event above — facts
-            // that already stood on the source, moved onto the object when the
-            // source gained its content identity.
-            state.stats.facts_imported += 1;
-        } else {
-            outcome
-                .verbose_lines
-                .push(format!("  {key}: {value} (on source)"));
-            facts_repo::upsert(
+        match object_id {
+            Some(oid) => {
+                facts_repo::upsert(conn, "object", oid, key, &value, record.observed_at, None)?
+            }
+            None => facts_repo::upsert(
                 conn,
                 "source",
                 record.source_id,
                 key,
-                &fact_value,
+                &value,
                 record.observed_at,
                 Some(record.basis_rev),
-            )?;
-            state.stats.facts_imported += 1;
+            )?,
         }
+        // Counted as imported, never as moved: this fact arrived where it is stored.
+        // Moving is the separate event above — facts that already stood on the source,
+        // moved to the content when the source gained its content identity.
+        out.stats.facts_imported += 1;
+        out.verbose.push(VerboseLine::Stored {
+            key: key.clone(),
+            written: written.to_string(),
+            on_content: object_id.is_some(),
+        });
     }
 
-    Ok(outcome)
+    Ok(())
 }
 
-// ============================================================================
-// Private helpers
-// ============================================================================
-
-/// A fact value with optional type hint.
-enum TypedValue {
-    Plain(Value),
-    Hinted { value: Value, type_hint: String },
-}
-
-impl TypedValue {
-    fn parse(v: &Value) -> Self {
-        if let Value::Object(obj) = v {
-            if let (Some(value), Some(Value::String(type_hint))) =
-                (obj.get("value"), obj.get("type"))
-            {
-                return TypedValue::Hinted {
-                    value: value.clone(),
-                    type_hint: type_hint.clone(),
-                };
-            }
-        }
-        TypedValue::Plain(v.clone())
-    }
-}
-
-/// Why a value could not be read: a time the list of spellings refused, or anything else.
-enum Refusal {
-    Time { value: Value, why: TimeReadError },
-    Other(String),
-}
-
-impl Refusal {
-    /// The warning, with the place named before the reason so a reason sentence ends the line.
-    fn warning(&self, key: &str, at: &str) -> String {
-        match self {
-            Refusal::Time { value, why } => {
-                format!("{value} is not a time for '{key}' in {at}: {why}")
-            }
-            Refusal::Other(e) => format!("{e} for '{key}' in {at}"),
-        }
-    }
-}
-
-/// Read an imported value once, as what its hint says it is. A time is read through the one
-/// list of spellings, never by a parser of import's own; a number is never epoch seconds.
-fn read_hinted(typed: &TypedValue) -> Result<FactValue, Refusal> {
-    match typed {
-        TypedValue::Plain(v) => Ok(read_plain(v)),
-        TypedValue::Hinted { value, type_hint } => match type_hint.as_str() {
-            "duration" => try_parse_duration(value)
-                .map(FactValue::Num)
-                .ok_or_else(|| Refusal::Other(format!("cannot parse as duration: {value}"))),
-            "datetime" => {
-                let read = match value {
-                    Value::String(s) => reading::read_time(s),
-                    Value::Number(n) => n.as_f64().map_or(
-                        Err(TimeReadError::YearOutOfRange),
-                        reading::read_year_number,
-                    ),
-                    _ => {
-                        return Err(Refusal::Other(format!(
-                            "datetime requires string or year, got: {value}"
-                        )))
-                    }
-                };
-                read.map(FactValue::Time).map_err(|why| Refusal::Time {
-                    value: value.clone(),
-                    why,
-                })
-            }
-            unknown => Err(Refusal::Other(format!("unknown type hint: {unknown}"))),
-        },
-    }
-}
-
-/// A plain value (no type hint): a string is text, a number or a boolean a number, anything
-/// else its JSON text.
-fn read_plain(value: &Value) -> FactValue {
-    match value {
-        Value::String(s) => FactValue::Text(s.clone()),
-        Value::Number(n) => match n.as_i64() {
-            Some(i) => FactValue::Num(i as f64),
-            None => n
-                .as_f64()
-                .map_or_else(|| FactValue::Text(n.to_string()), FactValue::Num),
-        },
-        Value::Bool(b) => FactValue::Num(if *b { 1.0 } else { 0.0 }),
-        Value::Null => FactValue::Text(String::new()),
-        Value::Array(_) | Value::Object(_) => FactValue::Text(value.to_string()),
-    }
-}
-
-/// Parse duration string to seconds. Each part is read through the one reading of a number
-/// (`core::domain::number::read_number`), so `inf`, `NaN` and a leading `+` are refused as
-/// they are everywhere, and a total too large to hold has no value.
-fn try_parse_duration(value: &Value) -> Option<f64> {
-    let seconds = match value {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => {
-            let s = s.trim();
-            let number = |part: &str| read_number(part).ok();
-            let parts: Vec<&str> = s.split(':').collect();
-            match parts.len() {
-                3 => {
-                    Some(number(parts[0])? * 3600.0 + number(parts[1])? * 60.0 + number(parts[2])?)
-                }
-                2 => Some(number(parts[0])? * 60.0 + number(parts[1])?),
-                1 => number(s),
-                _ => None,
-            }
-        }
-        _ => None,
-    }?;
-    seconds.is_finite().then_some(seconds)
-}
-
-/// Promote content facts from a source to its newly-linked object.
+/// Move content facts from a source to its newly-linked object: how many moved, and how many
+/// were dropped instead.
 ///
 /// The source copy is deleted whichever way the branch goes: content facts
 /// describe the content, so once the object holds the key the source's row is
 /// redundant, and the object's existing value wins over an arriving duplicate.
-/// The counter follows the insert, not the delete — it counts facts the object
-/// gained, not source rows removed.
-fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<u64> {
+fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> Result<(u64, u64)> {
     let facts = facts_repo::fetch_content_facts_on_source(conn, source_id)?;
 
-    let mut promoted = 0u64;
+    let (mut moved, mut dropped) = (0u64, 0u64);
     for fact in facts {
         if is_content_fact(&fact.key) {
-            if !facts_repo::object_has_fact(conn, object_id, &fact.key)? {
+            if facts_repo::object_has_fact(conn, object_id, &fact.key)? {
+                dropped += 1;
+            } else {
                 facts_repo::insert_object_fact(
                     conn,
                     object_id,
@@ -443,13 +660,13 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
                     &fact.value,
                     fact.observed_at,
                 )?;
-                promoted += 1;
+                moved += 1;
             }
             facts_repo::delete_by_id(conn, fact.id)?;
         }
     }
 
-    Ok(promoted)
+    Ok((moved, dropped))
 }
 
 // ============================================================================
@@ -459,216 +676,41 @@ fn promote_content_facts(conn: &Connection, source_id: i64, object_id: i64) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
-    use crate::core::testing::{insert_object, insert_root, insert_source, setup_test_db};
+    use crate::core::domain::conversion::Loss;
+    use crate::core::domain::fact::{FactType, FactValue};
+    use crate::core::repo::{open_with_options, Db, DbOptions};
+    use crate::core::testing::{
+        insert_fact, insert_number_fact, insert_object, insert_root, insert_source, setup_test_db,
+    };
+    use crate::facts::domain::{KnownHint, Reading};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    // =========================================================================
-    // read_hinted: times
-    // =========================================================================
-
-    fn hinted(value: Value) -> TypedValue {
-        TypedValue::Hinted {
-            value,
-            type_hint: "datetime".to_string(),
-        }
+    /// A database in a file, as the command opens one, so a second connection can share it.
+    fn open_file(path: &std::path::Path) -> Db {
+        open_with_options(
+            path,
+            DbOptions {
+                debug_sql: false,
+                profile: false,
+            },
+        )
+        .unwrap()
     }
 
-    fn read_as_time(value: Value) -> TimeValue {
-        match read_hinted(&hinted(value)) {
-            Ok(FactValue::Time(tv)) => tv,
-            Ok(other) => panic!("read as {}, not a time", other.kind()),
-            Err(refusal) => panic!("refused: {}", refusal.warning("k", "here")),
-        }
-    }
-
-    fn refusal_of(value: Value) -> TimeReadError {
-        match read_hinted(&hinted(value)) {
-            Err(Refusal::Time { why, .. }) => why,
-            Err(Refusal::Other(e)) => panic!("refused, but not as a time: {e}"),
-            Ok(v) => panic!("read as {}", v.kind()),
-        }
-    }
-
-    #[test]
-    fn an_rfc3339_time_with_an_offset_is_an_instant_that_keeps_it() {
-        let tv = read_as_time(Value::from("2020-01-15T10:30:00+00:00"));
-        assert_eq!(tv.form(), TimeForm::InstantWithOffset);
-        assert_eq!(tv.recorded_offset(), Some(jiff::tz::Offset::UTC));
-        assert_eq!(tv.precision(), Precision::Second);
-        assert_eq!(tv.legacy_epoch_number(), 1579084200);
-    }
-
-    #[test]
-    fn an_iso_time_without_an_offset_is_a_clock_reading() {
-        let tv = read_as_time(Value::from("2020-01-15T10:30:00"));
-        assert_eq!(tv.form(), TimeForm::Clock);
-        assert_eq!(tv.precision(), Precision::Second);
-        assert_eq!(tv.legacy_epoch_number(), 1579084200);
-    }
-
-    #[test]
-    fn an_exif_time_without_an_offset_is_a_clock_reading() {
-        let tv = read_as_time(Value::from("2020:07:23 11:06:32"));
-        assert_eq!(tv.form(), TimeForm::Clock);
-        assert_eq!(tv.legacy_epoch_number(), 1595502392);
-    }
-
-    /// Text after a time is never cut off and dropped — a multi-byte character included, at
-    /// any position — so an import never stops on it and never keeps part of it.
-    #[test]
-    fn an_exif_shaped_value_with_trailing_text_is_refused() {
-        assert_eq!(
-            refusal_of(Value::from("2020:07:23 11:06:3é")),
-            TimeReadError::NotInList
-        );
-        assert_eq!(
-            refusal_of(Value::from("2020:07:23 11:06:32é")),
-            TimeReadError::NotInList
-        );
-    }
-
-    #[test]
-    fn a_plain_year_string_is_a_clock_reading_at_year_precision() {
-        let tv = read_as_time(Value::from("2005"));
-        assert_eq!(tv.form(), TimeForm::Clock);
-        assert_eq!(tv.precision(), Precision::Year);
-        assert_eq!(tv.legacy_epoch_number(), 1104537600);
-    }
-
-    #[test]
-    fn text_that_is_not_a_time_is_refused() {
-        for text in ["not a date", "", "99999"] {
-            assert_eq!(
-                refusal_of(Value::from(text)),
-                TimeReadError::NotInList,
-                "{text:?}"
-            );
-        }
-    }
-
-    // =========================================================================
-    // try_parse_duration
-    // =========================================================================
-
-    #[test]
-    fn test_try_parse_duration_hms() {
-        let secs = try_parse_duration(&Value::String("1:30:45".to_string())).unwrap();
-        assert!((secs - 5445.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_try_parse_duration_ms() {
-        let secs = try_parse_duration(&Value::String("3:30".to_string())).unwrap();
-        assert!((secs - 210.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_try_parse_duration_seconds() {
-        let secs = try_parse_duration(&Value::String("45.5".to_string())).unwrap();
-        assert!((secs - 45.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_try_parse_duration_numeric_json() {
-        let secs = try_parse_duration(&serde_json::json!(120)).unwrap();
-        assert!((secs - 120.0).abs() < 0.01);
-    }
-
-    /// A duration's parts are numbers as Canon reads them everywhere. Where that grammar and
-    /// Rust's own parser differ, Canon's holds: `inf`, `NaN`, a leading `+` and a point with no
-    /// digit on one side (`.5`, `5.`) are refused, and so is a total too large to hold. The
-    /// defect it names: the parts went through Rust's parser, so `inf` was stored, printed, and
-    /// then refused by `--where` as not a number, and `NaN` reached the store as a constraint
-    /// error.
-    #[test]
-    fn a_duration_reads_its_parts_as_canon_reads_a_number() {
-        for written in [
-            "inf",
-            "-inf",
-            "NaN",
-            "+5",
-            ".5",
-            "5.",
-            "1:30.",
-            "1:inf",
-            "inf:00:00",
-            "1e308:00:00",
-        ] {
-            let value = Value::String(written.to_string());
-            assert_eq!(try_parse_duration(&value), None, "{written}");
-        }
-        assert_eq!(
-            try_parse_duration(&Value::String("1e3".to_string())),
-            Some(1000.0)
-        );
-    }
-
-    #[test]
-    fn test_try_parse_duration_invalid() {
-        assert!(try_parse_duration(&Value::String("not:a:duration:at:all".to_string())).is_none());
-        assert!(try_parse_duration(&Value::Null).is_none());
-    }
-
-    // =========================================================================
-    // read_hinted: plain values and the other hints
-    // =========================================================================
-
-    #[test]
-    fn a_plain_string_is_text() {
-        let read = read_hinted(&TypedValue::Plain(serde_json::json!("hello")));
-        assert!(matches!(read, Ok(FactValue::Text(t)) if t == "hello"));
-    }
-
-    #[test]
-    fn a_plain_number_is_a_number() {
-        let read = read_hinted(&TypedValue::Plain(serde_json::json!(42)));
-        assert!(matches!(read, Ok(FactValue::Num(n)) if n == 42.0));
-    }
-
-    #[test]
-    fn a_plain_boolean_is_a_number() {
-        let read = read_hinted(&TypedValue::Plain(serde_json::json!(true)));
-        assert!(matches!(read, Ok(FactValue::Num(n)) if n == 1.0));
-    }
-
-    #[test]
-    fn the_datetime_hint_on_a_string_reads_a_time() {
-        let read = read_hinted(&hinted(Value::from("2020-01-15T10:30:00+00:00")));
-        assert_eq!(read.ok().map(|v| v.kind()), Some(FactType::Time));
-    }
-
-    #[test]
-    fn the_duration_hint_reads_a_number_of_seconds() {
-        let typed = TypedValue::Hinted {
-            value: Value::String("3:30".to_string()),
-            type_hint: "duration".to_string(),
-        };
-        let read = read_hinted(&typed);
-        assert!(matches!(read, Ok(FactValue::Num(n)) if (n - 210.0).abs() < 0.01));
-    }
-
-    #[test]
-    fn an_unknown_hint_is_refused() {
-        let typed = TypedValue::Hinted {
-            value: Value::String("hello".to_string()),
-            type_hint: "bogus".to_string(),
-        };
-        match read_hinted(&typed) {
-            Err(refusal) => assert!(refusal.warning("k", "here").contains("unknown type hint")),
-            Ok(v) => panic!("read as {}", v.kind()),
-        }
-    }
-
-    // =========================================================================
-    // process_record (integration)
-    // =========================================================================
-
-    fn make_record(source_id: i64, basis_rev: i64, facts: HashMap<String, Value>) -> ImportRecord {
+    /// A record whose facts are given as each name and the JSON its tool wrote.
+    fn record(source_id: i64, basis_rev: i64, facts: &[(&str, &str)]) -> ImportRecord {
         ImportRecord {
             source_id,
             basis_rev,
             observed_at: 1700000000,
-            facts,
+            facts: facts
+                .iter()
+                .map(|(name, raw)| {
+                    let raw = RawValue::from_string(raw.to_string())
+                        .unwrap_or_else(|e| panic!("{raw}: {e}"));
+                    (name.to_string(), raw)
+                })
+                .collect(),
             path: None,
             root_id: None,
             size: None,
@@ -676,13 +718,38 @@ mod tests {
         }
     }
 
+    fn import(conn: &Connection, records: &[ImportRecord]) -> BatchOutcome {
+        import_batch(conn, records, false).unwrap()
+    }
+
+    fn skipped(outcome: &BatchOutcome, key: &str, cause: SkipCause) -> u64 {
+        outcome
+            .stats
+            .skipped_values
+            .get(&(key.to_string(), cause))
+            .map_or(0, |s| s.count)
+    }
+
+    fn set_aside(outcome: &BatchOutcome, skip: RecordSkip) -> u64 {
+        outcome
+            .stats
+            .skipped_records
+            .get(&skip)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn stored_count(conn: &Connection, key: &str) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM facts WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
     #[test]
     fn test_process_record_source_not_found() {
         let conn = setup_test_db();
-        let mut state = init_state(&conn).unwrap();
-        let record = make_record(999, 0, HashMap::new());
-
-        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
+        let outcome = import(&conn, &[record(999, 0, &[])]);
         assert!(outcome.warnings[0].contains("not found"));
     }
 
@@ -691,16 +758,14 @@ mod tests {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         insert_source(&conn, root, "photo.jpg", None);
-        let mut state = init_state(&conn).unwrap();
 
         // Source has basis_rev 0 (default), import has 99
-        let record = make_record(1, 99, HashMap::new());
-        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
+        let outcome = import(&conn, &[record(1, 99, &[])]);
 
         assert!(outcome.warnings[0].contains("basis_rev"));
-        assert_eq!(state.stats.skipped_stale, 1);
+        assert_eq!(set_aside(&outcome, RecordSkip::Stale), 1);
         // A gated record touches no root — no scope entry for it.
-        assert!(state.touched_roots.is_empty());
+        assert!(outcome.touched_roots.is_empty());
     }
 
     #[test]
@@ -710,27 +775,19 @@ mod tests {
         let root_b = insert_root(&conn, "/b", "source", false);
         let s1 = insert_source(&conn, root_a, "1.jpg", None);
         let s2 = insert_source(&conn, root_b, "2.jpg", None);
-        let mut state = init_state(&conn).unwrap();
 
-        for id in [s1, s2] {
-            let record = make_record(
-                id,
-                0,
-                HashMap::from([("Make".to_string(), Value::String("Canon".to_string()))]),
-            );
-            process_record(&conn, &record, &mut state, false).unwrap();
-        }
-        // Missing source: gated, must not touch.
-        process_record(
+        let outcome = import(
             &conn,
-            &make_record(999, 0, HashMap::new()),
-            &mut state,
-            false,
-        )
-        .unwrap();
+            &[
+                record(s1, 0, &[("Make", r#""Canon""#)]),
+                record(s2, 0, &[("Make", r#""Canon""#)]),
+                // Missing source: gated, must not touch.
+                record(999, 0, &[]),
+            ],
+        );
 
         assert_eq!(
-            state.touched_roots.iter().copied().collect::<Vec<_>>(),
+            outcome.touched_roots.iter().copied().collect::<Vec<_>>(),
             vec![root_a, root_b]
         );
     }
@@ -741,14 +798,11 @@ mod tests {
         let root = insert_root(&conn, "/archive", "archive", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
-        let mut state = init_state(&conn).unwrap();
-
-        let record = make_record(1, 0, HashMap::new());
 
         // Without allow_archived
-        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
+        let outcome = import(&conn, &[record(1, 0, &[])]);
         assert!(outcome.warnings.is_empty());
-        assert_eq!(state.stats.skipped_archived, 1);
+        assert_eq!(set_aside(&outcome, RecordSkip::Archived), 1);
     }
 
     /// A record naming a source behind a closed door is set aside and
@@ -762,30 +816,23 @@ mod tests {
         let live = insert_root(&conn, "/live", "source", false);
         let behind = insert_source(&conn, parked, "photo.jpg", None);
         let keeper = insert_source(&conn, live, "photo.jpg", None);
-        let mut state = init_state(&conn).unwrap();
+        let facts = [("content.hash.sha256", r#""abc123def456""#)];
 
-        let facts = || {
-            HashMap::from([(
-                "content.hash.sha256".to_string(),
-                Value::String("abc123def456".to_string()),
-            )])
-        };
-        let outcome =
-            process_record(&conn, &make_record(behind, 0, facts()), &mut state, false).unwrap();
+        let outcome = import(&conn, &[record(behind, 0, &facts)]);
 
         assert!(outcome.warnings.is_empty(), "set aside is not a warning");
-        assert_eq!(state.stats.skipped_suspended, 1);
-        assert_eq!(state.stats.facts_imported, 0);
-        assert_eq!(state.stats.objects_created, 0, "not even the object link");
+        assert_eq!(set_aside(&outcome, RecordSkip::Suspended), 1);
+        assert_eq!(outcome.stats.facts_imported, 0);
+        assert_eq!(outcome.stats.objects_created, 0, "not even the object link");
         assert!(
-            !state.touched_roots.contains(&parked),
+            !outcome.touched_roots.contains(&parked),
             "a set-aside record never claims its root as acted on"
         );
 
         // And the batch runs on: the next record imports as it always did.
-        process_record(&conn, &make_record(keeper, 0, facts()), &mut state, false).unwrap();
-        assert_eq!(state.stats.objects_created, 1);
-        assert!(state.touched_roots.contains(&live));
+        let outcome = import(&conn, &[record(keeper, 0, &facts)]);
+        assert_eq!(outcome.stats.objects_created, 1);
+        assert!(outcome.touched_roots.contains(&live));
     }
 
     #[test]
@@ -794,39 +841,39 @@ mod tests {
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
-        let mut state = init_state(&conn).unwrap();
 
-        let mut facts = HashMap::new();
-        facts.insert("content.Make".to_string(), serde_json::json!("Canon"));
-        let record = make_record(1, 0, facts);
-
-        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
+        let outcome = import(&conn, &[record(1, 0, &[("content.Make", r#""Canon""#)])]);
         assert!(outcome.warnings.is_empty());
-        assert_eq!(state.stats.facts_imported, 1);
+        assert_eq!(outcome.stats.facts_imported, 1);
     }
 
     /// A name is imported under its content reading (`Make` → `content.Make`); a name
-    /// starting with `source.` has none, and is skipped, counted and warned about.
+    /// starting with `source.` has none, and is skipped and counted — as a source fact passed
+    /// back where it names one, with no warning.
     #[test]
     fn a_source_name_is_skipped_and_a_plain_name_stored_under_content() {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
-        let mut state = init_state(&conn).unwrap();
 
-        let facts = HashMap::from([
-            ("source.size".to_string(), serde_json::json!(10)),
-            ("Make".to_string(), serde_json::json!("Canon")),
-        ]);
-        let outcome = process_record(&conn, &make_record(1, 0, facts), &mut state, false).unwrap();
-
-        assert_eq!(
-            outcome.warnings,
-            ["skipping fact 'source.size': names starting with 'source.' cannot be imported"]
+        let outcome = import(
+            &conn,
+            &[record(
+                1,
+                0,
+                &[
+                    ("source.size", "10"),
+                    ("source.foo", "1"),
+                    ("Make", r#""Canon""#),
+                ],
+            )],
         );
-        assert_eq!(state.stats.skipped_reserved, 1);
-        assert_eq!(state.stats.facts_imported, 1);
+
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert_eq!(skipped(&outcome, "source.size", SkipCause::SourceFact), 1);
+        assert_eq!(skipped(&outcome, "source.foo", SkipCause::SourceName), 1);
+        assert_eq!(outcome.stats.facts_imported, 1);
         let keys: Vec<String> = conn
             .prepare("SELECT key FROM facts")
             .unwrap()
@@ -842,102 +889,376 @@ mod tests {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         insert_source(&conn, root, "photo.jpg", None); // unhashed
-        let mut state = init_state(&conn).unwrap();
 
-        let mut facts = HashMap::new();
-        facts.insert(
-            "content.hash.sha256".to_string(),
-            serde_json::json!("abc123def456"),
+        let outcome = import(
+            &conn,
+            &[record(
+                1,
+                0,
+                &[("content.hash.sha256", r#""abc123def456""#)],
+            )],
         );
-        let record = make_record(1, 0, facts);
-
-        let outcome = process_record(&conn, &record, &mut state, false).unwrap();
         assert!(outcome.warnings.is_empty());
-        assert_eq!(state.stats.objects_created, 1);
+        assert_eq!(outcome.stats.objects_created, 1);
     }
 
-    /// The two counters that go into the printed *and* recorded summary must
-    /// count the events they name. Two sources sharing one hash is one object
-    /// created; a fact arriving straight onto an object was never promoted.
+    /// The counters that go into the printed *and* recorded summary must count the events
+    /// they name. Two sources sharing one hash is one object created; a fact arriving
+    /// straight onto an object was never moved there.
     #[test]
     fn the_import_counters_count_the_events_they_name() {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let first = insert_source(&conn, root, "photo.jpg", None);
         let second = insert_source(&conn, root, "copy.jpg", None);
-        let mut state = init_state(&conn).unwrap();
 
         // A fact stands on the first source before it has a content identity;
-        // giving it one promotes that fact onto the object.
-        let mut with_fact = HashMap::new();
-        with_fact.insert("content.Make".to_string(), serde_json::json!("Canon"));
-        process_record(&conn, &make_record(first, 0, with_fact), &mut state, false).unwrap();
-        assert_eq!(state.stats.facts_imported, 1);
-        assert_eq!(state.stats.facts_promoted, 0, "nothing promoted yet");
-
-        let mut hash_and_fact = HashMap::new();
-        hash_and_fact.insert(
-            "content.hash.sha256".to_string(),
-            serde_json::json!("abc123def456"),
-        );
-        hash_and_fact.insert("content.Model".to_string(), serde_json::json!("R6"));
-        process_record(
+        // giving it one moves that fact to the content.
+        let outcome = import(
             &conn,
-            &make_record(first, 0, hash_and_fact.clone()),
-            &mut state,
-            false,
-        )
-        .unwrap();
-        assert_eq!(state.stats.objects_created, 1);
+            &[record(first, 0, &[("content.Make", r#""Canon""#)])],
+        );
+        assert_eq!(outcome.stats.facts_imported, 1);
+        assert_eq!(outcome.stats.facts_moved, 0, "nothing moved yet");
+
+        let hash_and_fact = [
+            ("content.hash.sha256", r#""abc123def456""#),
+            ("content.Model", r#""R6""#),
+        ];
+        let outcome = import(&conn, &[record(first, 0, &hash_and_fact)]);
+        assert_eq!(outcome.stats.objects_created, 1);
         assert_eq!(
-            state.stats.facts_promoted, 1,
+            outcome.stats.facts_moved, 1,
             "the fact that already stood on the source"
         );
 
         // The second source carries the same content: it links to the object
         // that already exists, and the facts it brings land on that object
-        // directly — imported, not promoted.
-        process_record(
-            &conn,
-            &make_record(second, 0, hash_and_fact),
-            &mut state,
-            false,
-        )
-        .unwrap();
+        // directly — imported, not moved.
+        let outcome = import(&conn, &[record(second, 0, &hash_and_fact)]);
         assert_eq!(
-            state.stats.objects_created, 1,
+            outcome.stats.objects_created, 0,
             "one object, however many sources share it"
         );
         assert_eq!(
-            state.stats.facts_promoted, 1,
-            "an object fact imported directly was never promoted"
+            outcome.stats.facts_moved, 0,
+            "an object fact imported directly was never moved"
         );
+        assert_eq!(outcome.stats.facts_imported, 2);
     }
 
+    /// A string that does not read as a number key's type is skipped and counted, never
+    /// stored as a second type.
     #[test]
     fn test_process_record_type_mismatch() {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "hash1", false);
         insert_source(&conn, root, "photo.jpg", Some(obj));
-        let mut state = init_state(&conn).unwrap();
 
-        // First import: "content.Width" as number
-        let mut facts1 = HashMap::new();
-        facts1.insert("content.Width".to_string(), serde_json::json!(1920));
-        let record1 = make_record(1, 0, facts1);
-        process_record(&conn, &record1, &mut state, false).unwrap();
-        assert_eq!(state.stats.facts_imported, 1);
+        let outcome = import(&conn, &[record(1, 0, &[("content.Width", "1920")])]);
+        assert_eq!(outcome.stats.facts_imported, 1);
 
-        // Second import: "content.Width" as string (type mismatch)
-        let mut facts2 = HashMap::new();
-        facts2.insert("content.Width".to_string(), serde_json::json!("wide"));
-        let record2 = make_record(1, 0, facts2);
-        let outcome = process_record(&conn, &record2, &mut state, false).unwrap();
+        let outcome = import(&conn, &[record(1, 0, &[("content.Width", r#""wide""#)])]);
+        assert_eq!(
+            skipped(
+                &outcome,
+                "content.Width",
+                SkipCause::DoesNotRead(Reading::Number)
+            ),
+            1
+        );
+        assert_eq!(outcome.stats.facts_imported, 0);
+        let num: Option<f64> = conn
+            .query_row(
+                "SELECT value_num FROM facts WHERE key = 'content.Width'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            num,
+            Some(1920.0),
+            "the number stands, and no text beside it"
+        );
+    }
 
-        assert!(!outcome.warnings.is_empty());
-        assert!(outcome.warnings[0].contains("type mismatch"));
-        assert_eq!(state.stats.skipped_type_mismatch, 1);
+    /// **One type per key, whichever root holds it**: a key whose every fact sits on a
+    /// suspended root still has its type, and an import from an open root must fit it. The
+    /// key's types are read from its whole row set; parking never enters them.
+    #[test]
+    fn an_import_into_a_parked_key_must_fit_its_type() {
+        let conn = setup_test_db();
+        let parked = insert_root(&conn, "/parked", "source", true);
+        let open = insert_root(&conn, "/open", "source", false);
+        let behind = insert_source(&conn, parked, "a.jpg", None);
+        insert_number_fact(&conn, behind, "content.Serial", 12.0);
+        let here = insert_source(&conn, open, "b.jpg", None);
+
+        let outcome = import(
+            &conn,
+            &[record(here, 0, &[("content.Serial", r#""SN12AB""#)])],
+        );
+
+        assert_eq!(
+            skipped(
+                &outcome,
+                "content.Serial",
+                SkipCause::DoesNotRead(Reading::Number)
+            ),
+            1
+        );
+        assert_eq!(
+            stored_count(&conn, "content.Serial"),
+            1,
+            "only the parked number"
+        );
+
+        // A string that reads as a number lands as one.
+        import(&conn, &[record(here, 0, &[("content.Serial", r#""12""#)])]);
+        let types = types_at_end(&conn, &["content.Serial"]).unwrap();
+        assert_eq!(types["content.Serial"].single(), Some(FactType::Num));
+    }
+
+    /// **One record never gives a key two types.** Two names reading to one new key, a string
+    /// and a number, then a later record in the same batch: the key ends with one type and
+    /// nothing is skipped as a key of mixed type.
+    #[test]
+    fn two_names_for_one_new_key_never_give_it_two_types() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let a = insert_source(&conn, root, "a.jpg", None);
+        let b = insert_source(&conn, root, "b.jpg", None);
+
+        let outcome = import(
+            &conn,
+            &[
+                record(a, 0, &[("Make", r#""x""#), ("content.Make", "5")]),
+                record(b, 0, &[("Make", r#""y""#)]),
+            ],
+        );
+
+        let types = types_at_end(&conn, &["content.Make"]).unwrap();
+        assert!(
+            types["content.Make"].single().is_some(),
+            "{:?}",
+            types["content.Make"]
+        );
+        assert_eq!(skipped(&outcome, "content.Make", SkipCause::MixedKey), 0);
+    }
+
+    /// **A key named twice in one record takes neither value.** A tool's fresh `Model` beside
+    /// the `content.Model` passed back: the stored value stands, both are skipped and counted,
+    /// and nothing is counted imported. A content hash named twice links no content.
+    #[test]
+    fn a_key_named_twice_in_one_record_takes_neither_value() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let a = insert_source(&conn, root, "a.jpg", None);
+        import(&conn, &[record(a, 0, &[("Model", r#""old""#)])]);
+
+        let outcome = import(
+            &conn,
+            &[record(
+                a,
+                0,
+                &[
+                    ("content.Model", r#""old""#),
+                    ("Model", r#""new""#),
+                    ("hash.sha256", r#""aaa""#),
+                    ("content.hash.sha256", r#""bbb""#),
+                ],
+            )],
+        );
+
+        assert_eq!(skipped(&outcome, "content.Model", SkipCause::NamedTwice), 2);
+        assert_eq!(
+            skipped(&outcome, "content.hash.sha256", SkipCause::NamedTwice),
+            2
+        );
+        assert_eq!(outcome.stats.facts_imported, 0);
+        assert_eq!(outcome.stats.objects_created, 0);
+        let model: String = conn
+            .query_row(
+                "SELECT value_text FROM facts WHERE key = 'content.Model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(model, "old");
+    }
+
+    /// **A `null` beside a value under a second name names no key.** `worklist --emit` passes
+    /// back `null` for a file without the key; the tool's value under the other name is stored,
+    /// and the null is counted as a null.
+    #[test]
+    fn a_null_beside_a_value_under_a_second_name_names_no_key() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let a = insert_source(&conn, root, "a.jpg", None);
+
+        let outcome = import(
+            &conn,
+            &[record(
+                a,
+                0,
+                &[("content.Lens", "null"), ("Lens", r#""fresh""#)],
+            )],
+        );
+
+        assert_eq!(outcome.stats.facts_imported, 1);
+        assert_eq!(skipped(&outcome, "content.Lens", SkipCause::NoValue), 1);
+        assert_eq!(skipped(&outcome, "content.Lens", SkipCause::NamedTwice), 0);
+        let lens: String = conn
+            .query_row(
+                "SELECT value_text FROM facts WHERE key = 'content.Lens'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lens, "fresh");
+    }
+
+    /// **A skipped `source.` name is listed under its own file.** A record holding only such
+    /// names, after one that stored a value: its line follows its own file's header.
+    #[test]
+    fn a_skipped_source_name_is_listed_under_its_own_file() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let b = insert_source(&conn, root, "b.jpg", None);
+        let c = insert_source(&conn, root, "c.jpg", None);
+
+        let outcome = import(
+            &conn,
+            &[
+                record(b, 0, &[("Lens", r#""x""#)]),
+                record(c, 0, &[("source.foo", r#""y""#)]),
+            ],
+        );
+
+        let order: Vec<String> = outcome
+            .verbose
+            .iter()
+            .map(|line| match line {
+                VerboseLine::Source { rel_path, .. } => format!("file {rel_path}"),
+                VerboseLine::Stored { key, .. } | VerboseLine::Skipped { key, .. } => key.clone(),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            ["file b.jpg", "content.Lens", "file c.jpg", "source.foo"]
+        );
+    }
+
+    /// **The key's type is read under the write lock.** Another writer changes the key from
+    /// text to number while the import waits for the lock; once it has the lock, the import
+    /// reads the key as it now is and stores `"12"` as a number. Two connections to one file,
+    /// since an in-memory database has one.
+    #[test]
+    fn an_import_and_a_type_change_never_interleave_on_one_key() {
+        static WAITING: AtomicBool = AtomicBool::new(false);
+        fn wait_for_the_lock(_: i32) -> bool {
+            WAITING.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            true
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("canon.db");
+        let changer = open_file(&path);
+        let root = insert_root(&changer, "/photos", "source", false);
+        let before = insert_source(&changer, root, "a.jpg", None);
+        let arriving = insert_source(&changer, root, "b.jpg", None);
+        insert_fact(&changer, before, "content.K", "5");
+
+        changer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let importer = open_file(&path);
+        importer.busy_handler(Some(wait_for_the_lock)).unwrap();
+        let import = std::thread::spawn(move || {
+            import_batch(
+                &importer,
+                &[record(arriving, 0, &[("content.K", r#""12""#)])],
+                false,
+            )
+            .unwrap()
+        });
+        let started = std::time::Instant::now();
+        while !WAITING.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the import never waited for the lock"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        changer
+            .execute_batch(
+                "UPDATE facts SET value_num = CAST(value_text AS REAL), value_text = NULL \
+                 WHERE key = 'content.K'; COMMIT",
+            )
+            .unwrap();
+
+        let outcome = import.join().unwrap();
+        assert_eq!(outcome.stats.facts_imported, 1);
+        let types = types_at_end(&changer, &["content.K"]).unwrap();
+        assert_eq!(
+            types["content.K"].single(),
+            Some(FactType::Num),
+            "one type: the import read the key after the change"
+        );
+        let stored: Option<f64> = changer
+            .query_row(
+                "SELECT value_num FROM facts WHERE key = 'content.K' AND entity_id = ?1",
+                [arriving],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, Some(12.0));
+    }
+
+    /// **A record that fails is undone whole, the type it gave a key included.** The first
+    /// record gives a new key its first type (a number) and then fails on its next value; the
+    /// second record's text for the key finds a key with no type, and lands as text.
+    #[test]
+    fn a_record_that_fails_mid_batch_leaves_no_type_and_no_count() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let failing = insert_source(&conn, root, "a.jpg", None);
+        let next = insert_source(&conn, root, "b.jpg", None);
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_b BEFORE INSERT ON facts WHEN NEW.key = 'content.B' \
+             BEGIN SELECT RAISE(ABORT, 'planted'); END",
+        )
+        .unwrap();
+
+        let outcome = import(
+            &conn,
+            &[
+                record(failing, 0, &[("content.A", "5"), ("content.B", r#""x""#)]),
+                record(next, 0, &[("content.A", r#""abc""#)]),
+            ],
+        );
+
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(
+            outcome.warnings[0]
+                .starts_with(&format!("Failed to process source_id {failing}: planted")),
+            "{:?}",
+            outcome.warnings
+        );
+        assert_eq!(outcome.stats.records, 2);
+        assert_eq!(
+            outcome.stats.facts_imported, 1,
+            "the failed record's number is not counted"
+        );
+        assert!(outcome.stats.skipped_values.is_empty());
+        let stored: Vec<(i64, Option<String>)> = conn
+            .prepare("SELECT entity_id, value_text FROM facts WHERE key = 'content.A'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(stored, [(next, Some("abc".to_string()))]);
     }
 
     /// The columns one imported time is stored with: form, offset in seconds, precision, and
@@ -954,88 +1275,88 @@ mod tests {
         .ok()
     }
 
-    fn import_one(
-        conn: &Connection,
-        state: &mut ImportState,
-        source_id: i64,
-        facts: &[(String, Value)],
-    ) -> RecordOutcome {
-        let record = make_record(source_id, 0, facts.iter().cloned().collect());
-        process_record(conn, &record, state, false).unwrap()
-    }
-
     #[test]
     fn each_written_form_is_stored_with_its_form_offset_and_precision() {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let src = insert_source(&conn, root, "photo.jpg", None);
-        let mut state = init_state(&conn).unwrap();
 
         // What was written, then the form, offset, precision and fraction it is stored with.
-        type Case = (Value, &'static str, Option<i64>, &'static str, Option<i64>);
+        type Case = (
+            &'static str,
+            &'static str,
+            Option<i64>,
+            &'static str,
+            Option<i64>,
+        );
         let cases: [Case; 13] = [
             (
-                "2023-12-31T21:00:00-05:00".into(),
+                r#""2023-12-31T21:00:00-05:00""#,
                 "instant_offset",
                 Some(-18000),
                 "second",
                 None,
             ),
             (
-                "2023-12-31T23:30:00Z".into(),
+                r#""2023-12-31T23:30:00Z""#,
                 "instant_offset",
                 Some(0),
                 "second",
                 None,
             ),
             (
-                "2023-12-31T23:30:00+00:00".into(),
+                r#""2023-12-31T23:30:00+00:00""#,
                 "instant_offset",
                 Some(0),
                 "second",
                 None,
             ),
             (
-                "2023-12-31T23:30:00-00:00".into(),
+                r#""2023-12-31T23:30:00-00:00""#,
                 "instant",
                 None,
                 "second",
                 None,
             ),
-            ("2023:12:31 21:00:00".into(), "clock", None, "second", None),
-            ("2024".into(), "clock", None, "year", None),
-            ("2024-06".into(), "clock", None, "month", None),
-            ("2024-06-15".into(), "clock", None, "day", None),
-            ("2024-06-15T14:30".into(), "clock", None, "minute", None),
+            (r#""2023:12:31 21:00:00""#, "clock", None, "second", None),
+            (r#""2024""#, "clock", None, "year", None),
+            (r#""2024-06""#, "clock", None, "month", None),
+            (r#""2024-06-15""#, "clock", None, "day", None),
+            (r#""2024-06-15T14:30""#, "clock", None, "minute", None),
             (
-                "2024-06-15T14:30:05.45+02:00".into(),
+                r#""2024-06-15T14:30:05.45+02:00""#,
                 "instant_offset",
                 Some(7200),
                 "fraction",
                 Some(450_000_000),
             ),
             (
-                "2024:07:23 11:06:32.45+02:00".into(),
+                r#""2024:07:23 11:06:32.45+02:00""#,
                 "instant_offset",
                 Some(7200),
                 "fraction",
                 Some(450_000_000),
             ),
-            (serde_json::json!(2019), "clock", None, "year", None),
-            (serde_json::json!(2019.0), "clock", None, "year", None),
+            ("2019", "clock", None, "year", None),
+            ("2019.0", "clock", None, "year", None),
         ];
-        let facts: Vec<(String, Value)> = cases
+        let names: Vec<String> = (0..cases.len())
+            .map(|i| format!("content.form{i}"))
+            .collect();
+        let wrapped: Vec<String> = cases
             .iter()
-            .enumerate()
-            .map(|(i, (v, ..))| {
-                let wrapped = serde_json::json!({"value": v, "type": "datetime"});
-                (format!("content.form{i}"), wrapped)
-            })
+            .map(|(v, ..)| format!(r#"{{"value": {v}, "type": "datetime"}}"#))
+            .collect();
+        let facts: Vec<(&str, &str)> = names
+            .iter()
+            .zip(&wrapped)
+            .map(|(n, w)| (n.as_str(), w.as_str()))
             .collect();
 
-        let outcome = import_one(&conn, &mut state, src, &facts);
+        let outcome = import(&conn, &[record(src, 0, &facts)]);
 
         assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert!(outcome.stats.skipped_values.is_empty());
         for (i, (written, form, offset, precision, nanos)) in cases.iter().enumerate() {
             assert_eq!(
                 time_columns(&conn, src, &format!("content.form{i}")),
@@ -1045,54 +1366,59 @@ mod tests {
         }
     }
 
+    /// A value that does not read as its datetime hint is skipped and counted under that
+    /// cause, its `--verbose` line naming it as written — never stored, not even as a clock
+    /// reading, and never read as epoch seconds.
     #[test]
     fn an_unreadable_time_is_skipped_counted_and_warned_never_stored() {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let src = insert_source(&conn, root, "photo.jpg", None);
-        let mut state = init_state(&conn).unwrap();
 
-        let cases: [(Value, TimeReadError); 6] = [
-            ("2020:07:23 11:06:32é".into(), TimeReadError::NotInList),
-            ("2024-02-30".into(), TimeReadError::ImpossibleDate),
-            ("2024-06-15+02:00".into(), TimeReadError::OffsetOnDateAlone),
-            (
-                "9999-12-31T23:00:00-05:00".into(),
-                TimeReadError::OutOfRange,
-            ),
+        let written = [
+            r#""2020:07:23 11:06:32é""#,
+            r#""2024-02-30""#,
+            r#""2024-06-15+02:00""#,
+            r#""9999-12-31T23:00:00-05:00""#,
             // A number with the time hint is a year or nothing — never epoch seconds.
-            (serde_json::json!(1.5e9), TimeReadError::YearOutOfRange),
-            (serde_json::json!(2019.5), TimeReadError::YearOutOfRange),
+            "1.5e9",
+            "2019.5",
         ];
-        let facts: Vec<(String, Value)> = cases
+        let names: Vec<String> = (0..written.len())
+            .map(|i| format!("content.bad{i}"))
+            .collect();
+        let wrapped: Vec<String> = written
             .iter()
-            .enumerate()
-            .map(|(i, (v, _))| {
-                let wrapped = serde_json::json!({"value": v, "type": "datetime"});
-                (format!("content.bad{i}"), wrapped)
-            })
+            .map(|v| format!(r#"{{"value": {v}, "type": "datetime"}}"#))
+            .collect();
+        let facts: Vec<(&str, &str)> = names
+            .iter()
+            .zip(&wrapped)
+            .map(|(n, w)| (n.as_str(), w.as_str()))
             .collect();
 
-        let outcome = import_one(&conn, &mut state, src, &facts);
+        let outcome = import(&conn, &[record(src, 0, &facts)]);
 
-        assert_eq!(state.stats.skipped_type_mismatch, cases.len() as u64);
-        assert_eq!(state.stats.facts_imported, 0);
+        assert_eq!(outcome.stats.facts_imported, 0);
+        assert_eq!(outcome.stats.values_skipped(), written.len() as u64);
+        let cause = SkipCause::HintDoesNotRead(KnownHint::Datetime);
+        for (name, value) in names.iter().zip(written) {
+            assert_eq!(skipped(&outcome, name, cause.clone()), 1, "{name}");
+            assert!(
+                outcome.verbose.contains(&VerboseLine::Skipped {
+                    key: name.clone(),
+                    written: value.to_string(),
+                    cause: cause.clone(),
+                }),
+                "{name}: {:?}",
+                outcome.verbose
+            );
+        }
         assert_eq!(
             stored_on_source_count(&conn, src),
             0,
             "nothing is stored, not even as a clock reading"
         );
-        assert_eq!(outcome.warnings.len(), cases.len());
-        for (i, (written, why)) in cases.iter().enumerate() {
-            let key = format!("content.bad{i}");
-            let expected =
-                format!("{written} is not a time for '{key}' in /photos/photo.jpg: {why}");
-            assert!(
-                outcome.warnings.contains(&expected),
-                "{expected}\n{:?}",
-                outcome.warnings
-            );
-        }
     }
 
     #[test]
@@ -1100,14 +1426,8 @@ mod tests {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
         let src = insert_source(&conn, root, "photo.jpg", None);
-        let mut state = init_state(&conn).unwrap();
 
-        import_one(
-            &conn,
-            &mut state,
-            src,
-            &[("content.When".to_string(), serde_json::json!(1500000000))],
-        );
+        import(&conn, &[record(src, 0, &[("content.When", "1500000000")])]);
 
         let stored: (Option<f64>, Option<i64>) = conn
             .query_row(
@@ -1123,31 +1443,183 @@ mod tests {
     fn one_key_holding_every_form_is_never_a_type_change() {
         let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
-        let mut state = init_state(&conn).unwrap();
-        let written: [Value; 6] = [
-            "2023-12-31T21:00:00-05:00".into(),
-            "2023-12-31T23:30:00-00:00".into(),
-            "2023:12:31 21:00:00".into(),
-            "2024".into(),
-            "2024-06-15T14:30:05.45+02:00".into(),
-            serde_json::json!(2019),
+        let written = [
+            r#""2023-12-31T21:00:00-05:00""#,
+            r#""2023-12-31T23:30:00-00:00""#,
+            r#""2023:12:31 21:00:00""#,
+            r#""2024""#,
+            r#""2024-06-15T14:30:05.45+02:00""#,
+            "2019",
         ];
 
+        let mut imported = 0;
         for (i, v) in written.iter().enumerate() {
             let src = insert_source(&conn, root, &format!("{i}.jpg"), None);
-            let wrapped = serde_json::json!({"value": v, "type": "datetime"});
-            let outcome = import_one(
-                &conn,
-                &mut state,
-                src,
-                &[("content.When".to_string(), wrapped)],
-            );
+            let wrapped = format!(r#"{{"value": {v}, "type": "datetime"}}"#);
+            let outcome = import(&conn, &[record(src, 0, &[("content.When", &wrapped)])]);
             assert!(outcome.warnings.is_empty(), "{v}: {:?}", outcome.warnings);
+            assert!(outcome.stats.skipped_values.is_empty(), "{v}");
+            imported += outcome.stats.facts_imported;
         }
 
-        assert_eq!(state.stats.facts_imported, written.len() as u64);
-        assert_eq!(state.stats.skipped_type_mismatch, 0);
-        assert!(state.type_mismatch_keys.is_empty());
+        assert_eq!(imported, written.len() as u64);
+    }
+
+    /// Facts stored on a source before its content was known are moved to the content when it
+    /// becomes known, or dropped where the content already has a value for their key — each
+    /// counted under its own word.
+    #[test]
+    fn facts_moved_to_the_content_and_dropped_are_counted() {
+        let conn = setup_test_db();
+        let root = insert_root(&conn, "/photos", "source", false);
+        let first = insert_source(&conn, root, "a.jpg", None);
+        let second = insert_source(&conn, root, "b.jpg", None);
+        let hash = [("content.hash.sha256", r#""feed""#)];
+
+        import(
+            &conn,
+            &[
+                record(first, 0, &[("content.Make", r#""Canon""#)]),
+                record(
+                    second,
+                    0,
+                    &[
+                        ("content.Make", r#""Nikon""#),
+                        ("content.Lens", r#""50mm""#),
+                    ],
+                ),
+            ],
+        );
+        let outcome = import(&conn, &[record(first, 0, &hash), record(second, 0, &hash)]);
+
+        // The first source's Make moves; the second's Make is dropped (the content has one)
+        // and its Lens moves.
+        assert_eq!(outcome.stats.facts_moved, 2);
+        assert_eq!(outcome.stats.facts_dropped, 1);
+        assert_eq!(stored_on_source_count(&conn, first), 0);
+        assert_eq!(stored_on_source_count(&conn, second), 0);
+    }
+
+    /// Only counts above zero are named, each with its unit, singular for one; a null value
+    /// and a source fact passed back stand outside the skipped group.
+    #[test]
+    fn the_summary_names_only_counts_above_zero_with_their_units() {
+        let mut stats = ImportStats {
+            records: 1204,
+            facts_imported: 3880,
+            objects_created: 12,
+            facts_moved: 9,
+            facts_dropped: 2,
+            ..ImportStats::default()
+        };
+        stats.skipped_records.insert(RecordSkip::Stale, 3);
+        stats.skipped_records.insert(RecordSkip::Suspended, 2);
+        let mut skip = |key: &str, cause: SkipCause, n: u64| {
+            stats.skipped_values.insert(
+                (key.to_string(), cause),
+                Skipped {
+                    count: n,
+                    values: BTreeMap::from([("x".to_string(), n)]),
+                },
+            );
+        };
+        skip("content.A", SkipCause::DoesNotRead(Reading::Time), 40);
+        skip("content.B", SkipCause::DoesNotRead(Reading::Number), 1);
+        skip("content.B", SkipCause::WouldLose(Loss::LeadingZero), 3);
+        skip("content.C", SkipCause::WouldLose(Loss::TrailingZero), 1);
+        skip("content.D", SkipCause::NoValue, 2);
+        skip("source.mtime", SkipCause::SourceFact, 3);
+        assert_eq!(
+            stats.compose_summary(),
+            "Read 1,204 records: imported 3,880 facts; skipped 5 records: 3 stale, 2 on \
+             suspended roots; skipped 45 values: 41 that do not read as their key's type, 4 \
+             that would lose what the text carried; 2 null values (nothing stored); 3 values \
+             for source facts, which Canon records itself; 12 objects created; 9 facts moved \
+             to the content, 2 facts dropped (the content already had a value for their key)."
+        );
+
+        let nothing = ImportStats {
+            records: 3,
+            ..ImportStats::default()
+        };
+        assert_eq!(
+            nothing.compose_summary(),
+            "Read 3 records: imported 0 facts."
+        );
+
+        let mut ones = ImportStats {
+            records: 1,
+            facts_imported: 1,
+            objects_created: 1,
+            facts_dropped: 1,
+            ..ImportStats::default()
+        };
+        ones.skipped_records.insert(RecordSkip::Archived, 1);
+        for cause in [
+            SkipCause::NotExact,
+            SkipCause::NoValue,
+            SkipCause::SourceFact,
+        ] {
+            ones.skipped_values.insert(
+                ("content.K".to_string(), cause),
+                Skipped {
+                    count: 1,
+                    values: BTreeMap::new(),
+                },
+            );
+        }
+        assert_eq!(
+            ones.compose_summary(),
+            "Read 1 record: imported 1 fact; skipped 1 record: 1 in archive roots; skipped 1 \
+             value: 1 that is a number Canon cannot hold exactly; 1 null value (nothing \
+             stored); 1 value for a source fact, which Canon records itself; 1 object created; \
+             1 fact dropped (the content already had a value for its key)."
+        );
+    }
+
+    #[test]
+    fn the_early_stop_names_what_the_committed_batches_hold() {
+        let error = anyhow::anyhow!("database is locked");
+        assert_eq!(
+            ImportStats::default().compose_early_stop(&error),
+            "Import ended early before anything was imported: database is locked"
+        );
+        let mut stats = ImportStats {
+            records: 1204,
+            facts_imported: 3880,
+            ..ImportStats::default()
+        };
+        assert_eq!(
+            stats.compose_early_stop(&error),
+            "Import ended early after 1,204 records (3,880 facts imported in committed \
+             batches, which stand): database is locked"
+        );
+        stats.skipped_records.insert(RecordSkip::Stale, 5);
+        stats.skipped_values.insert(
+            ("content.A".to_string(), SkipCause::NotExact),
+            Skipped {
+                count: 45,
+                values: BTreeMap::new(),
+            },
+        );
+        assert_eq!(
+            stats.compose_early_stop(&error),
+            "Import ended early after 1,204 records (3,880 facts imported in committed \
+             batches, which stand; 5 records and 45 values skipped): database is locked"
+        );
+    }
+
+    #[test]
+    fn the_most_frequent_value_breaks_a_tie_by_text_order() {
+        let skipped = Skipped {
+            count: 5,
+            values: BTreeMap::from([
+                ("\"b\"".to_string(), 2),
+                ("\"a\"".to_string(), 2),
+                ("\"c\"".to_string(), 1),
+            ]),
+        };
+        assert_eq!(skipped.most_frequent(), Some("\"a\""));
     }
 
     // =========================================================================
@@ -1181,9 +1653,9 @@ mod tests {
         let src = insert_source(&conn, root, "photo.jpg", Some(obj));
         crate::core::testing::insert_fact(&conn, src, "content.Make", "Canon");
 
-        let promoted = promote_content_facts(&conn, src, obj).unwrap();
+        let (moved, dropped) = promote_content_facts(&conn, src, obj).unwrap();
 
-        assert_eq!(promoted, 1);
+        assert_eq!((moved, dropped), (1, 0));
         assert_eq!(
             object_fact_value(&conn, obj, "content.Make").as_deref(),
             Some("Canon")
@@ -1207,10 +1679,10 @@ mod tests {
         )
         .unwrap();
 
-        let promoted = promote_content_facts(&conn, src, obj).unwrap();
+        let (moved, dropped) = promote_content_facts(&conn, src, obj).unwrap();
 
-        // Nothing was gained, so nothing is counted...
-        assert_eq!(promoted, 0);
+        // Nothing was gained, so nothing moved; the source's copy is dropped...
+        assert_eq!((moved, dropped), (0, 1));
         // ...the object keeps the value it already had...
         assert_eq!(
             object_fact_value(&conn, obj, "content.Make").as_deref(),

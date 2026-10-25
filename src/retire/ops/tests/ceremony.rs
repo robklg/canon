@@ -812,9 +812,6 @@ fn a_failed_release_claims_no_sources_released() {
 /// committed, so the bound-not-released standing is what happened and what the
 /// row says. Reached here through the real failure path, not by setting the
 /// flag, so the arm is the one production uses.
-///
-/// *Smoke*: make `settle_release_failure` ignore the flag — this arm still
-/// passes, and its sibling below fails, which is the pair working as intended.
 #[test]
 fn an_unreleased_failure_records_the_root_remaining() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
@@ -844,9 +841,6 @@ fn an_unreleased_failure_records_the_root_remaining() {
 /// No production path reaches this arm today — nothing after the commit can
 /// fail — which is exactly why the flag exists rather than a note saying so,
 /// and why the arm is reached here directly.
-///
-/// *Smoke*: make `settle_release_failure` ignore the flag. The row then reads
-/// `partial` and claims a root that is gone.
 #[test]
 fn a_failure_after_release_leaves_the_committed_row_alone() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();
@@ -926,9 +920,6 @@ fn a_book_states_its_time_zone() {
 /// both, never composed twice. The ceremony is handed a stated clock that
 /// differs from the one its dates read on, so a book that composed its own
 /// text from the zone it reads dates on would say `UTC` here.
-///
-/// *Smoke*: have the compile write `ReadTimesOn::of_user(&params.zone)`, or
-/// the frame do the same; each fails one assertion below.
 #[test]
 fn the_book_and_the_retirement_record_state_the_same_zone() {
     let (conn, _src, _arch, root_id) = every_fate_fixture();

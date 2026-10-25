@@ -256,12 +256,11 @@ mod tests {
     /// same pinned instant the rest of this corpus uses, not the planted
     /// row's; a test asserting the planted year would pass against the defect.
     ///
-    /// **What it was red-smoked against.** Two independent mechanisms now hold
-    /// this: the prefetch never fetches the key, and evaluation resolves
-    /// computed keys before it consults the facts map. Removing only the
-    /// first leaves this green — the prefetch pins in `expr/ops/pattern.rs`
-    /// are what catch that — so the defect this test names is the two of them
-    /// gone together, and that is the smoke it was verified against.
+    /// **What it guards.** Two independent mechanisms hold this: the prefetch
+    /// never fetches the key, and evaluation resolves computed keys before it
+    /// consults the facts map. Removing only the first leaves this green — the
+    /// prefetch pins in `expr/ops/pattern.rs` are what catch that — so the
+    /// defect this test names is the two of them gone together.
     #[test]
     fn a_stored_fact_under_a_computed_name_does_not_move_the_destination() {
         use crate::core::testing::{insert_fact, insert_root, insert_source, setup_test_db};

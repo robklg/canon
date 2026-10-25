@@ -85,5 +85,6 @@ pub use domain::key::{
 pub use domain::transform::{rendered, Modified, Modifier, ModifierCategory};
 
 // The statement that keys are of mixed type and its way out, each key printed by the
-// printing rule — read by `facts`' listing, `cluster`'s summary and a manifest's comments.
-pub use domain::print::{mixed_type_statement, mixed_type_way_out};
+// printing rule — read by `facts`' listing, `cluster`'s summary and a manifest's comments —
+// and the printing rule's key and convert command, which an import's skip lines print.
+pub use domain::print::{convert_command, mixed_type_statement, mixed_type_way_out, printed_key};

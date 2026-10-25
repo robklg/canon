@@ -3970,6 +3970,8 @@ mod source {
                 "Modified",
                 "mixed_type_statement",
                 "mixed_type_way_out",
+                "convert_command",
+                "printed_key",
             ],
         ),
         ("ls", &["run", "show_duplicates"]),

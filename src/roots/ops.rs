@@ -777,8 +777,8 @@ mod tests {
     // The drop settlement at this subsystem's three sites
     //
     // Each plants a failure inside the window, so the `?` fires where a real
-    // one would, and reads what the row says afterwards. Red-smoked by
-    // removing `.armed(..)` at the site: the row then reads `started`.
+    // one would, and reads what the row says afterwards. Without `.armed(..)`
+    // at the site, the row reads `started`.
     // =========================================================================
 
     /// A failed removal reads `partial`, because the deletes are separate

@@ -2,8 +2,6 @@
 //! reads/writes, and the criteria-based delete/prune families that back
 //! `canon facts`.
 
-use std::collections::HashMap;
-
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
@@ -63,46 +61,6 @@ pub fn count_fact_keys(conn: &mut Connection, source_ids: &[i64]) -> Result<Vec<
     conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
 
     Ok(result)
-}
-
-/// Fetch the type map for all existing facts.
-///
-/// Returns a map from fact key to its storage type (Text, Num, or Time).
-/// This is used for type consistency checking during import — if a key
-/// already exists with type X, new values must also be type X.
-///
-/// # Returns
-/// HashMap where key is the fact key (e.g., "content.Make") and value is
-/// the detected kind based on which column has data. A kind-only read: it asks which
-/// column a key's rows use, never a value.
-pub fn fetch_type_map(conn: &Connection) -> Result<HashMap<String, FactType>> {
-    let mut type_map = HashMap::new();
-
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT key,
-                CASE
-                    WHEN value_time IS NOT NULL THEN 'time'
-                    WHEN value_num IS NOT NULL THEN 'num'
-                    ELSE 'text'
-                END as type
-         FROM facts",
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    for row in rows {
-        let (key, type_str) = row?;
-        let fact_type = match type_str.as_str() {
-            "time" => FactType::Time,
-            "num" => FactType::Num,
-            _ => FactType::Text,
-        };
-        type_map.insert(key, fact_type);
-    }
-
-    Ok(type_map)
 }
 
 /// Upsert a fact (insert or update on conflict).
@@ -725,73 +683,6 @@ mod tests {
         let mime = result.iter().find(|(k, _)| k == "content.mime").unwrap();
         // Must be 1, not 2 — one source, one key
         assert_eq!(mime.1, 1);
-    }
-
-    // =========================================================================
-    // fetch_type_map tests
-    // =========================================================================
-
-    #[test]
-    fn fetch_type_map_empty() {
-        let conn = setup_test_db();
-        let result = fetch_type_map(&conn).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn fetch_type_map_detects_text() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-
-        let result = fetch_type_map(&conn).unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get("content.Make"), Some(&FactType::Text));
-    }
-
-    #[test]
-    fn fetch_type_map_detects_num() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-        insert_fact_num(&conn, "object", 100, "content.Width", 4000.0);
-
-        let result = fetch_type_map(&conn).unwrap();
-
-        assert_eq!(result.get("content.Width"), Some(&FactType::Num));
-    }
-
-    #[test]
-    fn fetch_type_map_detects_time() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-        insert_fact_time(&conn, "object", 100, "content.DateTimeOriginal", 1704067200);
-
-        let result = fetch_type_map(&conn).unwrap();
-
-        assert_eq!(
-            result.get("content.DateTimeOriginal"),
-            Some(&FactType::Time)
-        );
-    }
-
-    #[test]
-    fn fetch_type_map_multiple_types() {
-        let conn = setup_test_db();
-        insert_object(&conn, 100, "abc123");
-        insert_fact_text(&conn, "object", 100, "content.Make", "Canon");
-        insert_fact_num(&conn, "object", 100, "content.Width", 4000.0);
-        insert_fact_time(&conn, "object", 100, "content.DateTimeOriginal", 1704067200);
-
-        let result = fetch_type_map(&conn).unwrap();
-
-        assert_eq!(result.len(), 3);
-        assert_eq!(result.get("content.Make"), Some(&FactType::Text));
-        assert_eq!(result.get("content.Width"), Some(&FactType::Num));
-        assert_eq!(
-            result.get("content.DateTimeOriginal"),
-            Some(&FactType::Time)
-        );
     }
 
     // =========================================================================

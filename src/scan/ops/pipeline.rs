@@ -4335,8 +4335,8 @@ mod tests {
         // routes through it rather than inserting directly. A direct insert
         // bypassing the walk-trust accounting would compile and pass every
         // behavioral test here while quietly reintroducing an unaccounted
-        // path. Red-smoked: plant a direct insert on `seen_source_ids`
-        // anywhere in this file and this fails.
+        // path. A direct insert on `seen_source_ids` anywhere in this file
+        // fails it.
         //
         // The matcher's aperture is a literal text scan, stated here rather
         // than left as a silence: it catches the one idiom it names — the

@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(keys(&unfloored), keys(&groups));
     }
 
-    /// **Red-smoke**: without the force rule this corpus keys at `/archive`
+    /// Without the force rule this corpus keys at `/archive`
     /// itself — twelve leaves is over budget, so the greedy pass alone would
     /// never refine it, and the view would answer "where did it go?" with the
     /// whole archive.

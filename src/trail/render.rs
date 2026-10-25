@@ -3680,7 +3680,7 @@ mod tests {
         assert_eq!(line, "Standing here: 229 files stand; 229 were delivered.");
     }
 
-    /// **Red-smoke**: containment fails in both directions — a decision stamp
+    /// Containment fails in both directions — a decision stamp
     /// survives a scan-observed move into the view — so where standing
     /// exceeds delivered the line must drop the "of the" construction rather
     /// than state an arithmetic impossibility from the one line designed
@@ -4890,12 +4890,11 @@ mod tests {
         )
     }
 
-    /// **Red-smoke against today's ordering.** The hint sits beneath the two
-    /// *crossing* rollups and above `Rearranged here`: it teaches the door,
-    /// the door itemizes crossings, and the rearrangement rollup is the one
-    /// line it never expands. Printed beneath the whole block — where it was
-    /// — "these totals" points last at the total the door has nothing to say
-    /// about.
+    /// The hint sits beneath the two *crossing* rollups and above
+    /// `Rearranged here`: it teaches the door, the door itemizes crossings,
+    /// and the rearrangement rollup is the one line it never expands. Printed
+    /// beneath the whole block, "these totals" would point last at the total
+    /// the door has nothing to say about.
     ///
     /// Asserted on the printed order, since the defect is positional and a
     /// const alone cannot show it.

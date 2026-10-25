@@ -769,8 +769,8 @@ mod tests {
     }
 
     /// Whatever a machine's zone writes into a manifest, the next run reads back as the same
-    /// zone. Red-smoked by `recordable` writing a named zone's current offset instead of its
-    /// name: the name comes back as `+02:00`, not the zone.
+    /// zone. If `recordable` wrote a named zone's current offset instead of its name, the name
+    /// would come back as `+02:00`, not the zone, and this fails.
     #[test]
     fn every_recordable_machine_zone_parses_back() {
         let machines = [

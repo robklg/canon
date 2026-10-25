@@ -2038,3 +2038,313 @@ fn generate_writes_the_default_and_no_placement_warning() {
     assert!(!run.stderr.contains("Warning"), "{}", run.stderr);
     assert!(!run.stdout.contains("Warning"), "{}", run.stdout);
 }
+
+// ---------------------------------------------------------------------------
+// Import fits the key's type, on the built binary.
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Import one record per named file, each record's facts given as the JSON text a tool
+    /// wrote, so a number keeps its spelling; the run is returned, not checked.
+    fn import_written(&self, rows: &[(&str, &str)]) -> Run {
+        let ids = self.source_ids();
+        let input: String = rows
+            .iter()
+            .map(|(name, facts)| {
+                format!(
+                    "{{\"source_id\":{},\"basis_rev\":0,\"facts\":{facts}}}\n",
+                    ids[*name]
+                )
+            })
+            .collect();
+        self.run_with_input(&["import-facts"], Some(&input))
+    }
+
+    /// One key's stored rows, each as the source or content it is stored on and its stored
+    /// columns, in that order.
+    fn stored_rows(&self, key: &str) -> Vec<Vec<Option<String>>> {
+        let db = rusqlite::Connection::open(self.path("home/canon.db")).unwrap();
+        let mut statement = db
+            .prepare(
+                "SELECT entity_id, value_text, value_num, value_time, time_nanos, time_form, \
+                 time_offset, time_precision FROM facts WHERE key = ?1 ORDER BY entity_id",
+            )
+            .unwrap();
+        statement
+            .query_map([key], |row| {
+                (0..8)
+                    .map(|i| {
+                        row.get::<_, rusqlite::types::Value>(i).map(|v| match v {
+                            rusqlite::types::Value::Null => None,
+                            rusqlite::types::Value::Integer(n) => Some(n.to_string()),
+                            rusqlite::types::Value::Real(x) => Some(x.to_string()),
+                            rusqlite::types::Value::Text(t) => Some(t),
+                            rusqlite::types::Value::Blob(_) => Some("blob".to_string()),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+}
+
+/// **A time handed out by `worklist --emit` comes back the same through a processor**, in
+/// `Europe/Amsterdam` and in `America/New_York`: every form (an offset, `Z`, `-00:00`, none)
+/// and every precision (year, month, day, minute, second, a fraction) emitted, passed through a
+/// processor that hands each line on unchanged, and imported with no hint, is stored with the
+/// same form, offset, precision and fraction, and `facts --key` prints the same.
+#[test]
+fn a_time_handed_out_by_emit_comes_back_the_same_through_a_processor() {
+    let written = [
+        "2024-06-15T14:30:05+02:00",
+        "2024-06-15T12:30:05Z",
+        "2024-06-15T12:30:05-00:00",
+        "2024-06-15T14:30:05",
+        "2024",
+        "2024-06",
+        "2024-06-15",
+        "2024-06-15T14:30",
+        "2024-06-15T14:30:05.45+02:00",
+    ];
+    let names: Vec<String> = (0..written.len()).map(|i| format!("t{i}.jpg")).collect();
+    for zone in ["Europe/Amsterdam", "America/New_York"] {
+        let files: Vec<(&str, i64)> = names.iter().map(|n| (n.as_str(), OLD)).collect();
+        let fx = photos(zone, &files);
+        let rows: Vec<(&str, serde_json::Value)> = names
+            .iter()
+            .zip(written)
+            .map(|(name, w)| {
+                (
+                    name.as_str(),
+                    serde_json::json!({"taken": {"value": w, "type": "datetime"}}),
+                )
+            })
+            .collect();
+        fx.import(&rows);
+        let stored = fx.stored_rows("content.taken");
+        assert_eq!(stored.len(), written.len(), "{zone}");
+        let report = |fx: &Fixture| {
+            let run = fx.run(&["facts", "--global", "--key", "content.taken"]);
+            assert_eq!(run.code, 0, "{}", run.stderr);
+            // Rows with equal counts are listed in no fixed order.
+            run.stdout
+                .lines()
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let reported = report(&fx);
+
+        let emitted = fx.run(&["worklist", "--global", "--emit", "content.taken"]);
+        assert_eq!(emitted.code, 0, "{}", emitted.stderr);
+        let back = fx.run_with_input(&["import-facts"], Some(&emitted.stdout));
+        assert_eq!(back.code, 0, "{zone}: {}{}", back.stdout, back.stderr);
+        assert_eq!(
+            back.stdout, "Read 9 records: imported 9 facts.\n",
+            "{zone}: {}",
+            emitted.stdout
+        );
+
+        assert_eq!(fx.stored_rows("content.taken"), stored, "{zone}");
+        assert_eq!(report(&fx), reported, "{zone}");
+    }
+}
+
+/// **Each skipped value is counted under its cause, and each key and cause gets one line with
+/// its way out**, on the built binary: the summary names every cause's count, and stderr holds
+/// one line per key and cause in key order, each as the way-out table words it — and nothing
+/// for a null value or a source fact passed back, which the summary counts.
+#[test]
+fn import_states_each_cause_with_its_count_and_way_out() {
+    let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"];
+    let files: Vec<(&str, i64)> = names.iter().map(|n| (*n, OLD)).collect();
+    let fx = photos("UTC", &files);
+    let setup = fx.import_written(&[
+        (
+            "a.jpg",
+            r#"{"Width":1920,"Count":5,"Taken":{"value":"2024","type":"datetime"},"When":{"value":"2024","type":"datetime"},"Label":"x","Model":"EOS"}"#,
+        ),
+        ("b.jpg", r#"{"Model":"R5"}"#),
+    ]);
+    assert_eq!(setup.code, 0, "{}{}", setup.stdout, setup.stderr);
+    // Import keeps a key to one type, so the second type is written as an older Canon could.
+    let db = rusqlite::Connection::open(fx.path("home/canon.db")).unwrap();
+    db.execute(
+        "UPDATE facts SET value_text = NULL, value_num = 5 \
+         WHERE key = 'content.Model' AND value_text = 'R5'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let run = fx.import_written(&[
+        (
+            "b.jpg",
+            r#"{"Width":"wide","Count":9007199254740993,"Taken":"soon","When":true,"Label":{"value":"2024","type":"datetime"},"Rating":{"value":"twelve","type":"number"},"Model":"Z","source.foo":1,"source.size":5,"Nothing":null,"Note":"ok"}"#,
+        ),
+        (
+            "c.jpg",
+            r#"{"Width":"wide","Count":9007199254740993,"Taken":"soon","When":true,"Label":{"value":"2024","type":"datetime"},"Rating":{"value":"twelve","type":"number"},"Model":"Z","source.foo":1}"#,
+        ),
+        (
+            "d.jpg",
+            r#"{"Width":"01234","Count":[1,2],"Taken":2019,"When":{"value":"5","type":"duration"},"Label":{"value":"x","type":"bogus"},"Lens":"a","content.Lens":"b"}"#,
+        ),
+        (
+            "e.jpg",
+            r#"{"Width":"01234","Count":[1,2],"Taken":2019,"When":{"value":"5","type":"duration"},"Label":{"value":"x","type":"bogus"},"Lens":"a","content.Lens":"b"}"#,
+        ),
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert_eq!(
+        run.stdout,
+        "Read 4 records: imported 1 fact; skipped 30 values: 4 that do not read as their key's \
+         type, 2 that would lose what the text carried, 2 that are numbers for a time key, \
+         2 that are numbers Canon cannot hold exactly, 2 that are true or false for a time key, \
+         2 that are lists or objects for a number or time key, 4 with a hint their key does not \
+         take, 2 that do not read as their hint, 2 with a hint Canon does not read, 2 for keys \
+         of mixed type, 4 for keys named twice in one record, 2 under names reserved for \
+         source facts; 1 null value (nothing stored); 1 value for a source fact, which Canon \
+         records itself.\n"
+    );
+    let lines = [
+        "content.Count: 2 values, such as 9007199254740993, are numbers Canon cannot hold \
+         exactly (--verbose lists each); `canon facts convert content.Count --to text` to keep \
+         values like these as written",
+        "content.Count: 2 values, such as [1,2], are lists or objects, and the key holds \
+         numbers (--verbose lists each); a number key does not take lists or objects: import \
+         them under a new key, or have the tool write numbers",
+        "content.Label: 2 values, such as \"2024\", are hinted datetime, and the key holds text \
+         (--verbose lists each); `canon facts convert content.Label --to time` if this key \
+         should hold times; otherwise have the tool write text",
+        "content.Label: 2 values, such as \"x\", carry the hint `bogus`, which Canon does not \
+         read (--verbose lists each); Canon reads three type hints, datetime, duration and \
+         number; have the tool drop this one, and the key decides",
+        "content.Lens: 4 values, such as \"a\", are for a key named twice in one record \
+         (--verbose lists each); have the tool write each key under one name (a key passed \
+         back by `worklist --emit` under the name it was emitted as)",
+        "content.Model: 2 values, such as \"Z\", are for a key of mixed type (--verbose lists \
+         each); these values arrive when the pipeline runs again after the key is converted",
+        "To see its values and convert it to one type:",
+        "  `canon facts convert content.Model`",
+        "content.Rating: 2 values, such as \"twelve\", do not read as their number hint \
+         (--verbose lists each); have the tool correct these values, or omit them",
+        "content.Taken: 2 values, such as \"soon\", do not read as a time (--verbose lists \
+         each); have the tool write a time Canon reads (see \"How Canon interprets a time\" in \
+         the facts documentation) or omit values that are no time (an empty EXIF date such as \
+         0000:00:00 00:00:00 is best omitted), or `canon facts convert content.Taken` to see \
+         the other ways",
+        "content.Taken: 2 values, such as 2019, are numbers, and the key holds times \
+         (--verbose lists each); have the tool write the time as text (a year as \"2019\"), or, \
+         for a year, write the number with the datetime hint",
+        "content.When: 2 values, such as true, are true or false, and the key holds times \
+         (--verbose lists each); a time key does not take true or false: import them under a \
+         new key, or have the tool write times",
+        "content.When: 2 values, such as \"5\", are hinted duration, and the key holds times \
+         (--verbose lists each); a duration is not a time: import durations under a new key",
+        "content.Width: 2 values, such as \"wide\", do not read as a number (--verbose lists \
+         each); have the tool write numbers or omit values that are no number, or `canon facts \
+         convert content.Width` to see the other ways",
+        "content.Width: 2 values, such as \"01234\", would lose what the text carried \
+         (--verbose lists each); `canon facts convert content.Width --to text` to keep values \
+         like these as written, or have the tool write them as JSON numbers",
+        "source.foo: 2 values, such as 1, are under a name starting with `source.`, which only \
+         Canon's own source facts have (--verbose lists each); have the tool name them another \
+         way (the key printed is the name as the tool wrote it)",
+        "Updating query statistics...",
+    ];
+    assert_eq!(run.stderr, lines.join("\n") + "\n");
+    assert_eq!(fx.stored_rows("content.Note").len(), 1);
+    assert_eq!(fx.stored_rows("content.Width").len(), 1, "only the setup's");
+}
+
+/// **A JSON number for a text key lands as text, in the spelling the tool wrote**: `1.10`
+/// stays `1.10`, never `1.1`.
+#[test]
+fn a_number_written_1_10_stays_1_10_in_a_text_key() {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    let run = fx.import_written(&[("a.jpg", r#"{"Version":"v1"}"#)]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let run = fx.import_written(&[("b.jpg", r#"{"Version":1.10}"#)]);
+    assert_eq!(run.stdout, "Read 1 record: imported 1 fact.\n");
+    let stored: std::collections::BTreeSet<Option<String>> = fx
+        .stored_rows("content.Version")
+        .into_iter()
+        .map(|row| row[1].clone())
+        .collect();
+    assert_eq!(
+        stored,
+        [Some("1.10".to_string()), Some("v1".to_string())].into()
+    );
+    assert_eq!(fx.listed(r#"Version="1.10""#), names(&["b.jpg"]));
+}
+
+/// **A key of mixed type takes nothing**, of any type, until it is converted: each value is
+/// counted, the line names the conversion, and the key's rows are as they were.
+#[test]
+fn an_import_into_a_mixed_key_takes_nothing() {
+    // Files of their own content, so each fact is stored on its own content.
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    import_a_mixed_model(&fx);
+    let before = fx.stored_rows("content.Model");
+    assert_eq!(before.len(), 2);
+    let run = fx.import_written(&[
+        ("a.jpg", r#"{"Model":"EOS2"}"#),
+        ("b.jpg", r#"{"Model":7}"#),
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert_eq!(
+        run.stdout,
+        "Read 2 records: imported 0 facts; skipped 2 values: 2 for keys of mixed type.\n"
+    );
+    assert!(
+        run.stderr.starts_with(
+            "content.Model: 2 values, such as \"EOS2\", are for a key of mixed type (--verbose \
+             lists each); these values arrive when the pipeline runs again after the key is \
+             converted\nTo see its values and convert it to one type:\n  `canon facts convert \
+             content.Model`\n"
+        ),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(fx.stored_rows("content.Model"), before);
+}
+
+/// **A large integer through `canonargs --type number` is skipped, never changed**: the
+/// records are the JSON `canonargs` writes for `9007199254740993` and `1920` (a number passed
+/// on as written, pinned in `canonargs` itself), imported into a number key. The first is
+/// skipped as a number Canon cannot hold exactly, and counted; the second is stored.
+#[test]
+fn a_large_integer_through_canonargs_is_skipped_never_changed() {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD), ("c.jpg", OLD)]);
+    let run = fx.import_written(&[("a.jpg", r#"{"Serial":5}"#)]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let run = fx.import_written(&[
+        ("b.jpg", r#"{"Serial":9007199254740993}"#),
+        ("c.jpg", r#"{"Serial":1920}"#),
+    ]);
+    assert_eq!(
+        run.stdout,
+        "Read 2 records: imported 1 fact; skipped 1 value: 1 that is a number Canon cannot \
+         hold exactly.\n"
+    );
+    assert!(
+        run.stderr.starts_with(
+            "content.Serial: 1 value, 9007199254740993, is a number Canon cannot hold exactly; \
+             `canon facts convert content.Serial --to text` to keep values like these as \
+             written\n"
+        ),
+        "{}",
+        run.stderr
+    );
+    let numbers: std::collections::BTreeSet<Option<String>> = fx
+        .stored_rows("content.Serial")
+        .into_iter()
+        .map(|row| row[2].clone())
+        .collect();
+    assert_eq!(
+        numbers,
+        [Some("1920".to_string()), Some("5".to_string())].into()
+    );
+}

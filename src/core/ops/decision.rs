@@ -1555,8 +1555,8 @@ mod tests {
     //
     // An armed recorder settles its own status claim on every non-panicking
     // exit, so the only run that can leave `started` is one that never reached
-    // a last act. Each test below is red-smoked by reverting the one line of
-    // the drop body it names.
+    // a last act. Each test below fails without the one line of the drop body
+    // it names.
     // =========================================================================
 
     /// The word and sentence these tests arm with. Fixed here so an assertion
@@ -1573,8 +1573,7 @@ mod tests {
     }
 
     /// The mechanism itself: a `?` inside an armed window leaves a settled row,
-    /// not a `started` one. *Smoke*: remove the `complete` call in the drop
-    /// body.
+    /// not a `started` one.
     #[test]
     fn an_error_after_arming_settles_the_row() {
         let conn = setup_test_db();
@@ -1597,7 +1596,7 @@ mod tests {
     }
 
     /// A run that reached a last act said what happened; the guard must not
-    /// speak over it. *Smoke*: remove the claim check in the drop body.
+    /// speak over it.
     #[test]
     fn a_settled_recorder_drops_without_a_second_write() {
         let conn = setup_test_db();
@@ -1623,8 +1622,7 @@ mod tests {
 
     /// A panic is a crash, and a crash leaves `started` — the one meaning every
     /// register carries for that row. Writing to SQLite during unwind could
-    /// also turn one panic into an abort. *Smoke*: remove the `panicking()`
-    /// check.
+    /// also turn one panic into an abort.
     #[test]
     fn a_panic_leaves_the_row_started() {
         let conn = setup_test_db();
@@ -1652,10 +1650,6 @@ mod tests {
     /// settles the order before the guard ever runs, so the test would pass
     /// whichever way round the two were declared — which is the one property
     /// it exists to hold.
-    ///
-    /// *Smoke*: declare the guard after the transaction. Its UPDATE then runs
-    /// inside the still-open transaction, rolls back with it, and the row reads
-    /// `started` — the fix wearing the defect's clothes.
     #[test]
     fn a_settlement_after_a_rollback_lands() {
         let conn = setup_test_db();
@@ -1726,7 +1720,6 @@ mod tests {
     /// The drop body calls `complete`, not `complete_db`, so a receipt path
     /// registered at `start()` and never written retracts in the same act —
     /// the row must not leave a citation for a file that does not exist.
-    /// *Smoke*: call `complete_db` in the drop body instead.
     #[test]
     fn a_drop_settlement_retracts_a_registered_receipt_claim() {
         let conn = setup_test_db();

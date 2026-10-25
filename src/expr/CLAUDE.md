@@ -211,8 +211,9 @@ and the binder's input type — and keeps no character list (`every_printed_valu
 printable one- and two-character value checked against the reader). A refusal's rule lines print
 through it. So does the statement that keys are of mixed type, with their types, and its way out
 (`mixed_type_statement`, `mixed_type_way_out`), which a refused filter, `facts`' listing,
-`cluster`'s summary and a manifest's comments read: the key prints through the rule, and its
-`canon facts convert` command names the full stored key, quoted for the shell only
+`cluster`'s summary, a manifest's comments and `import-facts`' skip lines read: the key prints
+through the rule, and its `canon facts convert` command (`convert_command`) names the full stored
+key, quoted for the shell only, and the type to convert to where its reader names one
 (`the_convert_command_is_quoted_for_the_shell_only`). Every bucket label is spelled and recognized
 here (`bucket_label`, `is_plain_bucket_label`, `threshold_bucket_labels`), the modifier handing over
 only a `BucketRange`, so a report, a rejection and a directory name say one label. **Where it does

@@ -87,7 +87,7 @@ The spellings in full:
 - A time of day follows the date after `T` or one space, as `HH:MM` or `HH:MM:SS`, with up to nine digits of a fraction of a second (`14:30:05.45`).
 - An offset follows the time directly or after one space, as `Z` or `±HH:MM`. Lower-case `t` and `z` mean the same as upper case.
 
-Anything else is not a time: an offset on a date alone (`2024-06-15+02:00`), a date or time that does not exist (`2024-02-30`), an offset written without its colon (`+0200`), trailing text, and an instant at the edge of the years 0000–9999 or beyond. [`import-facts`](../commands/enrich/import-facts.md) skips such a value and says why; it never cuts text short to make it fit.
+Anything else is not a time: an offset on a date alone (`2024-06-15+02:00`), a date or time that does not exist (`2024-02-30`), an offset written without its colon (`+0200`), trailing text, and an instant at the edge of the years 0000–9999 or beyond. [`import-facts`](../commands/enrich/import-facts.md) skips such a value, counts it and shows one such value as the tool wrote it; it never cuts text short to make it fit.
 
 How each form is shown in your local time:
 
