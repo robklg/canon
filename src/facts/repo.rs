@@ -176,6 +176,35 @@ pub fn delete_by_id(conn: &Connection, fact_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Write each fact's new value by id: the seven value columns only, so when it was observed and
+/// the revision it was observed at stay as they are.
+pub fn update_fact_values(conn: &Connection, changes: &[(i64, &FactValue)]) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "UPDATE facts SET value_text = ?, value_num = ?, value_time = ?, time_nanos = ?,
+                          time_form = ?, time_offset = ?, time_precision = ?
+         WHERE id = ?",
+    )?;
+    for (id, value) in changes {
+        let [text, num, time, nanos, form, offset, precision] = fact_value_params(value)?;
+        stmt.execute(rusqlite::params![
+            text, num, time, nanos, form, offset, precision, id
+        ])?;
+    }
+    Ok(())
+}
+
+/// Delete facts by id, in chunks.
+pub fn delete_facts_by_id(conn: &Connection, ids: &[i64]) -> Result<()> {
+    for chunk in ids.chunks(1000) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        conn.execute(
+            &format!("DELETE FROM facts WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(chunk.iter()),
+        )?;
+    }
+    Ok(())
+}
+
 /// Insert a fact on an object (for promotion from source).
 ///
 /// Similar to upsert but specifically for facts moved onto an object during promotion.

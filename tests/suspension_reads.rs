@@ -58,6 +58,10 @@ const LICENSED: &[(&str, &str, usize)] = &[
     //     sentence naming the way back) does, and none of these compose one.
     ("exclude/ops/types.rs", "is_active()", 1),
     ("facts/ops/import.rs", "is_active()", 1),
+    // The conversion's place order (`place_of`): a census source is marked as on a suspended
+    // root once, for the place counts the read and the plan state; no sentence with a way back
+    // is composed from it.
+    ("facts/domain/convert.rs", "is_active()", 1),
     ("scan/ops/pipeline.rs", "is_active()", 1),
     ("survey/domain/analysis.rs", "is_active()", 1),
     // The selection-side filter and its hidden-excluded count
@@ -115,6 +119,11 @@ const LICENSED: &[(&str, &str, usize)] = &[
     //     copied forward into a sibling struct that carries the same
     //     already-derived fact onward.
     ("story/ops/render.rs", ".suspended", 3),
+    // `Places.suspended`, the conversion's per-root count of sources `place_of` already marked
+    // suspended — filled and summed, never derived again; and the same count stated, each
+    // suspended root named (at most three) and the rest counted — a place in a list, with no
+    // way back composed from it.
+    ("facts/domain/convert.rs", ".suspended", 4),
     ("survey/ops/compute.rs", ".suspended", 7),
     ("survey/render.rs", ".suspended", 10),
     // --- The sweep engine's lens-free plain data, `sweep/CLAUDE.md`'s own

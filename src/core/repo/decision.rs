@@ -3,7 +3,7 @@ use rusqlite::OptionalExtension;
 
 use super::db::Connection;
 use super::source::BATCH_SIZE;
-use crate::core::domain::decision::Decision;
+use crate::core::domain::decision::{Decision, DecisionCommand, KeyDecision};
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::time::now_epoch_secs;
 
@@ -60,6 +60,44 @@ pub fn update_completed(
         ],
     )?;
     Ok(())
+}
+
+/// Record the fact key a decision acted on and the facts that key held after the act.
+pub fn set_fact_key(conn: &Connection, decision_id: i64, key: &str, remaining: u64) -> Result<()> {
+    conn.execute(
+        "UPDATE decisions SET fact_key = ?1, fact_key_remaining = ?2 WHERE id = ?3",
+        rusqlite::params![key, remaining as i64, decision_id],
+    )?;
+    Ok(())
+}
+
+/// The latest decision that recorded acting on `key`, with what the key held after it.
+pub fn latest_naming_key(conn: &Connection, key: &str) -> Result<Option<KeyDecision>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, command, fact_key_remaining FROM decisions
+             WHERE fact_key = ?1 ORDER BY id DESC LIMIT 1",
+            [key],
+            |row| {
+                let remaining: Option<i64> = row.get(2)?;
+                Ok(KeyDecision {
+                    id: row.get(0)?,
+                    command: row.get(1)?,
+                    remaining: remaining.and_then(|n| u64::try_from(n).ok()),
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Whether an `import-facts` decision was recorded after `decision_id` — of any key, since an
+/// import's row names none.
+pub fn import_recorded_after(conn: &Connection, decision_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM decisions WHERE command = ?1 AND id > ?2)",
+        rusqlite::params![DecisionCommand::ImportFacts.as_str(), decision_id],
+        |row| row.get(0),
+    )?)
 }
 
 /// Update the receipt location on an existing decision record.
@@ -413,6 +451,40 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()
+    }
+
+    fn started(conn: &Connection, command: &str) -> i64 {
+        insert_started(
+            conn, command, None, "canon", None, "0.7.0", "UTC", None, None,
+        )
+        .unwrap()
+    }
+
+    /// The latest decision naming a key is the last one written for it, with what it left; an
+    /// import of any key after it is found, one before it is not.
+    #[test]
+    fn the_latest_decision_naming_a_key_and_an_import_after_it() {
+        let conn = setup_test_db();
+        let early = started(&conn, "facts_convert");
+        set_fact_key(&conn, early, "content.Make", 4).unwrap();
+        let import = started(&conn, "import_facts");
+        let late = started(&conn, "facts_convert");
+        set_fact_key(&conn, late, "content.Make", 0).unwrap();
+        let other = started(&conn, "facts_delete");
+        set_fact_key(&conn, other, "content.Model", 2).unwrap();
+
+        assert_eq!(
+            latest_naming_key(&conn, "content.Make").unwrap(),
+            Some(KeyDecision {
+                id: late,
+                command: "facts_convert".into(),
+                remaining: Some(0)
+            })
+        );
+        assert_eq!(latest_naming_key(&conn, "content.Lens").unwrap(), None);
+        assert!(import_recorded_after(&conn, early).unwrap());
+        assert!(!import_recorded_after(&conn, late).unwrap());
+        assert!(import > early);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Decision Provenance
 
-Canon silently records every effectful action you take: scans, exclusions, applies, and more. Each decision leaves two linked artifacts: a queryable **record** in the database and a durable **receipt** file on disk. Together they build a trail of what happened, when, optionally why, and which files specifically.
+Canon silently records every effectful action you take: scans, exclusions, applies, and more. Each decision leaves a queryable **record** in the database, and an optional durable **receipt** file on disk. Together they build a trail of what happened, when, optionally why, and which files specifically.
 
 ## What Gets Recorded
 
@@ -17,6 +17,7 @@ Every command that changes state writes a decision record:
 | `import-facts` | Enrichment |
 | `prune` | Data cleanup |
 | `facts delete` | Fact removal |
+| `facts convert` | A key's change of type |
 | `note clear` | Note deletion |
 
 Read-only commands (`ls`, `facts`, `coverage`, `survey`, `compare`, `worklist`) do not record.
@@ -65,7 +66,7 @@ Recording happens in two phases:
 1. **Start**: A "started" record is written after you confirm (or just before execution for commands without confirmation)
 2. **Complete**: The record is updated with the outcome after execution finishes
 
-A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`.
+A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`. A refused `facts convert` records nothing.
 
 If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives as a durable trace that the operation was attempted. A row left `started` means its outcome was never written. That has three readings: the run was killed or crashed; or it ended and the outcome could not be written down, for example when another canon process held the database locked at that moment; or the row was written by a version of Canon older than the one that settles every ordinary error. `canon trail show` prints the row's version and time, and says the same thing on the row itself.
 
@@ -162,9 +163,9 @@ canon apply manifest.toml --reason "Italy 2016 — assembled from three drives"
 canon scan /mnt/old-laptop --reason "Deleted duplicate movies, originals confirmed in archive"
 ```
 
-`--reason` is available on: `exclude set`, `exclude clear`, `exclude duplicates`, `exclude set-object`, `apply`, `scan`, `roots rm`, `roots retire`, `roots suspend`, `roots unsuspend`.
+`--reason` is available on: `exclude set`, `exclude clear`, `exclude duplicates`, `exclude set-object`, `apply`, `scan`, `roots rm`, `roots retire`, `roots suspend`, `roots unsuspend`, `facts convert`.
 
-When not provided, no reason is stored and you are not prompted. When provided, the reason is written into both the decision record and the receipt's `[meta]`, so it travels with the durable artifact.
+When not provided, no reason is stored and you are not prompted. When provided, the reason is written into the decision record and into the receipt's `[meta]` when there is one, so it travels with the durable artifact.
 
 For `apply`, manifest notes (from the `# === Notes ===` section) automatically become the reason when `--reason` is not explicitly provided.
 

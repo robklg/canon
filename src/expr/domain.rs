@@ -8,8 +8,9 @@
 //! the patterns that arrange values into
 //! a path, and the place a scope-relative one measures from; the shape a
 //! prefetched fact takes on its way to a comparison; resolving a key to a
-//! value for one source; and rewriting the `@name` shorthands a filter may be
-//! written with. No I/O anywhere in this layer.
+//! value for one source; rewriting the `@name` shorthands a filter may be
+//! written with; and the grammar a statement about a value and its type is
+//! built by. No I/O anywhere in this layer.
 
 pub(super) mod alias;
 pub(super) mod bind;
@@ -21,6 +22,7 @@ pub(super) mod pattern;
 pub(super) mod print;
 pub(super) mod problem;
 pub(super) mod read;
+pub(super) mod statement;
 pub(super) mod transform;
 pub(super) mod value;
 pub(super) mod vantage;

@@ -494,6 +494,15 @@ fn migrations() -> Migrations<'static> {
         //    batch — answered from this index alone. Its expressions must match the
         //    query's exactly for SQLite to use it. No stored value changes.
         M::up("CREATE INDEX facts_key_type ON facts(key, value_time IS NULL, value_num IS NULL);"),
+        // 11: the fact key a decision acted on, and the facts that key held after the act —
+        //    written by `facts convert` and `facts delete`, so a key emptied by a conversion
+        //    can say so from a recorded fact rather than from summary text or counts. NULL
+        //    on every other row and on rows recorded before this.
+        M::up(
+            "ALTER TABLE decisions ADD COLUMN fact_key TEXT;
+             ALTER TABLE decisions ADD COLUMN fact_key_remaining INTEGER;
+             CREATE INDEX decisions_fact_key ON decisions(fact_key) WHERE fact_key IS NOT NULL;",
+        ),
     ])
 }
 
@@ -1333,5 +1342,33 @@ mod tests {
         };
         assert_eq!(zone_of(1), None);
         assert_eq!(zone_of(2).as_deref(), Some("Europe/Amsterdam"));
+    }
+
+    /// A decision recorded before migration 11 names no fact key and records no count; the
+    /// latest-naming read never finds it.
+    #[test]
+    fn migration11_leaves_an_older_decision_without_a_fact_key() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 10).unwrap();
+        conn.execute_batch(
+            "INSERT INTO decisions (id, command, command_line, status, canon_version, created_at)
+                 VALUES (1, 'facts_delete', 'canon facts delete --key Make --yes', 'completed',
+                         '0.6.0', 500);",
+        )
+        .unwrap();
+
+        migrations().to_latest(&mut conn).unwrap();
+        let (key, remaining): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT fact_key, fact_key_remaining FROM decisions WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((key, remaining), (None, None));
+        assert_eq!(
+            crate::core::repo::decision::latest_naming_key(&conn, "content.Make").unwrap(),
+            None
+        );
     }
 }

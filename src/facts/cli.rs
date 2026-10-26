@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 
+pub(super) mod convert;
 pub(super) mod import;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};

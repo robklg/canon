@@ -187,4 +187,4 @@ A modifier on a key of mixed type is rejected the same way, without `Error:`, si
 
 `--key source.mtime` groups save times by year in your local time. A save time at the edge of the years 0000–9999 or beyond has no value: it is counted under `(no value)` there, and left out of the `source.mtime` count in the overview ([Save times](../../concepts/facts.md#save-times)).
 
-See also: [`facts delete`](../maintain/facts-delete.md) for removing incorrect metadata, [`prune`](../maintain/prune.md) for cleaning up stale or orphaned data.
+See also: [`facts convert`](../maintain/facts-convert.md) for changing a key's type, [`facts delete`](../maintain/facts-delete.md) for removing incorrect metadata, [`prune`](../maintain/prune.md) for cleaning up stale or orphaned data.

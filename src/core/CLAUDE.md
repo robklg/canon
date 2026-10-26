@@ -339,7 +339,8 @@ in unsettled.
   split is by who reads it, not by what table it touches.
   **A key's type is read from the key's row set**: `repo::fact::key_types` reads every fact of
   the key and joins nothing, so suspension, scope, presence and role can never enter it; a
-  key with no facts has no type.
+  key with no facts has no type. `repo::fact::key_census` reads the same row set whole, for the
+  conversion.
 - **`ops::ledger`** — the extraction ledger's maintenance path (`ledger reindex`): rebuilds
   the `decision_extractions` projection from apply receipts already on disk. This is the
   *prove* half of the verb, and it lives with the discipline it proves: the claim that the
@@ -450,7 +451,8 @@ byte-exact, this is the law it owes.
 when a relative path needs one, so an absolute-path invocation survives a CWD deleted out from
 under the process, and a relative one is refused by name. `domain::scope` carries the typed
 where-contract (`DecisionScope`) that makes an un-decomposed scope string unrepresentable, and
-`domain::decision` the decision vocabulary itself.
+`domain::decision` the decision vocabulary itself, including what each command puts in a row's
+receipt columns (`DecisionCommand::receipt_columns`).
 
 Beside `DecisionScope`, `domain::scope` owns the **recorded-scope resolution law**: *a
 recorded scope is resolved once against the known roots, and a prefix matching no root is

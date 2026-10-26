@@ -340,3 +340,47 @@ fn set_object_by_path_refuses_the_empty_file() {
     .unwrap_err();
     assert!(err.to_string().contains("empty file"), "{err:#}");
 }
+
+/// **The conversion counts empty files by what each shows**: the fact on the empty content is
+/// shown by the three empty files holding that content — the archive copy, the source, and a
+/// source whose own fact is hidden behind the content's (the source-value law) — and not by an
+/// unhashed empty file, which shows its own fact and converts with the rest.
+#[test]
+fn the_conversion_counts_empty_files_by_what_each_shows() {
+    let mut c = canary();
+    insert_object_fact(&c.conn, c.empty_obj, "content.K", "nothing");
+    let unhashed = insert_source_with_size(&c.conn, c.source_root, "folder/other.log", None, 0);
+    insert_fact(&c.conn, unhashed, "content.K", "its own");
+    let own = insert_source_with_size(
+        &c.conn,
+        c.source_root,
+        "folder/third.log",
+        Some(c.empty_obj),
+        0,
+    );
+    insert_fact(&c.conn, own, "content.K", "its own too");
+    let home = tempfile::tempdir().unwrap();
+    let planned = crate::facts::plan_convert(
+        &mut c.conn,
+        "K",
+        crate::facts::Target::Type(crate::core::domain::fact::FactType::Time),
+        home.path(),
+    )
+    .unwrap();
+    let (empty, _) = planned
+        .plan
+        .empty_files
+        .expect("the empty content's fact has its line");
+    assert_eq!(empty.shown_by.total(), 3, "{empty:?}");
+    assert_eq!(empty.shown_by.counted, 2, "{empty:?}");
+    assert_eq!(empty.shown_by.archive_copy, 1, "{empty:?}");
+    assert_eq!(
+        planned.plan.bridge.sources.total(),
+        1,
+        "the unhashed empty file shows its own fact, counted with the rest"
+    );
+    assert_eq!(
+        planned.plan.bridge.hidden, 1,
+        "the third file's own fact is hidden"
+    );
+}

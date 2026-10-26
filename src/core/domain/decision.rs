@@ -4,6 +4,7 @@
 /// Values are append-only: never rename, never reuse for different semantics.
 /// When removing a command from Canon, keep its variant here so historical
 /// records remain interpretable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 pub enum DecisionCommand {
     Scan,
     Apply,
@@ -22,6 +23,17 @@ pub enum DecisionCommand {
     Prune,
     FactsDelete,
     NoteClear,
+    FactsConvert,
+}
+
+/// What a command puts in a decision row's receipt columns: a receipt it wrote, the pointer to
+/// an artifact that is no receipt (retirement's book), or never anything — so a reader of empty
+/// columns can say the command writes none rather than that one went missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptColumns {
+    Receipt,
+    ArtifactPointer,
+    Never,
 }
 
 impl DecisionCommand {
@@ -44,6 +56,38 @@ impl DecisionCommand {
             Self::Prune => "prune",
             Self::FactsDelete => "facts_delete",
             Self::NoteClear => "note_clear",
+            Self::FactsConvert => "facts_convert",
+        }
+    }
+
+    /// The command a decision row records, read back from its stored text — the inverse of
+    /// [`DecisionCommand::as_str`]; `None` for text no command of this version writes.
+    pub fn from_recorded(text: &str) -> Option<Self> {
+        use strum::IntoEnumIterator;
+        Self::iter().find(|command| command.as_str() == text)
+    }
+
+    /// What this command puts in a decision row's receipt columns.
+    pub fn receipt_columns(self) -> ReceiptColumns {
+        match self {
+            Self::Scan
+            | Self::Apply
+            | Self::ExcludeSet
+            | Self::ExcludeClear
+            | Self::ExcludeDuplicates
+            | Self::ExcludeSetObject
+            | Self::ExcludeClearObject => ReceiptColumns::Receipt,
+            Self::RootsRetire => ReceiptColumns::ArtifactPointer,
+            Self::ClusterGenerate
+            | Self::ClusterRefresh
+            | Self::RootsRm
+            | Self::RootsSuspend
+            | Self::RootsUnsuspend
+            | Self::ImportFacts
+            | Self::Prune
+            | Self::FactsDelete
+            | Self::NoteClear
+            | Self::FactsConvert => ReceiptColumns::Never,
         }
     }
 }
@@ -77,6 +121,16 @@ impl DecisionStatus {
             Self::Refused => "refused",
         }
     }
+}
+
+/// The latest decision that acted on a fact key: which one, by which command (its stored
+/// text), and how many facts the key held after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyDecision {
+    pub id: i64,
+    pub command: String,
+    /// `None` where the row records no count — never read as zero.
+    pub remaining: Option<u64>,
 }
 
 /// A decision record — what happened, when, why.
@@ -140,6 +194,19 @@ mod tests {
         assert_eq!(DecisionCommand::Prune.as_str(), "prune");
         assert_eq!(DecisionCommand::FactsDelete.as_str(), "facts_delete");
         assert_eq!(DecisionCommand::NoteClear.as_str(), "note_clear");
+        assert_eq!(DecisionCommand::FactsConvert.as_str(), "facts_convert");
+    }
+
+    #[test]
+    fn from_recorded_is_the_inverse_of_as_str() {
+        use strum::IntoEnumIterator;
+        for command in DecisionCommand::iter() {
+            assert_eq!(
+                DecisionCommand::from_recorded(command.as_str()),
+                Some(command)
+            );
+        }
+        assert_eq!(DecisionCommand::from_recorded("not_a_command"), None);
     }
 
     #[test]
@@ -162,6 +229,7 @@ mod tests {
             DecisionCommand::Prune,
             DecisionCommand::FactsDelete,
             DecisionCommand::NoteClear,
+            DecisionCommand::FactsConvert,
         ];
         let strings: HashSet<&str> = all.iter().map(|c| c.as_str()).collect();
         assert_eq!(strings.len(), all.len());

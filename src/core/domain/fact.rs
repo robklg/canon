@@ -51,6 +51,21 @@ impl FactType {
         }
     }
 
+    /// The type's noun, for one value or for many: `a number`/`numbers`, `a time`/`times`,
+    /// `a path`/`paths`, and `text` for both — vocabulary beside [`FactType::as_str`], which a
+    /// statement about a value and its type is built from.
+    pub fn noun(self, n: Count) -> &'static str {
+        match (self, n) {
+            (FactType::Text, Count::One | Count::Many) => "text",
+            (FactType::Num, Count::One) => "a number",
+            (FactType::Num, Count::Many) => "numbers",
+            (FactType::Time, Count::One) => "a time",
+            (FactType::Time, Count::Many) => "times",
+            (FactType::Path, Count::One) => "a path",
+            (FactType::Path, Count::Many) => "paths",
+        }
+    }
+
     /// A stored type read from a word a user typed: the printed words, and quietly the
     /// older spellings `num` and `datetime`, which are accepted and never printed. Never
     /// `path` — a path is derived, so no stored fact holds one.
@@ -60,6 +75,24 @@ impl FactType {
             "number" | "num" => Some(FactType::Num),
             "time" | "datetime" => Some(FactType::Time),
             _ => None,
+        }
+    }
+}
+
+/// How many things a word speaks of: one, or any other number — which decides a noun's form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Count {
+    One,
+    Many,
+}
+
+impl Count {
+    /// The count's form: one for exactly 1, many for any other number, 0 included.
+    pub fn of(n: u64) -> Count {
+        if n == 1 {
+            Count::One
+        } else {
+            Count::Many
         }
     }
 }
@@ -183,6 +216,39 @@ impl<T> Stored<T> {
             Stored::Unreadable => Stored::Unreadable,
         }
     }
+}
+
+/// **A key's census**: every fact of the key — the row set its type is read from — and every
+/// source those facts sit on, whatever the source's presence, root or role.
+#[derive(Debug, Clone, Default)]
+pub struct KeyCensus {
+    pub facts: Vec<CensusFact>,
+    pub sources: Vec<CensusSource>,
+}
+
+/// One fact of a key, as the census reads it.
+#[derive(Debug, Clone)]
+pub struct CensusFact {
+    pub id: i64,
+    pub on: FactOn,
+    pub value: Stored<FactValue>,
+    /// The content's hash, for a fact stored on the content: what names content no source
+    /// holds.
+    pub object_hash: Option<String>,
+}
+
+/// Where a fact is stored: on a source (its id), or on the content (its object's id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactOn {
+    Source(i64),
+    Content(i64),
+}
+
+/// A source a key's facts sit on, and whether its file was present at the last scan.
+#[derive(Debug, Clone)]
+pub struct CensusSource {
+    pub source: super::source::Source,
+    pub present: bool,
 }
 
 /// A source's facts as one batch fetch reads them: every readable row, on the source and on its
@@ -332,6 +398,23 @@ mod tests {
         for refused in ["path", "Number", "integer", ""] {
             assert_eq!(FactType::parse_word(refused), None, "{refused:?}");
         }
+    }
+
+    #[test]
+    fn every_type_has_a_noun_for_one_and_for_many() {
+        let expected = [
+            (FactType::Text, "text", "text"),
+            (FactType::Num, "a number", "numbers"),
+            (FactType::Time, "a time", "times"),
+            (FactType::Path, "a path", "paths"),
+        ];
+        for (t, one, many) in expected {
+            assert_eq!(t.noun(Count::One), one, "{t}");
+            assert_eq!(t.noun(Count::Many), many, "{t}");
+        }
+        assert_eq!(Count::of(1), Count::One);
+        assert_eq!(Count::of(0), Count::Many);
+        assert_eq!(Count::of(2), Count::Many);
     }
 
     #[test]

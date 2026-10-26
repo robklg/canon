@@ -22,8 +22,8 @@ use crate::core::domain::time::now_epoch_secs;
 use crate::core::repo::{self, Connection};
 use crate::expr::CONTENT_HASH;
 use crate::facts::domain::{
-    decide, import_key, is_content_fact, keys_named_twice, reserved_name_cause, Disposition,
-    JsonFact, SkipCause,
+    counted, decide, import_key, is_content_fact, keys_named_twice, plural, reserved_name_cause,
+    Disposition, JsonFact, SkipCause,
 };
 use crate::facts::repo as facts_repo;
 
@@ -175,11 +175,6 @@ fn summary_class(cause: &SkipCause) -> Option<(u8, &'static str, &'static str)> 
     })
 }
 
-/// `n` with its unit, singular for one.
-fn counted(n: u64, one: &str, many: &str) -> String {
-    format!("{} {}", format_count(n), if n == 1 { one } else { many })
-}
-
 impl ImportStats {
     /// Add a committed batch's counts.
     pub fn add(&mut self, other: ImportStats) {
@@ -259,9 +254,7 @@ impl ImportStats {
             }
             let parts: Vec<String> = by_class
                 .values()
-                .map(|&(n, one, many)| {
-                    format!("{} {}", format_count(n), if n == 1 { one } else { many })
-                })
+                .map(|&(n, one, many)| counted(n, one, many))
                 .collect();
             clauses.push(format!(
                 "skipped {}: {}",
@@ -298,11 +291,7 @@ impl ImportStats {
             format!(
                 "{} (the content already had a value for {})",
                 counted(self.facts_dropped, "fact dropped", "facts dropped"),
-                if self.facts_dropped == 1 {
-                    "its key"
-                } else {
-                    "their key"
-                }
+                plural(self.facts_dropped, "its key", "their key")
             )
         });
         match (self.facts_moved > 0, dropped) {

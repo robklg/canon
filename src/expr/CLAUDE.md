@@ -11,7 +11,7 @@ needs restating somewhere else, that is the signal something belongs in this fac
 
 **Modules**: `domain/key`, `domain/read`, `domain/problem`, `domain/transform`,
 `domain/pattern`, `domain/vantage`, `domain/filter`, `domain/glob`, `domain/bind`, `domain/print`,
-`domain/cache`, `domain/value`, `domain/alias`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
+`domain/cache`, `domain/value`, `domain/alias`, `domain/statement`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
 `ops/value`, `ops/notes`, `repo`.
 
 ## Strata
@@ -23,7 +23,7 @@ put through. `pattern` reads, checks and evaluates the shaping half — see A pa
 `vantage` owns the one rule that half cannot answer per source — see The scope vantage below. `filter` is the asking
 half: the syntax tree the reader builds and the comparisons it reduces to. `glob` is a glob's
 own grammar and its matcher. `bind` reads each clause's value as its key's type — the modifier table, the
-input types, the refusal — and `print` is the printing rule. `cache`
+input types, the refusal — and `print` is the printing rule. `statement` is the statement grammar — see The statement grammar below. `cache`
 is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
 because putting a return type in the layer above the function that returns it is a
 repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` checks
@@ -219,6 +219,24 @@ here (`bucket_label`, `is_plain_bucket_label`, `threshold_bucket_labels`), the m
 only a `BucketRange`, so a report, a rejection and a directory name say one label. **Where it does
 not apply**: a `facts` row and a pattern's directory name print text as it is, bare.
 
+## The statement grammar
+
+`domain/statement.rs` is the one way to state a fact about a value and its type: a `Statement`
+is a `Subject`, `is` or `are`, and a `Complement`, or a subject and `cannot be` and a participle.
+The verb comes from the subject's count alone, and no other verb can be written. A value subject
+prints through the printing rule and a key subject through `printed_key`, so no caller prints
+either another way. The type nouns and the loss names are core's (`FactType::noun`, `Loss::name`).
+Where the problem sits and who fixes it stay the caller's: what can be done about a type — that
+it cannot change, a route through another type, a modifier that asks without changing anything
+stored — is help beside a statement, never one. Sentences about acts and their history are
+outside it too.
+Pins: `every_complement_reads_in_both_forms` and
+`a_value_subject_prints_through_the_printing_rule`. **Where it does not apply**: these
+statements about a value and its type are spelled in their own files and are not built from it —
+`Gives::statement` in `domain/bind.rs`, `mixed_type_statement` and `mixed_type_way_out` in
+`domain/print.rs`, the modifier no-value reasons in `domain/transform.rs`, the pattern statements in
+`ops/pattern.rs`, `import-facts`' skip lines, and the number and time reading errors in core.
+
 ## The scope vantage
 
 `{scope.rel_path}` means *the shape I was looking at*. What it measures from is the **vantage**:
@@ -358,7 +376,7 @@ the hash the lock entry recorded. Pinned per reader.
 **The key-name law**: every command taking a key's name reads it through `read_key_name`
 (`domain/key.rs`) — the source fact, built-in key and content fact it names — and applies its
 own rule: an expression and `--emit` take them in that order, import and `facts delete` the
-content reading alone. A consumer then decides by the key read (`ParsedFactKey::key`), never
+content reading alone, and `facts convert` the content reading with its own refusals. A consumer then decides by the key read (`ParsedFactKey::key`), never
 the text, since quoting never changes which key. Verifier
 `a_key_is_read_by_the_name_import_stored_it_under` (`facts/domain.rs`); `--emit`'s leg is in
 `worklist/ops.rs`.

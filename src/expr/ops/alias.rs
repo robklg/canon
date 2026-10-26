@@ -40,6 +40,24 @@ pub(in crate::expr) fn load_aliases(path: &Path) -> Result<CheckedAliases> {
     Ok(check_aliases(path, true, raw)?)
 }
 
+/// What the aliases file says about a key: the aliases naming it, or that the file could not
+/// be checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasesNaming {
+    Names(Vec<String>),
+    FileHasErrors,
+}
+
+/// **The aliases naming a stored key** — awareness for a command about to change the key, never
+/// a gate: a file that cannot be read or checked is `FileHasErrors`, for the caller to state; a
+/// file that is not there names nothing.
+pub fn aliases_naming_key(canon_home: &Path, key: &str) -> AliasesNaming {
+    match load_aliases(&aliases_file(canon_home)) {
+        Ok(aliases) => AliasesNaming::Names(aliases.naming_key(key)),
+        Err(_) => AliasesNaming::FileHasErrors,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +155,34 @@ mod tests {
         assert!(
             text.contains("Caused by:\n    stream did not contain valid UTF-8"),
             "{text}"
+        );
+    }
+
+    /// A key alias reading as the key and a filter alias naming it under `NOT` are named; an
+    /// alias naming another key is not; a broken file is stated, never an error; no file names
+    /// nothing.
+    #[test]
+    fn the_aliases_naming_a_key() {
+        let (dir, _path) = file(
+            b"taken = \"DateTimeOriginal\"\nundated = \"NOT DateTimeOriginal? AND source.ext=jpg\"\nmake = \"Make\"\nfull = \"content.DateTimeOriginal|year\"\n",
+        );
+        assert_eq!(
+            aliases_naming_key(dir.path(), "content.DateTimeOriginal"),
+            AliasesNaming::Names(vec!["taken".into(), "undated".into(), "full".into()])
+        );
+        assert_eq!(
+            aliases_naming_key(dir.path(), "content.Width"),
+            AliasesNaming::Names(Vec::new())
+        );
+        let (broken, _path) = file(b"bad = \"a AND\"\n");
+        assert_eq!(
+            aliases_naming_key(broken.path(), "content.DateTimeOriginal"),
+            AliasesNaming::FileHasErrors
+        );
+        let none = tempfile::tempdir().unwrap();
+        assert_eq!(
+            aliases_naming_key(none.path(), "content.DateTimeOriginal"),
+            AliasesNaming::Names(Vec::new())
         );
     }
 }

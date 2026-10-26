@@ -912,6 +912,29 @@ const LAWS: &[Law] = &[
         authority: Authority::Recognised,
         record: "2026-10-25",
     },
+    Law {
+        // A key's type is read from all of its fact rows, wherever they sit — suspended roots,
+        // files no longer present, content no file holds — and only import and the conversion
+        // set it, each inside its own write transaction. A key with no facts has no type. The
+        // facility reads the same rows to bind a filter.
+        name: "one type per key",
+        owner: "core/repo/fact.rs",
+        verifier: "the_conversion_leaves_one_type_wherever_the_facts_sit",
+        reach: Reach::Unit("facts"),
+        authority: Authority::Distilled,
+        record: "2026-09-26",
+    },
+    Law {
+        // Every statement about a value and its type is a subject, `is` or `are`, and a
+        // complement, or a subject and `cannot be`: the verb agrees with the subject's count,
+        // and a value or key subject prints through the printing rule.
+        name: "statement grammar",
+        owner: "expr/domain/statement.rs",
+        verifier: "every_complement_reads_in_both_forms",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Recognised,
+        record: "2026-10-25",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

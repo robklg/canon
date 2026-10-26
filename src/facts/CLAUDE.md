@@ -1,7 +1,8 @@
 # facts/ — fact distribution, maintenance, and JSONL import
 
 `canon facts` (distribution and coverage reporting), `canon facts delete`/`prune-*`
-(maintenance), and `canon import-facts` (JSONL import). A leaf subsystem: no sibling
+(maintenance), `canon facts convert` (a key's type conversion), and `canon import-facts` (JSONL
+import). A leaf subsystem: no sibling
 reaches in, and it reaches no sibling.
 
 **Strata**: `domain.rs` — the import-vocabulary half of the fact noun (`ContentFactOnSource`,
@@ -11,8 +12,9 @@ and `decide`, which fits one value to its key's type as a `Disposition` — stor
 for a `SkipCause`. Text is read through `core::domain::conversion`'s table, times through
 `core::domain::time::reading`, never as epoch seconds. `repo.rs` — the SQL only facts
 performs: upsert, key counting, the fact-promotion reads and writes,
-counting and deleting by criteria, and the stale/excluded prunes, plus the private
-`value_type_clause`. `ops/report.rs` — the read-only distribution and enumeration
+counting and deleting by criteria, the stale/excluded prunes, and the conversion's writes by
+fact id, plus the private `value_type_clause`. `domain/convert.rs`, `ops/convert.rs` and
+`cli/convert.rs` — `canon facts convert`, in the same three strata. `ops/report.rs` — the read-only distribution and enumeration
 computations (`compute_all_keys`, `compute_distribution`, `compute_grouped_distribution`,
 `compute_root_distribution`). `ops/maintain.rs` — the delete and prune plan/execute
 pairs. `ops/import.rs` — `import_batch`, one batch of records, and the summary's
@@ -25,7 +27,16 @@ composition. `cli.rs` — the `canon facts` command surface. `cli/import.rs` —
 facts alone speaks lives here. `ops/report.rs` reads values through `expr::fetch_source_values`,
 one per source. The key listing's Type is the key's (`core::repo::fact::key_types`), never the scope's.
 
-**Four of this subsystem's five decision sites arm their recorder; `execute_delete` cannot.**
+**The conversion writes exactly the key's row set.** It reads every fact of the key through
+`core::repo::fact::key_census`, the row set `key_types` reads, and a source's value through
+`expr::source_value`. The act takes the write lock (`IMMEDIATE`) first and plans and checks
+`--allow` again inside it, so a count that changed since the preview refuses before anything is
+written. Its recorder starts on the transaction, so a refusal or a failure rolls the decision row
+back with the writes, as `exclude`'s does. `the_conversion_leaves_one_type_wherever_the_facts_sit`
+pins the write set.
+
+**Four of this subsystem's six decision sites arm their recorder, the conversion's rolls back
+with its transaction, and `execute_delete` can do neither.**
 An armed recorder holds a shared connection for the whole run, and the delete needs a mutable
 one — `delete_by_criteria` fills a temp table through `core::repo::db::populate_temp_sources`,
 which opens a transaction of its own. Narrowing that helper would trade the compile-time
@@ -74,9 +85,11 @@ file's own path, so a single entry naming one of them leaves the other unmatched
 fails the build. Repairing one call site deletes that file's entry, never both.
 
 **Barrel** (`facts.rs`), `main.rs`-facing: `run`, `import_run`, `delete_facts`,
-`DeleteOptions`, `prune_stale`, `prune_orphaned_objects`, `prune_excluded_facts`,
-plus `compute_distribution`, which the source-value law's verifier reads. `cli.rs` declares `pub(super) mod import;` and `ops.rs` declares
-`report`/`maintain`/`import` the same way, so nothing below the front door is reachable
+`DeleteOptions`, `prune_stale`, `prune_orphaned_objects`, `prune_excluded_facts`, `convert`,
+`ConvertOptions`, `Target` and `ConvertRefused`,
+plus `compute_distribution`, which the source-value law's verifier reads, and `plan_convert`,
+which the contentless-law canary reads. `cli.rs` declares `pub(super) mod import;` and
+`convert` the same way, and `ops.rs` declares `report`/`maintain`/`import`/`convert` the same way, so nothing below the front door is reachable
 from outside it. No repo-tier item is on the barrel: nothing else reaches facts.
 
 **The prunes consult no door.** `prune-stale`, `prune-orphaned-objects` and `prune-excluded-facts`

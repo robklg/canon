@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthStr;
 
+use super::bind::stored_keys;
 use super::filter::Expr;
 use super::key::{is_name_char, InputKey};
 use super::problem::{cut, Fix, Place, Problem};
@@ -88,6 +89,24 @@ impl CheckedAliases {
     pub(in crate::expr) fn get(&self, name: &str) -> Option<(&str, &AliasValue)> {
         self.entry(name)
             .map(|entry| (entry.value.as_str(), &entry.reading))
+    }
+
+    /// The names of the aliases whose value names the stored key `key`, in the file's order: a
+    /// key alias whose key is it, a filter alias whose tree reads it, under `NOT` included —
+    /// the keys binding reads ([`stored_keys`]), never the value's text.
+    pub(in crate::expr) fn naming_key(&self, key: &str) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| match &entry.reading {
+                AliasValue::Key(input) => input.base == key,
+                AliasValue::Filter(expr) => {
+                    let mut keys = Vec::new();
+                    stored_keys(expr, &mut keys);
+                    keys.iter().any(|named| named == key)
+                }
+            })
+            .map(|entry| entry.name.clone())
+            .collect()
     }
 
     fn entry(&self, name: &str) -> Option<&CheckedEntry> {

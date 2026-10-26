@@ -26,17 +26,7 @@ pub enum Converted {
     /// The same value, in the target type.
     Unchanged(FactValue),
     /// The nearest value the target type holds, and what the reading dropped.
-    Lossy(
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "import reads only what is lost; the nearest value is what a conversion stores"
-            )
-        )]
-        FactValue,
-        Loss,
-    ),
+    Lossy(FactValue, Loss),
     /// The value has no reading as the target type.
     DoesNotRead(NotRead),
 }
@@ -50,6 +40,19 @@ pub enum Loss {
     LeadingZero,
     /// The fraction ends in a zero (`2.50`).
     TrailingZero,
+}
+
+impl Loss {
+    /// What is lost, as a noun phrase — `a leading zero`, `a trailing decimal zero` — beside
+    /// the noun as `FactType::as_str` is. `None` for [`Loss::NotExact`]: what it loses is the
+    /// number itself, so a statement says that whole rather than naming a part.
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Loss::NotExact => None,
+            Loss::LeadingZero => Some("a leading zero"),
+            Loss::TrailingZero => Some("a trailing decimal zero"),
+        }
+    }
 }
 
 /// Why a value has no reading as the target type.
@@ -293,5 +296,12 @@ mod tests {
                 Err(NotAConversion::PathIsDerived)
             ));
         }
+    }
+
+    #[test]
+    fn every_loss_has_its_name_or_is_its_own_statement() {
+        assert_eq!(Loss::LeadingZero.name(), Some("a leading zero"));
+        assert_eq!(Loss::TrailingZero.name(), Some("a trailing decimal zero"));
+        assert_eq!(Loss::NotExact.name(), None);
     }
 }

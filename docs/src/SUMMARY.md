@@ -42,6 +42,7 @@
     - [`apply`](commands/archive/apply.md)
   - [Maintenance](./commands/maintain/index.md)
     - [`facts delete`](commands/maintain/facts-delete.md)
+    - [`facts convert`](commands/maintain/facts-convert.md)
     - [`prune`](commands/maintain/prune.md)
     - [`ledger reindex`](commands/maintain/ledger-reindex.md)
 

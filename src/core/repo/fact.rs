@@ -35,7 +35,10 @@ use jiff::{SignedDuration, Timestamp};
 use rusqlite::types::Value as SqlValue;
 
 use super::db::{populate_temp_sources, Connection};
-use crate::core::domain::fact::{FactEntry, FactType, FactValue, KeyTypes, SourceFacts, Stored};
+use crate::core::domain::fact::{
+    CensusFact, CensusSource, FactEntry, FactOn, FactType, FactValue, KeyCensus, KeyTypes,
+    SourceFacts, Stored,
+};
 use crate::core::domain::time::value::{Precision, TimeForm, TimeValue};
 
 // Source-keyed fetches fill a temp table (populate_temp_sources) rather than chunk an IN
@@ -160,6 +163,113 @@ fn key_types_sql(n: usize) -> String {
          WHERE key IN ({placeholders})
          GROUP BY key, value_time IS NULL, value_num IS NULL"
     )
+}
+
+/// Ids per IN list in the census's source and hash fetches.
+const CENSUS_CHUNK: usize = super::source::BATCH_SIZE;
+
+/// **A key's census** — the same row set [`key_types`] reads (`WHERE key = ?`, no join), every
+/// fact read whole, and every source those facts sit on: by source id for a fact stored on a
+/// source, by object id for one stored on the content — at any presence, on any root, of any
+/// role, each with its presence. The census reads tombstones by name; it is the one reader of
+/// sources here that does. A content fact carries its object's hash, so content no source
+/// holds can still be named.
+pub fn key_census(conn: &Connection, key: &str) -> Result<KeyCensus> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, entity_type, entity_id, {FACT_VALUE_COLUMNS} FROM facts WHERE key = ?"
+    ))?;
+    let rows = stmt.query_map([key], |row| {
+        let id: i64 = row.get(0)?;
+        let entity_type: String = row.get(1)?;
+        let entity_id: i64 = row.get(2)?;
+        let value = fact_value_at(row, 3)?;
+        let on = if FactEntry::sits_on_source(&entity_type) {
+            FactOn::Source(entity_id)
+        } else {
+            FactOn::Content(entity_id)
+        };
+        Ok((id, on, value))
+    })?;
+    let mut read = Vec::new();
+    for row in rows {
+        read.push(row?);
+    }
+
+    let mut source_ids: Vec<i64> = Vec::new();
+    let mut object_ids: Vec<i64> = Vec::new();
+    for (_, on, _) in &read {
+        match on {
+            FactOn::Source(id) => source_ids.push(*id),
+            FactOn::Content(id) => object_ids.push(*id),
+        }
+    }
+    source_ids.sort_unstable();
+    source_ids.dedup();
+    object_ids.sort_unstable();
+    object_ids.dedup();
+
+    let hashes = object_hashes(conn, &object_ids)?;
+    let mut sources = census_sources(conn, "s.id", &source_ids)?;
+    sources.extend(census_sources(conn, "s.object_id", &object_ids)?);
+    sources.sort_by_key(|s| s.source.id);
+    sources.dedup_by_key(|s| s.source.id);
+
+    let facts = read
+        .into_iter()
+        .map(|(id, on, value)| CensusFact {
+            id,
+            on,
+            value,
+            object_hash: match on {
+                FactOn::Content(object) => hashes.get(&object).cloned(),
+                FactOn::Source(_) => None,
+            },
+        })
+        .collect();
+    Ok(KeyCensus { facts, sources })
+}
+
+/// Every source whose `column` is one of `ids`, at any presence, with its presence.
+fn census_sources(conn: &Connection, column: &str, ids: &[i64]) -> Result<Vec<CensusSource>> {
+    use super::source::{source_from_row, SOURCE_COLUMNS, SOURCE_FROM};
+    let mut found = Vec::new();
+    for chunk in ids.chunks(CENSUS_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT {SOURCE_COLUMNS}, s.present AS present {SOURCE_FROM} WHERE {column} IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok(CensusSource {
+                source: source_from_row(row)?,
+                // By the name the select gives it, wherever `SOURCE_COLUMNS` ends.
+                present: row.get("present")?,
+            })
+        })?;
+        for row in rows {
+            found.push(row?);
+        }
+    }
+    Ok(found)
+}
+
+/// Each object's content hash, by object id.
+fn object_hashes(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>> {
+    let mut hashes = HashMap::new();
+    for chunk in ids.chunks(CENSUS_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, hash_value FROM objects WHERE id IN ({placeholders})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, hash) = row?;
+            hashes.insert(id, hash);
+        }
+    }
+    Ok(hashes)
 }
 
 /// The value columns of `facts`, in the order [`fact_value_at`] reads them and
@@ -677,5 +787,94 @@ mod tests {
         assert!(all[&2].unreadable_on_content.is_empty());
         assert!(all[&3].entries.is_empty());
         assert_eq!(all[&3].unreadable_on_content, ["content.T"]);
+    }
+
+    /// **The census reaches every fact of the key**, and every source they sit on: on an open
+    /// root, a suspended root, a file no longer present, an archive copy, an excluded source,
+    /// content no source holds, and a source's own fact behind its content's.
+    #[test]
+    fn the_census_reaches_every_fact_of_the_key() {
+        let conn = setup_test_db();
+        insert_root(&conn, 1, "/open");
+        insert_root(&conn, 2, "/parked");
+        insert_root(&conn, 3, "/archive");
+        conn.execute_batch(
+            "UPDATE roots SET suspended = 1 WHERE id = 2;
+             UPDATE roots SET role = 'archive' WHERE id = 3;",
+        )
+        .unwrap();
+        insert_object(&conn, 100, "held");
+        insert_object(&conn, 200, "orphan");
+        insert_source(&conn, 1, 1, "open", None);
+        insert_source(&conn, 2, 2, "parked", None);
+        insert_source(&conn, 3, 1, "gone", None);
+        insert_source(&conn, 4, 3, "copy", None);
+        insert_source(&conn, 5, 1, "excluded", None);
+        insert_source(&conn, 6, 1, "two-facts", Some(100));
+        insert_source(&conn, 7, 1, "no-fact", None);
+        conn.execute_batch(
+            "UPDATE sources SET present = 0 WHERE id = 3;
+             UPDATE sources SET excluded = 1 WHERE id = 5;",
+        )
+        .unwrap();
+        for id in 1..=6 {
+            insert_fact_text(&conn, "source", id, "content.K", "v");
+        }
+        insert_fact_text(&conn, "object", 100, "content.K", "w");
+        insert_fact_text(&conn, "object", 200, "content.K", "x");
+        insert_fact_text(&conn, "source", 7, "content.Other", "y");
+
+        let census = key_census(&conn, "content.K").unwrap();
+        assert_eq!(census.facts.len(), 8);
+        let mut on: Vec<FactOn> = census.facts.iter().map(|f| f.on).collect();
+        on.sort_by_key(|o| format!("{o:?}"));
+        assert!(on.contains(&FactOn::Content(200)));
+        let orphan = census
+            .facts
+            .iter()
+            .find(|f| f.on == FactOn::Content(200))
+            .unwrap();
+        assert_eq!(orphan.object_hash.as_deref(), Some("orphan"));
+        let sources: Vec<(i64, bool)> = census
+            .sources
+            .iter()
+            .map(|s| (s.source.id, s.present))
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                (1, true),
+                (2, true),
+                (3, false),
+                (4, true),
+                (5, true),
+                (6, true)
+            ]
+        );
+    }
+
+    /// The census across chunk boundaries: 2,500 facts on sources and 2,500 on content, each
+    /// source fetch crossing two boundaries of its IN lists.
+    #[test]
+    fn the_census_reads_past_every_chunk_boundary() {
+        let mut conn = setup_test_db();
+        insert_root(&conn, 1, "/r");
+        let tx = conn.transaction().unwrap();
+        for i in 1..=2_500i64 {
+            insert_source(&tx, i, 1, &format!("own{i}"), None);
+            insert_fact_text(&tx, "source", i, "content.K", "v");
+            let object = 10_000 + i;
+            insert_object(&tx, object, &format!("h{i}"));
+            insert_source(&tx, 5_000 + i, 1, &format!("held{i}"), Some(object));
+            insert_fact_text(&tx, "object", object, "content.K", "w");
+        }
+        tx.commit().unwrap();
+        let census = key_census(&conn, "content.K").unwrap();
+        assert_eq!(census.facts.len(), 5_000);
+        assert_eq!(census.sources.len(), 5_000);
+        assert!(census
+            .facts
+            .iter()
+            .all(|f| matches!(f.on, FactOn::Source(_)) || f.object_hash.is_some()));
     }
 }

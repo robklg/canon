@@ -38,9 +38,8 @@ pub fn decision_family(command: &str) -> DecisionFamily {
         "exclude_clear" | "exclude_clear_object" => DecisionFamily::Restore,
         "scan" => DecisionFamily::Observe,
         "cluster_generate" | "cluster_refresh" | "roots_rm" | "roots_retire" | "roots_suspend"
-        | "roots_unsuspend" | "import_facts" | "prune" | "facts_delete" | "note_clear" => {
-            DecisionFamily::Other
-        }
+        | "roots_unsuspend" | "import_facts" | "prune" | "facts_delete" | "note_clear"
+        | "facts_convert" => DecisionFamily::Other,
         _ => DecisionFamily::Unrecognized,
     }
 }
@@ -211,6 +210,7 @@ mod tests {
             (DecisionCommand::Prune, DecisionFamily::Other),
             (DecisionCommand::FactsDelete, DecisionFamily::Other),
             (DecisionCommand::NoteClear, DecisionFamily::Other),
+            (DecisionCommand::FactsConvert, DecisionFamily::Other),
         ];
         for (cmd, family) in expected {
             assert_eq!(decision_family(cmd.as_str()), family, "{}", cmd.as_str());

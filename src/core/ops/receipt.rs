@@ -830,6 +830,47 @@ mod tests {
         }
     }
 
+    /// **What each command puts in its receipt columns**, from the rule rather than a run: the
+    /// commands some `ReceiptKind` writes for are exactly the `Receipt` ones (the match below
+    /// is exhaustive, so a new kind names its command), retirement fills the columns with its
+    /// book's pointer, and every other command writes none.
+    #[test]
+    fn receipt_columns_match_what_each_command_records() {
+        use crate::core::domain::decision::{DecisionCommand, ReceiptColumns};
+        use strum::IntoEnumIterator;
+        let written_by = |kind: ReceiptKind| match kind {
+            ReceiptKind::Apply(_) => DecisionCommand::Apply,
+            ReceiptKind::ExcludeSet => DecisionCommand::ExcludeSet,
+            ReceiptKind::ExcludeDuplicates => DecisionCommand::ExcludeDuplicates,
+            ReceiptKind::ExcludeObject => DecisionCommand::ExcludeSetObject,
+            ReceiptKind::Restore => DecisionCommand::ExcludeClear,
+            ReceiptKind::RestoreObject => DecisionCommand::ExcludeClearObject,
+            ReceiptKind::Deletion => DecisionCommand::Scan,
+        };
+        let with_receipts: Vec<DecisionCommand> = [
+            ReceiptKind::Apply(OriginDisposition::Retained),
+            ReceiptKind::ExcludeSet,
+            ReceiptKind::ExcludeDuplicates,
+            ReceiptKind::ExcludeObject,
+            ReceiptKind::Restore,
+            ReceiptKind::RestoreObject,
+            ReceiptKind::Deletion,
+        ]
+        .into_iter()
+        .map(written_by)
+        .collect();
+        for command in DecisionCommand::iter() {
+            let expected = if with_receipts.contains(&command) {
+                ReceiptColumns::Receipt
+            } else if command == DecisionCommand::RootsRetire {
+                ReceiptColumns::ArtifactPointer
+            } else {
+                ReceiptColumns::Never
+            };
+            assert_eq!(command.receipt_columns(), expected, "{}", command.as_str());
+        }
+    }
+
     /// Origin disposition is the carried value spoken in its registered word;
     /// only apply carries one at all. Which transfer produces which disposition
     /// is the caller's knowledge, asserted where that mapping lives.

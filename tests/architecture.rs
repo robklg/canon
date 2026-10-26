@@ -1893,6 +1893,11 @@ const RECORDER_START_SITES: &[(&str, usize, Settlement)] = &[
         Settlement::RollsBackWithTransaction,
     ),
     ("facts/cli/import.rs", 1, Settlement::Armed),
+    (
+        "facts/ops/convert.rs",
+        1,
+        Settlement::RollsBackWithTransaction,
+    ),
     ("facts/ops/maintain.rs", 3, Settlement::Armed),
     ("facts/ops/maintain.rs", 1, Settlement::OwnWrapper),
     ("notes/ops.rs", 1, Settlement::RollsBackWithTransaction),
@@ -2459,6 +2464,9 @@ const FATE_WORD_EXEMPT: &[(&str, &str, usize)] = &[
     // the `--where` status-predicate vocabulary (`archived?`/`excluded?`)
     ("expr/domain/filter.rs", "archived", 1),
     ("expr/domain/filter.rs", "excluded", 1),
+    // `facts convert --list`'s place mark — where a source stands (no longer
+    // present, suspended, archive copy, excluded), never a decision's transition
+    ("facts/cli/convert.rs", "excluded", 1),
     // the standing word (`archived`/`present` — a counterpart's or a
     // member's standing), never a decision's transition
     ("sweep/cli.rs", "archived", 2),
@@ -3952,6 +3960,7 @@ mod source {
                 "resolve_fact_value",
                 "source_row_value",
                 "SourceAttributes",
+                "source_value",
                 "source_values",
                 "fetch_source_values",
                 "fetch_named_values",
@@ -3972,6 +3981,15 @@ mod source {
                 "mixed_type_way_out",
                 "convert_command",
                 "printed_key",
+                "printed_value",
+                "Arriving",
+                "Statement",
+                "Subject",
+                "Complement",
+                "Noun",
+                "type_words",
+                "aliases_naming_key",
+                "AliasesNaming",
             ],
         ),
         ("ls", &["run", "show_duplicates"]),
@@ -4120,6 +4138,11 @@ mod source {
             &[
                 "run",
                 "import_run",
+                "convert",
+                "ConvertOptions",
+                "ConvertRefused",
+                "Target",
+                "plan_convert",
                 "delete_facts",
                 "DeleteOptions",
                 "prune_stale",

@@ -393,13 +393,40 @@ fn an_explicit_opt_out_still_wins_over_a_refusal() {
 /// and most of them never write a receipt under any circumstance. An import
 /// whose records all went stale reads exactly like a failed apply in the
 /// counts — but nothing was ever going to be transferred, so saying so would
-/// name work the command does not do.
+/// name work the command does not do. An import writes no receipts, and that
+/// is what its row says.
 #[test]
-fn a_zero_completed_import_still_takes_the_generic_arm() {
+fn a_zero_completed_import_says_its_command_writes_none() {
     let conn = open_in_memory_for_test();
     let stale = insert_zero_transfer_decision(&conn, "import_facts", 400, 12);
 
     let show = compute_show(&conn, stale, None).unwrap().unwrap();
+    assert_eq!(
+        show.receipt_absence.as_deref(),
+        Some("no receipt (this command writes none)")
+    );
+}
+
+/// **A command that writes no receipts says so first**: above `--no-receipt`, since a flag
+/// suppressing a receipt the command never writes is no reason at all. A command text this
+/// version does not know falls to the arms that read the row.
+#[test]
+fn a_command_that_writes_no_receipts_says_so_first() {
+    let conn = open_in_memory_for_test();
+    let flagged = insert_decision_full(
+        &conn,
+        "facts_convert",
+        700,
+        "canon --no-receipt facts convert Make --to text --yes",
+    );
+    let unknown = insert_decision_at(&conn, "reduce_sweep", 800);
+
+    let show = compute_show(&conn, flagged, None).unwrap().unwrap();
+    assert_eq!(
+        show.receipt_absence.as_deref(),
+        Some("no receipt (this command writes none)")
+    );
+    let show = compute_show(&conn, unknown, None).unwrap().unwrap();
     assert_eq!(show.receipt_absence.as_deref(), Some("no receipt recorded"));
 }
 

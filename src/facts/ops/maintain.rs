@@ -10,6 +10,8 @@ use crate::core::domain::format_count;
 use crate::core::ops::decision::{
     DecisionCounts, DecisionParams, DecisionRecorder, UnwindTerminal,
 };
+use crate::core::repo::decision::set_fact_key;
+use crate::core::repo::fact::key_types;
 use crate::core::repo::object::OrphanedStats;
 use crate::core::repo::{Connection, Db};
 use crate::expr::{select_sources, NoteUnit, SelectionNotes, SelectionParams};
@@ -149,7 +151,13 @@ pub fn execute_delete(
 ) -> Result<DeleteResult> {
     let mut recorder = decision.map(|d| DecisionRecorder::start(conn, d, None));
 
-    match delete_body(conn, entity_type, value_type, plan) {
+    let deleted = delete_body(conn, entity_type, value_type, plan);
+    // The row names the key and what it holds now, whichever way the delete went, so a key a
+    // conversion emptied earlier is never answered as that conversion's once this ran.
+    if let Some(recorder) = recorder.as_mut() {
+        record_fact_key(conn, recorder, &plan.key);
+    }
+    match deleted {
         Ok(summary) => {
             if let Some(recorder) = recorder.as_mut() {
                 recorder.complete(
@@ -181,6 +189,25 @@ pub fn execute_delete(
             }
             Err(e)
         }
+    }
+}
+
+/// Record on the decision row the key it acted on and the facts that key holds now — read from
+/// the key's row set. A failure is a warning on the recorder, never the act's.
+pub(super) fn record_fact_key(conn: &Connection, recorder: &mut DecisionRecorder, key: &str) {
+    let Some(id) = recorder.decision_id() else {
+        return;
+    };
+    let recorded = key_types(conn, &[key]).and_then(|types| {
+        let remaining = types
+            .get(key)
+            .map_or(0, |t| t.counts().iter().map(|&(_, n)| n).sum());
+        set_fact_key(conn, id, key, remaining)
+    });
+    if let Err(e) = recorded {
+        recorder.push_warning(format!(
+            "Warning: failed to record the key on the decision: {e}"
+        ));
     }
 }
 
@@ -562,7 +589,9 @@ mod tests {
         let root_id = insert_root(&conn, "/photos", "source", false);
         let obj = insert_object(&conn, "h1", false);
         let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj));
+        let s2 = insert_source(&conn, root_id, "b.jpg", None);
         crate::core::testing::insert_fact(&conn, s1, "content.Make", "Canon");
+        crate::core::testing::insert_fact(&conn, s2, "content.Make", "Nikon");
 
         let plan = plan_delete_over(&mut conn, vec![s1], "content.Make", "source", None).unwrap();
         let decision =
@@ -576,6 +605,15 @@ mod tests {
         assert_eq!(completed, 1);
         assert_eq!(summary, result.summary);
         assert!(!summary.is_empty());
+        // The row names the key and the facts it still holds: the one the delete left.
+        let (key, remaining): (String, i64) = conn
+            .query_row(
+                "SELECT fact_key, fact_key_remaining FROM decisions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((key.as_str(), remaining), ("content.Make", 1));
     }
 
     /// **The delete acts on the key the plan counted.** `Make` is read as

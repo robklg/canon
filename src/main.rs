@@ -693,6 +693,19 @@ fn value_type_word() -> impl clap::builder::TypedValueParser<Value = FactType> {
     .try_map(|word| FactType::parse_word(&word).ok_or(format!("not a type word: {word}")))
 }
 
+/// `--to`'s parser: the type words as `--value-type` reads them, and `duration`, which the
+/// conversion answers with its routes.
+fn convert_target_word() -> impl clap::builder::TypedValueParser<Value = facts::Target> {
+    use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
+    PossibleValuesParser::new([
+        PossibleValue::new("text"),
+        PossibleValue::new("number").alias("num"),
+        PossibleValue::new("time").alias("datetime"),
+        PossibleValue::new("duration"),
+    ])
+    .try_map(|word| facts::Target::parse_word(&word).ok_or(format!("not a type word: {word}")))
+}
+
 #[derive(Subcommand)]
 enum FactsAction {
     /// Delete facts by key
@@ -713,6 +726,29 @@ enum FactsAction {
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
+    },
+    /// Show what a key holds and what each type would keep, lose and remove; convert it to one type
+    Convert {
+        /// Fact key to convert (e.g., "content.DateTimeOriginal")
+        key: String,
+        /// The type to convert to: text, number or time (default: show what the key holds)
+        #[arg(long, value_name = "TYPE", value_parser = convert_target_word())]
+        to: Option<facts::Target>,
+        /// List each lossy or removed fact with its source, tab-separated
+        #[arg(long, requires = "to", conflicts_with = "yes")]
+        list: bool,
+        /// With --list: separate fields with NUL and end each record with one
+        #[arg(short = '0', long = "null", requires = "list")]
+        null: bool,
+        /// Acknowledge a cost the plan states: loss=N, removal=N (comma-separated, repeatable)
+        #[arg(long, value_delimiter = ',', requires = "to")]
+        allow: Vec<String>,
+        /// Convert (default is a dry run)
+        #[arg(long, requires = "to")]
+        yes: bool,
+        /// Reason for this operation (recorded in decision log)
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -744,7 +780,7 @@ enum RootsAction {
         /// Comment text (omit to clear)
         comment: Option<String>,
     },
-    /// Close the door on a root: kept safe, out of view, until you open it again
+    /// Close the door on a root: out of view and not acted on, until you unsuspend
     Suspend {
         /// Root specifier: id:<N> or path:<path>
         spec: String,
@@ -956,6 +992,11 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
             action: Some(RootsAction::Retire { .. }),
             ..
         } => scope::DoorChannel::Stdout,
+        // The conversion's answers stand where its read and plan print.
+        Commands::Facts {
+            action: Some(FactsAction::Convert { .. }),
+            ..
+        } => scope::DoorChannel::Stdout,
         _ => scope::DoorChannel::Stderr,
     }
 }
@@ -997,6 +1038,18 @@ fn main() -> std::process::ExitCode {
                     }
                 } else {
                     eprintln!("{refusal}");
+                }
+            } else if let Some(refusal) = err.downcast_ref::<facts::ConvertRefused>() {
+                // A conversion refused: the key's own answer, a target not reached, an
+                // emptied key — answers, stated as they stand; a name Canon knows no facts
+                // under is an error.
+                if refusal.is_answer() {
+                    match channel {
+                        scope::DoorChannel::Stdout => println!("{refusal}"),
+                        scope::DoorChannel::Stderr => eprintln!("{refusal}"),
+                    }
+                } else {
+                    eprintln!("Error: {refusal}");
                 }
             } else if let Some(refusal) = err.downcast_ref::<crate::expr::ExpressionRefused>() {
                 // A filter Canon will not run: an answer about what a key is prints as it
@@ -1267,6 +1320,26 @@ fn run(cli: Cli) -> Result<()> {
                         &config,
                         cli.no_receipt,
                     )?;
+                }
+                Some(FactsAction::Convert {
+                    key,
+                    to,
+                    list,
+                    null,
+                    allow,
+                    yes,
+                    reason,
+                }) => {
+                    let options = facts::ConvertOptions {
+                        key,
+                        to,
+                        list,
+                        null,
+                        allow,
+                        yes,
+                        reason,
+                    };
+                    facts::convert(&mut db, &options, &canon_home, &command_line, &config)?;
                 }
                 None => {
                     let filters = expr::ExpressionText::given(filters, &canon_home);

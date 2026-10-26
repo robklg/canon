@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::core::domain::decision::{Decision, DecisionCommand, DecisionStatus};
+use crate::core::domain::decision::{Decision, DecisionCommand, DecisionStatus, ReceiptColumns};
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::core::domain::root::Root;
@@ -223,7 +223,15 @@ pub fn compute_show(conn: &Connection, id: i64, cwd: Option<&str>) -> Result<Opt
         // to be written whatever the run did. The nothing-transferred arm is
         // unreachable for a refusal by construction: it needs a non-zero
         // attempted count, and a refusal records none.
-        Some(if decision.command_line.contains("--no-receipt") {
+        // A command that never fills these columns explains itself first: its row was never
+        // going to hold a receipt, so neither a flag nor its outcome is the reason. A command
+        // text this version does not know falls to the arms below.
+        let writes_none = DecisionCommand::from_recorded(&decision.command)
+            .map(DecisionCommand::receipt_columns)
+            == Some(ReceiptColumns::Never);
+        Some(if writes_none {
+            "no receipt (this command writes none)".to_string()
+        } else if decision.command_line.contains("--no-receipt") {
             "no receipt (--no-receipt)".to_string()
         } else if decision.status == DecisionStatus::Refused.as_str() {
             "no receipt (the run was refused)".to_string()

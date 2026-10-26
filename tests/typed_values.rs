@@ -2348,3 +2348,633 @@ fn a_large_integer_through_canonargs_is_skipped_never_changed() {
         [Some("1920".to_string()), Some("5".to_string())].into()
     );
 }
+
+// ============================================================================
+// canon facts convert
+// ============================================================================
+
+/// Three photos on an open root and one on a parked root, each holding `Taken` as text: a
+/// date, the empty EXIF date (twice, once behind the door) and a word; `@taken` names the key.
+fn taken_photos() -> Fixture {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD), ("c.jpg", OLD)]);
+    std::fs::create_dir_all(fx.path("park")).unwrap();
+    std::fs::write(fx.path("park/d.jpg"), "d.jpg").unwrap();
+    let run = fx.run(&["scan", "--add", "--role", "source", &fx.path_str("park")]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    fx.import(&[
+        ("a.jpg", serde_json::json!({"Taken": "2021:03:02 18:44:10"})),
+        ("b.jpg", serde_json::json!({"Taken": "0000:00:00 00:00:00"})),
+        ("c.jpg", serde_json::json!({"Taken": "misc"})),
+        ("d.jpg", serde_json::json!({"Taken": "0000:00:00 00:00:00"})),
+    ]);
+    let run = fx.run(&["roots", "suspend", &format!("path:{}", fx.path_str("park"))]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    std::fs::write(fx.path("home/aliases.toml"), "taken = \"Taken\"\n").unwrap();
+    fx
+}
+
+/// **The read and the plan of one key, as printed**: the read states the key's type, what it
+/// holds by place (the parked photo counted on its suspended root), its three most frequent
+/// values, the pointer to `canon facts`, every target it can reach with its classes and the
+/// way that changes nothing stored, and one runnable line per target; the plan states the
+/// bridge to `canon facts`, each class, each removed value by its reason and its places with
+/// the suspended root named, the recovery sentence, what comes after, the acting command with
+/// its count, and that nothing changed. Neither records a decision.
+#[test]
+fn the_read_and_the_plan_of_a_key_as_printed() {
+    let fx = taken_photos();
+    let park = fx.path_str("park");
+    let before = fx.decisions();
+
+    let read = fx.run(&["facts", "convert", "Taken"]);
+    assert_eq!(read.code, 0, "{}{}", read.stdout, read.stderr);
+    assert_eq!(
+        read.stdout,
+        "content.Taken (whole index, read-only)\n\
+         Type: text\n\
+         Holds:\n  \
+         text  4 facts, the value of 4 sources: 3 counted by `canon facts --global`, 1 on a \
+         suspended root\n        \
+         most frequent: \"0000:00:00 00:00:00\" ×2 facts, \"2021:03:02 18:44:10\" ×1 fact, \
+         misc ×1 fact\n\
+         `canon facts --key content.Taken --global --limit 0` to see the values `canon facts` \
+         counts\n\
+         \n\
+         Can convert to:\n  \
+         time    the 4 text facts: 1 unchanged, 3 removed\n          \
+         most of these are not times — text on purpose? `|datetime` asks for these values as \
+         times without changing anything stored\n  \
+         number  the 4 text facts: 4 removed\n          \
+         most of these are not numbers — text on purpose? `|number` asks for these values as \
+         numbers without changing anything stored\n\
+         \n\
+         `canon facts convert content.Taken --to time` to preview\n\
+         `canon facts convert content.Taken --to number` to preview\n"
+    );
+
+    let plan = fx.run(&["facts", "convert", "Taken", "--to", "time"]);
+    assert_eq!(plan.code, 0, "{}{}", plan.stdout, plan.stderr);
+    assert_eq!(
+        plan.stdout,
+        format!(
+            "content.Taken → time (whole index, dry run): 4 text facts, the value of 4 sources \
+             — 1 of them not counted by `canon facts --global`: 1 on a suspended root\n  \
+             unchanged 1   spelling only, e.g. 2021:03:02 18:44:10 → 2021-03-02T18:44:10\n  \
+             removed   3\n      \
+             \"0000:00:00 00:00:00\" is not a time: ×2 facts, the value of 2 sources: 1 counted \
+             by `canon facts --global`, 1 on suspended root {park} (id:2)\n      \
+             `misc` is not a time: ×1 fact, the value of 1 source: 1 counted by `canon facts \
+             --global`\n  \
+             After changing the type, the lost and removed values cannot be reimported as your \
+             tool wrote them until this key's type is converted back.\n  \
+             After: untyped dates imported for this key are stored as times.\n  \
+             Aliases naming this key: @taken.\n  \
+             Manifests whose naming pattern uses this key place files by the new values at \
+             their next apply.\n\
+             `canon facts convert content.Taken --to time --list` to see each fact with its \
+             source (not kept after)\n\
+             `canon facts convert content.Taken --to time --allow removal=3 --yes` to convert\n  \
+             add --reason '<why>' to record why\n\
+             Dry run: nothing changed.\n"
+        )
+    );
+    assert_eq!(
+        fx.decisions(),
+        before,
+        "the read and the plan record nothing"
+    );
+}
+
+/// **The read prints a time as `canon facts` prints it**, on the user's clock, and counts values
+/// that print the same as one: an instant written in UTC, the same instant with its offset, and
+/// a clock reading of that hour in Amsterdam are one value there, three facts, as in the report
+/// the read points at; the printed value typed back selects all three files.
+#[test]
+fn the_read_prints_a_time_on_the_users_clock() {
+    let fx = photos(
+        "Europe/Amsterdam",
+        &[
+            ("a.jpg", OLD),
+            ("b.jpg", OLD),
+            ("c.jpg", OLD),
+            ("d.jpg", OLD),
+        ],
+    );
+    let hinted = |value: &str| serde_json::json!({"Shot": {"value": value, "type": "datetime"}});
+    fx.import(&[
+        ("a.jpg", hinted("2021-03-02T18:44:10Z")),
+        ("b.jpg", hinted("2021-03-02T19:44:10+01:00")),
+        ("c.jpg", hinted("2021-03-02 19:44:10")),
+        ("d.jpg", hinted("2021-07-01 08:00:00")),
+    ]);
+
+    let read = fx.run(&["facts", "convert", "Shot"]);
+    assert_eq!(read.code, 0, "{}{}", read.stdout, read.stderr);
+    assert!(
+        read.stdout.contains(
+            "most frequent: \"2021-03-02 19:44:10\" ×3 facts, \"2021-07-01 08:00:00\" ×1 fact\n"
+        ),
+        "{}",
+        read.stdout
+    );
+    let report = fx.run(&["facts", "--global", "--key", "Shot", "--limit", "0"]);
+    assert!(
+        report
+            .stdout
+            .lines()
+            .any(|line| line.starts_with("2021-03-02 19:44:10 ") && line.contains(" 3 ")),
+        "{}",
+        report.stdout
+    );
+    assert_eq!(
+        fx.listed("Shot=\"2021-03-02 19:44:10\""),
+        names(&["a.jpg", "b.jpg", "c.jpg"])
+    );
+}
+
+/// `--list`, `--allow` and `--yes` without `--to`, and `-0` without `--list`, are usage errors
+/// naming what is missing; an unknown `--to` word is refused with the words it takes.
+#[test]
+fn the_convert_flags_that_need_to_are_usage_errors() {
+    let fx = taken_photos();
+    for flags in [
+        &["--list"][..],
+        &["--allow", "removal=3"],
+        &["--yes"],
+        &["--list", "-0"],
+    ] {
+        let run = fx.run(&[&["facts", "convert", "Taken"][..], flags].concat());
+        assert_eq!(run.code, 2, "{flags:?}: {}{}", run.stdout, run.stderr);
+        assert!(
+            run.stderr.starts_with("error: ") && run.stderr.contains("--to <TYPE>"),
+            "{flags:?}: {}",
+            run.stderr
+        );
+    }
+    let run = fx.run(&["facts", "convert", "Taken", "--to", "time", "-0"]);
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.contains("--list"), "{}", run.stderr);
+    let run = fx.run(&[
+        "facts", "convert", "Taken", "--to", "time", "--list", "--yes",
+    ]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.starts_with("error: ") && run.stderr.contains("--yes"),
+        "{}",
+        run.stderr
+    );
+    let run = fx.run(&["facts", "convert", "Taken", "--to", "bogus"]);
+    assert_eq!(run.code, 2);
+    assert!(
+        run.stderr
+            .starts_with("error: invalid value 'bogus' for '--to <TYPE>'")
+            && run
+                .stderr
+                .contains("[possible values: text, number, time, duration]"),
+        "{}",
+        run.stderr
+    );
+}
+
+/// **Every refusal that is an answer exits non-zero with no `Error:`**, on stdout: a source
+/// fact, a built-in name, the content hash by each of its names, `--to duration`, and a
+/// target no conversion reaches (a time key to number, a number key to time); a name Canon
+/// knows no facts under — an unknown name, an alias, a `source.` name no source fact has — is
+/// an error.
+#[test]
+fn each_conversion_answer_exits_non_zero_without_error() {
+    let fx = taken_photos();
+    fx.import(&[(
+        "a.jpg",
+        serde_json::json!({"Width": 4000, "Shot": {"value": "2021-03-02", "type": "datetime"}}),
+    )]);
+    let answers: [(&[&str], &str); 9] = [
+        (
+            &["source.ext"],
+            "source.ext is of type text, and a source fact's type is fixed\n\
+             `source.ext|number` asks for its values as numbers without changing anything \
+             stored\n\
+             `source.ext|datetime` asks for its values as times without changing anything \
+             stored\n",
+        ),
+        (
+            &["mtime"],
+            "mtime is of type time, and a built-in key's type is fixed\n",
+        ),
+        (
+            &["hash"],
+            "The content hash (content.hash.sha256) is Canon's own record of content identity, \
+             and its type is fixed\n",
+        ),
+        (
+            &["hash_short"],
+            "The content hash (content.hash.sha256) is Canon's own record of content identity, \
+             and its type is fixed\n",
+        ),
+        (
+            &["content.hash.sha256", "--to", "time"],
+            "The content hash (content.hash.sha256) is Canon's own record of content identity, \
+             and its type is fixed\n",
+        ),
+        (
+            &["Taken", "--to", "duration"],
+            "`1:23:45` is not a number\n",
+        ),
+        (
+            &["Width", "--to", "duration"],
+            "content.Width is of type number: values with the duration hint imported for this \
+             key are stored as numbers\n",
+        ),
+        (
+            &["Shot", "--to", "number"],
+            "content.Shot is of type time: a time cannot be converted to a number; a time known \
+             only to a year can go through text\n",
+        ),
+        (
+            &["Width", "--to", "time"],
+            "content.Width is of type number: a number cannot be converted to a time; numbers \
+             that are years can go through text\n\
+             if these are seconds since 1970, have your tool write the times as date-time text \
+             with the datetime hint, under a new key\n",
+        ),
+    ];
+    for (args, starts) in answers {
+        let run = fx.run(&[&["facts", "convert"][..], args].concat());
+        assert_eq!(run.code, 1, "{args:?}: {}{}", run.stdout, run.stderr);
+        assert!(run.stdout.starts_with(starts), "{args:?}: {}", run.stdout);
+        assert!(
+            !run.stdout.contains("Error:") && run.stderr.is_empty(),
+            "{args:?}: {}{}",
+            run.stdout,
+            run.stderr
+        );
+    }
+    for name in ["Nope", "@taken", "source.foo"] {
+        let run = fx.run(&["facts", "convert", name]);
+        assert_eq!(run.code, 1, "{name}: {}{}", run.stdout, run.stderr);
+        assert!(run.stdout.is_empty(), "{name}: {}", run.stdout);
+        assert_eq!(
+            run.stderr,
+            format!("Error: `{name}` is an unknown key\n`canon facts --global` lists the keys\n")
+        );
+    }
+}
+
+/// **`--list` splits back into its fields**: a value holding a tab, a newline and a backslash
+/// is written `\t`, `\n`, `\\`, so each line is five tab-separated fields; with `-0` each
+/// field stands as stored, NUL-separated and NUL-ended.
+#[test]
+fn the_list_splits_back_into_its_fields() {
+    let fx = photos("UTC", &[("a.jpg", OLD)]);
+    fx.import(&[("a.jpg", serde_json::json!({"Note": "a\tb\nc\\d"}))]);
+    let path = format!("{}/a.jpg", fx.path_str("src"));
+
+    let run = fx.run(&["facts", "convert", "Note", "--to", "number", "--list"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "{}", run.stdout);
+    let fields: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(fields, ["removed", "a\\tb\\nc\\\\d", "", path.as_str(), ""]);
+
+    let run = fx.run(&["facts", "convert", "Note", "--to", "number", "--list", "-0"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let record = run.stdout.strip_suffix('\0').expect("NUL-ended");
+    let fields: Vec<&str> = record.split('\0').collect();
+    assert_eq!(fields, ["removed", "a\tb\nc\\d", "", path.as_str(), ""]);
+}
+
+/// The commands a line prints between backticks, `canon` first: each ends at the backtick
+/// followed by a space, a comma, a colon or the line's end.
+fn printed_commands(text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in text.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let starts = chars[i] == '`'
+                && chars[i + 1..]
+                    .iter()
+                    .take(6)
+                    .eq("canon ".chars().collect::<Vec<_>>().iter());
+            if !starts {
+                i += 1;
+                continue;
+            }
+            let mut end = i + 1;
+            while end < chars.len()
+                && !(chars[end] == '`'
+                    && chars.get(end + 1).is_none_or(|next| " ,:".contains(*next)))
+            {
+                end += 1;
+            }
+            commands.push(chars[i + 1..end].iter().collect());
+            i = end + 1;
+        }
+    }
+    commands
+}
+
+/// **Every command the read and the plan print runs as printed**, through `sh -c`, on a key
+/// needing quotes for the shell and the reader alike and a reason holding `'`, `"`, `$`, `!`
+/// and a backtick: each exits 0, and the acting command carries the reason unchanged.
+#[test]
+fn every_printed_convert_command_runs_as_printed() {
+    let fx = photos("UTC", &[("a.jpg", OLD), ("b.jpg", OLD)]);
+    fx.import(&[
+        (
+            "a.jpg",
+            serde_json::json!({"Shot Date": "2021:03:02 18:44:10"}),
+        ),
+        ("b.jpg", serde_json::json!({"Shot Date": "misc"})),
+    ]);
+    let reason = "it's \"odd\" $HOME !1 `date`";
+    let read = fx.run(&["facts", "convert", "Shot Date"]);
+    let plan = fx.run(&[
+        "facts",
+        "convert",
+        "Shot Date",
+        "--to",
+        "time",
+        "--reason",
+        reason,
+    ]);
+    let commands: Vec<String> = [&read.stdout, &plan.stdout]
+        .into_iter()
+        .flat_map(|text| printed_commands(text))
+        .collect();
+    let acting = "canon facts convert 'content.Shot Date' --to time --allow removal=1 --yes \
+                  --reason 'it'\\''s \"odd\" $HOME !1 `date`'"
+        .to_string();
+    assert!(commands.contains(&acting), "{commands:#?}");
+    assert!(
+        commands.contains(&"canon facts --key '\"content.Shot Date\"' --global --limit 0".into()),
+        "{commands:#?}"
+    );
+    for command in &commands {
+        let line = command.replacen("canon", &format!("'{}'", env!("CARGO_BIN_EXE_canon")), 1);
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&line)
+            .current_dir(fx.dir.path())
+            .env("CANON_HOME", fx.path("home"))
+            .env("TZ", fx.zone)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{command}: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if *command == acting {
+            let show = printed_commands(&stdout)
+                .into_iter()
+                .find(|c| c.starts_with("canon trail show "))
+                .unwrap_or_else(|| panic!("no trail line: {stdout}"));
+            let shown = fx.run(&show.split(' ').skip(1).collect::<Vec<_>>());
+            assert_eq!(shown.code, 0, "{}{}", shown.stdout, shown.stderr);
+            assert!(
+                shown
+                    .stdout
+                    .contains(&format!("  reason:   \"{reason}\"\n")),
+                "the reason reached the record unchanged: {}",
+                shown.stdout
+            );
+        }
+    }
+}
+
+/// The id a result line's `canon trail show <id>` names.
+fn shown_id(stdout: &str) -> String {
+    printed_commands(stdout)
+        .into_iter()
+        .find_map(|c| c.strip_prefix("canon trail show ").map(str::to_string))
+        .unwrap_or_else(|| panic!("no trail line: {stdout}"))
+}
+
+/// **The act, end to end**: the acting command converts every fact of the key, parked ones
+/// included, and prints the summary — the record's — the key's type now and the trail line;
+/// `canon trail show <id>` then reads the conversion with its reason, its counts and why no
+/// receipt is there; the key reads as one type.
+#[test]
+fn the_act_converts_and_records() {
+    let fx = taken_photos();
+    let before = fx.decisions();
+
+    let act = fx.run(&[
+        "facts",
+        "convert",
+        "Taken",
+        "--to",
+        "time",
+        "--allow",
+        "removal=3",
+        "--yes",
+        "--reason",
+        "the tool wrote dates without the hint",
+    ]);
+
+    assert_eq!(act.code, 0, "{}{}", act.stdout, act.stderr);
+    let id = shown_id(&act.stdout);
+    assert_eq!(
+        act.stdout,
+        format!(
+            "content.Taken → time: 1 unchanged, 3 removed\n  \
+             whole index: 4 text facts, the value of 4 sources — 1 of them not counted by \
+             `canon facts --global`: 1 on a suspended root\n  \
+             removed: \"0000:00:00 00:00:00\" ×2 facts, misc ×1 fact\n\
+             content.Taken is of type time.\n\
+             `canon trail show {id}` to read this conversion later\n"
+        )
+    );
+    assert!(act.stderr.is_empty(), "{}", act.stderr);
+    assert_eq!(fx.decisions(), before + 1);
+
+    let shown = fx.run(&["trail", "show", &id]);
+    assert_eq!(shown.code, 0, "{}{}", shown.stdout, shown.stderr);
+    for part in [
+        "content.Taken → time: 1 unchanged, 3 removed",
+        "  reason:   \"the tool wrote dates without the hint\"\n",
+        "attempted 4, completed 4",
+        "no receipt (this command writes none)",
+    ] {
+        assert!(shown.stdout.contains(part), "{part}: {}", shown.stdout);
+    }
+    let read = fx.run(&["facts", "convert", "Taken"]);
+    assert!(
+        read.stdout.contains("Type: time\n"),
+        "{}{}",
+        read.stdout,
+        read.stderr
+    );
+}
+
+/// **The printed acting command runs twice**: the command the plan prints converts; run again
+/// as printed, it says nothing is left to convert, exits 0 and records nothing — the count it
+/// carries protects nothing where nothing changes.
+#[test]
+fn the_printed_acting_command_runs_twice() {
+    let fx = taken_photos();
+    let plan = fx.run(&["facts", "convert", "Taken", "--to", "time"]);
+    let acting = printed_commands(&plan.stdout)
+        .into_iter()
+        .find(|c| c.contains("--yes"))
+        .unwrap_or_else(|| panic!("no acting command: {}", plan.stdout));
+    let run = || {
+        let line = acting.replacen("canon", &format!("'{}'", env!("CARGO_BIN_EXE_canon")), 1);
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&line)
+            .current_dir(fx.dir.path())
+            .env("CANON_HOME", fx.path("home"))
+            .env("TZ", fx.zone)
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let (code, stdout) = run();
+    assert_eq!(code, Some(0), "{stdout}");
+    let after_first = fx.decisions();
+    let (code, stdout) = run();
+    assert_eq!(code, Some(0), "{stdout}");
+    assert_eq!(
+        stdout,
+        "content.Taken is of type time; nothing to convert.\n"
+    );
+    assert_eq!(
+        fx.decisions(),
+        after_first,
+        "the second run records nothing"
+    );
+}
+
+/// **The act begins with the key reading**: a built-in name and the content hash are
+/// answered, an unknown name is an error, and a key a conversion emptied is answered by that
+/// conversion — none says "nothing to convert", and none records anything.
+#[test]
+fn the_act_begins_with_the_key_reading() {
+    let fx = taken_photos();
+    fx.import(&[("a.jpg", serde_json::json!({"Note": "misc"}))]);
+    let empty = fx.run(&[
+        "facts",
+        "convert",
+        "Note",
+        "--to",
+        "number",
+        "--allow",
+        "removal=1",
+        "--yes",
+    ]);
+    assert_eq!(empty.code, 0, "{}{}", empty.stdout, empty.stderr);
+    assert!(
+        empty
+            .stdout
+            .contains("content.Note has no facts; its next import sets its type anew\n"),
+        "{}",
+        empty.stdout
+    );
+    let emptying = shown_id(&empty.stdout);
+    let before = fx.decisions();
+
+    let answers: [(&[&str], String); 3] = [
+        (
+            &["mtime", "--to", "text"],
+            "mtime is of type time, and a built-in key's type is fixed\n".to_string(),
+        ),
+        (
+            &["hash", "--to", "number"],
+            "The content hash (content.hash.sha256) is Canon's own record of content identity, \
+             and its type is fixed\n"
+                .to_string(),
+        ),
+        (
+            &["Note", "--to", "number", "--allow", "removal=1"],
+            format!(
+                "content.Note has no facts: conversion {emptying} removed every fact the key then \
+                 held\n`canon trail show {emptying}` to read it\n"
+            ),
+        ),
+    ];
+    for (args, starts) in answers {
+        let run = fx.run(&[&["facts", "convert"][..], args, &["--yes"]].concat());
+        assert_eq!(run.code, 1, "{args:?}: {}{}", run.stdout, run.stderr);
+        assert!(run.stdout.starts_with(&starts), "{args:?}: {}", run.stdout);
+        assert!(!run.stdout.contains("nothing to convert"), "{}", run.stdout);
+        assert!(run.stderr.is_empty(), "{args:?}: {}", run.stderr);
+    }
+    let run = fx.run(&["facts", "convert", "Nope", "--to", "text", "--yes"]);
+    assert_eq!(run.code, 1);
+    assert_eq!(
+        run.stderr,
+        "Error: `Nope` is an unknown key\n`canon facts --global` lists the keys\n"
+    );
+    assert_eq!(fx.decisions(), before);
+}
+
+/// **Under `recording = "Off"`** the act converts and its result line says it was not
+/// recorded, in place of a trail line naming nothing.
+#[test]
+fn the_result_line_when_recording_is_off() {
+    let fx = taken_photos();
+    std::fs::write(
+        fx.path("home/config.toml"),
+        "[ledger]\nrecording = \"Off\"\n",
+    )
+    .unwrap();
+    let before = fx.decisions();
+    let act = fx.run(&[
+        "facts",
+        "convert",
+        "Taken",
+        "--to",
+        "time",
+        "--allow",
+        "removal=3",
+        "--yes",
+    ]);
+    assert_eq!(act.code, 0, "{}{}", act.stdout, act.stderr);
+    assert!(
+        act.stdout
+            .ends_with("content.Taken is of type time.\nnot recorded (recording is off)\n"),
+        "{}",
+        act.stdout
+    );
+    assert_eq!(fx.decisions(), before);
+}
+
+/// **A count that no longer matches refuses the act before anything changes**: an import
+/// adds a value between the dry run and the act, and the act given the dry run's count is
+/// answered with the problem, then the dry run, then the command with the count now.
+#[test]
+fn a_grown_count_refuses_the_act_and_leads_with_the_dry_run() {
+    let fx = taken_photos();
+    fx.import(&[("a.jpg", serde_json::json!({"Taken": "other"}))]);
+    let before = fx.decisions();
+    let act = fx.run(&[
+        "facts",
+        "convert",
+        "Taken",
+        "--to",
+        "time",
+        "--allow",
+        "removal=3",
+        "--yes",
+    ]);
+    assert_eq!(act.code, 1, "{}{}", act.stdout, act.stderr);
+    assert_eq!(
+        act.stdout,
+        "content.Taken → time: not converted; --allow does not match the conversion now\n  \
+         --allow removal=3 given; the conversion removes 4 facts\n\
+         `canon facts convert content.Taken --to time` to see what changed\n\
+         `canon facts convert content.Taken --to time --allow removal=4 --yes` to convert\n"
+    );
+    assert!(act.stderr.is_empty(), "{}", act.stderr);
+    assert_eq!(fx.decisions(), before);
+    let read = fx.run(&["facts", "convert", "Taken"]);
+    assert!(read.stdout.contains("Type: text\n"), "{}", read.stdout);
+}

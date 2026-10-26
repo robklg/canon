@@ -36,7 +36,7 @@ Canon stores facts as:
 - **Numbers**: Integers or decimals like `1024` or `3.14`; compared as numbers (`>1000`); enable the `|bucket` modifier
 - **Times**: Points or spans of time on one timeline, like a capture date or a save time; compared as spans of time in your local time; enable the time modifiers (`|year`, `|month`). See [Times](#times) below
 
-A key's type is determined from all of its facts, on every root, so it is the same whatever the scope. A value you type in a [filter](../reference/filter.md#values-and-types) is interpreted as the key's type: against a text key, `2019` is rejected until you say whether you mean the text `"2019"` or the year. A key whose facts hold more than one type is of mixed type, and lists as `mixed` in [`canon facts`](../commands/query/facts.md); a filter cannot compare its values until it is converted to one type.
+A key's type is determined from all of its facts, on every root, so it is the same whatever the scope. A value you type in a [filter](../reference/filter.md#values-and-types) is interpreted as the key's type: against a text key, `2019` is rejected until you say whether you mean the text `"2019"` or the year. A key whose facts hold more than one type is of mixed type, and lists as `mixed` in [`canon facts`](../commands/query/facts.md); a filter cannot compare its values until it is converted to one type with [`canon facts convert`](../commands/maintain/facts-convert.md).
 
 Type hints can be provided during import to ensure correct parsing. See [Enriching](../commands/enrich/index.md) for details.
 

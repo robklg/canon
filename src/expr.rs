@@ -70,7 +70,7 @@ pub use domain::value::{resolve_fact_value, source_row_value, SourceAttributes};
 // A source's one value for a stored key: the rule applied to a source's facts
 // already in hand, and the fetch that applies it to a batch — and a key of any
 // kind read for a batch as an expression reads it.
-pub use domain::value::source_values;
+pub use domain::value::{source_value, source_values};
 pub use ops::value::{fetch_named_values, fetch_source_values};
 
 // The key vocabulary: the one reader of a key's name, the three kinds of key,
@@ -86,5 +86,15 @@ pub use domain::transform::{rendered, Modified, Modifier, ModifierCategory};
 
 // The statement that keys are of mixed type and its way out, each key printed by the
 // printing rule — read by `facts`' listing, `cluster`'s summary and a manifest's comments —
-// and the printing rule's key and convert command, which an import's skip lines print.
-pub use domain::print::{convert_command, mixed_type_statement, mixed_type_way_out, printed_key};
+// and the printing rule's value, key and convert command, which an import's skip lines and the
+// conversion print.
+pub use domain::print::{
+    convert_command, mixed_type_statement, mixed_type_way_out, printed_key, printed_value,
+};
+
+// The statement grammar: every statement about a value and its type, built from its typed
+// parts, and a key's types in the words the Type column uses.
+pub use domain::statement::{type_words, Arriving, Complement, Noun, Statement, Subject};
+
+// The aliases naming a stored key, which a command about to change the key states.
+pub use ops::alias::{aliases_naming_key, AliasesNaming};

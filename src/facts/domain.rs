@@ -5,15 +5,31 @@
 //! (`expr::read_key_name`). A value's kind is the fact noun's own
 //! (`core::domain::fact::FactType`).
 
+pub(super) mod convert;
+
 use std::collections::{BTreeSet, HashMap};
 
 use serde_json::value::RawValue;
 
 use crate::core::domain::conversion::{convert, Converted, Loss, NotRead};
-use crate::core::domain::fact::{FactType, FactValue, KeyTypes};
+use crate::core::domain::fact::{Count, FactType, FactValue, KeyTypes};
+use crate::core::domain::format_count;
 use crate::core::domain::number::{number_form, read_number, NotExact};
 use crate::core::domain::time::reading::{read_time, read_year_number};
 use crate::expr::{read_key_name, BuiltinKey, Key, ParsedFactKey, SourceFact};
+
+/// `n` and a noun in its form for `n`: `1 fact`, `4 facts`.
+pub fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", format_count(n), plural(n, one, many))
+}
+
+/// The noun's form for `n`, by the fact noun's one/many rule.
+pub fn plural<'a>(n: u64, one: &'a str, many: &'a str) -> &'a str {
+    match Count::of(n) {
+        Count::One => one,
+        Count::Many => many,
+    }
+}
 
 /// A content fact stored on the source, moved to the content when an import
 /// links the source to it.
@@ -444,15 +460,17 @@ mod tests {
     /// **The key-name law's verifier**: every command reads a key's name
     /// through one reader (`expr::read_key_name`), and each applies its own rule
     /// to the readings. For a name that is not a built-in key, import's reading,
-    /// the filter's and `facts delete`'s reach the same content fact, so a filter
-    /// finds, and a delete removes, a fact by the name it was imported under. The
+    /// the filter's, `facts delete`'s and `facts convert`'s reach the same content
+    /// fact, so a filter finds, a delete removes and a conversion converts a fact by
+    /// the name it was imported under. The
     /// defect it names: the asking half kept `policy.`/`object.` keys as written
     /// while import stored them under `content.`, and `--where policy.reviewed?`
     /// selected nothing. Sampled prefixes.
     ///
     /// For a built-in key's name they differ, by design, and that half is
     /// pinned too: the filter reads the built-in key (`size` is the source's
-    /// size), import and the delete the content reading (`content.size`).
+    /// size), import, the delete and the conversion the content reading
+    /// (`content.size`).
     #[test]
     fn a_key_is_read_by_the_name_import_stored_it_under() {
         use crate::expr::ParsedFactKey;
@@ -474,6 +492,11 @@ mod tests {
                 let filtered = ParsedFactKey::parse(&written).unwrap().base_key;
                 assert_eq!(filtered, imported, "{written}");
                 assert_eq!(delete_key(&written).unwrap(), imported, "{written}");
+                assert_eq!(
+                    super::convert::convert_key(&written).unwrap(),
+                    imported,
+                    "{written}"
+                );
             }
         }
 
@@ -481,6 +504,7 @@ mod tests {
         assert_eq!(ParsedFactKey::parse("size").unwrap().base_key, "size");
         assert_eq!(import_key("size").as_deref(), Some("content.size"));
         assert_eq!(delete_key("size").unwrap(), "content.size");
+        assert_eq!(super::convert::convert_key("size").unwrap(), "content.size");
     }
 
     /// `facts delete` acts on the name's content reading, with no protected

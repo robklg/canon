@@ -1,6 +1,6 @@
 # canon facts delete
 
-Delete facts by key. Useful for removing incorrect or unwanted metadata.
+Delete facts by key. Useful for removing incorrect or unwanted metadata. To change a key's type, use [`facts convert`](facts-convert.md).
 
 ```bash
 # Preview deletion (dry-run by default)
