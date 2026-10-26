@@ -865,7 +865,7 @@ mod tests {
                 "  numtext<10",
                 "          ^ numtext is of type text, and `10` is a number",
                 "  Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`.",
+                 the stored type, `canon facts convert content.numtext`.",
             ]
         );
     }
@@ -1558,7 +1558,17 @@ mod tests {
             );
             let written = refusal(&conn, &[clause]).render("");
             let typed = refused_with(&conn, &text).render("");
-            let expected: Vec<String> = written.iter().map(|line| alias(line)).collect();
+            // The bottom line names the stored key the alias reads, so it runs as printed.
+            let expected: Vec<String> = written
+                .iter()
+                .map(|line| {
+                    if line.starts_with("Type conversion") {
+                        line.clone()
+                    } else {
+                        alias(line)
+                    }
+                })
+                .collect();
             assert_eq!(typed, expected, "{clause}");
         }
     }

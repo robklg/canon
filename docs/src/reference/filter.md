@@ -211,10 +211,10 @@ A value that cannot be read as its key's type is named with what the key is and 
 Error: cannot run the filter as given
   Model=2019
         ^ Model is of type text, and `2019` is a number. For a text key: Model="2019"
-  Type conversion: in the filter with a modifier such as |number or |year; for the stored type, `canon facts convert`.
+  Type conversion: in the filter with a modifier such as |number or |year; for the stored type, `canon facts convert content.Model`.
 ```
 
-The line is printed once however many values it applies to. It names `canon facts convert` where any of them is a stored key compared with no modifier or accessor, and leaves it out otherwise (`filename`, `Model|lowercase`); a path key gets no line.
+The line is printed once however many values it applies to. It names `canon facts convert` for each stored key compared with no modifier or accessor, and leaves it out otherwise (`filename`, `Model|lowercase`); a path key gets no line.
 
 A key of mixed type, whose facts hold more than one type, cannot be compared or modified: a filter supports one type only. That is an answer about the key, not an error, so it prints without `Error:`, and asking whether the key exists (`Model?`) still works:
 

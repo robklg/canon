@@ -153,8 +153,8 @@ pattern (`a_pattern_quoted_name_is_shown_only_where_it_binds`); a quoted name on
 names a key with facts (`every_fix_shown_reads_back_and_binds`,
 `a_quoted_name_is_offered_only_for_a_key_with_facts`). No
 other filter is ever offered. A type mismatch on a key of type text carries the bottom line
-(`Conversion`), printed once, last, in the strongest form the refusal holds
-(`the_conversion_line_is_printed_once_in_its_strongest_form`). **Held by discipline**: a new caller
+(`Conversion`), printed once, last, with each stored key's convert command
+(`the_conversion_line_is_printed_once_naming_each_stored_key`). **Held by discipline**: a new caller
 of `bind_key` calls the check. A cause about what a key is — mixed type, a type that changed or a
 key that gained its first facts while the run read it — is an answer, printed without `Error:`
 (`ExpressionRefused::is_answer`). Evaluation compares text by code point, a glob through its matcher, numbers

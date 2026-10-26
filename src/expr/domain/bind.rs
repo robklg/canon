@@ -29,8 +29,8 @@ use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, StatusPredicate, U
 use super::glob::{needs_quotes_problem, Glob, InputGlob};
 use super::key::{InputKey, Key};
 use super::print::{
-    is_plain_bucket_label, mixed_type_way_out, mixed_types, printed_key, printed_value,
-    printed_word, quoted, threshold_bucket_labels,
+    convert_command, is_plain_bucket_label, mixed_type_way_out, mixed_types, printed_key,
+    printed_value, printed_word, quoted, threshold_bucket_labels,
 };
 use super::problem::{cut, Fix, Place, Problem, TextOrPath};
 use super::read::{is_space, read_filter, read_keys, AliasMode, AliasUse, Grammar};
@@ -555,9 +555,9 @@ pub(in crate::expr) enum Reads {
 #[derive(Debug, Clone)]
 pub(in crate::expr) struct Chain {
     gives: Gives,
-    /// Whether the key is a stored key read with no accessor and no modifier, whose stored type
-    /// a conversion could change ([`Conversion::WithStoredType`]).
-    convertible: bool,
+    /// The full stored key, where the key is one read with no accessor and no modifier, whose
+    /// stored type a conversion could change ([`Conversion::WithStoredType`]).
+    convertible: Option<String>,
 }
 
 /// Check a key: its type from all its facts, then its accessor and modifiers through the
@@ -587,7 +587,7 @@ pub(in crate::expr) fn bind_key(
             BoundKey::of(key, read_as),
             Chain {
                 gives: Gives::Text,
-                convertible: false,
+                convertible: None,
             },
         ))
     };
@@ -716,9 +716,10 @@ fn walk(key: &InputKey, base_type: Option<FactType>) -> Result<Chain, BindCause>
     }
     Ok(Chain {
         gives: gives.unwrap_or(Gives::Text),
-        convertible: base_type.is_some()
+        convertible: (base_type.is_some()
             && known_type(&key.base).is_none()
-            && !key.has_transforms(),
+            && !key.has_transforms())
+        .then(|| key.base.clone()),
     })
 }
 
@@ -1042,20 +1043,20 @@ impl Site<'_> {
             },
             Some(_) => Fix::None,
         };
-        let conversion = match (key_type, self.chain.convertible) {
+        let conversion = match (key_type, &self.chain.convertible) {
             (TextOrPath::Path, _) => None,
-            (TextOrPath::Text, true) => Some(Conversion::WithStoredType),
-            (TextOrPath::Text, false) => Some(Conversion::InFilterOnly),
+            (TextOrPath::Text, Some(key)) => Some(Conversion::WithStoredType(key.clone())),
+            (TextOrPath::Text, None) => Some(Conversion::InFilterOnly),
         };
         Err(BindCause::TypeMismatch {
-            problem: Problem {
+            problem: Box::new(Problem {
                 fix,
                 ..self.problem(
                     value,
                     format!("{}, and `{}` is {what}", self.statement(), value.input),
                     None,
                 )
-            },
+            }),
             conversion,
         })
     }
@@ -1381,29 +1382,32 @@ const UNKNOWN_KEY_RULE: &str = "`canon facts` lists the keys";
 
 /// **The bottom line**: where the other reading of a value lives, for a refusal whose type
 /// mismatches meet a key of type text. It names no clause and rewrites nothing, so it prints
-/// once, at the bottom, in the strongest form any mismatch of the refusal holds — the forms
-/// ordered weakest first. A path key has none, and neither has a bucket, whose range is its own
-/// cause.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// once, at the bottom: the modifier always, and the conversion command for each stored key a
+/// mismatch read as it is stored, so the command runs as printed. A path key has none, and
+/// neither has a bucket, whose range is its own cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::expr) enum Conversion {
     /// Any key of type text but a stored key read as it is stored: a modifier reads it.
     InFilterOnly,
-    /// A stored key read with no accessor and no modifier: its stored type can change too.
-    WithStoredType,
+    /// A stored key read with no accessor and no modifier, its full name: its stored type can
+    /// change too.
+    WithStoredType(String),
 }
 
-impl Conversion {
-    fn line(self) -> &'static str {
-        match self {
-            Conversion::InFilterOnly => {
-                "Type conversion: in the filter with a modifier such as |number or |year."
-            }
-            Conversion::WithStoredType => {
-                "Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`."
-            }
-        }
+/// The bottom line for the stored keys a refusal's mismatches can convert, none or several.
+fn conversion_line(stored_keys: &[&str]) -> String {
+    let in_filter = "Type conversion: in the filter with a modifier such as |number or |year";
+    if stored_keys.is_empty() {
+        return format!("{in_filter}.");
     }
+    let commands: Vec<String> = stored_keys
+        .iter()
+        .map(|key| convert_command(key, None))
+        .collect();
+    format!(
+        "{in_filter}; for the stored type, {}.",
+        commands.join(" or ")
+    )
 }
 
 /// A key of mixed type, read by a clause: the clause as typed, where the key sits, the
@@ -1429,9 +1433,9 @@ pub(in crate::expr) enum BindCause {
     UnknownKey(Problem),
     Unreadable(Problem),
     /// A value that reads as another type for a key of type text or path, and the bottom line
-    /// it owes.
+    /// it owes. The problem is boxed so the key the bottom line names keeps every cause small.
     TypeMismatch {
-        problem: Problem,
+        problem: Box<Problem>,
         conversion: Option<Conversion>,
     },
     OutOfRange(Problem),
@@ -1474,10 +1478,10 @@ impl BindCause {
     /// The cause's problem, where it is one.
     pub(in crate::expr) fn problem(&self) -> Option<&Problem> {
         match self {
+            BindCause::TypeMismatch { problem, .. } => Some(problem),
             BindCause::Read(problem)
             | BindCause::UnknownKey(problem)
             | BindCause::Unreadable(problem)
-            | BindCause::TypeMismatch { problem, .. }
             | BindCause::OutOfRange(problem)
             | BindCause::WrongModifier(problem)
             | BindCause::GlobNotText(problem)
@@ -1492,10 +1496,10 @@ impl BindCause {
 
     fn problem_mut(&mut self) -> Option<&mut Problem> {
         match self {
+            BindCause::TypeMismatch { problem, .. } => Some(problem),
             BindCause::Read(problem)
             | BindCause::UnknownKey(problem)
             | BindCause::Unreadable(problem)
-            | BindCause::TypeMismatch { problem, .. }
             | BindCause::OutOfRange(problem)
             | BindCause::WrongModifier(problem)
             | BindCause::GlobNotText(problem)
@@ -1548,10 +1552,12 @@ impl BindCause {
     fn render(&self, texts: &[String], indent: &str, out: &mut Vec<String>) {
         let text = |place: Place| texts.get(place.text).map_or("", String::as_str);
         match self {
+            BindCause::TypeMismatch { problem, .. } => {
+                out.extend(problem.render(text(problem.place), indent))
+            }
             BindCause::Read(problem)
             | BindCause::UnknownKey(problem)
             | BindCause::Unreadable(problem)
-            | BindCause::TypeMismatch { problem, .. }
             | BindCause::OutOfRange(problem)
             | BindCause::WrongModifier(problem)
             | BindCause::GlobNotText(problem)
@@ -1725,7 +1731,8 @@ impl ExpressionRefused {
             .all(|cause| matches!(cause, BindCause::MixedType(_)));
         let mut lines = Vec::new();
         let mut keys: Vec<(&str, &KeyTypes)> = Vec::new();
-        let mut conversion: Option<Conversion> = None;
+        let mut conversion = false;
+        let mut stored_keys: Vec<&str> = Vec::new();
         for cause in causes {
             cause.render(&self.texts, indent, &mut lines);
             match cause {
@@ -1742,7 +1749,14 @@ impl ExpressionRefused {
                 BindCause::TypeMismatch {
                     conversion: Some(c),
                     ..
-                } => conversion = conversion.max(Some(*c)),
+                } => {
+                    conversion = true;
+                    if let Conversion::WithStoredType(key) = c {
+                        if !stored_keys.contains(&key.as_str()) {
+                            stored_keys.push(key);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1751,7 +1765,9 @@ impl ExpressionRefused {
                 .into_iter()
                 .map(|l| format!("{indent}{l}")),
         );
-        lines.extend(conversion.map(|c| format!("{indent}{}", c.line())));
+        if conversion {
+            lines.push(format!("{indent}{}", conversion_line(&stored_keys)));
+        }
         lines
     }
 
@@ -1945,7 +1961,7 @@ mod tests {
         let forms = r#"Type a year, month, day, minute or second: 2024, 2024-06, 2024-06-15, "2024-06-15 14:30""#;
         let stored =
             "Type conversion: in the filter with a modifier such as |number or |year; for \
-                      the stored type, `canon facts convert`.";
+                      the stored type, `canon facts convert content.Title`.";
         let in_filter = "Type conversion: in the filter with a modifier such as |number or |year.";
         let forms = format!("  {forms}");
         let numbers = format!("  {}", applicable_line(&Gives::Number, false));
@@ -2123,7 +2139,7 @@ mod tests {
     /// stored key read as stored, in the filter only otherwise — and none for a path or a
     /// bucket. It fails if the line prints per clause, or the weaker form wins.
     #[test]
-    fn the_conversion_line_is_printed_once_in_its_strongest_form() {
+    fn the_conversion_line_is_printed_once_naming_each_stored_key() {
         let line = |text: &str| -> Vec<String> {
             refusal(text)
                 .lines()
@@ -2133,9 +2149,13 @@ mod tests {
         };
         let stored =
             "Type conversion: in the filter with a modifier such as |number or |year; for \
-                      the stored type, `canon facts convert`.";
+                      the stored type, `canon facts convert content.Title`.";
+        let both = "Type conversion: in the filter with a modifier such as |number or |year; for \
+                      the stored type, `canon facts convert content.Title` or `canon facts \
+                      convert content.numtext`.";
         let in_filter = "Type conversion: in the filter with a modifier such as |number or |year.";
         for (text, expected) in [
+            ("Title=2025 AND numtext<10 AND Title=2026", vec![both]),
             ("filename=2024 AND Title=2025", vec![stored]),
             ("Title=2025 AND filename=2024", vec![stored]),
             (
@@ -2170,7 +2190,7 @@ mod tests {
                 "  Title IN (2024, x, 2025-06)",
                 "                     ^ Title is of type text, and `2025-06` is a time",
                 "  Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`.",
+                 the stored type, `canon facts convert content.Title`.",
             ]
             .join("\n")
         );
@@ -2855,7 +2875,7 @@ mod tests {
                 "  numtext<10",
                 "          ^ numtext is of type text, and `10` is a number",
                 "  Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`.",
+                 the stored type, `canon facts convert content.numtext`.",
             ]
             .join("\n")
         );
@@ -2914,7 +2934,7 @@ mod tests {
                 r#"  FNumber=garbage AND "content.File Size"=2 AND numtext<10"#,
                 "                                                        ^ numtext is of type text, and `10` is a number",
                 "  Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`.",
+                 the stored type, `canon facts convert content.numtext`.",
             ]
             .join("\n")
         );
@@ -2960,7 +2980,7 @@ mod tests {
             BindCause::UnknownKey(problem()),
             BindCause::Unreadable(problem()),
             BindCause::TypeMismatch {
-                problem: problem(),
+                problem: Box::new(problem()),
                 conversion: None,
             },
             BindCause::OutOfRange(problem()),
@@ -3037,7 +3057,7 @@ mod tests {
                 "Title=a OR @x",
                 "           ^ in alias `@x`: numtext is of type text, and `10` is a number",
                 "Type conversion: in the filter with a modifier such as |number or |year; for the \
-                 stored type, `canon facts convert`.",
+                 stored type, `canon facts convert content.numtext`.",
             ],
             "{joined}"
         );
@@ -3115,7 +3135,7 @@ mod tests {
                 "  @x",
                 "  ^ in alias `@x`: numtext is of type text, and `10` is a number",
                 "  Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`.",
+                 the stored type, `canon facts convert content.numtext`.",
             ])
         );
         // A rule line stays.
@@ -3227,7 +3247,7 @@ mod tests {
                 "  @n<10",
                 "     ^ @n is of type text, and `10` is a number",
                 "  Type conversion: in the filter with a modifier such as |number or |year; for \
-                 the stored type, `canon facts convert`.",
+                 the stored type, `canon facts convert content.numtext`.",
             ])
         );
         // A modifier inside the alias is named with the key as the alias writes it, up to the
