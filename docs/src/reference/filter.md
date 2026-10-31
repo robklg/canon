@@ -117,7 +117,7 @@ Every key has a [type](../concepts/facts.md#value-types): text, number, time, or
 
 **Numbers are compared exactly.** `content.Rating=0.3` selects a stored `0.3` and not a value that only rounds to it. A number Canon cannot hold exactly as written (`1e-400`, `1e400`, `1.0000000000000001`) gives an error.
 
-Canon's message prints each value and key so that, copied back into a filter, it means the same: text that reads as a number or a time is shown there in quotes. A row of [`canon facts`](../commands/query/facts.md) prints text as it is, so text such as `2019` appears bare there; put it in quotes when you copy it into a filter.
+Canon prints each value and key so that, copied back into a filter, it means the same: text that reads as a number or a time is shown in quotes, in its messages and in the rows of [`canon facts`](../commands/query/facts.md), where a row that cannot be pasted as printed says so. A printed row pasted into `aliases.toml` or a manifest's `where` line goes inside a TOML literal string, `'…'`, or `'''…'''` where it holds a single quote.
 
 **Text is compared exactly as stored.** An accented letter stored as one character and the same letter stored as a letter followed by a separate accent mark are two different texts to `=`, `!=`, `IN` and the ordering operators. A path typed as an argument, such as a scope, is found in either stored form; a value in `--where` is not.
 
@@ -347,15 +347,15 @@ canon facts --key @year
 canon facts --key source.ext --group-by @year
 ```
 
-A report shows a key alias as typed, then the kind of the key it stands for:
+A report shows a key alias as typed; the end of its header line names what the rows are and the kind of the key it stands for:
 
 ```
 $ canon facts --key @year
 Facts: all roots
 Sources matching filters: 3
 
-@year (source fact)                           Count   Coverage
-──────────────────────────────────────────────────────────────
+@year                                         Count   Coverage   (number, source fact)
+──────────────────────────────────────────────────────────────────────────────────────
 2026                                              3     100.0%
 ```
 

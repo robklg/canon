@@ -16,7 +16,7 @@ use crate::core::domain::fact::{Count, FactType, FactValue, KeyTypes};
 use crate::core::domain::format_count;
 use crate::core::domain::number::{number_form, read_number, NotExact};
 use crate::core::domain::time::reading::{read_time, read_year_number};
-use crate::expr::{read_key_name, BuiltinKey, Key, NameReading, ParsedFactKey, SourceFact};
+use crate::expr::{read_key_name, NameReading};
 
 /// `n` and a noun in its form for `n`: `1 fact`, `4 facts`.
 pub fn counted(n: u64, one: &str, many: &str) -> String {
@@ -70,17 +70,6 @@ pub fn delete_key(given: &str) -> anyhow::Result<String> {
 /// quotes included: no quoting is read off it.
 pub fn import_key(name: &str) -> Option<String> {
     read_key_name(name, NameReading::AsWritten).content_key
-}
-
-/// Whether a report key names a source's root — `source.root` or `root_id`, quoted or not,
-/// with no accessor or modifier — which a report shows and groups by root. Decided by the key
-/// the name reads as (`ParsedFactKey::key`), never by its text.
-pub fn names_the_root(key: &ParsedFactKey) -> bool {
-    !key.has_transforms()
-        && matches!(
-            key.key,
-            Some(Key::SourceFact(SourceFact::Root) | Key::BuiltinKey(BuiltinKey::RootId))
-        )
 }
 
 /// Check if a key is a content fact (starts with "content.").
@@ -553,24 +542,6 @@ mod tests {
                 delete_key(name).unwrap_err().to_string(),
                 format!("Cannot delete '{name}': names starting with 'source.' cannot be deleted.")
             );
-        }
-    }
-
-    /// A report key names the root as `source.root` or `root_id`, bare, double- or
-    /// single-quoted: a modifier, a prefix or a near spelling does not.
-    #[test]
-    fn only_the_two_root_names_name_the_root() {
-        let names = |written: &str| names_the_root(&ParsedFactKey::parse(written).unwrap());
-        for written in ["source.root", "root_id", "\"source.root\"", "'root_id'"] {
-            assert!(names(written), "{written}");
-        }
-        for written in [
-            "source.root|lowercase",
-            "content.root_id",
-            "root",
-            "source.roots",
-        ] {
-            assert!(!names(written), "{written}");
         }
     }
 

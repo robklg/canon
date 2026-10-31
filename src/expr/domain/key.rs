@@ -17,16 +17,13 @@
 
 use anyhow::Result;
 
-use super::bind::{check_read_as, ReadAs, Refused};
-use super::print::{printed_name_read, quoted};
+use super::bind::{check_read_as, result_of, Gives, ReadAs, Refused, Rows};
+use super::print::{printed_name, printed_name_read, quoted};
 use super::problem::{cut, Fix, Place};
 use super::read::{is_space, read_quoted, skip_end, skip_to, Cursor, Grammar};
-use super::transform::{
-    apply_chain, parse_modifier, Modified, Modifier, ModifierCall, PathAccessor,
-};
-use crate::core::domain::fact::{FactType, FactValue};
+use super::transform::{parse_modifier, Modifier, ModifierCall, PathAccessor};
+use crate::core::domain::fact::{FactType, FactValue, KeyTypes};
 use crate::core::domain::number::number_form;
-use crate::core::domain::time::zone::UserZone;
 
 // ============================================================================
 // The pattern-only key
@@ -497,6 +494,43 @@ pub struct ParsedFactKey {
     /// What a value read through this key's chain may be, as the key stood when the report
     /// read it.
     pub(in crate::expr) read_as: ReadAs,
+    /// What the key's rows are: what its chain gives, or the types of a bare key of mixed type.
+    pub(in crate::expr) rows: Rows,
+    /// The key as the user spelled it, which a report's header prints.
+    pub(in crate::expr) spelled: Spelled,
+}
+
+/// **A key as the user spelled it**: the name — a key alias's `@name` as typed, any other name
+/// as the printing rule writes it — and which of the key's transforms were typed after it. A
+/// built-in key's own reading (`hash_short` read through `|short`) and a key alias's value are
+/// not typed, and come before every transform that is.
+#[derive(Debug, Clone)]
+pub(in crate::expr) struct Spelled {
+    pub(in crate::expr) name: String,
+    pub(in crate::expr) accessor_typed: bool,
+    /// The index of the first modifier typed after the name.
+    pub(in crate::expr) typed_from: usize,
+}
+
+impl Spelled {
+    /// How `key` was spelled: a transform was typed where its place is in the text the key was
+    /// typed in, and is not the name's own place (a built-in key's reading sits there).
+    pub(in crate::expr) fn of(key: &InputKey) -> Spelled {
+        let typed = |place: &Place| place.text == key.place.text && *place != key.name_place;
+        let name = match &key.written {
+            Some(_) => key.input_name.clone(),
+            None => printed_name(&key.name_text()),
+        };
+        Spelled {
+            name,
+            accessor_typed: key.accessor.as_ref().is_some_and(|(_, at)| typed(at)),
+            typed_from: key
+                .modifiers
+                .iter()
+                .position(|(_, at)| typed(at))
+                .unwrap_or(key.modifiers.len()),
+        }
+    }
 }
 
 impl ParsedFactKey {
@@ -505,14 +539,32 @@ impl ParsedFactKey {
     /// The name is read in the expression's order (`KeyName::in_expression`): a
     /// source fact or built-in key stays its own name — except the hash keys,
     /// which read as the stored content hash (`BuiltinKey::reading`) — and any
-    /// other name is read under `content.` (`Make` becomes `content.Make`).
+    /// other name is read under `content.` (`Make` becomes `content.Make`). Its rows are what
+    /// its chain gives from the base key's known type, a content fact's read as text — or text,
+    /// where that chain does not bind.
     #[cfg(test)]
     pub fn parse(key: &str) -> Result<Self> {
-        let reading =
-            super::read::read_keys(key, 0, Grammar::Key, super::read::AliasMode::NotLoaded);
-        let (true, Some([read])) = (reading.problems.is_empty(), reading.value.as_deref()) else {
-            anyhow::bail!("not one key: {key}: {:?}", reading.problems);
-        };
+        let known = super::bind::known_type(&read_one(key)?.base);
+        Self::parse_as(key, known.unwrap_or(FactType::Text))
+            .or_else(|_| Self::read_with(key, Rows::One(Gives::Text)))
+    }
+
+    /// [`Self::parse`] for a key whose base holds facts of type `base_type`, read as a report
+    /// reads it: an error where its chain does not bind.
+    #[cfg(test)]
+    pub fn parse_as(key: &str, base_type: FactType) -> Result<Self> {
+        let read = read_one(key)?;
+        let types = std::collections::HashMap::from([(read.base.clone(), KeyTypes::of(base_type))]);
+        match super::bind::bind_key(&read, &read.input, super::bind::Reads::Report, &types) {
+            Ok((_, chain)) => Self::read_with(key, chain.rows()),
+            Err(cause) => anyhow::bail!("{key} does not bind: {cause:?}"),
+        }
+    }
+
+    /// A key read with the rows a test says it has.
+    #[cfg(test)]
+    fn read_with(key: &str, rows: Rows) -> Result<Self> {
+        let read = read_one(key)?;
         Ok(Self {
             raw: read.input.clone(),
             base_key: read.base.clone(),
@@ -524,22 +576,82 @@ impl ParsedFactKey {
                 .collect(),
             key: read.key.clone(),
             read_as: ReadAs::Any,
+            rows,
+            spelled: Spelled::of(&read),
         })
     }
 
-    /// A stored value through this key's accessor and modifiers, as a report counts it. The
-    /// value's type is checked first ([`Self::check_type`]), so a key whose type changed while
-    /// the report ran stops it as that answer, never as a modifier failing.
-    pub fn report_value(&self, value: FactValue, zone: &UserZone) -> Result<Modified> {
-        self.check_type(&value)?;
-        Ok(apply_chain(
-            value,
-            self.accessor.as_ref(),
-            &self.modifiers,
-            &self.raw,
-            zone,
-        )?
-        .value)
+    /// **The expression a report counted**, as its header prints it: the name as the user spelled
+    /// it ([`Spelled`]), then the accessor and the modifiers typed after it — any default a
+    /// report added among them ([`Self::with_modifier`]) — each in its one spelling. Typed back
+    /// as a key, it reads as this key.
+    pub fn printed(&self) -> String {
+        let accessor = match &self.accessor {
+            Some(accessor) if self.spelled.accessor_typed => accessor.spelled(),
+            _ => String::new(),
+        };
+        let modifiers: String = self.modifiers[self.spelled.typed_from..]
+            .iter()
+            .map(ModifierCall::spelled)
+            .collect();
+        format!("{}{accessor}{modifiers}", self.spelled.name)
+    }
+
+    /// **A default, as an expression**: this key with `modifier` added after its own, its rows
+    /// walked on through the modifier table from what they were, and read as its base's one type,
+    /// as a key typed with that modifier is. An error where the table refuses the modifier, or the
+    /// key is of mixed type — a defect in the caller's policy, never something the user typed.
+    pub fn with_modifier(mut self, modifier: Modifier) -> Result<ParsedFactKey> {
+        let Rows::One(gives) = &self.rows else {
+            anyhow::bail!("{} is of mixed type; it takes no modifier", self.base_key);
+        };
+        let call = ModifierCall {
+            modifier,
+            args: Vec::new(),
+        };
+        let Some(next) = result_of(gives, !self.modifiers.is_empty(), &call) else {
+            anyhow::bail!("{} cannot take |{}", self.printed(), <&str>::from(modifier));
+        };
+        self.read_as = match (self.read_as, gives) {
+            (ReadAs::One(t), _) => ReadAs::One(t),
+            (ReadAs::Any, Gives::Text) => ReadAs::One(FactType::Text),
+            (ReadAs::Any, Gives::Path) => ReadAs::One(FactType::Path),
+            (ReadAs::Any, Gives::Number) => ReadAs::One(FactType::Num),
+            (ReadAs::Any, Gives::Time) => ReadAs::One(FactType::Time),
+            (read_as, gives) => {
+                anyhow::bail!("{} read as {read_as:?} gives {gives:?}", self.base_key)
+            }
+        };
+        self.rows = Rows::One(next);
+        self.modifiers.push(call);
+        Ok(self)
+    }
+
+    /// **The rows' type, in the words a report's header names it**: the key list's words, and
+    /// `range` for a bucket's labels, `time of day` for `|time`'s, `mixed` for a bare key of
+    /// mixed type. A number part (`|year` … `|quarter`) is a number, which a filter compares it
+    /// as.
+    pub fn rows_word(&self) -> &'static str {
+        match &self.rows {
+            Rows::One(gives) => match gives {
+                Gives::Text => "text",
+                Gives::Path => "path",
+                Gives::Number => "number",
+                Gives::Time | Gives::TimeAt(_) => "time",
+                Gives::TimeOfDay => "time of day",
+                Gives::Part(_) => "number",
+                Gives::Bucket(_) => "range",
+            },
+            Rows::Mixed(_) => "mixed",
+        }
+    }
+
+    /// The types of a bare key of mixed type; `None` for any other key.
+    pub fn mixed_types(&self) -> Option<&KeyTypes> {
+        match &self.rows {
+            Rows::Mixed(types) => Some(types),
+            Rows::One(_) => None,
+        }
     }
 
     /// Whether a stored value is what the key was read as ([`check_read_as`]): a key with an
@@ -552,6 +664,16 @@ impl ParsedFactKey {
     /// Check if this key has transforms (accessor or modifiers).
     pub fn has_transforms(&self) -> bool {
         self.accessor.is_some() || !self.modifiers.is_empty()
+    }
+}
+
+/// One key read as `--key` reads it, for a test: no problem, exactly one key.
+#[cfg(test)]
+fn read_one(key: &str) -> Result<InputKey> {
+    let reading = super::read::read_keys(key, 0, Grammar::Key, super::read::AliasMode::NotLoaded);
+    match (reading.problems.is_empty(), reading.value) {
+        (true, Some(mut keys)) if keys.len() == 1 => Ok(keys.remove(0)),
+        (_, _) => anyhow::bail!("not one key: {key}: {:?}", reading.problems),
     }
 }
 
@@ -667,7 +789,7 @@ impl InputKey {
     }
 
     /// The name inside its quotes, an inner quote undoubled.
-    fn name_text(&self) -> String {
+    pub(in crate::expr) fn name_text(&self) -> String {
         let mut cursor = Cursor::new(&self.input_name, 0);
         if self.is_quoted() {
             read_quoted(&mut cursor).unwrap_or_default()
@@ -1902,5 +2024,156 @@ mod tests {
             let (key, at) = key_in_filter(text);
             assert_eq!(key.quoted_name_fix(text, at).as_deref(), want, "{text}");
         }
+    }
+
+    // =========================================================================
+    // A report key's header and rows
+    // =========================================================================
+
+    /// **The rows' type word**, one per kind a key's chain can give and `mixed` — the match is
+    /// exhaustive, so a new kind fails to compile until it has a word.
+    #[test]
+    fn the_rows_word_names_every_kind_a_chain_gives() {
+        for (text, base, word) in [
+            ("content.S", FactType::Text, "text"),
+            ("source.rel_path", FactType::Path, "path"),
+            ("content.N", FactType::Num, "number"),
+            ("content.T", FactType::Time, "time"),
+            ("content.T|datetime", FactType::Time, "time"),
+            ("content.T|date", FactType::Time, "time"),
+            ("content.T|yearmonth", FactType::Time, "time"),
+            ("content.T|time", FactType::Time, "time of day"),
+            ("content.T|year", FactType::Time, "number"),
+            ("content.T|weekday", FactType::Time, "number"),
+            ("content.T|quarter", FactType::Time, "number"),
+            ("content.N|bucket", FactType::Num, "range"),
+            ("content.N|bucket(60,300)", FactType::Num, "range"),
+            ("source.rel_path[-1]", FactType::Path, "text"),
+            ("source.rel_path[:-1]", FactType::Path, "path"),
+        ] {
+            let key = ParsedFactKey::parse_as(text, base).unwrap();
+            assert_eq!(key.rows_word(), word, "{text}");
+            assert!(key.mixed_types().is_none(), "{text}");
+        }
+        let mut mixed = ParsedFactKey::parse("content.M").unwrap();
+        mixed.rows = Rows::Mixed(KeyTypes::of(FactType::Text));
+        assert_eq!(mixed.rows_word(), "mixed");
+        assert!(mixed.mixed_types().is_some());
+    }
+
+    /// **The header expression**: the name as the user spelled it — bare where it reads back as
+    /// the same key, otherwise in Canon's quotes, never swapped for the full stored key — then the
+    /// accessor and modifiers typed after it, each in its one spelling; a built-in key's own
+    /// reading is not typed, and a quoted name keeps reading as what it read as.
+    #[test]
+    fn a_key_prints_as_the_user_spelled_it() {
+        for (typed, printed) in [
+            ("content.File Size", "\"content.File Size\""),
+            ("\"content.File Size\"", "\"content.File Size\""),
+            ("File Size", "\"File Size\""),
+            ("mtime", "mtime"),
+            ("\"mtime\"", "mtime"),
+            ("Model", "Model"),
+            ("hash_short", "hash_short"),
+            ("hash_short|uppercase", "hash_short|uppercase"),
+            ("source.rel_path[:-1]", "source.rel_path[:-1]"),
+            ("source.rel_path [-1]|stem", "source.rel_path[-1]|stem"),
+            (
+                "content.N|bucket( 60 ,300.50 )",
+                "content.N|bucket(60,300.5)",
+            ),
+            ("\"archived\"", "\"archived\""),
+            ("\"content.a|b\"", "\"content.a|b\""),
+        ] {
+            let key = ParsedFactKey::parse(typed).unwrap();
+            assert_eq!(key.printed(), printed, "{typed}");
+            let again = ParsedFactKey::parse(printed).unwrap();
+            assert_eq!(
+                (again.key.clone(), again.base_key.clone()),
+                (key.key.clone(), key.base_key.clone()),
+                "{printed} reads back as {typed}"
+            );
+        }
+    }
+
+    /// **Every modifier and accessor, spelled, reads back as itself**: the same call, the same
+    /// accessor.
+    #[test]
+    fn spelled_transforms_read_back_as_themselves() {
+        use strum::IntoEnumIterator;
+        let mut calls: Vec<ModifierCall> = Modifier::iter()
+            .map(|modifier| ModifierCall {
+                modifier,
+                args: Vec::new(),
+            })
+            .collect();
+        calls.push(ModifierCall {
+            modifier: Modifier::Bucket,
+            args: vec![-5.0, 0.25, 60.0, 1e6],
+        });
+        for call in calls {
+            let text = format!("content.K{}", call.spelled());
+            let read = read_one(&text).unwrap();
+            assert_eq!(read.modifiers.len(), 1, "{text}");
+            assert_eq!(read.modifiers[0].0, call, "{text}");
+        }
+        for accessor in [
+            PathAccessor::Index(0),
+            PathAccessor::Index(-1),
+            PathAccessor::Slice {
+                start: Some(1),
+                end: Some(3),
+            },
+            PathAccessor::Slice {
+                start: None,
+                end: Some(-1),
+            },
+            PathAccessor::Slice {
+                start: Some(-2),
+                end: None,
+            },
+            PathAccessor::Slice {
+                start: None,
+                end: None,
+            },
+        ] {
+            let text = format!("source.rel_path{}", accessor.spelled());
+            let read = read_one(&text).unwrap();
+            assert_eq!(
+                read.accessor.map(|(read, _)| read),
+                Some(accessor),
+                "{text}"
+            );
+        }
+    }
+
+    /// **A default, as an expression**: the modifier added after the key's own, the rows walked
+    /// on, the key read as its one type — a modification time by year, a size by range, an alias
+    /// for one as its key would; a modifier the table refuses, or a key of mixed type, is an
+    /// error.
+    #[test]
+    fn a_default_is_added_as_a_modifier() {
+        let year = ParsedFactKey::parse("source.mtime")
+            .unwrap()
+            .with_modifier(Modifier::Year)
+            .unwrap();
+        assert_eq!(year.printed(), "source.mtime|year");
+        assert!(matches!(year.rows, Rows::One(Gives::Part(Modifier::Year))));
+        assert_eq!(year.read_as, ReadAs::One(FactType::Time));
+
+        let size = ParsedFactKey::parse("size")
+            .unwrap()
+            .with_modifier(Modifier::Bucket)
+            .unwrap();
+        assert_eq!(size.printed(), "size|bucket");
+        assert_eq!(size.rows_word(), "range");
+
+        let refused = ParsedFactKey::parse("source.ext")
+            .unwrap()
+            .with_modifier(Modifier::Bucket);
+        assert!(refused.is_err());
+        let mut mixed = ParsedFactKey::parse("content.M").unwrap();
+        mixed.rows = Rows::Mixed(KeyTypes::of(FactType::Text));
+        assert!(mixed.with_modifier(Modifier::Year).is_err());
     }
 }

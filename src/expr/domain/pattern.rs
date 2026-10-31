@@ -1066,7 +1066,6 @@ fn key_value(key: &PatternKey, ctx: &EvalContext) -> Result<Value, KeyOutcome> {
 #[cfg(test)]
 mod tests {
     use super::super::bind::bind_pattern_key;
-    use super::super::transform::Modifier;
     use super::*;
     use crate::core::domain::fact::{FactType, KeyTypes};
 
@@ -1233,6 +1232,7 @@ mod tests {
     fn a_bucket_label_is_the_same_in_a_report_a_rejection_and_a_directory() {
         use crate::expr::domain::key::ParsedFactKey;
         use crate::expr::domain::print::threshold_bucket_labels;
+        use crate::expr::domain::row::RowValue;
         let zone = UserZone::utc();
         let ctx = context(&zone, at("photos/image.jpg")); // 1,024,000 bytes
         for (key, label) in [
@@ -1245,14 +1245,11 @@ mod tests {
                 format!("{label}/image.jpg"),
                 "{key}"
             );
-            let reported = ParsedFactKey::parse(key)
+            let report_key = ParsedFactKey::parse(key).unwrap();
+            let reported = RowValue::read(FactValue::Num(1_024_000.0), &report_key, &zone)
                 .unwrap()
-                .report_value(FactValue::Num(1_024_000.0), &zone)
-                .unwrap();
-            let Modified::Value(reported) = reported else {
-                panic!("{key}: no value")
-            };
-            assert_eq!(rendered(Some(Modifier::Bucket), &reported, &zone), label);
+                .unwrap_or_else(|| panic!("{key}: no value"));
+            assert_eq!(reported.rendered(), label);
         }
         // A rejection lists the same labels as its ranges.
         assert!(

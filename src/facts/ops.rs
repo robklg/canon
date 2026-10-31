@@ -7,3 +7,6 @@ pub(super) mod convert;
 pub(super) mod import;
 pub(super) mod maintain;
 pub(super) mod report;
+
+#[cfg(test)]
+mod tests;

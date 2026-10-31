@@ -5,7 +5,8 @@
 //! one for the status predicates — one point read answers whether a key is
 //! known, one reads the source row a per-source comparison works from, and
 //! one reads a key's rows per source, on the source and on its content, for the
-//! one rule that picks between them. Batch in, domain types out.
+//! one rule that picks between them — every stored key's at once, for the key list's
+//! counts. Batch in, domain types out.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -303,6 +304,74 @@ pub(super) struct KeyRowsOf {
     pub on_content: Option<Stored<FactEntry>>,
 }
 
+impl KeyRowsOf {
+    fn empty() -> KeyRowsOf {
+        KeyRowsOf {
+            on_source: None,
+            on_content: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.on_source.is_none() && self.on_content.is_none()
+    }
+
+    /// **Fold one fact row in**, where it sits: a value Canon cannot read is no row on the
+    /// source, and on the content an unreadable row, which decides the source has no value.
+    fn fold(&mut self, row: SourceFactRow) {
+        let on_source = FactEntry::sits_on_source(&row.entity_type);
+        let entry = |value| FactEntry::new(row.key, value, row.entity_type, row.entity_id);
+        match row.value {
+            Stored::Readable(value) if on_source => self.on_source = Some(entry(value)),
+            Stored::Readable(value) => self.on_content = Some(Stored::Readable(entry(value))),
+            Stored::Unreadable if on_source => {}
+            Stored::Unreadable => self.on_content = Some(Stored::Unreadable),
+        }
+    }
+}
+
+/// One fact row of a source, on the source or on its content.
+struct SourceFactRow {
+    source_id: i64,
+    key: String,
+    entity_type: String,
+    entity_id: i64,
+    value: Stored<FactValue>,
+}
+
+/// **The facts of the temp table's sources**, on each source and on its content, in one query:
+/// `key_clause` narrows them (` AND f.key = ?1`, or nothing) and `order` orders them; read by
+/// [`read_fact_row`].
+fn source_facts_query(key_clause: &str, order: &str) -> String {
+    format!(
+        r#"
+        SELECT ts.id, f.key, f.entity_type, f.entity_id, {cols}
+        FROM temp_sources ts
+        JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id{key_clause}
+
+        UNION ALL
+
+        SELECT ts.id, f.key, f.entity_type, f.entity_id, {cols}
+        FROM temp_sources ts
+        JOIN sources s ON s.id = ts.id
+        JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id{key_clause}
+        WHERE s.object_id IS NOT NULL
+        {order}
+    "#,
+        cols = fact_value_columns_of("f")
+    )
+}
+
+fn read_fact_row(row: &rusqlite::Row) -> rusqlite::Result<SourceFactRow> {
+    Ok(SourceFactRow {
+        source_id: row.get(0)?,
+        key: row.get(1)?,
+        entity_type: row.get(2)?,
+        entity_id: row.get(3)?,
+        value: fact_value_at(row, 4)?,
+    })
+}
+
 /// A key's rows for a batch of sources. A source holding neither row is absent from the
 /// map. A stored value Canon cannot read is no row on the source, and on the content an
 /// unreadable row, which decides the source has no value.
@@ -317,60 +386,65 @@ pub(super) fn fetch_key_rows(
 
     populate_temp_sources(conn, source_ids)?;
 
-    let query = format!(
-        r#"
-        SELECT ts.id, f.key, f.entity_type, f.entity_id, {cols}
-        FROM temp_sources ts
-        JOIN facts f ON f.entity_type = 'source' AND f.entity_id = ts.id AND f.key = ?1
-
-        UNION ALL
-
-        SELECT ts.id, f.key, f.entity_type, f.entity_id, {cols}
-        FROM temp_sources ts
-        JOIN sources s ON s.id = ts.id
-        JOIN facts f ON f.entity_type = 'object' AND f.entity_id = s.object_id AND f.key = ?1
-        WHERE s.object_id IS NOT NULL
-    "#,
-        cols = fact_value_columns_of("f")
-    );
-
     let mut rows: HashMap<i64, KeyRowsOf> = HashMap::new();
     {
-        let mut stmt = conn.prepare(&query)?;
-        let fetched = stmt.query_map([key], |row| {
-            let source_id: i64 = row.get(0)?;
-            let key: String = row.get(1)?;
-            let entity_type: String = row.get(2)?;
-            let entity_id: i64 = row.get(3)?;
-            let value = fact_value_at(row, 4)?;
-            Ok((source_id, key, entity_type, entity_id, value))
-        })?;
-        for row in fetched {
-            let (source_id, key, entity_type, entity_id, value) = row?;
-            let on_source = FactEntry::sits_on_source(&entity_type);
-            let entry = match value {
-                Stored::Readable(value) => {
-                    Stored::Readable(FactEntry::new(key, value, entity_type, entity_id))
-                }
-                Stored::Unreadable if on_source => continue,
-                Stored::Unreadable => Stored::Unreadable,
-            };
-            let of = rows.entry(source_id).or_insert(KeyRowsOf {
-                on_source: None,
-                on_content: None,
-            });
-            match entry {
-                Stored::Readable(entry) if on_source => of.on_source = Some(entry),
-                content => of.on_content = Some(content),
-            }
+        let mut stmt = conn.prepare(&source_facts_query(" AND f.key = ?1", ""))?;
+        for row in stmt.query_map([key], read_fact_row)? {
+            let row = row?;
+            rows.entry(row.source_id)
+                .or_insert_with(KeyRowsOf::empty)
+                .fold(row);
         }
     }
+    rows.retain(|_, of| !of.is_empty());
 
     conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
 
     Ok(rows)
 }
 
+/// **Every stored key's rows for a batch of sources**, read once, in order of source then key,
+/// and handed to `visit` one source's key at a time, so what is held stays one source's: the key,
+/// then its rows as [`fetch_key_rows`] gives them. A key whose only row is a value Canon cannot
+/// read on the source is still handed over, with no rows, so a reader can know the key is there.
+pub(super) fn fetch_all_key_rows(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    mut visit: impl FnMut(&str, KeyRowsOf),
+) -> Result<()> {
+    if source_ids.is_empty() {
+        return Ok(());
+    }
+
+    populate_temp_sources(conn, source_ids)?;
+
+    {
+        let mut stmt = conn.prepare(&source_facts_query("", "ORDER BY 1, 2"))?;
+        let mut current: Option<(i64, String, KeyRowsOf)> = None;
+        for row in stmt.query_map([], read_fact_row)? {
+            let row = row?;
+            match &mut current {
+                Some((id, key, of)) if *id == row.source_id && *key == row.key => of.fold(row),
+                _ => {
+                    if let Some((_, key, rows)) = current.take() {
+                        visit(&key, rows);
+                    }
+                    let (id, key) = (row.source_id, row.key.clone());
+                    let mut of = KeyRowsOf::empty();
+                    of.fold(row);
+                    current = Some((id, key, of));
+                }
+            }
+        }
+        if let Some((_, key, rows)) = current {
+            visit(&key, rows);
+        }
+    }
+
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -75,7 +75,7 @@ These work on text and paths, and on the printed form of another modifier's resu
 | `bucket` | A number from 0 up | A range label: `0`, then powers of ten, `1-to-10`, `10-to-100`, `1K-to-10K`, `0.00001-to-0.0001`. A number below zero has no value: \|bucket groups numbers from 0 up |
 | `bucket(a,b,c)` | Any number, negative ones included | A range label: `under-a`, `a-to-b`, `b-to-c`, `c-and-up`, a number below zero written with `minus-` (`\|bucket(-90,0,90)` gives `under-minus-90`, `minus-90-to-0`, `0-to-90`, `90-and-up`) |
 
-Example: `content.numtext|number>=10` compares text such as `9` and `10` as numbers, and `source.size|bucket` groups file sizes by order of magnitude. A label holds only letters, digits, `-` and `.`. It is compared with `=`, `!=` and `IN`, typed as Canon prints it (`source.size|bucket(1e6)=1000000-and-up`); ordering a label gives an error.
+Example: `content.numtext|number>=10` compares text such as `9` and `10` as numbers, and `source.size|bucket` groups file sizes by order of magnitude. A range includes its lower edge and not its upper: `1K-to-10K` holds 1,000 up to 9,999, since `K` is 1,000, `M` 1,000,000 and `G` 1,000,000,000. A label holds only letters, digits, `-` and `.`. It is compared with `=`, `!=` and `IN`, typed as Canon prints it (`source.size|bucket(1e6)=1000000-and-up`); ordering a label gives an error.
 
 ## Path Accessors
 

@@ -11,7 +11,7 @@ needs restating somewhere else, that is the signal something belongs in this fac
 
 **Modules**: `domain/key`, `domain/read`, `domain/problem`, `domain/transform`,
 `domain/pattern`, `domain/vantage`, `domain/filter`, `domain/glob`, `domain/bind`, `domain/print`,
-`domain/cache`, `domain/value`, `domain/alias`, `domain/statement`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
+`domain/row`, `domain/cache`, `domain/value`, `domain/alias`, `domain/statement`, `ops/filter`, `ops/bind`, `ops/pattern`, `ops/selection`, `ops/alias`,
 `ops/value`, `ops/notes`, `repo`.
 
 ## Strata
@@ -23,7 +23,8 @@ put through. `pattern` reads, checks and evaluates the shaping half — see A pa
 `vantage` owns the one rule that half cannot answer per source — see The scope vantage below. `filter` is the asking
 half: the syntax tree the reader builds and the comparisons it reduces to. `glob` is a glob's
 own grammar and its matcher. `bind` reads each clause's value as its key's type — the modifier table, the
-input types, the refusal — and `print` is the printing rule. `statement` is the statement grammar — see The statement grammar below. `cache`
+input types, the refusal — and `print` is the printing rule. `row` is a report's rows — see The
+read-back round trip below. `statement` is the statement grammar — see The statement grammar below. `cache`
 is the shape a prefetched fact takes on its way to a comparison — it sits in domain, not ops,
 because putting a return type in the layer above the function that returns it is a
 repo-to-ops inversion. `value` resolves a key to a value for one source. `alias` checks
@@ -37,13 +38,16 @@ reads its stored facts, the place the context-supplied law is applied rather tha
 reports over or acts on — it lives here rather than beside any one command because exploring
 and acting must resolve to the same set. `notes` is what a selecting run recorded beside its
 evaluation and the lines an acting command's plan states from it — see Selection notes below. `alias` reads the aliases file, the first time a reading meets
-an alias, and hands its entries to the check. `value` reads a stored key's one value for a batch of sources, and any key's as an
-expression reads it (`fetch_named_values`, for `worklist --emit`).
+an alias, and hands its entries to the check. `value` reads a stored key's one value for a batch of sources, any key's as an
+expression reads it (`fetch_named_values`, for `worklist --emit`), a report key's typed
+(`fetch_row_values`), and how many sources have a value for each stored key
+(`count_values_by_key`).
 
 **`repo.rs`** — what the language needs read out of the database before it can be evaluated:
 `prefetch_facts` and `prefetch_status_data` fill the cache, `fetch_source_row` reads one source's
-row, and
-`fetch_key_rows` reads a key's rows per source, on the source and on its content.
+row,
+`fetch_key_rows` reads a key's rows per source, on the source and on its content, and
+`fetch_all_key_rows` every stored key's, one source at a time.
 
 ## The front door
 
@@ -54,7 +58,8 @@ Everything else is private, and the strata are private modules: how the facility
 itself is its own business, and rearranging it must not be visible to any caller. One item is
 carried only as a parameter type, `NoteMarks`: `SelectionNotes::of` takes it and no consumer
 names it, so it rides with `#[allow(unused_imports)]` under the parameter-type rule; return
-types never join that way.
+types never join that way. `fetch_source_values` rides the same way for another reason: its one
+reader outside is the source-value law's verifier, a test.
 
 **Every inbound reach is at the front door.** Nothing outside names `expr::domain::…` or
 `expr::ops::…`, and nothing inside reaches a sibling subsystem's internals in either
@@ -215,14 +220,38 @@ printable one- and two-character value checked against the reader). A refusal's 
 through it. So does the statement that keys are of mixed type, with their types, and its way out
 (`mixed_type_statement`, `mixed_type_way_out`), which a refused filter, `facts`' listing,
 `cluster`'s summary, a manifest's comments and `import-facts`' skip lines read: the key prints
-through the rule, and its `canon facts convert` command (`convert_command`) names the full stored
+through the rule, its control characters shown as pictures in `mixed_type_statement` (a refused
+filter's own sentence, `Gives::statement`, prints the key as typed), and its `canon facts convert` command (`convert_command`) names the full stored
 key, quoted for the shell only, and the type to convert to where its reader names one
 (`the_convert_command_is_quoted_for_the_shell_only`). Every bucket label is spelled and recognized
 here (`bucket_label`, `is_plain_bucket_label`, `threshold_bucket_labels`), the modifier handing over
-only a `BucketRange`, so a report, a rejection and a directory name say one label. Its inverse
+only a `BucketRange`, so a report, a rejection and a directory name say one label. A report's
+value prints against what its key gives (`printed_as`): every kind a chain gives, a part's word
+and a bucket's label bare. A key's name as the user spelled it (`printed_name`, a report's
+header) prints bare where it reads back as that same name, never swapped for the full stored key. Its inverse
 for a name, `printed_name_read`, reads Canon's quotes off by `read_quoted`, which the key-name
 reader applies to a typed name (`a_printed_key_reads_back_as_its_name`). **Where it does
-not apply**: a `facts` row and a pattern's directory name print text as it is, bare.
+not apply**: a pattern's directory name prints text as it is, bare.
+
+## The read-back round trip
+
+**The read-back round trip**: every row a report prints carries its filter as a typed result
+(`RowFilter`, exact or wider), spelled only in `domain/row.rs` — a report spells no `--where`
+text. A row's cell and the value in its filter come from one constructor (`ParsedFactKey::row`),
+so the two cannot drift. Pasted as printed onto the same selection in the same zone, an unmarked
+row selects exactly the sources it counted; a coarse time beside finer ones in its period is
+marked `+` and its exact filter adds `AND NOT <key>|<next finer part>?` (`exactly`, read off
+`RowValue::grain` and `contained`, the time noun's period table); text or a path holding a control
+character is marked `!`, shown in control pictures (`pictured`), its filter a glob of quoted parts
+around a bare `?` per visible character holding one — wider. A key of mixed type's rows claim no
+filter. A report's value is read typed (`RowValue`) and counted under its row (`RowIdentity`: its
+type and its printed form, so on a key of mixed type the text `"2019"` and the number `2019` are
+two rows); values are ordered by type, then the type's own order, then printed form and type, so
+two values are equal in order only where they are one row and ties print the same every run; a report key carries what its rows
+are (`Rows`) and how it was spelled, which its header prints (`printed`), and a report's default is
+added as a modifier (`with_modifier`). Verifier `every_printed_row_selects_what_it_counted`
+(`facts`' tests, the report that consumes it). **Where it does not apply**: `ls -l`, `worklist`
+and `facts convert`'s own output, which make no paste-back promise.
 
 ## The statement grammar
 
@@ -349,8 +378,8 @@ repaired, so a wrong site is made impossible rather than merely detectable — a
 spelling appearing anywhere outside.
 
 **Reach: this facility, argued rather than defaulted.** The asking half needs no such rule —
-`resolve_fact_value` tries the computed key first and falls back to stored facts, so shadowing is
-already structurally impossible there. No canon-wide reach is claimed.
+the filter's compare and a report's `row_value` read a computed key from the source row only, so
+shadowing is already structurally impossible there. No canon-wide reach is claimed.
 
 One narrowing to know about: the law drops only what the context actually supplies, never the
 whole `source.` namespace. A `source.*` key that is not a source fact is supplied by nothing and
@@ -419,7 +448,8 @@ since it already selects exactly what has no value.
 **A source has one value for a stored key**: its content's fact; the source's own only where the
 content has none. `source_value` (`domain/value.rs`) decides it. Readers reach it
 through `FactCache::value` (the filter), `fetch_source_values` (`ops/value.rs`: patterns, `facts`
-reports, and `worklist --emit` through `fetch_named_values`), or `source_values` (`domain/value.rs`), which `cluster generate`
+reports through `fetch_row_values`, and `worklist --emit` through `fetch_named_values`),
+`count_values_by_key` (the key list's counts, what a bare `<key>?` selects), or `source_values` (`domain/value.rs`), which `cluster generate`
 hands the facts it already holds for a source; none outside pairs the two rows or picks
 between them, and which row a fact sits on is the fact noun's (`FactEntry::is_on_source`). Why:
 a filter matching either row selected sources the report beside it never counted.

@@ -3,16 +3,18 @@
 //! bare exactly when the reader reads it back after `=` as one bare value with the same
 //! text **and** the binder reads that bare text as the same value for its type; a key prints
 //! bare exactly when the reader reads it back as one key, in a filter and as a report key, with
-//! no accessor or modifier and the same base key. Otherwise it prints in double quotes, an inner `"` doubled — which the
+//! no accessor or modifier and the same base key; a key's name as the user spelled it, as the
+//! same name. Otherwise it prints in double quotes, an inner `"` doubled — which the
 //! grammar reads back as the text inside. No character list lives here, so the writer cannot
-//! drift from the reader.
+//! drift from the reader. A report's value prints against what its key gives, and a control
+//! character is shown as a visible one.
 
 use crate::core::domain::fact::{FactType, KeyTypes};
 use crate::core::domain::format::{format_count, shell_quote};
 use crate::core::domain::number::{number_form, spelled};
-use crate::core::domain::time::reading::read_time;
+use crate::core::domain::time::reading::{read_time, read_time_of_day};
 
-use super::bind::{input_type, InputType};
+use super::bind::{input_type, Gives, InputType};
 use super::read::{
     read_keys, read_quoted, reads_as_one_bare_key, reads_as_one_bare_value, AliasMode, Cursor,
     Grammar,
@@ -53,6 +55,64 @@ pub fn printed_key(key: &str) -> String {
     } else {
         quoted(key)
     }
+}
+
+/// A key's name as the user spelled it, as Canon prints it: bare where the bare text, read back as
+/// a filter's key, is one key with nothing typed after its name and this same name — so it reads
+/// as the same key, a built-in key's own reading included (`hash_short`) — otherwise
+/// double-quoted (`"File Size"`). Never swapped for the full stored key.
+pub(in crate::expr) fn printed_name(name: &str) -> String {
+    let reading = read_keys(name, 0, Grammar::Key, AliasMode::NotLoaded);
+    let its_own_name = reading.problems.is_empty()
+        && matches!(reading.value.as_deref(),
+            Some([read]) if read.input == name && read.input_name == name);
+    if reads_as_one_bare_key(name) && its_own_name {
+        name.to_string()
+    } else {
+        quoted(name)
+    }
+}
+
+/// **A report's value as Canon prints it**, against what its key gives: text, a path, a number
+/// and a time through [`printed_value`] for that type; a number part's word and a bucket's
+/// label through [`printed_word`], since each names itself; a time of day bare exactly where
+/// the bare text reads back as one. `text` is the value's one printed form
+/// (`transform::rendered`).
+pub(in crate::expr) fn printed_as(gives: &Gives, text: &str) -> String {
+    match gives {
+        Gives::Text => printed_value(text, FactType::Text),
+        Gives::Path => printed_value(text, FactType::Path),
+        Gives::Number => printed_value(text, FactType::Num),
+        Gives::Time | Gives::TimeAt(_) => printed_value(text, FactType::Time),
+        Gives::Part(_) | Gives::Bucket(_) => printed_word(text),
+        Gives::TimeOfDay => {
+            if read_time_of_day(text).is_ok() && reads_back_bare(text) {
+                text.to_string()
+            } else {
+                quoted(text)
+            }
+        }
+    }
+}
+
+/// **Control pictures**: `text` with each control character shown as a visible one, so a table
+/// holding it stays intact — U+0000–U+001F as their Unicode control pictures (U+2400 on), DEL as
+/// U+2421, and a control character with no picture of its own (U+0080–U+009F) as U+2426, a
+/// symbol no metadata stores by accident.
+pub fn pictured(text: &str) -> String {
+    text.chars()
+        .map(|c| match c as u32 {
+            code @ 0x00..=0x1F => char::from_u32(0x2400 + code).unwrap_or(c),
+            0x7F => '\u{2421}',
+            _ if c.is_control() => '\u{2426}',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Whether `text` holds a control character, which [`pictured`] shows as another.
+pub fn holds_control(text: &str) -> bool {
+    text.chars().any(char::is_control)
 }
 
 /// **The printing rule's inverse for a name**: a name given wholly as one quoted name — one pair
@@ -109,26 +169,26 @@ pub(in crate::expr) fn mixed_types(types: &KeyTypes) -> String {
 }
 
 /// The statement that keys are of mixed type, with their types. One key is named as Canon
-/// prints it; several are counted, then named one per line. Spoken here once, beside the
+/// prints it, a control character in it shown as its picture so the statement keeps its lines;
+/// several are counted, then named one per line. Spoken here once, beside the
 /// printing rule its keys print through, for the surfaces that list such keys: `facts`'
-/// listing and `cluster`'s summary. A refused filter states its own line per clause and reads
+/// listing, a `facts` report above its table, and `cluster`'s summary. A refused filter states its own line per clause and reads
 /// only the way out. Empty for no keys.
 pub fn mixed_type_statement(keys: &[(&str, &KeyTypes)]) -> Vec<String> {
     match keys {
         [] => Vec::new(),
         [(key, types)] => vec![format!(
             "{} is of mixed type ({}); filters and patterns support one type only.",
-            printed_key(key),
+            pictured(&printed_key(key)),
             mixed_types(types)
         )],
         keys => std::iter::once(format!(
             "{} keys are of mixed type; filters and patterns support one type only:",
             format_count(keys.len())
         ))
-        .chain(
-            keys.iter()
-                .map(|(key, types)| format!("  {} ({})", printed_key(key), mixed_types(types))),
-        )
+        .chain(keys.iter().map(|(key, types)| {
+            format!("  {} ({})", pictured(&printed_key(key)), mixed_types(types))
+        }))
         .collect(),
     }
 }
@@ -257,8 +317,10 @@ mod tests {
     use super::*;
     use crate::core::domain::fact::KeyTypes;
     use crate::core::domain::number::read_number;
+    use crate::core::domain::time::value::Precision;
     use crate::expr::domain::bind::{bind_expr, Bound, Test};
     use crate::expr::domain::read::read_filter;
+    use crate::expr::domain::transform::Modifier;
 
     /// The value the binder reads from `k=<printed>` against a key of type `t`.
     fn read_back(printed: &str, t: FactType) -> Test {
@@ -491,7 +553,8 @@ mod tests {
 
     /// The statement and the way out, word for word, for one key (named, with its types) and
     /// for several (counted, then each named with its types); a key the language reads only
-    /// quoted prints quoted, and its command is quoted for the shell alone.
+    /// quoted prints quoted, and its command is quoted for the shell alone; a control character
+    /// in a key is pictured in the statement and left as it is in the command.
     #[test]
     fn the_mixed_type_statement_reads_as_decided() {
         use FactType::{Num, Text, Time};
@@ -535,6 +598,21 @@ mod tests {
         assert_eq!(
             mixed_type_statement(&[("content.File Size", &file_size)])[0],
             r#""content.File Size" is of mixed type (number and text); filters and patterns support one type only."#
+        );
+
+        let line_feed = [("content.NL\nKey", &file_size)];
+        assert_eq!(
+            mixed_type_statement(&line_feed),
+            ["\"content.NL\u{240A}Key\" is of mixed type (number and text); filters and patterns \
+              support one type only."]
+        );
+        assert_eq!(
+            mixed_type_statement(&[line_feed[0], one[0]])[1],
+            "  \"content.NL\u{240A}Key\" (number and text)"
+        );
+        assert_eq!(
+            mixed_type_way_out(&line_feed)[1],
+            "  `canon facts convert 'content.NL\nKey'`"
         );
 
         assert!(mixed_type_statement(&[]).is_empty());
@@ -630,6 +708,81 @@ mod tests {
             r#"content.""""#,
         ] {
             assert_eq!(printed_name_read(&printed_key(key)), key, "{key}");
+        }
+    }
+
+    /// **A report's value prints against what its key gives**: text through the text rule —
+    /// quoted where it would read as anything else — times bare where they read so and quoted
+    /// with a space, numbers bare, a part's word and a bucket's label bare, and a time of day bare.
+    #[test]
+    fn a_report_value_prints_against_what_its_key_gives() {
+        for (gives, text, printed) in [
+            (
+                Gives::Text,
+                "Canon EOS 5D Mark II",
+                r#""Canon EOS 5D Mark II""#,
+            ),
+            (Gives::Text, "", r#""""#),
+            (Gives::Text, " a ", r#"" a ""#),
+            (Gives::Text, r#"say "hi""#, r#""say ""hi""""#),
+            (Gives::Text, "it's", r#""it's""#),
+            (Gives::Text, "icon@2x.png", r#""icon@2x.png""#),
+            (Gives::Text, "a,b", r#""a,b""#),
+            (Gives::Text, "a?b", r#""a?b""#),
+            (Gives::Text, "[draft]", r#""[draft]""#),
+            (Gives::Text, "2019", r#""2019""#),
+            (Gives::Text, "2024-06-15", r#""2024-06-15""#),
+            (Gives::Text, "0500", r#""0500""#),
+            (Gives::Text, "18:00", r#""18:00""#),
+            (
+                Gives::Text,
+                "2019:05:04 10:12:00",
+                r#""2019:05:04 10:12:00""#,
+            ),
+            (Gives::Text, "(no value)", r#""(no value)""#),
+            (Gives::Text, "DMC-FZ38", "DMC-FZ38"),
+            (Gives::Text, "IMG_0001.jpg", "IMG_0001.jpg"),
+            (Gives::Text, "AND", "AND"),
+            (Gives::Path, "a b/c.jpg", r#""a b/c.jpg""#),
+            (Gives::Path, "2024/a.jpg", "2024/a.jpg"),
+            (Gives::Time, "2024", "2024"),
+            (Gives::Time, "2024-06-15", "2024-06-15"),
+            (Gives::Time, "2024-06-15 14:30", r#""2024-06-15 14:30""#),
+            (Gives::TimeAt(Precision::Day), "2024-06-15", "2024-06-15"),
+            (Gives::Number, "1024", "1024"),
+            (Gives::Number, "-1.5", "-1.5"),
+            (Gives::Part(Modifier::Year), "2024", "2024"),
+            (Gives::Part(Modifier::Month), "07", "07"),
+            (Gives::Part(Modifier::Weekday), "Monday", "Monday"),
+            (Gives::Part(Modifier::Quarter), "Q1", "Q1"),
+            (Gives::Bucket(Vec::new()), "1K-to-10K", "1K-to-10K"),
+            (Gives::Bucket(vec![60.0, 300.0]), "under-60", "under-60"),
+            (Gives::TimeOfDay, "18:30", "18:30"),
+            (Gives::TimeOfDay, "18:30:45", "18:30:45"),
+        ] {
+            assert_eq!(printed_as(&gives, text), printed, "{gives:?} {text:?}");
+        }
+    }
+
+    /// **Control pictures**: each control character shown as its picture — line feed, tab, a
+    /// carriage return and line feed each, delete — and one with no picture of its own as U+2426;
+    /// a stored picture, U+2426 or U+FFFD is no control character and prints as it is.
+    #[test]
+    fn a_control_character_is_shown_as_its_picture() {
+        let next_line = char::from_u32(0x85).unwrap();
+        for (text, shown, holds) in [
+            ("a\nb".to_string(), "a\u{240A}b", true),
+            ("a\tb".to_string(), "a\u{2409}b", true),
+            ("a\r\nb".to_string(), "a\u{240D}\u{240A}b", true),
+            ("a\u{7F}b".to_string(), "a\u{2421}b", true),
+            (format!("a{next_line}b"), "a\u{2426}b", true),
+            ("a\u{240A}b".to_string(), "a\u{240A}b", false),
+            ("a\u{2426}b".to_string(), "a\u{2426}b", false),
+            ("a\u{FFFD}b".to_string(), "a\u{FFFD}b", false),
+            ("plain".to_string(), "plain", false),
+        ] {
+            assert_eq!(pictured(&text), shown, "{text:?}");
+            assert_eq!(holds_control(&text), holds, "{text:?}");
         }
     }
 }

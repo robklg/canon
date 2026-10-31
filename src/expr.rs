@@ -62,16 +62,27 @@ pub use ops::pattern::read_pattern;
 pub use domain::pattern::PatternFacts;
 pub use ops::pattern::prefetch_pattern_facts;
 
-// Resolving a key to a value, and rendering one for display — together with
-// the attributes a source's own row answers a key from, which both halves of
-// the language hand the resolver.
-pub use domain::value::{resolve_fact_value, source_row_value, SourceAttributes};
+// A key's value from a source's own row — together with the attributes that row answers a key
+// from, which both halves of the language hand the resolver.
+pub use domain::value::{source_row_value, SourceAttributes};
+
+// A report's rows: each source's value for a report key, typed and ordered, read for a batch;
+// the row a value is counted under, its type and its printed form;
+// which values a coarse time's row would select besides its own, and the grain it prints at;
+// the filter a printed row stands for, exact or wider, and what stands in its value's place; and
+// a value's control characters shown as visible ones — the read-back round trip's owner.
+pub use domain::print::{holds_control, pictured};
+pub use domain::row::{contained, Grain, RowFilter, RowIdentity, RowValue, Slot};
+pub use ops::value::{count_values_by_key, fetch_row_values};
 
 // A source's one value for a stored key: the rule applied to a source's facts
 // already in hand, and the fetch that applies it to a batch — and a key of any
-// kind read for a batch as an expression reads it.
+// kind read for a batch as an expression reads it. The batch fetch has no production
+// caller outside: the source-value law's verifier (source_value_law_tests.rs) reads it.
 pub use domain::value::{source_value, source_values};
-pub use ops::value::{fetch_named_values, fetch_source_values};
+pub use ops::value::fetch_named_values;
+#[allow(unused_imports)]
+pub use ops::value::fetch_source_values;
 
 // The key vocabulary: the one reader of a key's name and how each caller declares it reads
 // one (a name a person typed, Canon's printed quoting read off; a tool's, as written), the
@@ -82,8 +93,8 @@ pub use domain::key::{
     CONTENT_HASH, SCOPE_REL_PATH,
 };
 
-// What a modifier gives — a value, or none — and the one printed form of what it gave.
-pub use domain::transform::{rendered, Modified, Modifier, ModifierCategory};
+// A modifier, and the one printed form of what it gave.
+pub use domain::transform::{rendered, Modifier, ModifierCategory};
 
 // The statement that keys are of mixed type and its way out, each key printed by the
 // printing rule — read by `facts`' listing, `cluster`'s summary and a manifest's comments —

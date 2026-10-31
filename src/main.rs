@@ -321,7 +321,8 @@ enum Commands {
         /// Show source count per root, or group fact values by root (with --key)
         #[arg(long)]
         by_root: bool,
-        /// Group results by fact key(s), comma-separated (requires --key). Supports modifiers.
+        /// Group results by fact key(s) (requires --key). Supports modifiers. A comma separates
+        /// keys only outside quotes, parentheses and square brackets.
         #[arg(long)]
         group_by: Vec<String>,
     },

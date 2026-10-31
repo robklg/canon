@@ -7,17 +7,26 @@ reaches in, and it reaches no sibling.
 
 **Strata**: `domain.rs` — the import-vocabulary half of the fact noun (`ContentFactOnSource`,
 `is_content_fact`, `import_key`, `delete_key` — which, like the conversion's `read_convert_name`, reads
-a name as typed (`expr::NameReading`), where import reads it as written — and `names_the_root`), and what arrives and what
+a name as typed (`expr::NameReading`), where import reads it as written), and what arrives and what
 becomes of it: `JsonFact` (a value as the JSON its tool wrote, a number in its own spelling),
 and `decide`, which fits one value to its key's type as a `Disposition` — stored, or skipped
 for a `SkipCause`. Text is read through `core::domain::conversion`'s table, times through
 `core::domain::time::reading`, never as epoch seconds. `repo.rs` — the SQL only facts
-performs: upsert, key counting, the fact-promotion reads and writes,
+performs: upsert, the fact-promotion reads and writes,
 counting and deleting by criteria, the stale/excluded prunes, and the conversion's writes by
 fact id, plus the private `value_type_clause`. `domain/convert.rs`, `ops/convert.rs` and
-`cli/convert.rs` — `canon facts convert`, in the same three strata. `ops/report.rs` — the read-only distribution and enumeration
-computations (`compute_all_keys`, `compute_distribution`, `compute_grouped_distribution`,
-`compute_root_distribution`). `ops/maintain.rs` — the delete and prune plan/execute
+`cli/convert.rs` — `canon facts convert`, in the same three strata. `ops/report.rs` — the
+report's four tables as typed rows (`compute_all_keys`, `compute_distribution`,
+`compute_grouped_distribution`, `compute_root_distribution`): each row's cell, count, filter and
+mark, a mixed value's type, and the lines under its table, the header and every line's filter as
+`--where` text, composed here because a row's filter is a typed result a
+second reader takes; `report_keys`, the one owner of a report's defaults (`|year` for a
+modification time, `|bucket` for a size, by the key the name reads as), applied once to the main
+key and every grouping key; `--by-root` is a grouping position, never the text `source.root`, so a
+typed root key prints values. Marks are decided over the whole selection before `--limit`; the
+interface sizes every column by display width, cuts nothing, writes a mixed value's type after
+its cell and shows a control character in the header and the lines as its picture. `ops/tests/` — the report's
+tests and the read-back round trip's verifier, sharing one library builder. `ops/maintain.rs` — the delete and prune plan/execute
 pairs. `ops/import.rs` — `import_batch`, one batch of records, and the summary's
 composition. `cli.rs` — the `canon facts` command surface. `cli/import.rs` — the
 `canon import-facts` one: the reader thread, the batch loop, and the way-out lines.
@@ -25,8 +34,10 @@ composition. `cli.rs` — the `canon facts` command surface. `cli/import.rs` —
 **The fact noun is split, not moved.** `FactEntry`, `FactType` and `FactValue` stay in
 `core::domain::fact`, and `batch_fetch_for_sources` stays in `core/repo/fact.rs`, because
 `archive` and the expression facility consume the nouns, and `archive` the fetch — only what
-facts alone speaks lives here. `ops/report.rs` reads values through `expr::fetch_source_values`,
-one per source. The key listing's Type is the key's (`core::repo::fact::key_types`), never the scope's.
+facts alone speaks lives here. `ops/report.rs` reads values through `expr::fetch_row_values`,
+one per source, typed, and the key list's counts through `expr::count_values_by_key`; it spells
+no `--where` text, every row's filter being the facility's (`expr::RowFilter`). The key listing's
+Type is the key's (`core::repo::fact::key_types`), never the scope's.
 
 **The conversion writes exactly the key's row set.** It reads every fact of the key through
 `core::repo::fact::key_census`, the row set `key_types` reads, and a source's value through

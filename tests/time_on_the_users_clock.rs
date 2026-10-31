@@ -169,21 +169,33 @@ impl Home {
     }
 
     /// `facts --key <key>`'s rows as (value, count), sorted.
+    /// The report's rows, each as its value's text and its count: the table runs to the first
+    /// blank line, a row's mark after Coverage is not its value, and a value printed in Canon's
+    /// quotes is its text inside them.
     fn distribution(&self, tz: &str, key: &str) -> Vec<(String, usize)> {
         let run = self.run(tz, &["facts", "--global", "--key", key], None);
         let rows = run
             .stdout
             .lines()
             .skip_while(|line| !line.starts_with('─'))
-            .skip(1);
+            .skip(1)
+            .take_while(|line| !line.is_empty());
         let mut parsed: Vec<(String, usize)> = rows
             .filter_map(|line| {
-                let words: Vec<&str> = line.split_whitespace().collect();
+                let mut words: Vec<&str> = line.split_whitespace().collect();
+                if matches!(words.last(), Some(&("+" | "!"))) {
+                    words.pop();
+                }
                 if words.len() < 3 {
                     return None;
                 }
                 let count = words[words.len() - 2].parse().ok()?;
-                Some((words[..words.len() - 2].join(" "), count))
+                let value = words[..words.len() - 2].join(" ");
+                let value = match value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+                    Some(inside) => inside.to_string(),
+                    None => value,
+                };
+                Some((value, count))
             })
             .collect();
         parsed.sort();

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::core::domain::fact::FactValue;
+use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::source::fetch_by_id;
@@ -65,9 +65,9 @@ fn report(conn: &mut Connection, ids: &[i64]) -> HashMap<String, i64> {
     let key = ParsedFactKey::parse("content.Make").unwrap();
     crate::facts::compute_distribution(conn, ids, &key, 100, &UserZone::utc())
         .unwrap()
-        .entries
+        .rows
         .into_iter()
-        .map(|entry| (entry.value, entry.count))
+        .map(|row| (row.cell, row.count))
         .collect()
 }
 
@@ -184,13 +184,14 @@ fn an_unreadable_content_value_is_no_value() {
     );
     assert!(filtered(&mut w.conn, &all, "content.Taken|year=2024").is_empty());
 
-    let key = ParsedFactKey::parse("content.Taken").unwrap();
+    // Read as a report reads it: a key of type time.
+    let key = ParsedFactKey::parse_as("content.Taken", FactType::Time).unwrap();
     let report =
         crate::facts::compute_distribution(&mut w.conn, &all, &key, 100, &UserZone::utc()).unwrap();
     let counted: Vec<(String, i64)> = report
-        .entries
+        .rows
         .into_iter()
-        .map(|entry| (entry.value, entry.count))
+        .map(|row| (row.cell, row.count))
         .collect();
     assert_eq!(counted, [("2023-01-02".to_string(), 1)], "facts --key");
 

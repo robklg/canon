@@ -21,9 +21,10 @@ use crate::expr::domain::alias::{recorded_text, CheckedAliases};
 use crate::expr::domain::bind::{
     bind_expr, bind_key, keep_fix_that_binds, keep_quoted_name_with_facts, known_type,
     quoted_name_key, stored_keys, BindCause, Bound, BoundKey, ExpressionRefused, Reads, Refused,
+    Rows,
 };
 use crate::expr::domain::filter::UsedStatus;
-use crate::expr::domain::key::{InputKey, ParsedFactKey};
+use crate::expr::domain::key::{InputKey, ParsedFactKey, Spelled};
 use crate::expr::domain::problem::{Fix, Problem};
 use crate::expr::domain::read::{
     grouping_keys_rewrite, read_filter, read_keys, AliasMode, AliasUse, Grammar, Reading,
@@ -423,13 +424,15 @@ fn bind_report_key(
         Default::default()
     };
     Ok(match bind_as_report(key, &types) {
-        Ok(bound) => Ok(ParsedFactKey {
+        Ok((bound, rows)) => Ok(ParsedFactKey {
             raw: bound.input,
             base_key: bound.base,
             accessor: bound.accessor,
             modifiers: bound.modifiers,
             key: key.key.clone(),
             read_as: bound.read_as,
+            rows,
+            spelled: Spelled::of(key),
         }),
         Err(mut cause) => {
             // A report's fix rewrites the key, so it is read the same way.
@@ -444,12 +447,12 @@ fn bind_report_key(
 }
 
 /// Bind a key as a report reads it: the one reading the report's own key and every fix
-/// offered for it go through.
+/// offered for it go through. With the key, what its rows are.
 fn bind_as_report(
     key: &InputKey,
     types: &HashMap<String, KeyTypes>,
-) -> std::result::Result<BoundKey, BindCause> {
-    bind_key(key, &key.input, Reads::Report, types).map(|(bound, _)| bound)
+) -> std::result::Result<(BoundKey, Rows), BindCause> {
+    bind_key(key, &key.input, Reads::Report, types).map(|(bound, chain)| (bound, chain.rows()))
 }
 
 /// One `--where` string read and bound, for a test: it must bind.

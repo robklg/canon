@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use unicode_width::UnicodeWidthStr;
 
 pub(super) mod convert;
 pub(super) mod import;
@@ -6,7 +7,6 @@ pub(super) mod import;
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
 use crate::core::domain::fact::{FactType, KeyTypes};
-use crate::core::domain::format::first_chars;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::time::zone::ReadTimesOn;
@@ -14,10 +14,10 @@ use crate::core::domain::IncludeSet;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::scope::{classify_all, ResolvedScope};
 use crate::core::repo::Db;
+use crate::expr::{pictured, Key, KeyKind, Listing};
 use crate::expr::{read_filters, read_report, ExpressionText};
 use crate::expr::{select_sources, RolePolicy, SelectionNotes, SelectionParams};
-use crate::expr::{Key, KeyKind, Listing, ParsedFactKey};
-use crate::facts::domain::{delete_key, names_the_root};
+use crate::facts::domain::delete_key;
 use crate::facts::ops::maintain::{
     execute_delete, execute_prune_excluded, execute_prune_orphaned, execute_prune_stale,
     plan_delete, plan_prune_excluded, plan_prune_orphaned, plan_prune_stale,
@@ -25,18 +25,23 @@ use crate::facts::ops::maintain::{
 };
 use crate::facts::ops::report::{
     compute_all_keys, compute_distribution, compute_grouped_distribution,
-    compute_root_distribution, AllKeysResult, DistributionResult, GroupedDistributionResult,
-    KeyInfo, RootDistributionResult,
+    compute_root_distribution, report_keys, AllKeysResult, Annotation, Distribution, Group,
+    Grouped, KeyInfo, Line, Mark, Part, RootTable, Row,
 };
 
-/// What kind of key the listing and a report's header say a key is: nothing after a content
+/// What kind of key the listing and a report's header say a key is: nothing for a content
 /// fact.
-fn kind_label(kind: KeyKind) -> Option<&'static str> {
+fn kind_word(kind: KeyKind) -> Option<&'static str> {
     match kind {
-        KeyKind::SourceFact => Some("(source fact)"),
-        KeyKind::BuiltinKey => Some("(built-in key)"),
+        KeyKind::SourceFact => Some("source fact"),
+        KeyKind::BuiltinKey => Some("built-in key"),
         KeyKind::ContentFact => None,
     }
+}
+
+/// The key list's kind suffix: the kind in parentheses.
+fn kind_label(kind: KeyKind) -> Option<String> {
+    kind_word(kind).map(|word| format!("({word})"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,14 +65,11 @@ pub fn run(
     let conn = db.conn_mut();
 
     // Read every key named and every filter before anything is selected, so every cause —
-    // a wrong-type modifier, a value a key cannot read — is refused up front, together.
-    let grouping: Vec<String> = by_root
-        .then(|| "source.root".to_string())
-        .into_iter()
-        .chain(group_by.iter().cloned())
-        .collect();
-    let reading = read_report(conn, key_arg, &grouping, filter_text)?;
-    let (main_key, grouping_keys, filters) = (reading.key, reading.grouping, reading.filters);
+    // a wrong-type modifier, a value a key cannot read — is refused up front, together; then
+    // give every key its default, once.
+    let reading = read_report(conn, key_arg, group_by, filter_text)?;
+    let filters = reading.filters;
+    let keys = report_keys(reading.key, reading.grouping, by_root)?;
 
     let scopes = classify_all(scope_prefixes);
     let params = SelectionParams {
@@ -130,21 +132,21 @@ pub fn run(
         }
     }
 
-    if let Some(main_key) = main_key {
-        if !grouping_keys.is_empty() {
+    if let Some(main_key) = keys.main {
+        if !keys.grouping.is_empty() {
             let result = compute_grouped_distribution(
                 conn,
                 &source_ids,
                 &main_key,
-                &grouping_keys,
+                &keys.grouping,
                 limit,
                 crate::user_zone(),
             )?;
-            display_grouped_distribution(&result, &main_key, &grouping_keys, total_sources);
+            display_grouped_distribution(&result);
         } else {
             let result =
                 compute_distribution(conn, &source_ids, &main_key, limit, crate::user_zone())?;
-            display_distribution(&result, &main_key);
+            display_distribution(&result);
         }
     } else if by_root {
         let result = compute_root_distribution(&sel.sources);
@@ -168,67 +170,138 @@ pub fn run(
 // Display functions (format typed results from ops layer)
 // ============================================================================
 
-fn display_root_distribution(result: &RootDistributionResult) {
+/// The narrowest a distribution's value column is, so a short report keeps the layout every
+/// report has; a wider cell widens it.
+const MIN_COLUMN: usize = 40;
+
+/// A cell's width on a terminal, in display columns — the one measure every column is sized by.
+fn width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// `text` followed by spaces to `columns` display columns.
+fn pad(text: &str, columns: usize) -> String {
+    format!("{text}{}", " ".repeat(columns.saturating_sub(width(text))))
+}
+
+/// A mark as the mark column prints it, after Coverage; nothing on an unmarked row.
+fn mark_cell(mark: Option<Mark>) -> &'static str {
+    match mark {
+        Some(Mark::Coarse) => "  +",
+        Some(Mark::Unshowable) => "  !",
+        None => "",
+    }
+}
+
+/// A line under a table: what is on the row, then its filter after `: `, a control character
+/// shown as its picture so the line stays one line.
+fn line_text(line: &Line) -> String {
+    pictured(&match &line.filter {
+        Some(filter) => format!("{}: {filter}", line.label),
+        None => line.label.clone(),
+    })
+}
+
+/// A grouped table's part as printed: its cell, and a mixed value's type after it,
+/// `2019 (number)`.
+fn part_text(part: &Part) -> String {
+    match part.type_word {
+        Some(word) => format!("{} ({word})", part.cell),
+        None => part.cell.clone(),
+    }
+}
+
+/// A grouped row's parts as printed, joined by ` / `.
+fn parts_text(parts: &[Part]) -> String {
+    parts.iter().map(part_text).collect::<Vec<_>>().join(" / ")
+}
+
+/// The lines under a table, after a blank line; nothing where there are none.
+fn write_lines(out: &mut impl std::io::Write, lines: &[Line]) {
+    if lines.is_empty() {
+        return;
+    }
+    let _ = writeln!(out);
+    for line in lines {
+        let _ = writeln!(out, "{}", line_text(line));
+    }
+}
+
+/// The statement that a key is of mixed type and its way out, above a table.
+fn write_mixed(out: &mut impl std::io::Write, mixed: &[String]) {
+    if mixed.is_empty() {
+        return;
+    }
+    for line in mixed {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out);
+}
+
+fn display_root_distribution(result: &RootTable) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
 
-    // Adaptive path width: compute max needed, cap at 60
-    let max_path = result
-        .entries
+    let column = result
+        .rows
         .iter()
-        .map(|e| format!("id:{:<2} {}", e.root_id, e.root_path).len())
+        .map(|row| width(&row.cell))
+        .chain([width("Root")])
         .max()
-        .unwrap_or(30);
-    let col_width = max_path.min(60);
+        .unwrap_or_default();
 
-    let _ = writeln!(
-        handle,
-        "{:<width$} {:>10}",
-        "Root",
-        "Sources",
-        width = col_width,
-    );
-    let _ = writeln!(handle, "{}", "─".repeat(col_width + 18));
+    let _ = writeln!(handle, "{} {:>10}", pad("Root", column), "Sources");
+    let _ = writeln!(handle, "{}", "─".repeat(column + 18));
 
-    for entry in &result.entries {
+    for row in &result.rows {
         let pct = if result.total_sources > 0 {
-            (entry.count as f64 / result.total_sources as f64) * 100.0
+            (row.count as f64 / result.total_sources as f64) * 100.0
         } else {
             0.0
         };
-        let label = format_root_display_adaptive(entry.root_id, &entry.root_path, col_width);
         if writeln!(
             handle,
-            "{:<width$} {:>10} ({:>5.1}%)",
-            label,
-            format_count(entry.count),
+            "{} {:>10} ({:>5.1}%)",
+            pad(&row.cell, column),
+            format_count(row.count),
             pct,
-            width = col_width,
         )
         .is_err()
         {
             return;
         }
     }
+    write_lines(&mut handle, &result.lines);
 }
 
 fn display_all_keys(result: &AllKeysResult, show_all: bool, show_status_predicates: bool) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
+    let column = key_column(result);
     let _ = writeln!(
         handle,
-        "{:<30} {:>6} {:>10} {:>10}",
-        "Key", "Type", "Count", "Coverage"
+        "{} {:>6} {:>10} {:>10}",
+        pad("Key", column),
+        "Type",
+        "Count",
+        "Coverage"
     );
-    let _ = writeln!(handle, "{}", "─".repeat(60));
+    let _ = writeln!(handle, "{}", "─".repeat(column + 30));
 
     for key_info in &result.keys {
-        if writeln!(handle, "{}", key_row(key_info, result.total_sources)).is_err() {
+        if writeln!(
+            handle,
+            "{}",
+            key_row(key_info, result.total_sources, column)
+        )
+        .is_err()
+        {
             break;
         }
     }
+    write_lines(&mut handle, &result.lines);
 
     if !show_all {
         let hidden_count = Key::all()
@@ -279,20 +352,34 @@ fn built_in_key_lines() -> Vec<String> {
     lines
 }
 
-/// One key's row in the listing: its name, the key's type word, the scope's count and
-/// coverage, and what kind of key it is.
-fn key_row(key_info: &KeyInfo, total_sources: usize) -> String {
+/// The narrowest the key list's key column is, as it has always been printed.
+const MIN_KEY_COLUMN: usize = 30;
+
+/// The key list's key column: as wide as its widest printed key.
+fn key_column(result: &AllKeysResult) -> usize {
+    result
+        .keys
+        .iter()
+        .map(|key_info| width(&key_info.cell))
+        .chain([MIN_KEY_COLUMN])
+        .max()
+        .unwrap_or(MIN_KEY_COLUMN)
+}
+
+/// One key's row in the listing: its printed name, the key's type word, the scope's count and
+/// coverage, its mark, and what kind of key it is.
+fn key_row(key_info: &KeyInfo, total_sources: usize, column: usize) -> String {
     let coverage = (key_info.count as f64 / total_sources as f64) * 100.0;
+    let mark = if key_info.mark { "  !" } else { "" };
     let suffix = kind_label(key_info.kind)
         .map(|label| format!("  {label}"))
         .unwrap_or_default();
     format!(
-        "{:<30} {:>6} {:>10} {:>9.1}%{}",
-        key_info.key,
+        "{} {:>6} {:>10} {:>9.1}%{mark}{suffix}",
+        pad(&key_info.cell, column),
         key_info.types.word(),
         key_info.count,
         coverage,
-        suffix
     )
 }
 
@@ -312,171 +399,125 @@ fn mixed_key_lines(result: &AllKeysResult) -> Vec<String> {
     lines
 }
 
-/// A value as the distribution table's first column shows it: labelled when
-/// empty, cut to fit the 40-character column when long. The cut counts
-/// characters, as the column's padding does, never bytes.
-fn value_cell(value: &str) -> String {
-    if value.is_empty() {
-        EMPTY.to_string()
-    } else if value.chars().count() > 38 {
-        format!("{}...", first_chars(value, 35))
-    } else {
-        value.to_string()
+/// What a header says its rows are, at the end of the header line: the rows' type, and the
+/// key's kind where it has one.
+fn annotation_text(annotation: &Annotation) -> String {
+    match annotation.kind.and_then(kind_word) {
+        Some(kind) => format!("({}, {kind})", annotation.rows),
+        None => format!("({})", annotation.rows),
     }
 }
 
-/// What an empty value is shown as in a report, for every key: one label for every table a
-/// report prints, its main values and its groups alike. A file with no extension has no
-/// value for it, so it is counted with the sources that have none.
-const EMPTY: &str = "(empty)";
-
-/// A grouping value as a report's group line shows it: labelled when empty.
-fn group_cell(value: &str) -> String {
-    if value.is_empty() {
-        EMPTY.to_string()
-    } else {
-        value.to_string()
-    }
-}
-
-fn display_distribution(result: &DistributionResult, key: &ParsedFactKey) {
-    use std::io::Write;
-    // The header names the key as it was read, and what kind of key it is, as the listing does
-    let label = match kind_label(key.key.as_ref().map_or(KeyKind::ContentFact, Key::kind)) {
-        Some(kind) => format!("{} {kind}", key.raw),
-        None => key.raw.clone(),
-    };
-
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    let _ = writeln!(handle, "{:<40} {:>10} {:>10}", label, "Count", "Coverage");
-    let _ = writeln!(handle, "{}", "─".repeat(62));
-
-    for entry in &result.entries {
-        let display_val = value_cell(&entry.value);
-        let coverage = (entry.count as f64 / result.total_sources as f64) * 100.0;
-        if writeln!(
-            handle,
-            "{display_val:<40} {:>10} {:>9.1}%",
-            entry.count, coverage
-        )
-        .is_err()
-        {
-            break;
-        }
-    }
-
-    // Show "(no value)" count
-    let without_value = result.total_sources as i64 - result.sources_with_value;
-    if without_value > 0 {
-        let coverage = (without_value as f64 / result.total_sources as f64) * 100.0;
-        let _ = writeln!(
-            handle,
-            "{:<40} {:>10} {:>9.1}%",
-            "(no value)", without_value, coverage
-        );
-    }
-
-    // Warn about truncation if limit was applied
-    if result.entries.len() < result.total_distinct_values {
+fn display_distribution(result: &Distribution) {
+    write_distribution(&mut std::io::stdout().lock(), result);
+    if result.shown < result.total_values {
         eprintln!(
             "Showing {} of {} values (use --limit 0 for all)",
-            result.entries.len(),
-            result.total_distinct_values
+            result.shown, result.total_values
         );
     }
 }
 
-/// Format root for display: id:N path (with fixed max path length for grouped output)
-fn format_root_display(root_id: i64, root_path: &str) -> String {
-    format_root_display_adaptive(root_id, root_path, 40)
-}
+/// One key's table: the mixed-type statement, the header — its control characters shown as
+/// pictures — and its rule, the rows, and the lines under it.
+fn write_distribution(handle: &mut impl std::io::Write, result: &Distribution) {
+    write_mixed(handle, &result.mixed);
 
-/// Format root for display with adaptive width: id:N path, truncating path if needed.
-fn format_root_display_adaptive(root_id: i64, root_path: &str, max_total: usize) -> String {
-    let id_prefix = format!("id:{root_id:<2}");
-    let prefix_len = id_prefix.len() + 1; // +1 for space
-    let max_path = if max_total > prefix_len + 3 {
-        max_total - prefix_len
-    } else {
-        10 // minimum
-    };
-    format!(
-        "{id_prefix} {}",
-        crate::core::domain::format::cap_path(root_path, max_path)
-    )
-}
-
-fn display_grouped_distribution(
-    result: &GroupedDistributionResult,
-    main_key: &ParsedFactKey,
-    grouping_keys: &[ParsedFactKey],
-    total_sources: usize,
-) {
-    use std::io::Write;
-    // Build grouping label
-    let grouping_label = if grouping_keys.len() == 1 && names_the_root(&grouping_keys[0]) {
-        "by root".to_string()
-    } else {
-        let labels: Vec<&str> = grouping_keys.iter().map(|gk| gk.raw.as_str()).collect();
-        format!("grouped by {}", labels.join(", "))
+    let rows: Vec<&Row> = result.rows.iter().chain(&result.no_value).collect();
+    let shown_header = pictured(&result.header);
+    let column = rows
+        .iter()
+        .map(|row| width(&row.cell))
+        .chain([width(&shown_header), MIN_COLUMN])
+        .max()
+        .unwrap_or(MIN_COLUMN);
+    let typed = rows.iter().any(|row| row.type_word.is_some());
+    let type_column = |word: &str| {
+        if typed {
+            format!(" {word:>6}")
+        } else {
+            String::new()
+        }
     };
 
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    let _ = writeln!(handle, "{} ({})\n", main_key.raw, grouping_label);
+    let header = format!(
+        "{}{} {:>10} {:>10}   {}",
+        pad(&shown_header, column),
+        type_column("Type"),
+        "Count",
+        "Coverage",
+        annotation_text(&result.annotation)
+    );
+    let _ = writeln!(handle, "{header}");
+    let _ = writeln!(handle, "{}", "─".repeat(width(&header)));
 
-    for group in &result.groups {
-        let coverage = (group.total_count as f64 / total_sources as f64) * 100.0;
-        let main_display = group_cell(&group.main_value);
+    for row in rows {
+        let coverage = (row.count as f64 / result.total_sources as f64) * 100.0;
         if writeln!(
             handle,
-            "{} (total: {:>6}, {:>5.1}%)",
-            main_display,
-            format_count(group.total_count),
-            coverage
+            "{}{} {:>10} {:>9.1}%{}",
+            pad(&row.cell, column),
+            type_column(row.type_word.unwrap_or_default()),
+            row.count,
+            coverage,
+            mark_cell(row.mark)
         )
         .is_err()
         {
             return;
         }
+    }
+    write_lines(handle, &result.lines);
+}
 
-        for sub in &group.sub_groups {
-            let sub_coverage = (sub.count as f64 / group.total_count as f64) * 100.0;
+fn display_grouped_distribution(result: &Grouped) {
+    write_grouped(&mut std::io::stdout().lock(), result);
+    if result.shown < result.total_groups {
+        eprintln!(
+            "Showing {} of {} groups (use --limit 0 for all)",
+            result.shown, result.total_groups
+        );
+    }
+}
 
-            // Format group display
-            let group_display = if grouping_keys.len() == 1 && names_the_root(&grouping_keys[0]) {
-                if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref()) {
-                    format_root_display(rid, rpath)
-                } else {
-                    group_cell(&sub.group_values[0])
-                }
-            } else {
-                let parts: Vec<String> = grouping_keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, gk)| {
-                        if names_the_root(gk) {
-                            if let (Some(rid), Some(rpath)) = (sub.root_id, sub.root_path.as_ref())
-                            {
-                                format_root_display(rid, rpath)
-                            } else {
-                                group_cell(&sub.group_values[i])
-                            }
-                        } else {
-                            group_cell(&sub.group_values[i])
-                        }
-                    })
-                    .collect();
-                parts.join(" / ")
-            };
+/// A grouped table: the mixed-type statement, the header — its control characters shown as
+/// pictures — each group and its rows, and the lines under it.
+fn write_grouped(handle: &mut impl std::io::Write, result: &Grouped) {
+    write_mixed(handle, &result.mixed);
+    let _ = writeln!(handle, "{}\n", pictured(&result.header));
 
+    let groups: Vec<&Group> = result.groups.iter().chain(&result.no_value_group).collect();
+    let column = groups
+        .iter()
+        .flat_map(|group| &group.rows)
+        .map(|row| width(&parts_text(&row.parts)))
+        .chain([MIN_COLUMN])
+        .max()
+        .unwrap_or(MIN_COLUMN);
+
+    for group in groups {
+        let coverage = (group.total as f64 / result.total_sources as f64) * 100.0;
+        if writeln!(
+            handle,
+            "{} (total: {:>6}, {:>5.1}%){}",
+            part_text(&group.part),
+            format_count(group.total),
+            coverage,
+            mark_cell(group.mark)
+        )
+        .is_err()
+        {
+            return;
+        }
+        for row in &group.rows {
+            let coverage = (row.count as f64 / group.total as f64) * 100.0;
             if writeln!(
                 handle,
-                "  {:<40} {:>8} {:>6.1}%",
-                group_display,
-                format_count(sub.count),
-                sub_coverage
+                "  {} {:>8} {:>6.1}%{}",
+                pad(&parts_text(&row.parts), column),
+                format_count(row.count),
+                coverage,
+                mark_cell(row.mark)
             )
             .is_err()
             {
@@ -487,17 +528,8 @@ fn display_grouped_distribution(
             return;
         }
     }
-
-    // Show "(no value)" count for main key
-    let without_main_value = total_sources as i64 - result.sources_with_value;
-    if without_main_value > 0 {
-        let coverage = (without_main_value as f64 / total_sources as f64) * 100.0;
-        let _ = writeln!(
-            handle,
-            "(no value) (total: {:>6}, {:>5.1}%)",
-            format_count(without_main_value),
-            coverage
-        );
+    for line in &result.lines {
+        let _ = writeln!(handle, "{}", line_text(line));
     }
 }
 
@@ -798,15 +830,101 @@ pub fn prune_excluded_facts(
 mod tests {
     use super::*;
 
-    /// Both of a report's cells read one empty label, `(empty)`, for every key —
-    /// `value_cell` for the plain table's values, `group_cell` for the grouped table's main and
-    /// grouping values. That the grouped display calls `group_cell` is interface text this pin
-    /// cannot see; it was read on the binary.
+    /// **One width function sizes every column**, in display columns: a cell of wide or
+    /// accented characters pads to the same column as plain text, and nothing is cut.
     #[test]
-    fn an_empty_value_is_labelled_alike_in_every_table() {
-        assert_eq!(value_cell(""), "(empty)");
-        assert_eq!(group_cell(""), "(empty)");
-        assert_eq!(group_cell("jpg"), "jpg");
+    fn a_cell_is_padded_by_its_display_width_and_never_cut() {
+        let accented = "é".repeat(50);
+        assert_eq!(width(&accented), 50);
+        assert_eq!(pad(&accented, 40), accented);
+        assert_eq!(width("東京"), 4);
+        assert_eq!(pad("東京", 6), "東京  ");
+        assert_eq!(pad("ab", 4), "ab  ");
+    }
+
+    /// **A line under a table prints on one line**: a control character in its label or its
+    /// filter is shown as its picture, and a line holding none prints as composed.
+    #[test]
+    fn a_line_holding_a_control_character_prints_on_one_line() {
+        let line = Line {
+            label: "Row ! \"a\tb\"".to_string(),
+            filter: Some("NOT \"content.NL\nKey\"?".to_string()),
+        };
+        assert_eq!(
+            line_text(&line),
+            "Row ! \"a\u{2409}b\": NOT \"content.NL\u{240A}Key\"?"
+        );
+        let plain = Line {
+            label: "(no value)".to_string(),
+            filter: Some("NOT content.Make?".to_string()),
+        };
+        assert_eq!(line_text(&plain), "(no value): NOT content.Make?");
+    }
+
+    /// **A header whose key holds a control character prints on one line**, in both tables:
+    /// ops hands the key as `--where` reads it, and the screen shows the line feed as `␊`.
+    #[test]
+    fn a_header_holding_a_control_character_prints_on_one_line() {
+        let key = "\"content.NL\nKey\"";
+        let plain = Distribution {
+            header: key.to_string(),
+            annotation: Annotation {
+                rows: "text",
+                kind: None,
+            },
+            mixed: Vec::new(),
+            rows: Vec::new(),
+            no_value: None,
+            lines: Vec::new(),
+            shown: 0,
+            total_values: 0,
+            total_sources: 1,
+        };
+        let mut out = Vec::new();
+        write_distribution(&mut out, &plain);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.lines()
+                .next()
+                .unwrap()
+                .starts_with("\"content.NL\u{240A}Key\""),
+            "{out}"
+        );
+
+        let grouped = Grouped {
+            header: format!("{key} (grouped by source.ext)"),
+            mixed: Vec::new(),
+            groups: Vec::new(),
+            no_value_group: None,
+            lines: Vec::new(),
+            shown: 0,
+            total_groups: 0,
+            total_sources: 1,
+        };
+        let mut out = Vec::new();
+        write_grouped(&mut out, &grouped);
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out.lines().next().unwrap(),
+            "\"content.NL\u{240A}Key\" (grouped by source.ext)"
+        );
+    }
+
+    /// **A grouped part prints its value's type after it** where it has one, `2019 (number)`,
+    /// and the parts of a row join with ` / `.
+    #[test]
+    fn a_typed_part_prints_its_type_after_its_cell() {
+        let parts = [
+            Part {
+                cell: "2019".to_string(),
+                type_word: Some("number"),
+            },
+            Part {
+                cell: "jpg".to_string(),
+                type_word: None,
+            },
+        ];
+        assert_eq!(parts_text(&parts), "2019 (number) / jpg");
     }
 
     // =========================================================================
@@ -816,6 +934,8 @@ mod tests {
     fn stored(key: &str, types: &[(FactType, u64)]) -> KeyInfo {
         KeyInfo {
             key: key.to_string(),
+            cell: crate::expr::printed_key(key),
+            mark: false,
             count: 1,
             kind: KeyKind::ContentFact,
             types: crate::core::domain::fact::KeyTypes::from_counts(types.iter().copied()).unwrap(),
@@ -825,6 +945,7 @@ mod tests {
     fn listing(keys: Vec<KeyInfo>) -> AllKeysResult {
         AllKeysResult {
             keys,
+            lines: Vec::new(),
             total_sources: 1,
         }
     }
@@ -837,13 +958,51 @@ mod tests {
             (vec![(FactType::Time, 3)], "time"),
             (vec![(FactType::Text, 2), (FactType::Num, 1)], "mixed"),
         ] {
-            let row = key_row(&stored("content.K", &types), 1);
+            let row = key_row(&stored("content.K", &types), 1, MIN_KEY_COLUMN);
             assert_eq!(
                 row,
                 format!("{:<30} {word:>6} {:>10} {:>9.1}%", "content.K", 1, 100.0)
             );
         }
-        assert!(!key_row(&stored("content.K", &[(FactType::Num, 1)]), 1).contains("num "));
+        let row = key_row(
+            &stored("content.K", &[(FactType::Num, 1)]),
+            1,
+            MIN_KEY_COLUMN,
+        );
+        assert!(!row.contains("num "));
+    }
+
+    /// **The key column fits its widest key**: a 60-character key prints whole, and every row
+    /// of the listing pads to it, so the Type column stands in one place.
+    #[test]
+    fn the_key_column_fits_a_long_key() {
+        let long = format!("content.{}", "k".repeat(52));
+        assert_eq!(long.len(), 60);
+        let result = listing(vec![
+            stored(&long, &[(FactType::Text, 1)]),
+            stored("content.Make", &[(FactType::Text, 1)]),
+        ]);
+        let column = key_column(&result);
+        assert_eq!(column, 60);
+        let rows: Vec<String> = result
+            .keys
+            .iter()
+            .map(|key| key_row(key, 1, column))
+            .collect();
+        assert!(rows[0].starts_with(&long));
+        assert_eq!(rows[0].find(" text"), rows[1].find(" text"));
+    }
+
+    /// A key holding a control character prints its pictures and its mark in the mark column,
+    /// before the kind suffix.
+    #[test]
+    fn a_marked_key_prints_its_mark_after_coverage() {
+        let mut key = stored("content.a\tb", &[(FactType::Text, 1)]);
+        key.cell = crate::expr::pictured(&crate::expr::printed_key(&key.key));
+        key.mark = true;
+        let row = key_row(&key, 1, MIN_KEY_COLUMN);
+        assert!(row.starts_with("\"content.a\u{2409}b\""), "{row}");
+        assert!(row.ends_with("100.0%  !"), "{row}");
     }
 
     #[test]
@@ -898,65 +1057,6 @@ mod tests {
             stored("content.Width", &[(FactType::Num, 4)]),
         ]);
         assert!(mixed_key_lines(&result).is_empty());
-    }
-
-    // =========================================================================
-    // value_cell tests
-    // =========================================================================
-
-    /// A long value whose 35th byte falls inside an accented letter is cut
-    /// between letters, never inside one.
-    #[test]
-    fn a_long_accented_value_is_cut_between_characters() {
-        let cell = value_cell(&"é".repeat(40));
-        assert_eq!(cell, format!("{}...", "é".repeat(35)));
-    }
-
-    /// The cut is measured in characters, as the column's padding is: a value
-    /// that fits the column in characters prints whole, however many bytes.
-    #[test]
-    fn a_value_that_fits_in_characters_prints_whole() {
-        let value = "é".repeat(38);
-        assert_eq!(value_cell(&value), value);
-        assert_eq!(value_cell(&"a".repeat(39)).chars().count(), 38);
-    }
-
-    // =========================================================================
-    // format_root_display tests
-    // =========================================================================
-
-    #[test]
-    fn format_root_display_short_path() {
-        // Path that fits within MAX_PATH_LEN (30 chars)
-        let result = format_root_display(1, "/home/user");
-        assert_eq!(result, "id:1  /home/user");
-    }
-
-    #[test]
-    fn format_root_display_exact_length() {
-        // Path exactly at MAX_PATH_LEN (30 chars)
-        let path = "/home/user/exactly30charslongg";
-        assert_eq!(path.len(), 30);
-        let result = format_root_display(1, path);
-        assert_eq!(result, "id:1  /home/user/exactly30charslongg");
-    }
-
-    #[test]
-    fn format_root_display_long_path_truncated() {
-        // Path longer than MAX_PATH_LEN - should be truncated with ...
-        let long_path = "/home/user/very/long/path/that/exceeds/the/limit";
-        let result = format_root_display(42, long_path);
-        // Should start with "id:42 ..."
-        assert!(result.starts_with("id:42 ..."));
-        // Should end with last portion of path
-        assert!(result.ends_with("exceeds/the/limit"));
-    }
-
-    #[test]
-    fn format_root_display_id_formatting() {
-        // ID should be left-aligned in 2-char field
-        assert!(format_root_display(1, "/tmp").starts_with("id:1 "));
-        assert!(format_root_display(99, "/tmp").starts_with("id:99"));
     }
 
     // =========================================================================

@@ -59,7 +59,7 @@ pub(in crate::expr) enum Gives {
 }
 
 impl Gives {
-    fn of(t: FactType) -> Gives {
+    pub(in crate::expr) fn of(t: FactType) -> Gives {
         match t {
             FactType::Text => Gives::Text,
             FactType::Path => Gives::Path,
@@ -546,6 +546,27 @@ pub(in crate::expr) struct Chain {
     /// The full stored key, where the key is one read with no accessor and no modifier, whose
     /// stored type a conversion could change ([`Conversion::WithStoredType`]).
     convertible: Option<String>,
+    /// A bare key of mixed type, read where no value is compared: its types, which a report's
+    /// rows are of.
+    mixed: Option<KeyTypes>,
+}
+
+impl Chain {
+    /// What a report's rows are, read through this chain.
+    pub(in crate::expr) fn rows(self) -> Rows {
+        match self.mixed {
+            Some(types) => Rows::Mixed(types),
+            None => Rows::One(self.gives),
+        }
+    }
+}
+
+/// **What a report key's rows are**: what its chain gives, or — for a bare key of mixed type —
+/// its types, each row then of its own value's type.
+#[derive(Debug, Clone)]
+pub(in crate::expr) enum Rows {
+    One(Gives),
+    Mixed(KeyTypes),
 }
 
 /// Check a key: its type from all its facts, then its accessor and modifiers through the table. A
@@ -570,12 +591,13 @@ pub(in crate::expr) fn bind_key(
         return Err(unknown());
     }
     let bare_existence = matches!(reads, Reads::Existence | Reads::Report) && !key.has_transforms();
-    let unbound = |read_as| {
+    let unbound = |read_as, mixed| {
         Ok((
             BoundKey::of(key, read_as),
             Chain {
                 gives: Gives::Text,
                 convertible: None,
+                mixed,
             },
         ))
     };
@@ -585,13 +607,13 @@ pub(in crate::expr) fn bind_key(
                 let chain = walk(key, None)?;
                 Ok((BoundKey::of(key, ReadAs::Absent), chain))
             }
-            Reads::Existence => unbound(ReadAs::Any),
+            Reads::Existence => unbound(ReadAs::Any, None),
             Reads::Value | Reads::Pattern | Reads::Report => Err(unknown()),
         };
     };
     let Some(base_type) = key_types.single() else {
         if bare_existence {
-            return unbound(ReadAs::Any);
+            return unbound(ReadAs::Any, Some(key_types));
         }
         return Err(mixed_type(key, clause, key_types, reads));
     };
@@ -708,6 +730,7 @@ fn walk(key: &InputKey, base_type: Option<FactType>) -> Result<Chain, BindCause>
             && known_type(&key.base).is_none()
             && !key.has_transforms())
         .then(|| key.base.clone()),
+        mixed: None,
     })
 }
 

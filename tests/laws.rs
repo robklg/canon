@@ -857,6 +857,19 @@ const LAWS: &[Law] = &[
         record: "2026-10-11",
     },
     Law {
+        // Every row a report prints carries its filter as a typed result, spelled by the
+        // facility alone: pasted as printed onto the same selection in the same zone, an
+        // unmarked row selects exactly the sources it counted, and a marked row's line exactly
+        // them (`+`) or more (`!`); a key of mixed type's rows claim no filter. `facts` is the
+        // report that consumes it.
+        name: "read-back round trip",
+        owner: "expr/domain/row.rs",
+        verifier: "every_printed_row_selects_what_it_counted",
+        reach: Reach::Unit("expr"),
+        authority: Authority::Distilled,
+        record: "2026-09-26",
+    },
+    Law {
         // Every command that takes a key's name reads it through one reader — the source fact,
         // the built-in key and the content fact the name may name — and each applies its own
         // rule: an expression takes them in that order, import the content reading alone.

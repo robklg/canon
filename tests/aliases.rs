@@ -261,7 +261,8 @@ fn cluster_generate_records_each_alias_replaced() {
 }
 
 /// **A report reads a key alias as the key it stands for**, its header showing the key as
-/// typed and then that key's kind, as every header does: no label for a content fact.
+/// typed, and at the end of the line what the rows are and that key's kind, as every header
+/// does: no kind for a content fact.
 #[test]
 fn facts_reads_a_key_alias_and_shows_it_as_typed() {
     let lib = Library::new();
@@ -269,17 +270,21 @@ fn facts_reads_a_key_alias_and_shows_it_as_typed() {
     let header = |key: &str| {
         let run = lib.run(&["facts", "--global", "--key", key], None);
         assert_eq!(run.code, 0, "{key}: {}{}", run.stdout, run.stderr);
-        run.stdout
+        let line = run
+            .stdout
             .lines()
             .find(|line| line.contains("Count"))
             .unwrap_or_else(|| panic!("{key}: {}", run.stdout))
-            .split("  ")
-            .next()
-            .unwrap()
-            .to_string()
+            .to_string();
+        let first = line.split("  ").next().unwrap().to_string();
+        let annotation = line.rsplit("   ").next().unwrap().to_string();
+        (first, annotation)
     };
-    assert_eq!(header("@model"), "@model");
-    assert_eq!(header("@yr"), "@yr (source fact)");
+    assert_eq!(header("@model"), ("@model".into(), "(text)".into()));
+    assert_eq!(
+        header("@yr"),
+        ("@yr".into(), "(number, source fact)".into())
+    );
     let run = lib.run(
         &[
             "facts",

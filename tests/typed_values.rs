@@ -991,7 +991,10 @@ fn a_report_names_its_key_as_read_in_both_headers() {
     )]);
     let plain = fx.run(&["facts", "--global", "--key", " Make "]);
     assert_eq!(plain.code, 0, "{}{}", plain.stdout, plain.stderr);
-    let header = format!("{:<40} {:>10} {:>10}\n", "Make", "Count", "Coverage");
+    let header = format!(
+        "{:<40} {:>10} {:>10}   (text)\n",
+        "Make", "Count", "Coverage"
+    );
     assert!(plain.stdout.contains(&header), "{}", plain.stdout);
     let grouped = fx.run(&[
         "facts",
@@ -2128,11 +2131,8 @@ fn a_time_handed_out_by_emit_comes_back_the_same_through_a_processor() {
         let report = |fx: &Fixture| {
             let run = fx.run(&["facts", "--global", "--key", "content.taken"]);
             assert_eq!(run.code, 0, "{}", run.stderr);
-            // Rows with equal counts are listed in no fixed order.
+            // Rows with equal counts are listed in the values' order, the same on every run.
             run.stdout
-                .lines()
-                .map(str::to_string)
-                .collect::<std::collections::BTreeSet<_>>()
         };
         let reported = report(&fx);
 
@@ -2482,7 +2482,7 @@ fn the_read_prints_a_time_on_the_users_clock() {
         report
             .stdout
             .lines()
-            .any(|line| line.starts_with("2021-03-02 19:44:10 ") && line.contains(" 3 ")),
+            .any(|line| line.starts_with("\"2021-03-02 19:44:10\" ") && line.contains(" 3 ")),
         "{}",
         report.stdout
     );

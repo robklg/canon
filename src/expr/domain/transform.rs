@@ -36,6 +36,33 @@ pub enum PathAccessor {
     },
 }
 
+impl ModifierCall {
+    /// **The modifier's one spelling**: `|name`, and `|bucket`'s numbers in parentheses, each
+    /// through the one number spelling, with no spaces (`|bucket(60,300)`). Read back as a key's
+    /// modifier, it is the same call.
+    pub(in crate::expr) fn spelled(&self) -> String {
+        let name: &'static str = self.modifier.into();
+        if self.args.is_empty() {
+            format!("|{name}")
+        } else {
+            let args: Vec<String> = self.args.iter().map(|&a| spelled(a)).collect();
+            format!("|{name}({})", args.join(","))
+        }
+    }
+}
+
+impl PathAccessor {
+    /// **The accessor's one spelling**: `[n]`, `[a:b]`, a bound left out where it was
+    /// (`[:-1]`, `[1:]`). Read back after a key, it is the same accessor.
+    pub(in crate::expr) fn spelled(&self) -> String {
+        let bound = |b: &Option<i32>| b.map(|n| n.to_string()).unwrap_or_default();
+        match self {
+            PathAccessor::Index(n) => format!("[{n}]"),
+            PathAccessor::Slice { start, end } => format!("[{}:{}]", bound(start), bound(end)),
+        }
+    }
+}
+
 /// Modifier category for grouping, in the order lists of modifiers name them.
 #[derive(Debug, Clone, Copy, PartialEq, strum::EnumIter)]
 pub enum ModifierCategory {
@@ -690,6 +717,18 @@ pub(in crate::expr) enum BucketRange {
     Below(f64),
     Between(f64, f64),
     From(f64),
+}
+
+impl BucketRange {
+    /// The range's lower edge, which it includes: below the first threshold has none.
+    pub(in crate::expr) fn lower_edge(&self) -> f64 {
+        match *self {
+            BucketRange::Zero => 0.0,
+            BucketRange::PowerOfTen(e) => 10f64.powi(e),
+            BucketRange::Below(_) => f64::NEG_INFINITY,
+            BucketRange::Between(lower, _) | BucketRange::From(lower) => lower,
+        }
+    }
 }
 
 /// The range `n` falls in, for `|bucket` with `thresholds` (none for plain `|bucket`); `None`
