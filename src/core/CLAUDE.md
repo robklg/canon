@@ -40,7 +40,8 @@ positive half alone, is what gets reviewed when either changes.
 
 ### It names — `domain::{source, root, object, fact}`
 
-`Source`, `Root`, `RootSpec`, `Object`, `ArchiveCopy`/`ArchiveLocation`,
+`Source`, `Root`, `RootSpec`, `Object`, `ArchiveCopy`/`ArchiveLocation`, `Holders` (content's
+present copies by role and door, empty files apart),
 `FactEntry`/`FactType`/`FactValue`/`Stored`/`SourceFacts`, and the predicates
 that read them (`is_excluded`, `is_contentless`/`is_contentless_size`, `matches_scope`,
 `find_containing_root`, `FactEntry::is_on_source`), and `KeyTypes`, the types a key's facts hold.

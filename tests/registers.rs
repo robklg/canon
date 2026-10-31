@@ -60,7 +60,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/core/CLAUDE.md",
-        words: 8340,
+        words: 8351,
         verifiers: 24,
     },
     Ceiling {
@@ -70,17 +70,17 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/exclude/CLAUDE.md",
-        words: 1584,
+        words: 1586,
         verifiers: 14,
     },
     Ceiling {
         path: "src/expr/CLAUDE.md",
-        words: 5845,
+        words: 5855,
         verifiers: 46,
     },
     Ceiling {
         path: "src/facts/CLAUDE.md",
-        words: 1267,
+        words: 1366,
         verifiers: 3,
     },
     Ceiling {

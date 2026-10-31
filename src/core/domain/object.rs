@@ -27,6 +27,8 @@
 //! }
 //! ```
 
+use super::source::Source;
+
 /// Content identified by hash.
 ///
 /// Objects represent unique content in canon. Multiple sources can reference
@@ -94,9 +96,129 @@ pub struct ArchiveLocation {
     pub root: ArchiveCopy,
 }
 
+/// The present sources holding some content, counted: by root role, and how many of them sit on
+/// suspended roots. Empty files are counted apart and never as holders — every empty file shares
+/// the one empty content, so counting them as its holders would claim they hold the same thing
+/// (the contentless law).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Holders {
+    pub in_source_roots: usize,
+    pub in_archives: usize,
+    /// Of the two above, how many are on suspended roots.
+    pub on_suspended_roots: usize,
+    /// Empty files among the sources given, never counted above.
+    pub empty_files: usize,
+}
+
+impl Holders {
+    /// Counts what it is given: callers pass present sources
+    /// (`core::repo::source::fetch_sources_by_object_ids` reads only those).
+    pub fn of<'a>(sources: impl IntoIterator<Item = &'a Source>) -> Holders {
+        let mut holders = Holders::default();
+        for source in sources {
+            if source.is_contentless() {
+                holders.empty_files += 1;
+                continue;
+            }
+            if source.is_from_role("archive") {
+                holders.in_archives += 1;
+            } else {
+                holders.in_source_roots += 1;
+            }
+            if !source.is_active() {
+                holders.on_suspended_roots += 1;
+            }
+        }
+        holders
+    }
+
+    pub fn add(&mut self, other: Holders) {
+        self.in_source_roots += other.in_source_roots;
+        self.in_archives += other.in_archives;
+        self.on_suspended_roots += other.on_suspended_roots;
+        self.empty_files += other.empty_files;
+    }
+
+    /// The holders of content, both roles: empty files are not among them.
+    pub fn total(&self) -> usize {
+        self.in_source_roots + self.in_archives
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A present source on a root of `role`, suspended or not, of `size` bytes.
+    fn holder(role: &str, suspended: bool, size: i64) -> Source {
+        Source {
+            id: 1,
+            root_id: 1,
+            root_path: "/r".to_string(),
+            rel_path: "f".to_string(),
+            object_id: Some(1),
+            size,
+            mtime: 0,
+            excluded: false,
+            object_excluded: Some(false),
+            device: 0,
+            inode: 0,
+            partial_hash: String::new(),
+            basis_rev: 0,
+            root_role: role.to_string(),
+            root_suspended: suspended,
+            decision_id: None,
+        }
+    }
+
+    /// **Holders count by role and door**: each role counted once per source, the suspended
+    /// ones a share of those two, never a third role.
+    #[test]
+    fn holders_count_by_role_and_door() {
+        let sources = [
+            holder("source", false, 10),
+            holder("source", true, 10),
+            holder("archive", false, 10),
+            holder("archive", true, 10),
+            holder("archive", false, 10),
+        ];
+        let holders = Holders::of(&sources);
+        assert_eq!(
+            holders,
+            Holders {
+                in_source_roots: 2,
+                in_archives: 3,
+                on_suspended_roots: 2,
+                empty_files: 0,
+            }
+        );
+        assert_eq!(holders.total(), 5);
+
+        let mut both = holders;
+        both.add(Holders::of(&sources[..1]));
+        assert_eq!((both.in_source_roots, both.total()), (3, 6));
+    }
+
+    /// **Empty files are set apart, never holders** — on either role, open or suspended.
+    #[test]
+    fn holders_set_empty_files_apart() {
+        let sources = [
+            holder("source", false, 0),
+            holder("archive", true, 0),
+            holder("source", false, 10),
+        ];
+        let holders = Holders::of(&sources);
+        assert_eq!(
+            holders,
+            Holders {
+                in_source_roots: 1,
+                in_archives: 0,
+                on_suspended_roots: 0,
+                empty_files: 2,
+            }
+        );
+        assert_eq!(holders.total(), 1);
+    }
 
     /// Helper to create a test object with sensible defaults.
     fn make_object(id: i64, excluded: bool) -> Object {

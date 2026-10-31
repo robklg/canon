@@ -23,9 +23,9 @@ use crate::expr::{aliases_naming_key, printed_key, AliasesNaming};
 use crate::facts::domain::convert::{
     bridge_clause, census_types, check_acknowledgments, class_summary, fixed_type_answer, holdings,
     list_lines, next_import, plan, printed_stored, read_convert_name, targets, Acknowledgments,
-    ConversionPlan, ConvertRefused, Holdings, ListLine, NextImport, Target, TargetLine,
+    ConversionPlan, ConvertRefused, Holdings, ListLine, NextImport, TargetLine,
 };
-use crate::facts::domain::{counted, plural};
+use crate::facts::domain::{counted, plural, TypeWord};
 use crate::facts::repo::{delete_facts_by_id, update_fact_values};
 
 /// The read: what a key holds and every target it can reach or not.
@@ -117,7 +117,7 @@ pub fn read_key(conn: &mut Connection, name: &str, zone: &UserZone) -> Result<Ke
 pub fn plan_convert(
     conn: &mut Connection,
     name: &str,
-    target: Target,
+    target: TypeWord,
     canon_home: &Path,
 ) -> Result<PlanRead> {
     let tx = conn.transaction()?;
@@ -136,13 +136,13 @@ pub fn plan_convert(
 
 /// The plan for `target` over the census — or `duration`'s routes, or why the target is not a
 /// conversion: the same answer for the plan and the act.
-fn reach(key: &str, name: &str, census: &KeyCensus, target: Target) -> Result<ConversionPlan> {
+fn reach(key: &str, name: &str, census: &KeyCensus, target: TypeWord) -> Result<ConversionPlan> {
     let types = census_types(census).ok_or_else(|| ConvertRefused::UnknownKey {
         name: name.to_string(),
     })?;
     let to = match target {
-        Target::Type(to) => to,
-        Target::Duration => {
+        TypeWord::Type(to) => to,
+        TypeWord::Duration => {
             let removal = plan(census, FactType::Num)
                 .ok()
                 .and_then(|plan| plan.duration_removal());
@@ -197,7 +197,7 @@ pub struct ConvertResult {
 pub fn execute_convert(
     conn: &mut Connection,
     name: &str,
-    target: Target,
+    target: TypeWord,
     given: &Acknowledgments,
     decision: Option<&DecisionParams>,
 ) -> Result<ConvertOutcome> {
@@ -323,8 +323,9 @@ mod tests {
     use crate::core::repo::fact::key_census;
     use crate::core::testing::*;
     use crate::expr::{select_sources, BoundFilters, RolePolicy, SelectionParams};
+    use crate::facts::domain::convert::ConvertRefused;
     use crate::facts::domain::convert::{valued_places, Place};
-    use crate::facts::domain::convert::{ConvertRefused, Target};
+    use crate::facts::domain::TypeWord;
 
     /// **The counted place is what `select_sources` selects**: the census's sources counted by
     /// `canon facts --global` are exactly the sources `canon facts --global`'s selection keeps,
@@ -415,7 +416,7 @@ mod tests {
         insert_fact(&conn, a, "content.File Size", "12");
         insert_fact(&conn, b, "content.File Size", "misc");
         let home = tempfile::tempdir().unwrap();
-        let to = Target::Type(FactType::Num);
+        let to = TypeWord::Type(FactType::Num);
         let previews: Vec<String> = ["content.File Size", r#""content.File Size""#]
             .into_iter()
             .map(|name| {
@@ -511,7 +512,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{err:?}"))
                 .clone()
         };
-        let time = Target::Type(FactType::Time);
+        let time = TypeWord::Type(FactType::Time);
         assert!(is_emptied_by(
             &plan_refused(&mut conn, "Gone", time),
             emptying
@@ -524,7 +525,7 @@ mod tests {
             plan_refused(&mut conn, "filename", time),
             ConvertRefused::Key(crate::facts::domain::convert::KeyRefusal::Builtin { .. })
         ));
-        let duration = plan_refused(&mut conn, "Len", Target::Duration);
+        let duration = plan_refused(&mut conn, "Len", TypeWord::Duration);
         assert!(
             matches!(
                 duration,
@@ -540,18 +541,18 @@ mod tests {
             .to_string()
             .starts_with("`1:23:45` is not a number\n"));
         // A removal that would take a value the hint cannot bring back offers no removal route.
-        let mixed = plan_refused(&mut conn, "Mix", Target::Duration);
+        let mixed = plan_refused(&mut conn, "Mix", TypeWord::Duration);
         assert!(
             matches!(mixed, ConvertRefused::Duration { removal: None, .. }),
             "{mixed:?}"
         );
         // A removal beside a loss: the removal command alone would not run, so no removal route.
-        let lossy = plan_refused(&mut conn, "Lossy", Target::Duration);
+        let lossy = plan_refused(&mut conn, "Lossy", TypeWord::Duration);
         assert!(
             matches!(lossy, ConvertRefused::Duration { removal: None, .. }),
             "{lossy:?}"
         );
-        let number = plan_refused(&mut conn, "Taken", Target::Type(FactType::Num));
+        let number = plan_refused(&mut conn, "Taken", TypeWord::Type(FactType::Num));
         assert_eq!(
             number.to_string(),
             "content.Taken is of type time: a time cannot be converted to a number; a time \
@@ -601,8 +602,14 @@ mod tests {
         to: FactType,
         given: Acknowledgments,
     ) -> ConvertResult {
-        let outcome =
-            execute_convert(conn, name, Target::Type(to), &given, Some(&recording(None))).unwrap();
+        let outcome = execute_convert(
+            conn,
+            name,
+            TypeWord::Type(to),
+            &given,
+            Some(&recording(None)),
+        )
+        .unwrap();
         match outcome {
             ConvertOutcome::Converted(result) => *result,
             ConvertOutcome::NothingToConvert { .. } => panic!("{outcome:?}"),
@@ -828,7 +835,7 @@ mod tests {
             insert_fact(&conn, id, "content.N", value);
         }
         let home = tempfile::tempdir().unwrap();
-        let seen = plan_convert(&mut conn, "N", Target::Type(FactType::Num), home.path())
+        let seen = plan_convert(&mut conn, "N", TypeWord::Type(FactType::Num), home.path())
             .unwrap()
             .plan
             .counts
@@ -841,7 +848,7 @@ mod tests {
         let err = execute_convert(
             &mut conn,
             "N",
-            Target::Type(FactType::Num),
+            TypeWord::Type(FactType::Num),
             &acks(None, Some(seen)),
             Some(&recording(None)),
         )
@@ -878,7 +885,7 @@ mod tests {
         let err = execute_convert(
             &mut conn,
             "N",
-            Target::Type(FactType::Num),
+            TypeWord::Type(FactType::Num),
             &acks(None, Some(1)),
             Some(&recording(None)),
         )
@@ -901,7 +908,7 @@ mod tests {
         let outcome = execute_convert(
             &mut conn,
             "N",
-            Target::Type(FactType::Num),
+            TypeWord::Type(FactType::Num),
             &acks(Some(3), Some(4)),
             Some(&recording(None)),
         )
@@ -938,7 +945,7 @@ mod tests {
         let outcome = execute_convert(
             &mut conn,
             "N",
-            Target::Type(FactType::Num),
+            TypeWord::Type(FactType::Num),
             &acks(None, Some(5)),
             Some(&recording(Some("the tool wrote numbers as text"))),
         )
@@ -1040,7 +1047,7 @@ mod tests {
             execute_convert(
                 converter.conn_mut(),
                 "N",
-                Target::Type(FactType::Num),
+                TypeWord::Type(FactType::Num),
                 &acks(None, None),
                 None,
             )

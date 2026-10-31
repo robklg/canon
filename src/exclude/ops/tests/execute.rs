@@ -1,3 +1,4 @@
+use crate::core::domain::object::Holders;
 use crate::core::testing::{
     insert_object, insert_root, insert_source, insert_source_excluded, is_object_excluded,
     is_source_excluded, setup_test_db,
@@ -178,9 +179,10 @@ fn test_execute_set_objects_marks_excluded() {
                 sources: vec![],
             },
         ],
-        total_source_count: 2,
-        total_archive_count: 0,
-        total_suspended_count: 0,
+        holders: Holders {
+            in_source_roots: 2,
+            ..Holders::default()
+        },
         skipped_no_hash: 0,
         skipped_empty: 0,
         skipped_already_excluded: 0,
@@ -206,9 +208,10 @@ fn test_execute_set_objects_returns_count() {
             hash: "sha256:count_obj_hash_xxx".to_string(),
             sources: vec![],
         }],
-        total_source_count: 1,
-        total_archive_count: 0,
-        total_suspended_count: 0,
+        holders: Holders {
+            in_source_roots: 1,
+            ..Holders::default()
+        },
         skipped_no_hash: 0,
         skipped_empty: 0,
         skipped_already_excluded: 0,

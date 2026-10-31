@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::core::domain::object::Object;
+use crate::core::domain::object::{Holders, Object};
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
@@ -217,14 +217,12 @@ pub struct ExcludeSetObjectsParams {
 pub struct ExcludeSetObjectsPlan {
     /// Objects to exclude, with display data.
     pub objects: Vec<ObjectPlanEntry>,
-    /// Total source count across all objects.
-    pub total_source_count: usize,
-    /// Total archive source count across all objects.
-    pub total_archive_count: usize,
-    /// How many of those sources stand behind a closed door. Counted, never
-    /// filtered: the act is about the object everywhere and the stamp reaches
-    /// every sharer, so the honest thing is to say how far it reaches.
-    pub total_suspended_count: usize,
+    /// The present sources holding the objects, by root role. How many of them
+    /// stand behind a closed door is counted, never filtered: the act is about
+    /// the object everywhere and the stamp reaches every sharer, so the honest
+    /// thing is to say how far it reaches. Empty objects are set aside before
+    /// the count (`skipped_empty`), so it holds no empty files.
+    pub holders: Holders,
     /// Sources skipped because they have no hash.
     pub skipped_no_hash: usize,
     /// Empty files skipped (size = 0). Counts sources, not deduped objects —

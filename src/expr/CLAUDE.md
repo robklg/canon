@@ -269,7 +269,7 @@ Pins: `every_complement_reads_in_both_forms` and
 statements about a value and its type are spelled in their own files and are not built from it —
 `Gives::statement` in `domain/bind.rs`, `mixed_type_statement` and `mixed_type_way_out` in
 `domain/print.rs`, the modifier no-value reasons in `domain/transform.rs`, the pattern statements in
-`ops/pattern.rs`, `import-facts`' skip lines, and the number and time reading errors in core.
+`ops/pattern.rs`, `import-facts`' skip lines, `facts delete`'s duration answer, and the number and time reading errors in core.
 
 ## The scope vantage
 

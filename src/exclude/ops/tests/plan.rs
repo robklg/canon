@@ -567,8 +567,8 @@ fn test_plan_set_objects_empty_when_no_sources() {
     let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
 
     assert!(plan.objects.is_empty());
-    assert_eq!(plan.total_source_count, 0);
-    assert_eq!(plan.total_archive_count, 0);
+    assert_eq!(plan.holders.total(), 0);
+    assert_eq!(plan.holders.in_archives, 0);
 }
 
 #[test]
@@ -689,8 +689,8 @@ fn test_plan_set_objects_computes_source_counts() {
     let plan = plan_set_objects(&mut conn, &make_set_objects_params(vec![])).unwrap();
 
     assert_eq!(plan.objects.len(), 1);
-    assert_eq!(plan.total_source_count, 2);
-    assert_eq!(plan.total_archive_count, 1);
+    assert_eq!(plan.holders.total(), 2);
+    assert_eq!(plan.holders.in_archives, 1);
 }
 
 #[test]
@@ -774,10 +774,11 @@ fn object_exclusion_counts_parked_sharers_without_filtering_them() {
 
     assert_eq!(plan.objects.len(), 1);
     assert_eq!(
-        plan.total_source_count, 2,
+        plan.holders.total(),
+        2,
         "the parked sharer is still in the stamp-set"
     );
-    assert_eq!(plan.total_suspended_count, 1);
+    assert_eq!(plan.holders.on_suspended_roots, 1);
     assert!(
         plan.objects[0].sources.iter().any(|s| s.is_suspended),
         "and it is marked, so the ceremony can count it"

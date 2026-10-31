@@ -10,11 +10,12 @@ reaches in, and it reaches no sibling.
 a name as typed (`expr::NameReading`), where import reads it as written), and what arrives and what
 becomes of it: `JsonFact` (a value as the JSON its tool wrote, a number in its own spelling),
 and `decide`, which fits one value to its key's type as a `Disposition` — stored, or skipped
-for a `SkipCause`. Text is read through `core::domain::conversion`'s table, times through
+for a `SkipCause`; and the deletion's nouns, `FactSide` (`--on`), `TypeWord` (the type words
+`--value-type` and `--to` read) and `DeleteRefused`. Text is read through `core::domain::conversion`'s table, times through
 `core::domain::time::reading`, never as epoch seconds. `repo.rs` — the SQL only facts
 performs: upsert, the fact-promotion reads and writes,
-counting and deleting by criteria, the stale/excluded prunes, and the conversion's writes by
-fact id, plus the private `value_type_clause`. `domain/convert.rs`, `ops/convert.rs` and
+counting, reading the objects holding a key's fact, and deleting by criteria, the stale/excluded prunes, and the conversion's writes by
+fact id, plus the private `value_type_clause`, `object_facts_of_key` and `fill_temp_objects`. `domain/convert.rs`, `ops/convert.rs` and
 `cli/convert.rs` — `canon facts convert`, in the same three strata. `ops/report.rs` — the
 report's four tables as typed rows (`compute_all_keys`, `compute_distribution`,
 `compute_grouped_distribution`, `compute_root_distribution`): each row's cell, count, filter and
@@ -58,6 +59,12 @@ refusal that keeps those fills out of an outer transaction for a runtime error, 
 `a_failed_fact_delete_settles_interrupted` is its declaring test, and the architecture test's
 census carries the file's two shapes as two rows.
 
+**A deletion's lines are composed once, on `DeletePlan`** (`ops/maintain.rs`), the key through
+`printed_key`; the preview and the summary share one tail, so the record keeps the reach the preview
+showed. `DeleteRefused` carries the two answers given before anything is read: the content hash, by
+the key a name reads as, in convert's words (`content_hash_answer`), and `--value-type duration`,
+since an import stores every value Canon knows as a duration as a number.
+
 **A batch is one write transaction.** `import_batch` takes the write lock (`IMMEDIATE`) before it
 reads the batch's key types, so another writer changing a key's type cannot interleave with the
 decision, and each record runs in a savepoint: a record that fails is undone whole, its facts,
@@ -98,7 +105,7 @@ fails the build. Repairing one call site deletes that file's entry, never both.
 
 **Barrel** (`facts.rs`), `main.rs`-facing: `run`, `import_run`, `delete_facts`,
 `DeleteOptions`, `prune_stale`, `prune_orphaned_objects`, `prune_excluded_facts`, `convert`,
-`ConvertOptions`, `Target` and `ConvertRefused`,
+`ConvertOptions`, `TypeWord`, `ConvertRefused` and `DeleteRefused`,
 plus `compute_distribution`, which the source-value law's verifier reads, and `plan_convert`,
 which the contentless-law canary reads. `cli.rs` declares `pub(super) mod import;` and
 `convert` the same way, and `ops.rs` declares `report`/`maintain`/`import`/`convert` the same way, so nothing below the front door is reachable

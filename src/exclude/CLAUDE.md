@@ -90,7 +90,7 @@ fails if it stops holding (all under `exclude/ops/tests/`):
 **Behind a door: counted where a claim would otherwise be false, and re-checked once more inside
 the transaction.** **Object exclusion** reaches every source sharing the object, parked ones
 included: the stamp-set is the receipt-set, so filtering a sharer would break that law —
-`ObjectSourceInfo.is_suspended` and the plan's `total_suspended_count` carry the fact out
+`ObjectSourceInfo.is_suspended` and the plan's `Holders` (core's count) carry the fact out
 (`object_exclusion_counts_parked_sharers_without_filtering_them`), and the ceremony states
 `of which N on suspended roots` **directly under the sources line it qualifies**,
 on the preview path and the executing one alike, with the plan's notes (`expr::SelectionNotes`)

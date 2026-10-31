@@ -22,7 +22,10 @@ use crate::expr::{
     BuiltinKey, Complement, Key, NameReading, Noun, Statement, Subject, CONTENT_HASH,
 };
 
-use super::{counted, decide, plural, try_parse_duration, Disposition, Hint, JsonFact, KnownHint};
+use super::{
+    content_hash_answer, counted, decide, is_the_content_hash, plural, try_parse_duration,
+    Disposition, Hint, JsonFact, KnownHint,
+};
 
 // ============================================================================
 // The key
@@ -66,7 +69,7 @@ pub fn convert_key(name: &str) -> Result<String, KeyRefusal> {
                 .source_fact
                 .and_then(|fact| Key::SourceFact(fact).known_type()),
         }),
-        Some(key) if key == CONTENT_HASH => Err(KeyRefusal::ContentHash),
+        Some(key) if is_the_content_hash(&key) => Err(KeyRefusal::ContentHash),
         Some(key) => Ok(key),
     }
 }
@@ -93,23 +96,6 @@ pub fn fixed_type_answer(name: &str) -> Option<KeyRefusal> {
         name: name.to_string(),
         t,
     })
-}
-
-/// What `--to` names: a type, or `duration`, which the conversion answers with its routes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Target {
-    Type(FactType),
-    Duration,
-}
-
-impl Target {
-    /// The words `--to` takes: the type words (and quietly `num`, `datetime`), and `duration`.
-    pub fn parse_word(word: &str) -> Option<Target> {
-        match word {
-            "duration" => Some(Target::Duration),
-            other => FactType::parse_word(other).map(Target::Type),
-        }
-    }
 }
 
 // ============================================================================
@@ -1449,15 +1435,7 @@ impl ConvertRefused {
                         "{}, and a built-in key's type is fixed",
                         key_is(name, Complement::OfType(*t))
                     )],
-                    KeyRefusal::ContentHash => vec![
-                        format!(
-                            "The content hash ({CONTENT_HASH}) is Canon's own record of content \
-                             identity, and its type is fixed"
-                        ),
-                        "to correct a hash a tool imported wrongly, import the right one with \
-                         `canon import-facts`, which moves the source to its content"
-                            .to_string(),
-                    ],
+                    KeyRefusal::ContentHash => content_hash_answer("and its type is fixed").into(),
                 };
                 if refusal.offers_modifiers() {
                     let name = match refusal {
@@ -1575,6 +1553,7 @@ mod tests {
     use super::*;
     use crate::core::domain::source::Source;
     use crate::core::domain::time::reading::read_time;
+    use crate::facts::domain::TypeWord;
 
     /// A source in the census: its id, root, content, presence, root state and role.
     struct At {
@@ -1718,16 +1697,19 @@ mod tests {
     #[test]
     fn to_takes_the_type_words_and_duration() {
         assert_eq!(
-            Target::parse_word("time"),
-            Some(Target::Type(FactType::Time))
+            TypeWord::parse_word("time"),
+            Some(TypeWord::Type(FactType::Time))
         );
         assert_eq!(
-            Target::parse_word("datetime"),
-            Some(Target::Type(FactType::Time))
+            TypeWord::parse_word("datetime"),
+            Some(TypeWord::Type(FactType::Time))
         );
-        assert_eq!(Target::parse_word("num"), Some(Target::Type(FactType::Num)));
-        assert_eq!(Target::parse_word("duration"), Some(Target::Duration));
-        assert_eq!(Target::parse_word("path"), None);
+        assert_eq!(
+            TypeWord::parse_word("num"),
+            Some(TypeWord::Type(FactType::Num))
+        );
+        assert_eq!(TypeWord::parse_word("duration"), Some(TypeWord::Duration));
+        assert_eq!(TypeWord::parse_word("path"), None);
     }
 
     /// **Each source sits in the first place that applies**: no longer present, then a

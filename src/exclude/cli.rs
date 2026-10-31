@@ -751,8 +751,6 @@ pub fn set_objects_by_filter(
         return Ok(());
     }
 
-    let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
-
     // Object exclusion has no confirmation prompt: the command has no
     // --dry-run flag, so a plain run is always this preview and --yes is what
     // executes. Keep both halves — dropping either one turns a preview into a
@@ -761,11 +759,11 @@ pub fn set_objects_by_filter(
         println!(
             "Would exclude {} objects affecting {} sources ({} in source roots, {} in archives):",
             plan.objects.len(),
-            plan.total_source_count,
-            total_in_source_roots,
-            plan.total_archive_count
+            plan.holders.total(),
+            plan.holders.in_source_roots,
+            plan.holders.in_archives
         );
-        print_suspended_share(plan.total_suspended_count);
+        print_suspended_share(plan.holders.on_suspended_roots);
         print_notes(&plan.notes);
         for entry in &plan.objects {
             let archive_count = entry.sources.iter().filter(|s| s.is_archive).count();
@@ -819,7 +817,7 @@ pub fn set_objects_by_filter(
     if let Some(head) = summary.next() {
         println!("{head}");
     }
-    print_suspended_share(plan.total_suspended_count);
+    print_suspended_share(plan.holders.on_suspended_roots);
     for line in summary {
         println!("{line}");
     }

@@ -3,7 +3,6 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 use crate::core::domain::config::{parse_ledger_config, LedgerConfig};
-use crate::core::domain::fact::FactType;
 use crate::core::domain::root::{find_containing_root, DoorVerb};
 use crate::core::domain::time::zone::{UserZone, ZoneLabel};
 use crate::core::domain::IncludeSet;
@@ -681,30 +680,20 @@ enum TrailAction {
     },
 }
 
-/// `--value-type`'s parser: the type words as printed, and quietly the older
-/// spellings, which are accepted and never listed — read through the one
-/// reading of a type word (`FactType::parse_word`).
-fn value_type_word() -> impl clap::builder::TypedValueParser<Value = FactType> {
+/// The type words `--to` and `--value-type` take, as printed, and quietly the older spellings,
+/// which are accepted and never listed; and `duration`, which the command taking it answers —
+/// the conversion with its routes, the deletion with where durations are stored. `--to` lists
+/// it, since the conversion offers routes for it; `--value-type` accepts it without listing it,
+/// since no deletion is narrowed to it.
+fn type_word(list_duration: bool) -> impl clap::builder::TypedValueParser<Value = facts::TypeWord> {
     use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
     PossibleValuesParser::new([
         PossibleValue::new("text"),
         PossibleValue::new("number").alias("num"),
         PossibleValue::new("time").alias("datetime"),
+        PossibleValue::new("duration").hide(!list_duration),
     ])
-    .try_map(|word| FactType::parse_word(&word).ok_or(format!("not a type word: {word}")))
-}
-
-/// `--to`'s parser: the type words as `--value-type` reads them, and `duration`, which the
-/// conversion answers with its routes.
-fn convert_target_word() -> impl clap::builder::TypedValueParser<Value = facts::Target> {
-    use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
-    PossibleValuesParser::new([
-        PossibleValue::new("text"),
-        PossibleValue::new("number").alias("num"),
-        PossibleValue::new("time").alias("datetime"),
-        PossibleValue::new("duration"),
-    ])
-    .try_map(|word| facts::Target::parse_word(&word).ok_or(format!("not a type word: {word}")))
+    .try_map(|word| facts::TypeWord::parse_word(&word).ok_or(format!("not a type word: {word}")))
 }
 
 #[derive(Subcommand)]
@@ -722,8 +711,8 @@ enum FactsAction {
         #[arg(long, value_name = "TYPE")]
         on: String,
         /// Filter by value storage type (text, number, or time)
-        #[arg(long, value_parser = value_type_word())]
-        value_type: Option<FactType>,
+        #[arg(long, value_parser = type_word(false))]
+        value_type: Option<facts::TypeWord>,
         /// Execute deletion (default is dry-run)
         #[arg(long)]
         yes: bool,
@@ -733,8 +722,8 @@ enum FactsAction {
         /// Fact key to convert (e.g., "content.DateTimeOriginal")
         key: String,
         /// The type to convert to: text, number or time (default: show what the key holds)
-        #[arg(long, value_name = "TYPE", value_parser = convert_target_word())]
-        to: Option<facts::Target>,
+        #[arg(long, value_name = "TYPE", value_parser = type_word(true))]
+        to: Option<facts::TypeWord>,
         /// List each lossy or removed fact with its source, tab-separated
         #[arg(long, requires = "to", conflicts_with = "yes")]
         list: bool,
@@ -993,9 +982,9 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
             action: Some(RootsAction::Retire { .. }),
             ..
         } => scope::DoorChannel::Stdout,
-        // The conversion's answers stand where its read and plan print.
+        // The conversion's and the deletion's answers stand where their plans print.
         Commands::Facts {
-            action: Some(FactsAction::Convert { .. }),
+            action: Some(FactsAction::Convert { .. } | FactsAction::Delete { .. }),
             ..
         } => scope::DoorChannel::Stdout,
         _ => scope::DoorChannel::Stderr,
@@ -1044,6 +1033,17 @@ fn main() -> std::process::ExitCode {
                 // A conversion refused: the key's own answer, a target not reached, an
                 // emptied key — answers, stated as they stand; a name Canon knows no facts
                 // under is an error.
+                if refusal.is_answer() {
+                    match channel {
+                        scope::DoorChannel::Stdout => println!("{refusal}"),
+                        scope::DoorChannel::Stderr => eprintln!("{refusal}"),
+                    }
+                } else {
+                    eprintln!("Error: {refusal}");
+                }
+            } else if let Some(refusal) = err.downcast_ref::<facts::DeleteRefused>() {
+                // A deletion refused before anything is read — the content hash, a duration —
+                // is an answer, stated as it stands.
                 if refusal.is_answer() {
                     match channel {
                         scope::DoorChannel::Stdout => println!("{refusal}"),
@@ -1996,6 +1996,7 @@ fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::fact::FactType;
 
     #[test]
     fn a_zone_canon_reads_gets_no_notice() {
@@ -2023,7 +2024,7 @@ mod tests {
         );
     }
 
-    fn value_type_of(word: &str) -> Option<FactType> {
+    fn value_type_of(word: &str) -> Option<facts::TypeWord> {
         let argv = [
             "canon",
             "facts",
@@ -2043,19 +2044,43 @@ mod tests {
         }
     }
 
-    /// `num` and `number` are one type, and so are `datetime` and `time`; `path` is not
-    /// offered.
+    /// `num` and `number` are one type, and so are `datetime` and `time`; `duration` is read,
+    /// for the deletion to answer; `path` is not offered.
     #[test]
     fn value_type_num_and_number_delete_the_same_rows() {
-        assert_eq!(value_type_of("number"), Some(FactType::Num));
-        assert_eq!(value_type_of("num"), Some(FactType::Num));
-        assert_eq!(value_type_of("time"), Some(FactType::Time));
-        assert_eq!(value_type_of("datetime"), Some(FactType::Time));
-        assert_eq!(value_type_of("text"), Some(FactType::Text));
+        use facts::TypeWord;
+        assert_eq!(value_type_of("number"), Some(TypeWord::Type(FactType::Num)));
+        assert_eq!(value_type_of("num"), Some(TypeWord::Type(FactType::Num)));
+        assert_eq!(value_type_of("time"), Some(TypeWord::Type(FactType::Time)));
+        assert_eq!(
+            value_type_of("datetime"),
+            Some(TypeWord::Type(FactType::Time))
+        );
+        assert_eq!(value_type_of("text"), Some(TypeWord::Type(FactType::Text)));
+        assert_eq!(value_type_of("duration"), Some(TypeWord::Duration));
         assert_eq!(value_type_of("path"), None);
     }
 
-    /// The whole help line names `number`, and `num` appears nowhere in it.
+    /// **A deletion's and a conversion's answers stand on stdout, where their plans print**: a
+    /// refused deletion or conversion, and a deletion's answer about a filter's key or a closed
+    /// door, print on the command's channel.
+    #[test]
+    fn facts_delete_answers_on_stdout() {
+        for argv in [
+            &["canon", "facts", "delete", "hash", "--on", "object"][..],
+            &["canon", "facts", "convert", "hash"][..],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parses");
+            assert!(
+                matches!(door_channel_for(&cli.command), scope::DoorChannel::Stdout),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The whole help line names `number`, and `num` appears nowhere in it. `duration` is read
+    /// (`value_type_num_and_number_delete_the_same_rows`) but not listed, where `facts convert
+    /// --to` lists it.
     #[test]
     fn the_value_type_help_line_says_number() {
         use clap::CommandFactory;
@@ -2076,6 +2101,16 @@ mod tests {
         assert!(
             line.contains("[possible values: text, number, time]"),
             "{line}"
+        );
+        let convert = cmd
+            .find_subcommand_mut("facts")
+            .and_then(|c| c.find_subcommand_mut("convert"))
+            .expect("facts convert")
+            .render_long_help()
+            .to_string();
+        assert!(
+            convert.contains("[possible values: text, number, time, duration]"),
+            "{convert}"
         );
         assert!(!line.contains("num,") && !line.contains("num]"), "{line}");
         assert!(!line.contains("datetime"), "{line}");

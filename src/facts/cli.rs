@@ -6,7 +6,7 @@ pub(super) mod import;
 
 use crate::core::domain::config::{LedgerConfig, RecordingMode};
 use crate::core::domain::decision::DecisionCommand;
-use crate::core::domain::fact::{FactType, KeyTypes};
+use crate::core::domain::fact::KeyTypes;
 use crate::core::domain::format_count;
 use crate::core::domain::scope::DecisionScope;
 use crate::core::domain::time::zone::ReadTimesOn;
@@ -17,7 +17,7 @@ use crate::core::repo::Db;
 use crate::expr::{pictured, Key, KeyKind, Listing};
 use crate::expr::{read_filters, read_report, ExpressionText};
 use crate::expr::{select_sources, RolePolicy, SelectionNotes, SelectionParams};
-use crate::facts::domain::delete_key;
+use crate::facts::domain::{counted, delete_key, delete_value_type, FactSide, TypeWord};
 use crate::facts::ops::maintain::{
     execute_delete, execute_prune_excluded, execute_prune_orphaned, execute_prune_stale,
     plan_delete, plan_prune_excluded, plan_prune_orphaned, plan_prune_stale,
@@ -539,7 +539,8 @@ fn write_grouped(handle: &mut impl std::io::Write, result: &Grouped) {
 
 pub struct DeleteOptions {
     pub entity_type: String, // "source" or "object"
-    pub value_type: Option<FactType>,
+    /// `--value-type` as typed; `duration` is answered before anything is read.
+    pub value_type: Option<TypeWord>,
     pub dry_run: bool,
     /// The visibility the equivalent `ls --where` would have used at this
     /// scope. Deletion must act on the population the user could preview.
@@ -559,12 +560,13 @@ pub fn delete_facts(
 ) -> Result<()> {
     // The key acted on, read first: nothing below may hide its refusal.
     let key = delete_key(key)?;
-    if options.entity_type != "source" && options.entity_type != "object" {
+    let Some(side) = FactSide::parse(&options.entity_type) else {
         bail!(
             "Invalid entity type '{}'. Must be 'source' or 'object'.",
             options.entity_type
         );
-    }
+    };
+    let value_type = delete_value_type(options.value_type)?;
 
     let conn = db.conn_mut();
 
@@ -586,37 +588,19 @@ pub fn delete_facts(
         clock: crate::user_zone().clone(),
         notes: true,
     };
-    let plan = plan_delete(
-        conn,
-        &params,
-        &key,
-        &options.entity_type,
-        options.value_type,
-    )?;
+    let plan = plan_delete(conn, &params, &key, side, value_type)?;
 
     if plan.source_ids.is_empty() {
-        println!("No sources match the given filters.");
+        println!("{}", plan.no_sources_line());
         print_notes(&plan.notes);
         return Ok(());
     }
 
-    let entity_label = if options.entity_type == "source" {
-        "sources"
-    } else {
-        "objects"
-    };
-
     if plan.fact_count == 0 {
-        println!("No '{key}' facts found on matching {entity_label}.");
+        println!("{}", plan.none_line());
         print_notes(&plan.notes);
     } else if options.dry_run {
-        println!(
-            "Would delete {} '{}' fact rows across {} {}",
-            format_count(plan.fact_count),
-            plan.key,
-            format_count(plan.entity_count),
-            entity_label
-        );
+        println!("{}", plan.preview_line());
         print_notes(&plan.notes);
     } else {
         // Execute
@@ -633,13 +617,7 @@ pub fn delete_facts(
             ledger_config: config.clone(),
             zone: ReadTimesOn::of_user(crate::user_zone()),
         };
-        let result = execute_delete(
-            conn,
-            &options.entity_type,
-            options.value_type,
-            &plan,
-            Some(&decision),
-        )?;
+        let result = execute_delete(conn, &plan, Some(&decision))?;
         println!("{}", result.summary);
     }
 
@@ -675,8 +653,8 @@ pub fn prune_stale(
 
     if dry_run {
         println!(
-            "Would delete {} stale fact rows (observed_basis_rev mismatch)",
-            format_count(plan.stale_count)
+            "Would delete {} (observed_basis_rev mismatch)",
+            counted(plan.stale_count as u64, "stale fact", "stale facts")
         );
     } else {
         let decision = DecisionParams {
@@ -829,6 +807,7 @@ pub fn prune_excluded_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::fact::FactType;
 
     /// **One width function sizes every column**, in display columns: a cell of wide or
     /// accented characters pads to the same column as plain text, and nothing is cut.
@@ -1162,6 +1141,49 @@ mod tests {
                 assert_eq!(
                     refused.to_string(),
                     "Cannot delete 'source.size': names starting with 'source.' cannot be deleted."
+                );
+            },
+        )
+    }
+
+    /// **The content hash and `duration` are refused before anything is read**: on a library
+    /// with no sources, where a selection would answer "No sources match", each refusal is the
+    /// answer.
+    #[test]
+    fn the_content_hash_is_refused_before_anything_is_read() {
+        crate::core::domain::time::zone::with_test_zone(
+            crate::core::domain::time::zone::UserZone::utc(),
+            || {
+                use crate::core::repo::{open_in_memory_for_test, Db};
+                let mut db = Db::from_connection(open_in_memory_for_test());
+                let refused = |key: &str, value_type: Option<TypeWord>, db: &mut Db| {
+                    let options = DeleteOptions {
+                        entity_type: "object".to_string(),
+                        value_type,
+                        dry_run: true,
+                        include: IncludeSet::default(),
+                    };
+                    delete_facts(
+                        db,
+                        key,
+                        &[],
+                        &ExpressionText::plain(&[]),
+                        &options,
+                        "canon facts delete",
+                        &LedgerConfig::default(),
+                        true,
+                    )
+                    .expect_err(key)
+                    .downcast::<crate::facts::DeleteRefused>()
+                    .expect(key)
+                };
+                assert_eq!(
+                    refused("hash.sha256", None, &mut db),
+                    crate::facts::DeleteRefused::ContentHash
+                );
+                assert_eq!(
+                    refused("content.Len", Some(TypeWord::Duration), &mut db),
+                    crate::facts::DeleteRefused::Duration
                 );
             },
         )

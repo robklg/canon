@@ -16,7 +16,7 @@ use crate::core::domain::fact::{Count, FactType, FactValue, KeyTypes};
 use crate::core::domain::format_count;
 use crate::core::domain::number::{number_form, read_number, NotExact};
 use crate::core::domain::time::reading::{read_time, read_year_number};
-use crate::expr::{read_key_name, NameReading};
+use crate::expr::{read_key_name, NameReading, CONTENT_HASH};
 
 /// `n` and a noun in its form for `n`: `1 fact`, `4 facts`.
 pub fn counted(n: u64, one: &str, many: &str) -> String {
@@ -56,12 +56,156 @@ pub struct ContentFactOnSource {
 /// else the command does, so no empty selection hides the refusal.
 pub fn delete_key(given: &str) -> anyhow::Result<String> {
     let reading = read_key_name(given, NameReading::QuotingReadOff);
-    reading.content_key.ok_or_else(|| {
+    let key = reading.content_key.ok_or_else(|| {
         anyhow::anyhow!(
             "Cannot delete '{}': names starting with 'source.' cannot be deleted.",
             reading.name
         )
-    })
+    })?;
+    if is_the_content_hash(&key) {
+        return Err(DeleteRefused::ContentHash.into());
+    }
+    Ok(key)
+}
+
+/// Which facts of a key a deletion acts on: those stored on the matching sources, or those
+/// stored on their content (`--on`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactSide {
+    Source,
+    Object,
+}
+
+impl FactSide {
+    /// The words `--on` takes.
+    pub fn parse(word: &str) -> Option<FactSide> {
+        match word {
+            "source" => Some(FactSide::Source),
+            "object" => Some(FactSide::Object),
+            _ => None,
+        }
+    }
+
+    /// The noun the side's facts are counted across: `source`/`sources`, `object`/`objects`.
+    pub fn noun(self, n: u64) -> &'static str {
+        match self {
+            FactSide::Source => plural(n, "source", "sources"),
+            FactSide::Object => plural(n, "object", "objects"),
+        }
+    }
+
+    pub fn other(self) -> FactSide {
+        match self {
+            FactSide::Source => FactSide::Object,
+            FactSide::Object => FactSide::Source,
+        }
+    }
+
+    /// The flag that names the side: `--on source`.
+    pub fn flag(self) -> &'static str {
+        match self {
+            FactSide::Source => "--on source",
+            FactSide::Object => "--on object",
+        }
+    }
+
+    /// The `entity_type` a fact stored on this side carries.
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            FactSide::Source => "source",
+            FactSide::Object => "object",
+        }
+    }
+}
+
+/// Whether a stored key is the content hash, which `facts delete` and `facts convert` refuse:
+/// decided by the key a name resolves to, never by its spelling (the key-name law).
+pub fn is_the_content_hash(key: &str) -> bool {
+    key == CONTENT_HASH
+}
+
+/// Why `facts delete` and `facts convert` refuse the content hash, and the way to correct one:
+/// `[reason, way out]`. Each command ends the reason with its own consequence.
+pub fn content_hash_answer(consequence: &str) -> [String; 2] {
+    [
+        format!(
+            "The content hash ({CONTENT_HASH}) is Canon's own record of content identity, \
+             {consequence}"
+        ),
+        "to correct a hash a tool imported wrongly, import the right one with \
+         `canon import-facts`, which moves the source to its content"
+            .to_string(),
+    ]
+}
+
+/// A type word as typed: text, number, time, or `duration`, which the command taking it
+/// answers — `facts convert --to` with its routes, `facts delete --value-type` with where
+/// durations are stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeWord {
+    Type(FactType),
+    Duration,
+}
+
+impl TypeWord {
+    /// The type words (and quietly `num`, `datetime`), and `duration`.
+    pub fn parse_word(word: &str) -> Option<TypeWord> {
+        match word {
+            "duration" => Some(TypeWord::Duration),
+            other => FactType::parse_word(other).map(TypeWord::Type),
+        }
+    }
+}
+
+/// **A deletion refused** before anything is read, carried out to `main`: both are answers,
+/// printed without `Error:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteRefused {
+    /// The name resolves to the content hash.
+    ContentHash,
+    /// `--value-type duration`: Canon has no duration type.
+    Duration,
+}
+
+impl DeleteRefused {
+    /// Whether the refusal is an answer: both are.
+    pub fn is_answer(&self) -> bool {
+        match self {
+            DeleteRefused::ContentHash | DeleteRefused::Duration => true,
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        match self {
+            DeleteRefused::ContentHash => {
+                content_hash_answer("and its facts are not deleted").into()
+            }
+            // Canon knows a value is a duration only where its tool gave the `duration` hint, and
+            // an import stores every such value as a number (`decide`). A later conversion of the
+            // key to text changes that, which the sentence does not follow.
+            DeleteRefused::Duration => vec![format!(
+                "Canon has no duration type: durations are stored as {}",
+                FactType::Num.noun(Count::Many)
+            )],
+        }
+    }
+}
+
+impl std::fmt::Display for DeleteRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.lines().join("\n"))
+    }
+}
+
+impl std::error::Error for DeleteRefused {}
+
+/// The stored type a deletion is narrowed to, or the answer for `duration`.
+pub fn delete_value_type(word: Option<TypeWord>) -> Result<Option<FactType>, DeleteRefused> {
+    match word {
+        None => Ok(None),
+        Some(TypeWord::Type(t)) => Ok(Some(t)),
+        Some(TypeWord::Duration) => Err(DeleteRefused::Duration),
+    }
 }
 
 /// The key an import stores a fact under: the name's content reading (`Make` →
@@ -543,6 +687,72 @@ mod tests {
                 format!("Cannot delete '{name}': names starting with 'source.' cannot be deleted.")
             );
         }
+    }
+
+    /// **The content hash is refused by the key a name reads as, never its spelling**: the full
+    /// key, the short name, either in Canon's quotes; `hash` reads as `content.hash` and is not
+    /// the content hash, nor is a longer key that starts with it.
+    #[test]
+    fn the_content_hash_is_refused_under_every_spelling_that_reads_as_it() {
+        for given in [
+            "content.hash.sha256",
+            "hash.sha256",
+            r#""content.hash.sha256""#,
+            r#""hash.sha256""#,
+            "'content.hash.sha256'",
+        ] {
+            let refused = delete_key(given).expect_err(given);
+            assert_eq!(
+                refused.downcast_ref::<DeleteRefused>(),
+                Some(&DeleteRefused::ContentHash),
+                "{given}"
+            );
+        }
+        assert_eq!(delete_key("hash").unwrap(), "content.hash");
+        assert_eq!(
+            delete_key("content.hash.sha256x").unwrap(),
+            "content.hash.sha256x"
+        );
+        assert!(DeleteRefused::ContentHash.is_answer());
+    }
+
+    /// **The two commands give the content hash one reason and one way out**: the reason up to
+    /// each command's own consequence, the way out byte for byte. Convert's lines are master's,
+    /// written out here rather than captured.
+    #[test]
+    fn delete_and_convert_give_the_content_hash_one_reason() {
+        let reason = "The content hash (content.hash.sha256) is Canon's own record of content \
+                      identity, ";
+        let way_out = "to correct a hash a tool imported wrongly, import the right one with \
+                       `canon import-facts`, which moves the source to its content";
+        let convert = convert::ConvertRefused::Key(convert::KeyRefusal::ContentHash).to_string();
+        assert_eq!(
+            convert,
+            format!("{reason}and its type is fixed\n{way_out}"),
+            "convert's bytes are unchanged"
+        );
+        assert_eq!(
+            DeleteRefused::ContentHash.to_string(),
+            format!("{reason}and its facts are not deleted\n{way_out}")
+        );
+    }
+
+    /// **`--value-type duration` is answered, not read as a type**: one sentence, the same
+    /// whatever the key holds, since every value Canon knows as a duration is stored as a
+    /// number. The type words give their stored type.
+    #[test]
+    fn value_type_duration_is_answered() {
+        let refused = delete_value_type(Some(TypeWord::Duration)).unwrap_err();
+        assert_eq!(refused, DeleteRefused::Duration);
+        assert!(refused.is_answer());
+        assert_eq!(
+            refused.to_string(),
+            "Canon has no duration type: durations are stored as numbers"
+        );
+        for t in [FactType::Text, FactType::Num, FactType::Time] {
+            assert_eq!(delete_value_type(Some(TypeWord::Type(t))), Ok(Some(t)));
+        }
+        assert_eq!(delete_value_type(None), Ok(None));
     }
 
     // =========================================================================

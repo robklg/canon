@@ -24,9 +24,9 @@ use crate::facts::domain::convert::{
     acting_command, bridge_clause, class_summary, duration_routes, facts_by_type,
     not_a_conversion_lines, parse_allow, place_parts, printed, stored_spelling, unreadable_line,
     valueless_parts, Class, ClassGroups, EmptyFiles, ListLine, ListMark, Outcome, Place, Places,
-    Target, ValueGroup, UNREADABLE_TIME,
+    ValueGroup, UNREADABLE_TIME,
 };
-use crate::facts::domain::{counted, plural};
+use crate::facts::domain::{counted, plural, TypeWord};
 use crate::facts::ops::convert::{
     execute_convert, plan_convert, read_key, ConvertOutcome, KeyRead, PlanRead,
 };
@@ -34,7 +34,7 @@ use crate::facts::ops::convert::{
 /// What `canon facts convert` was given.
 pub struct ConvertOptions {
     pub key: String,
-    pub to: Option<Target>,
+    pub to: Option<TypeWord>,
     pub list: bool,
     /// `-0`: `--list`'s fields NUL-separated, each record NUL-ended, nothing escaped.
     pub null: bool,
@@ -638,7 +638,7 @@ mod tests {
         execute_convert(
             &mut conn,
             "N",
-            Target::Type(FactType::Num),
+            TypeWord::Type(FactType::Num),
             &Acknowledgments {
                 loss: None,
                 removal: Some(Ack::Count(removed as u64)),
@@ -683,7 +683,7 @@ mod tests {
             }
             let home = tempfile::tempdir().unwrap();
             let planned =
-                plan_convert(&mut conn, "N", Target::Type(FactType::Num), home.path()).unwrap();
+                plan_convert(&mut conn, "N", TypeWord::Type(FactType::Num), home.path()).unwrap();
             plan_lines(&planned, None)
         };
 

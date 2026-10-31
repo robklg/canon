@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::core::domain::format_count;
+use crate::core::domain::object::Holders;
 use crate::core::ops::decision::DecisionParams;
 use crate::core::ops::receipt::ReceiptKind;
 use crate::core::repo::Connection;
@@ -251,8 +252,7 @@ pub fn execute_duplicates(
 #[allow(dead_code)]
 pub struct ExcludeSetObjectsResult {
     pub count: usize,
-    pub total_source_count: usize,
-    pub total_archive_count: usize,
+    pub holders: Holders,
     pub summary: String,
     pub warnings: Vec<String>,
 }
@@ -267,10 +267,12 @@ pub fn execute_set_objects(
 ) -> Result<ExcludeSetObjectsResult> {
     let count = plan.objects.len();
     let has_items = !plan.objects.is_empty();
-    let total_in_source_roots = plan.total_source_count - plan.total_archive_count;
     let head = format!(
         "Excluded {} objects affecting {} sources ({} in source roots, {} in archives)",
-        count, plan.total_source_count, total_in_source_roots, plan.total_archive_count
+        count,
+        plan.holders.total(),
+        plan.holders.in_source_roots,
+        plan.holders.in_archives
     );
     let summary = recorded_summary(&head, None, &plan.notes);
 
@@ -327,8 +329,7 @@ pub fn execute_set_objects(
 
     Ok(ExcludeSetObjectsResult {
         count,
-        total_source_count: plan.total_source_count,
-        total_archive_count: plan.total_archive_count,
+        holders: plan.holders,
         summary: run.summary,
         warnings: run.warnings,
     })

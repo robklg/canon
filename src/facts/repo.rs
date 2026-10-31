@@ -202,6 +202,35 @@ fn value_type_clause(value_type: Option<FactType>) -> &'static str {
     }
 }
 
+/// The facts of a key (of `value_type`, where given) stored on the objects in `temp_objects`,
+/// as the `FROM` of a statement binding the key as its one parameter: the one spelling the
+/// object side's count, id read and delete share, so what is counted is what is deleted.
+fn object_facts_of_key(value_type: Option<FactType>) -> String {
+    format!(
+        "facts WHERE entity_type = 'object'
+           AND entity_id IN (SELECT id FROM temp_objects)
+           AND key = ? {}",
+        value_type_clause(value_type)
+    )
+}
+
+/// Fill `temp_objects` with the objects of the sources in `temp_sources`: the objects a
+/// deletion's object side reads, counts and deletes over. The caller drops it.
+fn fill_temp_objects(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
+        [],
+    )?;
+    conn.execute("DELETE FROM temp_objects", [])?;
+    conn.execute(
+        "INSERT OR IGNORE INTO temp_objects (id)
+         SELECT DISTINCT object_id FROM sources
+         WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Count facts matching criteria for the given sources.
 ///
 /// # Arguments
@@ -253,35 +282,18 @@ pub fn count_by_criteria(
         (count, entities)
     } else {
         // Object entity type - need to map source IDs to object IDs
-        conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
-            [],
-        )?;
-        conn.execute("DELETE FROM temp_objects", [])?;
-        conn.execute(
-            "INSERT OR IGNORE INTO temp_objects (id)
-             SELECT DISTINCT object_id FROM sources
-             WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
-            [],
-        )?;
+        fill_temp_objects(conn)?;
 
         let count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {vt_clause}"
-            ),
+            &format!("SELECT COUNT(*) FROM {}", object_facts_of_key(value_type)),
             [key],
             |row| row.get(0),
         )?;
 
         let entities: i64 = conn.query_row(
             &format!(
-                "SELECT COUNT(DISTINCT entity_id) FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {vt_clause}"
+                "SELECT COUNT(DISTINCT entity_id) FROM {}",
+                object_facts_of_key(value_type)
             ),
             [key],
             |row| row.get(0),
@@ -295,6 +307,38 @@ pub fn count_by_criteria(
     conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
 
     Ok((fact_count, entity_count))
+}
+
+/// The objects of the given sources that hold a fact of `key` (of `value_type`, where given):
+/// the objects `count_by_criteria` counts on the object side (`object_facts_of_key`), returned
+/// rather than counted. An object holds at most one fact of a key (`facts_entity_key_uq`), so
+/// their number is also the number of facts.
+pub fn object_ids_with_fact(
+    conn: &mut Connection,
+    source_ids: &[i64],
+    key: &str,
+    value_type: Option<FactType>,
+) -> Result<Vec<i64>> {
+    if source_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    populate_temp_sources(conn, source_ids)?;
+    fill_temp_objects(conn)?;
+
+    let ids = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT entity_id FROM {} ORDER BY entity_id",
+            object_facts_of_key(value_type)
+        ))?;
+        let rows = stmt.query_map([key], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<i64>>>()?
+    };
+
+    conn.execute("DROP TABLE IF EXISTS temp_objects", [])?;
+    conn.execute("DROP TABLE IF EXISTS temp_sources", [])?;
+
+    Ok(ids)
 }
 
 /// Delete facts matching criteria for the given sources.
@@ -334,25 +378,10 @@ pub fn delete_by_criteria(
         )?
     } else {
         // Object entity type - need to map source IDs to object IDs
-        conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS temp_objects (id INTEGER PRIMARY KEY)",
-            [],
-        )?;
-        conn.execute("DELETE FROM temp_objects", [])?;
-        conn.execute(
-            "INSERT OR IGNORE INTO temp_objects (id)
-             SELECT DISTINCT object_id FROM sources
-             WHERE id IN (SELECT id FROM temp_sources) AND object_id IS NOT NULL",
-            [],
-        )?;
+        fill_temp_objects(conn)?;
 
         let deleted = conn.execute(
-            &format!(
-                "DELETE FROM facts
-                 WHERE entity_type = 'object'
-                   AND entity_id IN (SELECT id FROM temp_objects)
-                   AND key = ? {vt_clause}"
-            ),
+            &format!("DELETE FROM {}", object_facts_of_key(value_type)),
             [key],
         )?;
 

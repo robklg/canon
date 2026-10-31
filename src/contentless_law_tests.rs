@@ -212,6 +212,27 @@ fn set_object_planning_sets_the_empty_file_aside() {
 }
 
 #[test]
+fn the_holder_count_sets_empty_files_apart() {
+    // The holders of content are what `exclude set-object`'s totals and `facts delete --on
+    // object`'s reach count: an empty file holds the one content every empty file shares, so it
+    // is counted apart, never as a holder in a source root or an archive.
+    let c = canary();
+    let held =
+        repo::source::fetch_sources_by_object_ids(&c.conn, &[c.empty_obj, c.data_obj]).unwrap();
+    let holders = crate::core::domain::object::Holders::of(held.values().flatten());
+    assert_eq!(holders.empty_files, 2, "both empty files are counted apart");
+    assert_eq!(
+        (
+            holders.in_source_roots,
+            holders.in_archives,
+            holders.total()
+        ),
+        (1, 1, 2),
+        "only the genuine copies hold content"
+    );
+}
+
+#[test]
 fn survey_counts_the_empty_files_it_sets_aside() {
     // "Stated, never silent": the index refuses contentless sources, so
     // empties vanish from overlap, coverage, and only-here — the summary
@@ -363,7 +384,7 @@ fn the_conversion_counts_empty_files_by_what_each_shows() {
     let planned = crate::facts::plan_convert(
         &mut c.conn,
         "K",
-        crate::facts::Target::Type(crate::core::domain::fact::FactType::Time),
+        crate::facts::TypeWord::Type(crate::core::domain::fact::FactType::Time),
         home.path(),
     )
     .unwrap();

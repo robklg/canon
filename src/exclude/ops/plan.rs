@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::core::domain::format::first_chars;
 use crate::core::domain::include::IncludeSet;
+use crate::core::domain::object::Holders;
 use crate::core::domain::path::path_is_under;
 use crate::core::domain::source::Source;
 use crate::core::repo::{self, Connection};
@@ -318,15 +319,13 @@ pub fn plan_set_objects(
     // The selection is source-side and passes over every closed door in
     // silence, like any other act; the *act* reaches every sharer of a
     // selected object, parked ones included, because the stamp-set is the
-    // receipt-set. That second fact is `total_suspended_count`, counted here
+    // receipt-set. That second fact is `holders.on_suspended_roots`, counted here
     // and stated under the sources line it is a share of.
 
     if selection.sources.is_empty() {
         return Ok(ExcludeSetObjectsPlan {
             objects: vec![],
-            total_source_count: 0,
-            total_archive_count: 0,
-            total_suspended_count: 0,
+            holders: Holders::default(),
             skipped_no_hash: 0,
             skipped_empty: 0,
             skipped_already_excluded: 0,
@@ -369,9 +368,7 @@ pub fn plan_set_objects(
     if object_ids_to_check.is_empty() {
         return Ok(ExcludeSetObjectsPlan {
             objects: vec![],
-            total_source_count: 0,
-            total_archive_count: 0,
-            total_suspended_count: 0,
+            holders: Holders::default(),
             skipped_no_hash,
             skipped_empty,
             skipped_already_excluded: 0,
@@ -387,9 +384,7 @@ pub fn plan_set_objects(
 
     // Build plan entries, filtering out already-excluded objects
     let mut objects: Vec<ObjectPlanEntry> = Vec::new();
-    let mut total_source_count = 0;
-    let mut total_archive_count = 0;
-    let mut total_suspended_count = 0;
+    let mut holders = Holders::default();
     let mut skipped_already_excluded = 0;
 
     for &object_id in &object_ids_to_check {
@@ -421,10 +416,7 @@ pub fn plan_set_objects(
 
         let sources: Vec<ObjectSourceInfo> = obj_sources.iter().map(object_source_info).collect();
 
-        let archive_count = sources.iter().filter(|s| s.is_archive).count();
-        total_archive_count += archive_count;
-        total_suspended_count += sources.iter().filter(|s| s.is_suspended).count();
-        total_source_count += sources.len();
+        holders.add(Holders::of(&obj_sources));
 
         objects.push(ObjectPlanEntry {
             object_id,
@@ -445,9 +437,7 @@ pub fn plan_set_objects(
 
     Ok(ExcludeSetObjectsPlan {
         objects,
-        total_source_count,
-        total_archive_count,
-        total_suspended_count,
+        holders,
         skipped_no_hash,
         skipped_empty,
         skipped_already_excluded,
