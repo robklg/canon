@@ -526,6 +526,34 @@ mod tests {
         assert_eq!(plan.entity_type, "source");
     }
 
+    /// A key copied from Canon's output, in its quotes, previews the same facts as the bare
+    /// name, on sources and on content alike.
+    #[test]
+    fn a_key_in_canons_quotes_previews_the_facts_of_the_bare_name() {
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", false);
+        let obj1 = insert_object(&conn, "h1", false);
+        let obj2 = insert_object(&conn, "h2", false);
+        let s1 = insert_source(&conn, root_id, "a.jpg", Some(obj1));
+        let s2 = insert_source(&conn, root_id, "b.jpg", Some(obj2));
+        let s3 = insert_source(&conn, root_id, "c.jpg", None);
+        crate::core::testing::insert_fact(&conn, s3, "content.File Size", "10");
+        crate::core::testing::insert_object_fact(&conn, obj1, "content.File Size", "20");
+        crate::core::testing::insert_object_fact(&conn, obj2, "content.File Size", "30");
+        for (entity, facts) in [("source", 1), ("object", 2)] {
+            let counts: Vec<(i64, i64)> = ["content.File Size", r#""content.File Size""#]
+                .into_iter()
+                .map(|name| {
+                    let key = crate::facts::domain::delete_key(name).unwrap();
+                    let plan =
+                        plan_delete_over(&mut conn, vec![s1, s2, s3], &key, entity, None).unwrap();
+                    (plan.fact_count, plan.entity_count)
+                })
+                .collect();
+            assert_eq!(counts, [(facts, facts), (facts, facts)], "{entity}");
+        }
+    }
+
     #[test]
     fn test_plan_prune_stale_counts() {
         let conn = setup_test_db();

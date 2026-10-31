@@ -975,7 +975,7 @@ fn the_empty_key_sentences_name_where_a_key_is_missing() {
         "--key",
         "source.ext",
         "--group-by",
-        "Make, source.size|bucket(60,300)",
+        "filename, source.size|bucket(60,300)",
     ]);
     assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
 }

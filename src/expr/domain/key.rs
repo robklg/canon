@@ -18,7 +18,7 @@
 use anyhow::Result;
 
 use super::bind::{check_read_as, ReadAs, Refused};
-use super::print::quoted;
+use super::print::{printed_name_read, quoted};
 use super::problem::{cut, Fix, Place};
 use super::read::{is_space, read_quoted, skip_end, skip_to, Cursor, Grammar};
 use super::transform::{
@@ -213,12 +213,27 @@ impl BuiltinKey {
 // The name reader
 // ============================================================================
 
+/// **How a key's name is read**, which every caller of [`read_key_name`] declares, so no
+/// command takes a reading by default. Named by what the reading does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameReading {
+    /// A name a person typed as a whole argument, perhaps a key copied from Canon's output:
+    /// Canon's printed quoting is read off first (the printing rule's inverse), so
+    /// `"content.File Size"` names `content.File Size`. Nothing expression-like is read.
+    QuotingReadOff,
+    /// The name as written: a tool's name, which import stores as the tool wrote it, or a name
+    /// Canon has already read. Never read off twice: `"a"` read again stays `"a"`.
+    AsWritten,
+}
+
 /// What a key's name can be read as: the source fact it names, the built-in key
 /// it names, the content fact it names. A name may have more than one reading
 /// (`filename` is a built-in key and, read under `content.`, a content fact), or
 /// none (`source.extension`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyName {
+    /// The name as read, which a command names in its answers.
+    pub name: String,
     /// A `source.` name that is one of the source facts.
     pub source_fact: Option<SourceFact>,
     /// One of the built-in keys.
@@ -228,14 +243,19 @@ pub struct KeyName {
     pub content_key: Option<String>,
 }
 
-/// **The key-name law**: every command that takes a key's name reads it here,
-/// and each applies its own rule to the readings it gets — an expression and
-/// `--emit` take [`KeyName::in_expression`], import and `facts delete` the
-/// content reading alone. Everything given is the name: no quoting, accessor,
-/// modifier or alias is read.
-pub fn read_key_name(name: &str) -> KeyName {
+/// **The key-name law**: every command that takes a key's name reads it here, declaring
+/// how ([`NameReading`]) — a name a person typed with Canon's printed quoting read off, a
+/// tool's or an already-read name as written — and each applies its own rule to the readings
+/// it gets: an expression and `--emit` take [`KeyName::in_expression`], import and
+/// `facts delete` the content reading alone. No accessor, modifier or alias is read.
+pub fn read_key_name(given: &str, reading: NameReading) -> KeyName {
     use strum::IntoEnumIterator;
 
+    let name = match reading {
+        NameReading::QuotingReadOff => printed_name_read(given),
+        NameReading::AsWritten => given.to_string(),
+    };
+    let name = name.as_str();
     let source_fact = SourceFact::iter().find(|fact| <&'static str>::from(*fact) == name);
     let builtin = BuiltinKey::iter().find(|key| <&'static str>::from(*key) == name);
     let content_key = if name.starts_with("source.") {
@@ -246,6 +266,7 @@ pub fn read_key_name(name: &str) -> KeyName {
         Some(format!("content.{name}"))
     };
     KeyName {
+        name: name.to_string(),
         source_fact,
         builtin,
         content_key,
@@ -293,11 +314,12 @@ pub enum Listing {
 }
 
 impl Key {
-    /// The key a name reads as in an expression —
-    /// `read_key_name(name).in_expression()`. A key's own name reads back as
-    /// the key, so a base key already read can be asked again here.
+    /// The key a name reads as in an expression — `read_key_name(name, AsWritten)
+    /// .in_expression()`. A key's own name reads back as the key, so a base key already read
+    /// can be asked again here. Never a command's reading of a name a person typed, which
+    /// declares its reading at [`read_key_name`].
     pub fn read(name: &str) -> Option<Key> {
-        read_key_name(name).in_expression()
+        read_key_name(name, NameReading::AsWritten).in_expression()
     }
 
     /// The nine source facts, then the nine built-in keys.
@@ -521,8 +543,8 @@ impl ParsedFactKey {
     }
 
     /// Whether a stored value is what the key was read as ([`check_read_as`]): a key with an
-    /// accessor or modifiers was read as its one type, or as having no facts; a bare key reads
-    /// every value it meets, of whatever type.
+    /// accessor or modifiers was read as its one type; a bare key reads every value it meets, of
+    /// whatever type.
     pub(in crate::expr) fn check_type(&self, value: &FactValue) -> Result<()> {
         check_read_as(self.read_as, &self.base_key, value, Refused::Key)
     }
@@ -608,6 +630,8 @@ impl InputKey {
             ),
             _ => cut(&self.input, 0, place.start.saturating_sub(self.place.start)),
         }
+        // Spaces before a key's first modifier or accessor are not the key's.
+        .trim_end_matches(is_space)
     }
 
     /// Every place the key holds, for a copy that stands elsewhere.
@@ -652,73 +676,32 @@ impl InputKey {
         }
     }
 
-    /// **The quoted name a refusal may offer**: the name quoted, where the key is a bare name and the character
-    /// straight after it (byte `end` of `text`) is one a name cannot contain and that cannot
-    /// start anything that may follow a key in this position. In a filter a space may stand
-    /// before an operator, so it never is one; in a report key a space followed by more text
-    /// (not a `,`) is. The quoted name runs to where what follows the key may start. Whether it
-    /// is shown is binding's (a key with facts).
-    pub(in crate::expr) fn quoted_name_fix(
-        &self,
-        text: &str,
-        end: usize,
-        grammar: Grammar,
-    ) -> Option<String> {
+    /// **The quoted name a filter's refusal may offer**: the name quoted, where the key is a bare
+    /// name and the character straight after it (byte `end` of `text`) is one a name cannot
+    /// contain and that cannot start anything that may follow a key in a filter. The quoted name
+    /// runs to where what follows the key may start. Only a filter needs it: where a key stands
+    /// alone a bare name already runs to what may follow it ([`ends_a_bare_name`]). Whether it is
+    /// shown is binding's (a key with facts).
+    pub(in crate::expr) fn quoted_name_fix(&self, text: &str, end: usize) -> Option<String> {
         // A key ending past its name has an accessor or a modifier typed after it; a built-in
         // key's own reading (`hash_short` as `|short`) is no such text.
         if self.is_quoted() || self.written.is_some() || end != self.name_place.end {
             return None;
         }
         let rest = cut(text, end, text.len());
-        let next = rest.chars().next()?;
-        let candidate = match grammar {
-            Grammar::Filter => !follows_a_key_in_a_filter(rest),
-            // The text read ends where the `}` stands, so what follows the name is inside the
-            // braces.
-            Grammar::Pattern => {
-                let more = rest.trim_start_matches(is_space).chars().next();
-                if is_space(next) {
-                    more.is_some()
-                } else {
-                    !matches!(next, '[' | '|')
-                }
-            }
-            Grammar::Key | Grammar::KeyList => {
-                let more = rest.trim_start_matches(is_space).chars().next();
-                match (is_space(next), grammar) {
-                    (true, Grammar::KeyList) => more.is_some_and(|c| c != ','),
-                    (true, _) => more.is_some(),
-                    (false, Grammar::KeyList) => next != ',',
-                    (false, _) => true,
-                }
-            }
-        };
-        if !candidate {
+        if rest.is_empty() || follows_a_key_in_a_filter(rest) {
             return None;
         }
         // The name runs to where what may follow it starts, read as the reader skips: a `)`
         // closing a `(` the name opened belongs to it (`content.Foo(5)`), and quoted text where a
         // part starts is stepped over whole.
-        let extent = skip_end(text, end, |at, c| match grammar {
-            Grammar::Filter => follows_a_key_in_a_filter(at.rest()),
-            Grammar::Key | Grammar::Pattern => matches!(c, '[' | '|'),
-            Grammar::KeyList => matches!(c, '[' | '|' | ','),
-        }) - end;
+        let extent = skip_end(text, end, |at, _| follows_a_key_in_a_filter(at.rest())) - end;
         let name = format!(
             "{}{}",
             self.input_name,
             cut(rest, 0, extent).trim_end_matches(is_space)
         );
-        Some(match grammar {
-            // In a pattern the whole `{…}`, its name quoted with `'`, which a manifest's
-            // `pattern = "…"` line holds as it is.
-            Grammar::Pattern => format!(
-                "{{{}{}}}",
-                single_quoted(&name),
-                cut(rest, extent, rest.len())
-            ),
-            Grammar::Filter | Grammar::Key | Grammar::KeyList => quoted(&name),
-        })
+        Some(quoted(&name))
     }
 }
 
@@ -758,20 +741,54 @@ pub(in crate::expr) fn single_quoted(name: &str) -> String {
     format!("'{}'", name.replace('\'', "''"))
 }
 
+/// **Where a key stands alone a space can mean nothing else**, so a `|` after spaces still
+/// starts the key's modifiers, and a `[` its accessor where one may follow (`accessor`) — after a
+/// bare name, a quoted one and a key alias alike: the bytes of spaces at the start of `rest`
+/// before one, or `None`.
+pub(in crate::expr) fn spaces_before_transforms(rest: &str, accessor: bool) -> Option<usize> {
+    let after = rest.trim_start_matches(is_space);
+    (after.starts_with('|') || (accessor && after.starts_with('[')))
+        .then(|| rest.len() - after.len())
+}
+
+/// Step the cursor over spaces to a `|`, or to a `[` where an accessor may follow
+/// ([`spaces_before_transforms`]).
+pub(in crate::expr) fn step_to_transforms(cursor: &mut Cursor, accessor: bool) {
+    if let Some(spaces) = spaces_before_transforms(cursor.rest(), accessor) {
+        cursor.set_at(cursor.at() + spaces);
+    }
+}
+
 /// Whether `c` continues a bare name: letters and digits of any language, `_ . : / -`.
 pub(in crate::expr) fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-')
 }
 
+/// **What ends a bare name**, by position: in a filter, where an operator may follow the key,
+/// the first character that is not a name character (a space among them); where a key stands
+/// alone only what may follow it there — `[` or `|`, and in a key list `,`. A pattern's key is
+/// read from the inside of its `{…}`, so its `}` is the end of the text.
+fn ends_a_bare_name(c: char, grammar: Grammar) -> bool {
+    match grammar {
+        Grammar::Filter => !is_name_char(c),
+        Grammar::Key | Grammar::Pattern => matches!(c, '[' | '|'),
+        Grammar::KeyList => matches!(c, '[' | '|' | ','),
+    }
+}
+
 /// The rule line under every `|bucket` number sentence.
 const BUCKET_RULE: &str = "|bucket takes numbers: |bucket(10,100)";
 
-/// **The key grammar**: a name — a letter or `_` first, then letters, digits and
-/// `_ . : / -` — or a quoted name; then one `[…]` straight after it; then modifiers `|name`, the
-/// name in exact lower case, only `|bucket` taking numbers in parentheses. The key ends at the
-/// first character that does not fit, and the caller says what may stand there. Problems
-/// inside the key are recorded on the cursor; `None` where nothing can be read as a key — a
-/// text that is not one, an empty quoted name — or reading stopped.
+/// **The key grammar**: a name — a bare name, a letter or `_` first, or a quoted name; then one
+/// `[…]` after it; then modifiers `|name`, the name in exact lower case, only `|bucket` taking
+/// numbers in parentheses. In a filter the `[` or first `|` stands straight after the name; where a
+/// key stands alone, after any spaces, after a bare name and a quoted one alike. What ends a bare
+/// name is the position's ([`ends_a_bare_name`]): in a filter the first character that is not a
+/// name character, where a key stands alone only what may follow it there, so a space inside is the
+/// name's and spaces at its end are not. The key ends at the first character that does not fit, and
+/// the caller says what may stand there. Problems inside the key are recorded on the cursor; `None`
+/// where nothing can be read as a key — a text that is not one, an empty quoted name — or reading
+/// stopped.
 pub(in crate::expr) fn read_key(cursor: &mut Cursor, grammar: Grammar) -> Option<InputKey> {
     let start = cursor.at();
     let first = cursor.peek()?;
@@ -790,8 +807,16 @@ pub(in crate::expr) fn read_key(cursor: &mut Cursor, grammar: Grammar) -> Option
         }
         name
     } else if first.is_alphabetic() || first == '_' {
-        cursor.bump_while(is_name_char);
-        cursor.slice(start, cursor.at()).to_string()
+        // The name runs to what ends it here, read as the reader skips: quoted text where a part
+        // starts stepped over, a `(` paired, a quote that never closes named. Spaces at its end
+        // are not its own.
+        skip_to(cursor, |_, c| ends_a_bare_name(c, grammar));
+        if cursor.stopped() {
+            return None;
+        }
+        let name = cursor.slice(start, cursor.at()).trim_end_matches(is_space);
+        cursor.set_at(start + name.len());
+        name.to_string()
     } else {
         // The text runs to what may follow a key here, read as the reader skips; it is named
         // before it is read through, so a quote in it that never closes is named after it.
@@ -812,6 +837,13 @@ pub(in crate::expr) fn read_key(cursor: &mut Cursor, grammar: Grammar) -> Option
         return None;
     };
     let name_end = cursor.at();
+    let alone = match grammar {
+        Grammar::Filter => false,
+        Grammar::Key | Grammar::KeyList | Grammar::Pattern => true,
+    };
+    if alone {
+        step_to_transforms(cursor, true);
+    }
     let name_place = cursor.place(start, name_end);
     let (base, leading) = read_base_key(&name);
     let mut modifiers = Vec::new();
@@ -834,7 +866,7 @@ pub(in crate::expr) fn read_key(cursor: &mut Cursor, grammar: Grammar) -> Option
     Some(key)
 }
 
-/// **The key grammar after a name**, from the cursor: one `[…]` straight after the name, where
+/// **The key grammar after a name**, from the cursor: one `[…]` where the cursor stands, where
 /// `accessor_may_follow` (nothing but the name read so far), then modifiers; `key`'s text and
 /// place then run from byte `start` to where the key ends. A key alias's key continues here,
 /// after its `@name`. `None` where reading stopped.
@@ -1112,8 +1144,9 @@ mod tests {
         ];
         for (name, source_fact, builtin, content_key) in cases {
             assert_eq!(
-                read_key_name(name),
+                read_key_name(name, NameReading::AsWritten),
                 KeyName {
+                    name: name.to_string(),
                     source_fact,
                     builtin,
                     content_key
@@ -1121,6 +1154,44 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// **A name is read as its caller declares**: typed by a person, the key as Canon prints it
+    /// reads back as that key, its name the key itself; as written, a name is the name, quotes
+    /// and all — so a name already read is never read off twice.
+    #[test]
+    fn a_name_is_read_as_its_caller_declares() {
+        use super::super::print::printed_key;
+        for key in [
+            "content.Make",
+            "content.File Size",
+            r#"content.a"b"#,
+            "content.it's",
+            "content.a,b",
+            "content.Größe",
+        ] {
+            let typed = read_key_name(&printed_key(key), NameReading::QuotingReadOff);
+            assert_eq!(
+                (typed.name.as_str(), typed.content_key.as_deref()),
+                (key, Some(key)),
+                "{key}"
+            );
+            let written = read_key_name(key, NameReading::AsWritten);
+            assert_eq!(written.name, key);
+        }
+        // `"""a"""` typed is the name `"a"`; read again as written it stays `"a"`.
+        let typed = read_key_name(r#""""a""""#, NameReading::QuotingReadOff);
+        assert_eq!(typed.name, r#""a""#);
+        let again = read_key_name(&typed.name, NameReading::AsWritten);
+        assert_eq!(again.content_key.as_deref(), Some(r#"content."a""#));
+        // A tool's name is stored as written, quotes included, and `Key::read` — the re-read of
+        // a name already read, as the grammar hands it a quoted name's text — reads it so too.
+        let tool = read_key_name(r#""Foo""#, NameReading::AsWritten);
+        assert_eq!(tool.content_key.as_deref(), Some(r#"content."Foo""#));
+        assert_eq!(
+            Key::read(r#""Foo""#),
+            Some(Key::ContentFact(r#"content."Foo""#.to_string()))
+        );
     }
 
     /// The content reading, which import stores a key under: a plain name gains
@@ -1141,7 +1212,9 @@ mod tests {
             ("content.hash.sha256", "content.hash.sha256"),
         ] {
             assert_eq!(
-                read_key_name(name).content_key.as_deref(),
+                read_key_name(name, NameReading::AsWritten)
+                    .content_key
+                    .as_deref(),
                 Some(want),
                 "{name}"
             );
@@ -1158,7 +1231,11 @@ mod tests {
             "source.ext",
             "source.extension",
         ] {
-            assert_eq!(read_key_name(name).content_key, None, "{name}");
+            assert_eq!(
+                read_key_name(name, NameReading::AsWritten).content_key,
+                None,
+                "{name}"
+            );
         }
     }
 
@@ -1674,90 +1751,146 @@ mod tests {
         assert_eq!(key.modifiers[0].0.modifier, Modifier::Short);
     }
 
-    /// The quoted name offered where the character straight after a bare name can start
-    /// nothing that may follow the key there (in a report key, a space followed by more).
+    /// **What ends a bare name is the position's**: in a filter the first character that is not
+    /// a name character; where a key stands alone only what may follow it there — `[` or `|`,
+    /// and in a key list `,` — so a space inside is the name's and spaces at its ends are not.
     #[test]
-    fn a_quoted_name_is_offered_only_where_nothing_may_follow_the_name() {
-        let offered = |at: usize, sentence: &str, rewrite: &str| {
-            vec![(
-                at,
-                sentence.to_string(),
-                None,
-                Fix::KeyName {
-                    rewrite: rewrite.to_string(),
-                },
-            )]
+    fn a_bare_name_ends_where_its_position_says() {
+        let bases = |text: &str, grammar: Grammar| {
+            let reading = read_keys(text, 0, grammar, AliasMode::NotLoaded);
+            assert!(
+                reading.problems.is_empty(),
+                "{text}: {:?}",
+                reading.problems
+            );
+            let keys = reading.value.unwrap();
+            keys.into_iter()
+                .map(|k| (k.input, k.base))
+                .collect::<Vec<_>>()
         };
+        let pair = |input: &str, base: &str| (input.to_string(), base.to_string());
+        // A space inside the name is the name's where a key stands alone.
         assert_eq!(
-            read("content.File Size", Grammar::Key).1,
-            offered(
-                13,
-                "`Size` cannot follow `content.File`",
-                r#""content.File Size""#
-            )
+            bases("content.File Size", Grammar::Key),
+            [pair("content.File Size", "content.File Size")]
         );
         assert_eq!(
-            read("content.Foo@Bar", Grammar::Key).1,
-            offered(
-                11,
-                "`@Bar` cannot follow `content.Foo`",
-                r#""content.Foo@Bar""#
-            )
+            bases("content.File Size, Make", Grammar::KeyList),
+            [
+                pair("content.File Size", "content.File Size"),
+                pair("Make", "content.Make")
+            ]
         );
-        assert_eq!(
-            read("content.File Size, Make", Grammar::KeyList),
+        let mut cursor = Cursor::new("content.File Size", 0);
+        let key = read_key(&mut cursor, Grammar::Pattern).unwrap();
+        assert_eq!((key.base.as_str(), cursor.at()), ("content.File Size", 17));
+        // In a filter a space still ends it, an operator after it.
+        let (key, at) = key_in_filter("content.File Size=1");
+        assert_eq!((key.base.as_str(), at), ("content.File", 12));
+        // Every character up to what may follow the name is the name's.
+        for (text, grammar, want) in [
             (
-                vec!["Make".to_string()],
-                offered(
-                    13,
-                    "`Size` cannot follow `content.File`",
-                    r#""content.File Size""#
-                )
-            )
-        );
-        // A built-in key's own reading is no modifier typed after its name.
-        assert_eq!(
-            read("hash_short@x", Grammar::Key).1,
-            offered(10, "`@x` cannot follow `hash_short`", r#""hash_short@x""#)
-        );
-        // An apostrophe inside a word opens no quote: the item ends at its `,`, where the
-        // quoted name ends too.
-        assert_eq!(
-            read("Make's,Model", Grammar::KeyList),
+                "content.Foo@Bar",
+                Grammar::Key,
+                vec![pair("content.Foo@Bar", "content.Foo@Bar")],
+            ),
             (
-                vec!["Model".to_string()],
-                offered(4, "`'s` cannot follow `Make`", r#""Make's""#)
-            )
-        );
-        // Quoted text where a part starts is stepped over by the item and the name alike.
-        assert_eq!(
-            read("Make x='a,b',Model", Grammar::KeyList),
+                "hash_short@x",
+                Grammar::Key,
+                vec![pair("hash_short@x", "content.hash_short@x")],
+            ),
             (
-                vec!["Model".to_string()],
-                offered(5, "`x='a,b'` cannot follow `Make`", r#""Make x='a,b'""#)
-            )
-        );
-        // A `(` that never closes hides no `,`.
-        assert_eq!(
-            read("Make x(a, Model", Grammar::KeyList),
+                "content.Foo(5)",
+                Grammar::Key,
+                vec![pair("content.Foo(5)", "content.Foo(5)")],
+            ),
             (
-                vec!["Model".to_string()],
-                offered(5, "`x(a` cannot follow `Make`", r#""Make x(a""#)
-            )
+                "Make's,Model",
+                Grammar::KeyList,
+                vec![
+                    pair("Make's", "content.Make's"),
+                    pair("Model", "content.Model"),
+                ],
+            ),
+            // Quoted text where a part starts is stepped over, so its `,` is the name's.
+            (
+                "Make x='a,b',Model",
+                Grammar::KeyList,
+                vec![
+                    pair("Make x='a,b'", "content.Make x='a,b'"),
+                    pair("Model", "content.Model"),
+                ],
+            ),
+            // A `(` that never closes hides no `,`.
+            (
+                "Make x(a, Model",
+                Grammar::KeyList,
+                vec![
+                    pair("Make x(a", "content.Make x(a"),
+                    pair("Model", "content.Model"),
+                ],
+            ),
+        ] {
+            assert_eq!(bases(text, grammar), want, "{text}");
+        }
+        // `|` and `[` still start a modifier and an accessor, after spaces too.
+        for (text, base, accessor, modifiers) in [
+            ("content.File Size|year", "content.File Size", false, 1),
+            ("source.rel_path[-1]|stem", "source.rel_path", true, 1),
+            ("content.File Size |year", "content.File Size", false, 1),
+            ("source.rel_path [0]", "source.rel_path", true, 0),
+        ] {
+            let reading = read_keys(text, 0, Grammar::Key, AliasMode::NotLoaded);
+            assert!(reading.problems.is_empty(), "{text}");
+            let key = &reading.value.unwrap()[0];
+            assert_eq!(
+                (
+                    key.base.as_str(),
+                    key.accessor.is_some(),
+                    key.modifiers.len()
+                ),
+                (base, accessor, modifiers),
+                "{text}"
+            );
+        }
+        // Spaces at the ends are not the name's, and its place does not cover them.
+        let reading = read_keys(
+            "  content.File Size  ",
+            0,
+            Grammar::Key,
+            AliasMode::NotLoaded,
+        );
+        let key = &reading.value.unwrap()[0];
+        assert_eq!(
+            (key.base.as_str(), key.name_place.start, key.name_place.end),
+            ("content.File Size", 2, 19)
+        );
+        // What follows a key's modifiers, or a quoted name, still cannot follow it.
+        assert_eq!(
+            read("Make|year x", Grammar::Key),
+            (vec![], one(10, "`x` cannot follow `Make|year`"))
+        );
+        assert_eq!(
+            read(r#""a"b"#, Grammar::Key),
+            (vec![], one(3, r#"`b` cannot follow `"a"`"#))
         );
         // Text that is not a key pairs the `(` it starts with.
         assert_eq!(
             read("(a,b), Model", Grammar::KeyList),
             (vec!["Model".to_string()], one(0, "`(a,b)` is not a key"))
         );
-        // After a modifier the key is no bare name; quoted, it already is one.
+        // A quote that never closes inside the name is named, and reading stops.
         assert_eq!(
-            read("source.rel_path|stem(5)", Grammar::Key).1[0].3,
-            Fix::None
+            read("Make 'x", Grammar::Key),
+            (vec![], one(5, "this quote is unclosed"))
         );
-        assert_eq!(read(r#""a"b"#, Grammar::Key).1[0].3, Fix::None);
+    }
 
-        // In a filter a space or an operator may follow a name; `@` or `(` cannot.
+    /// The quoted name a filter offers where the character straight after a bare name can start
+    /// nothing that may follow a key there: a space or an operator may follow a name; `@` or `(`
+    /// cannot.
+    #[test]
+    fn a_filter_offers_a_quoted_name_only_where_nothing_may_follow_the_name() {
         for (text, want) in [
             ("content.Foo@Bar=1", Some(r#""content.Foo@Bar""#)),
             ("content.Foo(5)=1", Some(r#""content.Foo(5)""#)),
@@ -1767,11 +1900,7 @@ mod tests {
             ("content.Foo?", None),
         ] {
             let (key, at) = key_in_filter(text);
-            assert_eq!(
-                key.quoted_name_fix(text, at, Grammar::Filter).as_deref(),
-                want,
-                "{text}"
-            );
+            assert_eq!(key.quoted_name_fix(text, at).as_deref(), want, "{text}");
         }
     }
 }

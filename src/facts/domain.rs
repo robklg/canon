@@ -16,7 +16,7 @@ use crate::core::domain::fact::{Count, FactType, FactValue, KeyTypes};
 use crate::core::domain::format_count;
 use crate::core::domain::number::{number_form, read_number, NotExact};
 use crate::core::domain::time::reading::{read_time, read_year_number};
-use crate::expr::{read_key_name, BuiltinKey, Key, ParsedFactKey, SourceFact};
+use crate::expr::{read_key_name, BuiltinKey, Key, NameReading, ParsedFactKey, SourceFact};
 
 /// `n` and a noun in its form for `n`: `1 fact`, `4 facts`.
 pub fn counted(n: u64, one: &str, many: &str) -> String {
@@ -50,20 +50,26 @@ pub struct ContentFactOnSource {
 }
 
 /// The key `facts delete` acts on: the name's content reading (`Make` →
-/// `content.Make`), or a refusal for a name with none — any name starting with
-/// `source.`, a source fact or not. Read once, before anything else the command
-/// does, so no empty selection hides the refusal.
-pub fn delete_key(name: &str) -> anyhow::Result<String> {
-    read_key_name(name).content_key.ok_or_else(|| {
-        anyhow::anyhow!("Cannot delete '{name}': names starting with 'source.' cannot be deleted.")
+/// `content.Make`), Canon's printed quoting read off it first, so a key copied
+/// from Canon's output names that key — or a refusal for a name with none — any
+/// name starting with `source.`, a source fact or not. Read once, before anything
+/// else the command does, so no empty selection hides the refusal.
+pub fn delete_key(given: &str) -> anyhow::Result<String> {
+    let reading = read_key_name(given, NameReading::QuotingReadOff);
+    reading.content_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot delete '{}': names starting with 'source.' cannot be deleted.",
+            reading.name
+        )
     })
 }
 
 /// The key an import stores a fact under: the name's content reading (`Make` →
 /// `content.Make`), or `None` for a name with none — any name starting with
-/// `source.`, which the import skips.
+/// `source.`, which the import skips. A tool's name is stored as the tool wrote it,
+/// quotes included: no quoting is read off it.
 pub fn import_key(name: &str) -> Option<String> {
-    read_key_name(name).content_key
+    read_key_name(name, NameReading::AsWritten).content_key
 }
 
 /// Whether a report key names a source's root — `source.root` or `root_id`, quoted or not,
@@ -447,7 +453,7 @@ pub fn keys_named_twice<'a>(
 /// itself, passed back (`worklist --emit` writes these), or another name starting with
 /// `source.`. Decided by the name's reading, never its text.
 pub fn reserved_name_cause(name: &str) -> SkipCause {
-    match read_key_name(name).source_fact {
+    match read_key_name(name, NameReading::AsWritten).source_fact {
         Some(_) => SkipCause::SourceFact,
         None => SkipCause::SourceName,
     }
@@ -465,7 +471,9 @@ mod tests {
     /// the name it was imported under. The
     /// defect it names: the asking half kept `policy.`/`object.` keys as written
     /// while import stored them under `content.`, and `--where policy.reviewed?`
-    /// selected nothing. Sampled prefixes.
+    /// selected nothing. Sampled prefixes. The key as Canon prints it, copied back,
+    /// reaches it too in the delete and the conversion, which read the printed quoting
+    /// off a name first; import does not, so a tool's quoted name keeps its quotes.
     ///
     /// For a built-in key's name they differ, by design, and that half is
     /// pinned too: the filter reads the built-in key (`size` is the source's
@@ -473,7 +481,7 @@ mod tests {
     /// (`content.size`).
     #[test]
     fn a_key_is_read_by_the_name_import_stored_it_under() {
-        use crate::expr::ParsedFactKey;
+        use crate::expr::{printed_key, ParsedFactKey};
 
         let prefixes = [
             "",
@@ -486,7 +494,7 @@ mod tests {
             "contents.",
         ];
         for prefix in prefixes {
-            for name in ["Make", "reviewed", "x.y"] {
+            for name in ["Make", "reviewed", "x.y", "File Size", "it's"] {
                 let written = format!("{prefix}{name}");
                 let imported = import_key(&written).unwrap();
                 let filtered = ParsedFactKey::parse(&written).unwrap().base_key;
@@ -497,8 +505,28 @@ mod tests {
                     imported,
                     "{written}"
                 );
+                // The key as Canon prints it, copied back: the delete and the conversion read
+                // the printed quoting off it first.
+                let printed = printed_key(&imported);
+                assert_eq!(delete_key(&printed).unwrap(), imported, "{printed}");
+                let (name, key) = super::convert::read_convert_name(&printed);
+                assert_eq!(key, Ok(imported.clone()), "{printed}");
+                assert_eq!(name, imported, "{printed}");
             }
         }
+        // A typed name whose read form starts with a quote — a stored key `content."Foo"`, typed
+        // with its quotes doubled — is read off once and never again: the delete and the
+        // conversion's re-read reach the key import stored, and no built-in key is read into it.
+        let doubled = r#""""Foo""""#;
+        assert_eq!(delete_key(doubled).unwrap(), r#"content."Foo""#);
+        let (name, key) = super::convert::read_convert_name(doubled);
+        assert_eq!(
+            (name.as_str(), key),
+            (r#""Foo""#, Ok(r#"content."Foo""#.to_string()))
+        );
+        assert_eq!(super::convert::fixed_type_answer(r#""hash""#), None);
+        // A quoted name at import is a name with quotes: a tool's key is stored as written.
+        assert_eq!(import_key(r#""Foo""#).as_deref(), Some(r#"content."Foo""#));
 
         // One built-in name, a deliberate difference: each command's own rule.
         assert_eq!(ParsedFactKey::parse("size").unwrap().base_key, "size");

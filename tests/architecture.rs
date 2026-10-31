@@ -3965,6 +3965,7 @@ mod source {
                 "fetch_source_values",
                 "fetch_named_values",
                 "read_key_name",
+                "NameReading",
                 "BuiltinKey",
                 "Key",
                 "KeyKind",

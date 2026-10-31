@@ -16,7 +16,7 @@ use crate::core::domain::number::spelled;
 use crate::core::domain::source::Source;
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo::Connection;
-use crate::expr::{fetch_named_values, ExpressionRefused, Key};
+use crate::expr::{fetch_named_values, read_key_name, ExpressionRefused, Key, NameReading};
 
 /// A single worklist entry, ready for JSONL serialization.
 #[derive(Serialize)]
@@ -40,20 +40,23 @@ pub struct WorklistResult {
     pub skipped_duplicate: u64,
 }
 
-/// Each `--emit` name read as an expression reads it (`Key::read`): the source fact it
-/// names, else the built-in key, else the content fact (`Make` is `content.Make`) — kept
-/// beside the name as given, which names its field. Every name with no reading (a `source.`
-/// name that is no source fact) is refused in one refusal, so one run names them all; the
-/// caller reads them before it selects anything.
+/// Each `--emit` name, typed by a person, read with Canon's printed quoting read off
+/// (`NameReading::QuotingReadOff`), as an expression reads it: the source fact it names, else
+/// the built-in key, else the content fact (`Make` is `content.Make`) — kept beside the name as
+/// read, which names its field, so a key copied from Canon's output, quoted or not, gives one
+/// field. Every name with no reading (a `source.` name that is no source fact) is refused in
+/// one refusal, so one run names them all; the caller reads them before it selects anything.
 pub fn read_emit_keys(
     names: &[String],
 ) -> std::result::Result<Vec<(String, Key)>, ExpressionRefused> {
     let mut keys = Vec::with_capacity(names.len());
     let mut unknown = Vec::new();
-    for name in names {
-        match Key::read(name) {
-            Some(key) => keys.push((name.clone(), key)),
-            None => unknown.push(name.clone()),
+    for given in names {
+        let reading = read_key_name(given, NameReading::QuotingReadOff);
+        let name = reading.name.clone();
+        match reading.in_expression() {
+            Some(key) => keys.push((name, key)),
+            None => unknown.push(name),
         }
     }
     if !unknown.is_empty() {
@@ -67,7 +70,7 @@ pub fn read_emit_keys(
 /// When `unique_content` is true, only the first source per object_id is included.
 /// When `emit_keys` is non-empty, each emitted source's value per key is attached, read in
 /// one batch per key as an expression reads it (`fetch_named_values`), under the name as
-/// given; `zone` is the clock a key's reading reads on.
+/// read ([`read_emit_keys`]); `zone` is the clock a key's reading reads on.
 pub fn build_entries(
     conn: &mut Connection,
     sources: &[Source],
@@ -305,7 +308,7 @@ mod tests {
         );
     }
 
-    /// `--emit` reads a name as an expression reads it and names the field as given: a plain
+    /// `--emit` reads a name as an expression reads it and names the field as read: a plain
     /// name is the content fact (`Make` is `content.Make`), a source fact and a built-in key
     /// the source's own value — `size` the same as `source.size` — and `hash`/`hash_short`
     /// the content hash, in full and its first eight characters.
@@ -337,7 +340,7 @@ mod tests {
         fields.sort_unstable();
         let mut expected = names.to_vec();
         expected.sort_unstable();
-        assert_eq!(fields, expected, "each field named as given");
+        assert_eq!(fields, expected, "each field named as read");
         assert_eq!(facts["Make"], serde_json::json!("Canon"));
         assert_eq!(facts["source.size"], serde_json::json!(100));
         assert_eq!(facts["filename"], serde_json::json!("a.jpg"));
@@ -367,19 +370,30 @@ mod tests {
     /// a built-in key's name — `size` — reads the built-in key, as a filter does, by design.
     /// That the content reading is the key import stores the fact under rests on the
     /// verifier, which pins import's own `import_key` equal to the filter's reading; this
-    /// subsystem may not name `facts`.
+    /// subsystem may not name `facts`. A name is typed by a person, so the key as Canon prints
+    /// it reads as the same key and names the same field.
     #[test]
     fn an_emit_name_reaches_the_fact_import_stored_it_under() {
-        use crate::expr::{read_key_name, BuiltinKey};
+        use crate::expr::{printed_key, BuiltinKey};
 
         for prefix in ["", "content.", "policy.", "object.", "Content."] {
-            for name in ["Make", "reviewed", "x.y"] {
+            for name in ["Make", "reviewed", "x.y", "File Size"] {
                 let written = format!("{prefix}{name}");
-                let imported = read_key_name(&written).content_key.unwrap();
+                let imported = read_key_name(&written, NameReading::AsWritten)
+                    .content_key
+                    .unwrap();
                 assert_eq!(
-                    emit(&[&written])[0].1,
-                    Key::ContentFact(imported),
+                    emit(&[&written])[0],
+                    (written.clone(), Key::ContentFact(imported.clone())),
                     "{written}"
+                );
+                // The key as Canon prints it, copied back: the same key, in the field of the
+                // name as read, so the quoted and bare spellings give one field.
+                let printed = printed_key(&imported);
+                assert_eq!(
+                    emit(&[&printed])[0],
+                    (imported.clone(), Key::ContentFact(imported.clone())),
+                    "{printed}"
                 );
             }
         }

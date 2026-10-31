@@ -19,7 +19,7 @@ use crate::core::domain::number::spelled;
 use crate::core::domain::time::zone::UserZone;
 use crate::expr::{
     convert_command, printed_key, printed_value, read_key_name, rendered, source_value, Arriving,
-    BuiltinKey, Complement, Key, Noun, Statement, Subject, CONTENT_HASH,
+    BuiltinKey, Complement, Key, NameReading, Noun, Statement, Subject, CONTENT_HASH,
 };
 
 use super::{counted, decide, plural, try_parse_duration, Disposition, Hint, JsonFact, KnownHint};
@@ -55,9 +55,10 @@ impl KeyRefusal {
 
 /// The stored key a conversion acts on: the name's content reading (`Make` → `content.Make`),
 /// or a refusal for a `source.` name and for the content hash. A name with no facts is asked
-/// about after the census ([`fixed_type_answer`]).
+/// about after the census ([`fixed_type_answer`]). `name` is a name already read
+/// ([`read_convert_name`]), read again as written.
 pub fn convert_key(name: &str) -> Result<String, KeyRefusal> {
-    let reading = read_key_name(name);
+    let reading = read_key_name(name, NameReading::AsWritten);
     match reading.content_key {
         None => Err(KeyRefusal::SourceName {
             name: name.to_string(),
@@ -70,11 +71,20 @@ pub fn convert_key(name: &str) -> Result<String, KeyRefusal> {
     }
 }
 
+/// **The name a conversion was given, read**: Canon's printed quoting read off it first, so a
+/// key copied from Canon's output names that key, and the stored key it names
+/// ([`convert_key`]). Every answer about the name names it as read.
+pub fn read_convert_name(given: &str) -> (String, Result<String, KeyRefusal>) {
+    let name = read_key_name(given, NameReading::QuotingReadOff).name;
+    let key = convert_key(&name);
+    (name, key)
+}
+
 /// The answer for a name whose content reading holds no facts but which is a built-in key:
 /// its type is fixed — the content hash's reason for `hash` and `hash_short`. `None` for any
 /// other name, which is then an unknown key.
 pub fn fixed_type_answer(name: &str) -> Option<KeyRefusal> {
-    let builtin: BuiltinKey = read_key_name(name).builtin?;
+    let builtin: BuiltinKey = read_key_name(name, NameReading::AsWritten).builtin?;
     let key = Key::BuiltinKey(builtin);
     if key.reads_the_content_hash() {
         return Some(KeyRefusal::ContentHash);

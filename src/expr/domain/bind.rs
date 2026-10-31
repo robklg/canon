@@ -336,27 +336,19 @@ pub(in crate::expr) fn bind_expr(
     bound
 }
 
-/// **A fix shown reads back and binds**: drop `cause`'s fix where `binds` refuses what it
-/// rewrites to — a filter's clause bound as a clause, a report's key as a key. Every fix is a
-/// [`Fix`], from the closed list, so no rewrite can be shown outside this check at a door that
-/// calls it — today the three doors that bind a key (`bind_expr`, `bind_report_key`,
-/// `read_pattern`); a fourth caller of `bind_key` must call it too, and
-/// [`keep_quoted_name_that_binds`] as well where its quoted name rewrites more than the name.
+/// **A fix shown reads back and binds**: drop `cause`'s fix where `binds` refuses what it rewrites
+/// to — a filter's clause bound as a clause, a report's key as a key. Every fix is a [`Fix`], from
+/// the closed list, so no rewrite can be shown unchecked at a door that calls this or the check
+/// named below for its fix — today the three doors that bind a key (`bind_expr`, `bind_report_key`,
+/// `read_pattern`); a fourth caller of `bind_key` must call it too. Two fixes are not a clause or
+/// one report key, so they pass through here and are checked at their own door instead: a filter's
+/// quoted name, a key kept where it names one with facts (`keep_quoted_name_with_facts`), and a
+/// `--group-by` text's grouping keys, a key list kept where it reads back and every key binds
+/// (`keep_grouping_keys_that_bind`, in `ops/bind.rs`), which a new reader of a key list must call
+/// too.
 pub(in crate::expr) fn keep_fix_that_binds(cause: &mut BindCause, binds: &dyn Fn(&str) -> bool) {
     if let Some(problem) = cause.problem_mut() {
         problem.keep_fix_that_binds(binds);
-    }
-}
-
-/// **A pattern's quoted name reads back and binds** too: it rewrites the whole `{…}`, modifiers
-/// included, so it is more than a name; drop it where `binds` refuses what it rewrites to
-/// (`Problem::keep_quoted_name_that_binds`).
-pub(in crate::expr) fn keep_quoted_name_that_binds(
-    cause: &mut BindCause,
-    binds: &dyn Fn(&str) -> bool,
-) {
-    if let Some(problem) = cause.problem_mut() {
-        problem.keep_quoted_name_that_binds(binds);
     }
 }
 
@@ -366,11 +358,6 @@ pub(in crate::expr) fn quoted_name_key(problem: &Problem) -> Option<InputKey> {
     let Fix::KeyName { rewrite } = &problem.fix else {
         return None;
     };
-    // A pattern's quoted name is offered as its whole `{…}`.
-    let rewrite = rewrite
-        .strip_prefix('{')
-        .and_then(|inner| inner.strip_suffix('}'))
-        .unwrap_or(rewrite);
     let reading = read_keys(rewrite, 0, Grammar::Key, AliasMode::NotLoaded);
     match reading.value {
         Some(mut keys) if reading.problems.is_empty() && keys.len() == 1 => keys.pop(),
@@ -544,7 +531,8 @@ pub(in crate::expr) enum Reads {
     Existence,
     Value,
     /// A report's key (`facts --key`, `--group-by`): every value it holds, of whatever type;
-    /// only a modifier works on one type.
+    /// only a modifier works on one type. A key with no facts is unknown, as for a value
+    /// compared.
     Report,
     /// A pattern's key, whose value is placed: a key with no facts is unknown, and a key of
     /// mixed type is one of the pattern's problems, as for a value compared.
@@ -560,11 +548,11 @@ pub(in crate::expr) struct Chain {
     convertible: Option<String>,
 }
 
-/// Check a key: its type from all its facts, then its accessor and modifiers through the
-/// table. A key with no facts binds only where no value is compared (`?`, a report's key), its
-/// chain checked from any type ([`walk`]); a key of mixed type binds only for a bare `?`, which
-/// reads no value. A name with no reading in an expression — a `source.` name that is no source
-/// fact — names no key, and is refused wherever it stands.
+/// Check a key: its type from all its facts, then its accessor and modifiers through the table. A
+/// key with no facts binds only where nothing is read but whether a value exists (`?`), its chain
+/// checked from any type ([`walk`]); a key of mixed type binds only for a bare `?` or a bare report
+/// key, which compare no value. A name with no reading in an expression — a `source.` name that is
+/// no source fact — names no key, and is refused wherever it stands.
 pub(in crate::expr) fn bind_key(
     key: &InputKey,
     clause: &str,
@@ -593,12 +581,12 @@ pub(in crate::expr) fn bind_key(
     };
     let Some(key_types) = types_of(&key.base, types) else {
         return match reads {
-            Reads::Existence | Reads::Report if key.has_transforms() => {
+            Reads::Existence if key.has_transforms() => {
                 let chain = walk(key, None)?;
                 Ok((BoundKey::of(key, ReadAs::Absent), chain))
             }
-            Reads::Existence | Reads::Report => unbound(ReadAs::Any),
-            Reads::Value | Reads::Pattern => Err(unknown()),
+            Reads::Existence => unbound(ReadAs::Any),
+            Reads::Value | Reads::Pattern | Reads::Report => Err(unknown()),
         };
     };
     let Some(base_type) = key_types.single() else {
@@ -2259,8 +2247,8 @@ mod tests {
     }
 
     /// **A chain is checked on a key with no facts**: its first step takes any type, every later
-    /// one the table's, so a chain no key could pass a value through is refused — under `?`,
-    /// `NOT` and in a report — and one some key could is not.
+    /// one the table's, so a chain no key could pass a value through is refused — under `?` and
+    /// `NOT`, the one place a key with no facts binds — and one some key could is not.
     #[test]
     fn a_chain_is_checked_on_a_key_with_no_facts() {
         for (text, sentence) in [
@@ -3297,5 +3285,35 @@ mod tests {
                 "  `canon facts convert content.Width`",
             ])
         );
+    }
+
+    /// **A key with no facts** is unknown wherever a value is read — compared, placed or
+    /// reported, with a modifier or without; only `?` binds it, as asking whether a value exists.
+    #[test]
+    fn a_key_with_no_facts_is_unknown_except_to_ask_whether_it_exists() {
+        use super::super::read::{read_keys, AliasMode, Grammar};
+        let none = HashMap::new();
+        for text in ["content.Nope", "content.Nope|year"] {
+            let key = read_keys(text, 0, Grammar::Key, AliasMode::NotLoaded)
+                .value
+                .unwrap()
+                .remove(0);
+            for reads in [Reads::Report, Reads::Value, Reads::Pattern] {
+                assert!(
+                    matches!(
+                        bind_key(&key, text, reads, &none),
+                        Err(BindCause::UnknownKey(_))
+                    ),
+                    "{text}"
+                );
+            }
+            let (bound, _) = bind_key(&key, text, Reads::Existence, &none).unwrap();
+            let want = if key.has_transforms() {
+                ReadAs::Absent
+            } else {
+                ReadAs::Any
+            };
+            assert_eq!(bound.read_as, want, "{text}");
+        }
     }
 }

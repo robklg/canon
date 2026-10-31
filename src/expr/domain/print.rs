@@ -13,7 +13,10 @@ use crate::core::domain::number::{number_form, spelled};
 use crate::core::domain::time::reading::read_time;
 
 use super::bind::{input_type, InputType};
-use super::read::{read_keys, reads_as_one_bare_key, reads_as_one_bare_value, AliasMode, Grammar};
+use super::read::{
+    read_keys, read_quoted, reads_as_one_bare_key, reads_as_one_bare_value, AliasMode, Cursor,
+    Grammar,
+};
 use super::transform::BucketRange;
 
 /// A value as Canon prints it for the reader of `read_as`: bare where the bare text reads
@@ -50,6 +53,22 @@ pub fn printed_key(key: &str) -> String {
     } else {
         quoted(key)
     }
+}
+
+/// **The printing rule's inverse for a name**: a name given wholly as one quoted name — one pair
+/// of `"` or `'`, an inner quote of the same mark doubled, as [`printed_key`] writes it — is the
+/// text inside; any other text is the name as given. The quotes are read by the reader's own
+/// `read_quoted`, so the two cannot disagree.
+pub(in crate::expr) fn printed_name_read(given: &str) -> String {
+    let mut cursor = Cursor::new(given, 0);
+    if matches!(cursor.peek(), Some('"' | '\'')) {
+        if let Some(name) = read_quoted(&mut cursor) {
+            if cursor.at_end() && !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    given.to_string()
 }
 
 /// Whether `key`, read as a report reads a key, is one key with no accessor and no modifier
@@ -571,5 +590,46 @@ mod tests {
             convert_command("content.Width", Some(FactType::Time)),
             "`canon facts convert content.Width --to time`"
         );
+    }
+
+    /// A name given wholly as one quoted name is the text inside, an inner quote undoubled; any
+    /// other text is the name as given.
+    #[test]
+    fn a_name_in_canons_quotes_reads_as_the_text_inside() {
+        for (given, name) in [
+            (r#""a b""#, "a b"),
+            ("'a b'", "a b"),
+            (r#""a""b""#, r#"a"b"#),
+            ("'it''s'", "it's"),
+            ("content.Make", "content.Make"),
+            (r#""abc"#, r#""abc"#),
+            (r#""a" "b""#, r#""a" "b""#),
+            (r#""Make"|lowercase"#, r#""Make"|lowercase"#),
+            (r#" "a b" "#, r#" "a b" "#),
+            (r#""""#, r#""""#),
+        ] {
+            assert_eq!(printed_name_read(given), name, "{given}");
+        }
+    }
+
+    /// **The printing rule read backwards for a name**: every stored key Canon prints, read back
+    /// through `printed_name_read`, is that key.
+    #[test]
+    fn a_printed_key_reads_back_as_its_name() {
+        for key in [
+            "content.Make",
+            "content.File Size",
+            r#"content.a"b"#,
+            "content.it's",
+            "content.a,b",
+            "content.a|b",
+            "content.a[0]",
+            "content.a}b",
+            "content.icon@2x",
+            "content.Größe",
+            r#"content.""""#,
+        ] {
+            assert_eq!(printed_name_read(&printed_key(key)), key, "{key}");
+        }
     }
 }

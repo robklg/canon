@@ -75,12 +75,12 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/expr/CLAUDE.md",
-        words: 5277,
-        verifiers: 44,
+        words: 5427,
+        verifiers: 45,
     },
     Ceiling {
         path: "src/facts/CLAUDE.md",
-        words: 1085,
+        words: 1105,
         verifiers: 3,
     },
     Ceiling {

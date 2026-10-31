@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use super::alias::alias_name_at;
 use super::bind::{read_as_changed, BoundKey, ExpressionRefused, Gives, ReadAs, Refused};
 use super::key::{
-    is_name_char, read_key, single_quoted, InputKey, Key, SourceFact, CONTENT_HASH, SCOPE_REL_PATH,
+    read_key, single_quoted, InputKey, Key, SourceFact, CONTENT_HASH, SCOPE_REL_PATH,
 };
 use super::print::printed_key;
 use super::problem::{cut, Fix, Place, Problem};
@@ -207,11 +207,10 @@ enum Span {
         start: usize,
         end: usize,
     },
-    /// `{…}`: the bytes of the braces, and of each space inside them that cannot stand there.
+    /// `{…}`: the bytes of the braces.
     Braces {
         open: usize,
         close: usize,
-        spaces: Vec<usize>,
     },
 }
 
@@ -223,12 +222,11 @@ enum Unclosed {
 }
 
 /// **The pattern grammar**: literal text, written as it is, and `{…}`, each holding one key read
-/// by the key grammar ([`read_key`]), which only the `}` may follow. Literal text may not start or
-/// end with `/`, hold `//`, or have `.` or `..` as a whole name; a `}` with no `{` is refused. A
-/// space inside `{…}`, outside a quoted name and `|bucket( … )`, is one problem with a caret under
-/// each, and the key is read on as if the spaces were not there — a space between two parts of a
-/// name read as the quoted name it would be, which is also the fix offered. `@name` is refused.
-/// Every problem is recorded; reading stops only at a `{` or a quote that never closes.
+/// by the key grammar ([`read_key`]) as `--key` reads its argument: a bare name runs to its `[`
+/// or `|`, a space inside it the name's, and spaces at either end of the `{…}` are not the key's;
+/// a quoted name may hold a `}`. Literal text may not start or end with `/`, hold `//`, or have
+/// `.` or `..` as a whole name; a `}` with no `{` is refused. `@name` is refused. Every problem is
+/// recorded; reading stops only at a `{` or a quote that never closes.
 pub(in crate::expr) fn read_pattern_text(text: &str) -> Reading<Vec<InputPiece>> {
     let mut cursor = Cursor::new(text, 0);
     let (spans, unclosed) = divide(text);
@@ -239,12 +237,8 @@ pub(in crate::expr) fn read_pattern_text(text: &str) -> Reading<Vec<InputPiece>>
             Span::Literal { start, end } => {
                 pieces.push(InputPiece::Literal(cut(text, *start, *end).to_string()))
             }
-            Span::Braces {
-                open,
-                close,
-                spaces,
-            } => {
-                if let Some(input) = read_braces(&mut cursor, text, *open, *close, spaces) {
+            Span::Braces { open, close } => {
+                if let Some(input) = read_braces(&mut cursor, text, *open, *close) {
                     pieces.push(InputPiece::Key(Box::new(input)));
                 }
             }
@@ -265,7 +259,7 @@ pub(in crate::expr) fn read_pattern_text(text: &str) -> Reading<Vec<InputPiece>>
 }
 
 /// Divide a pattern's text into literal text and `{…}`, finding each `}` past a quoted name that
-/// may hold one; the spaces inside `{…}` that cannot stand there are noted on the way.
+/// may hold one.
 fn divide(text: &str) -> (Vec<Span>, Option<Unclosed>) {
     let mut spans = Vec::new();
     let mut literal_start = 0;
@@ -282,11 +276,9 @@ fn divide(text: &str) -> (Vec<Span>, Option<Unclosed>) {
             });
         }
         let open = at;
-        let mut spaces = Vec::new();
-        let mut i = open + 1;
         let char_at = |i: usize| cut(text, i, text.len()).chars().next();
+        let mut i = open + 1;
         while let Some(c) = char_at(i).filter(|&c| is_space(c)) {
-            spaces.push(i);
             i += c.len_utf8();
         }
         if let Some(quote @ ('"' | '\'')) = char_at(i) {
@@ -298,23 +290,14 @@ fn divide(text: &str) -> (Vec<Span>, Option<Unclosed>) {
             debug_assert_eq!(char_at(i), Some(quote));
             i = scan.at();
         }
-        let mut in_bucket = false;
         let close = loop {
             match char_at(i) {
                 None => return (spans, Some(Unclosed::Brace(open))),
                 Some('}') => break i,
-                Some(c) if is_space(c) && !in_bucket => spaces.push(i),
-                Some('(') if cut(text, 0, i).ends_with("|bucket") => in_bucket = true,
-                Some(')') => in_bucket = false,
-                Some(_) => {}
+                Some(c) => i += c.len_utf8(),
             }
-            i += char_at(i).map_or(1, char::len_utf8);
         };
-        spans.push(Span::Braces {
-            open,
-            close,
-            spaces,
-        });
+        spans.push(Span::Braces { open, close });
         at = close + 1;
         literal_start = at;
     }
@@ -383,46 +366,35 @@ fn check_literal_text(cursor: &mut Cursor, text: &str, spans: &[Span], ends: boo
 }
 
 /// Read the key inside one `{…}`, recording its problems at the places they were typed. The key
-/// is read from the text between the braces with the spaces that cannot stand there left out,
-/// and a space between two parts of a name read as the quoted name: what is read then has its
-/// places put back where they were typed. `None` where no key is read, or text follows it.
-fn read_braces(
-    cursor: &mut Cursor,
-    text: &str,
-    open: usize,
-    close: usize,
-    spaces: &[usize],
-) -> Option<PatternInput> {
+/// is read as `--key` reads its argument: from the text between the braces, spaces at both ends
+/// left out, every place put back by where that text starts. `None` where no key is read, or text
+/// follows it.
+fn read_braces(cursor: &mut Cursor, text: &str, open: usize, close: usize) -> Option<PatternInput> {
     let inside = cut(text, open + 1, close);
-    if inside.trim_matches(is_space).is_empty() {
+    let read = inside.trim_matches(is_space);
+    if read.is_empty() {
         let sentence = "a key is missing between `{` and `}`";
         cursor.problem(open, close + 1, sentence, None, Fix::None);
         return None;
     }
-    let name = spaced_name(text, open, close, spaces);
-    let read = ReadText::new(text, open, close, spaces, name);
-    if let Some(&first) = spaces.first() {
-        let fix = name.map_or(Fix::None, |_| Fix::KeyName {
-            rewrite: format!("{{{}}}", read.text),
-        });
-        let problem = Problem {
-            also: Some(Box::new(spaces[1..].to_vec())),
-            fix,
-            ..Problem::new(
-                cursor.place(first, first + 1),
-                "a space cannot stand inside `{…}`".to_string(),
-                None,
-            )
-        };
-        cursor.push_problem(problem);
-    }
-    let mut sub = Cursor::new(&read.text, 0);
+    // Where the text read starts in the pattern: a place read from it moves by this much.
+    let from = open + 1 + (inside.len() - inside.trim_start_matches(is_space).len());
+    let put_back = |cursor: &mut Cursor, problems: Vec<Problem>| {
+        for mut problem in problems {
+            moved(&mut problem.place, from);
+            for at in problem.also.iter_mut().flat_map(|also| also.iter_mut()) {
+                *at += from;
+            }
+            cursor.push_problem(problem);
+        }
+    };
+    let mut sub = Cursor::new(read, 0);
     if sub.peek() == Some('@') {
-        if let Some(alias) = alias_name_at(cut(&read.text, 1, read.text.len())) {
+        if let Some(alias) = alias_name_at(cut(read, 1, read.len())) {
             let end = 1 + alias.len();
             let sentence = format!("`@{alias}` is an alias; a pattern cannot contain aliases");
             sub.problem(0, end, sentence, None, Fix::None);
-            read.put_back(cursor, sub.into_reading::<()>(None).problems);
+            put_back(cursor, sub.into_reading::<()>(None).problems);
             return None;
         }
     }
@@ -430,33 +402,24 @@ fn read_braces(
     let mut follows = false;
     if let Some(key) = &key {
         key_position(&mut sub, key, Grammar::Pattern);
-        let key_end = sub.at();
-        if key_end < read.text.len() {
+        sub.skip_spaces();
+        let rest_start = sub.at();
+        if rest_start < read.len() {
             follows = true;
-            let rest = cut(&read.text, key_end, read.text.len());
-            let rest_end = key_end + rest.trim_end_matches(is_space).len();
-            let fix = if spaces.is_empty() {
-                key.quoted_name_fix(&read.text, key_end, Grammar::Pattern)
-                    .map_or(Fix::None, |rewrite| Fix::KeyName { rewrite })
-            } else {
-                Fix::None
-            };
             let sentence = format!(
                 "`{}` cannot follow `{}`",
-                cut(&read.text, key_end, rest_end),
+                cut(read, rest_start, read.len()),
                 key.input
             );
-            sub.problem(key_end, rest_end, sentence, None, fix);
+            sub.problem(rest_start, read.len(), sentence, None, Fix::None);
         }
     }
     let scope = key.as_ref().is_some_and(|key| key.names(SCOPE_REL_PATH));
     // A key the reader refused — a status word, text after it — is not bound as well.
     let read_whole = !follows && sub.problem_count() == 0;
-    read.put_back(cursor, sub.into_reading::<()>(None).problems);
+    put_back(cursor, sub.into_reading::<()>(None).problems);
     let mut key = key.filter(|_| read_whole)?;
-    key.each_place(&mut |place| read.put_place_back(place));
-    key.input = cut(text, key.place.start, key.place.end).to_string();
-    key.input_name = cut(text, key.name_place.start, key.name_place.end).to_string();
+    key.each_place(&mut |place| moved(place, from));
     if scope {
         key.base = SCOPE_REL_PATH.to_string();
     }
@@ -467,99 +430,10 @@ fn read_braces(
     })
 }
 
-/// A name inside `{…}` with a space between two of its parts (`{content.File Size}`): the bytes
-/// it runs over, from its first character to its last, stopping at `[` or `|`. `None` where no
-/// space stands inside a bare name.
-fn spaced_name(text: &str, open: usize, close: usize, spaces: &[usize]) -> Option<(usize, usize)> {
-    let start = spaces
-        .iter()
-        .take_while(|&&at| at < close)
-        .fold(
-            open + 1,
-            |start, &at| if at == start { at + 1 } else { start },
-        );
-    let first = cut(text, start, close).chars().next()?;
-    if !(first.is_alphabetic() || first == '_') {
-        return None;
-    }
-    let run = cut(text, start, close);
-    let len = run
-        .find(|c: char| !(is_name_char(c) || is_space(c)))
-        .unwrap_or(run.len());
-    let end = start + cut(run, 0, len).trim_end_matches(is_space).len();
-    spaces
-        .iter()
-        .any(|&at| start < at && at < end)
-        .then_some((start, end))
-}
-
-/// The text a `{…}`'s key is read from, and where each of its bytes was typed.
-struct ReadText {
-    text: String,
-    /// For each byte of `text`, and its end, the byte of the pattern a place starting there
-    /// starts at.
-    starts: Vec<usize>,
-    /// For each end position in `text`, the byte of the pattern a place ending there ends at.
-    ends: Vec<usize>,
-}
-
-impl ReadText {
-    fn new(
-        pattern: &str,
-        open: usize,
-        close: usize,
-        spaces: &[usize],
-        name: Option<(usize, usize)>,
-    ) -> ReadText {
-        let mut read = ReadText {
-            text: String::new(),
-            starts: Vec::new(),
-            ends: vec![open + 1],
-        };
-        let mut at = open + 1;
-        while at < close {
-            if let Some((start, end)) = name.filter(|&(start, _)| start == at) {
-                let quoted = single_quoted(cut(pattern, start, end));
-                read.text.push_str(&quoted);
-                read.starts.extend(std::iter::repeat_n(start, quoted.len()));
-                read.ends.extend(std::iter::repeat_n(end, quoted.len()));
-                at = end;
-                continue;
-            }
-            let c = cut(pattern, at, pattern.len())
-                .chars()
-                .next()
-                .expect("inside the braces");
-            if !spaces.contains(&at) {
-                read.text.push(c);
-                for byte in 0..c.len_utf8() {
-                    read.starts.push(at + byte);
-                    read.ends.push(at + byte + 1);
-                }
-            }
-            at += c.len_utf8();
-        }
-        read.starts.push(close);
-        read
-    }
-
-    fn put_place_back(&self, place: &mut Place) {
-        let last = self.starts.len() - 1;
-        place.start = self.starts[place.start.min(last)];
-        place.end = self.ends[place.end.min(last)].max(place.start);
-    }
-
-    /// Record `problems`, read from this text, where they were typed.
-    fn put_back(&self, cursor: &mut Cursor, problems: Vec<Problem>) {
-        for mut problem in problems {
-            self.put_place_back(&mut problem.place);
-            let last = self.starts.len() - 1;
-            for at in problem.also.iter_mut().flat_map(|also| also.iter_mut()) {
-                *at = self.starts[(*at).min(last)];
-            }
-            cursor.push_problem(problem);
-        }
-    }
+/// A place read from a text that starts at byte `from` of the pattern, put where it was typed.
+fn moved(place: &mut Place, from: usize) {
+    place.start += from;
+    place.end += from;
 }
 
 // ============================================================================

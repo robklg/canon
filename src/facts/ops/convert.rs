@@ -21,10 +21,9 @@ use crate::core::repo::fact::key_census;
 use crate::core::repo::Connection;
 use crate::expr::{aliases_naming_key, printed_key, AliasesNaming};
 use crate::facts::domain::convert::{
-    bridge_clause, census_types, check_acknowledgments, class_summary, convert_key,
-    fixed_type_answer, holdings, list_lines, next_import, plan, printed_stored, targets,
-    Acknowledgments, ConversionPlan, ConvertRefused, Holdings, ListLine, NextImport, Target,
-    TargetLine,
+    bridge_clause, census_types, check_acknowledgments, class_summary, fixed_type_answer, holdings,
+    list_lines, next_import, plan, printed_stored, read_convert_name, targets, Acknowledgments,
+    ConversionPlan, ConvertRefused, Holdings, ListLine, NextImport, Target, TargetLine,
 };
 use crate::facts::domain::{counted, plural};
 use crate::facts::repo::{delete_facts_by_id, update_fact_values};
@@ -57,8 +56,12 @@ impl PlanRead {
 /// **The key reading every invocation begins with**: the stored key and its census — or the
 /// refusal for a `source.` name and the content hash; and for a key with no facts, the
 /// fixed-type answer of a built-in name, else the emptied-key answer, else an unknown key.
-fn read_census(conn: &Connection, name: &str) -> Result<(String, KeyCensus)> {
-    let key = convert_key(name).map_err(ConvertRefused::Key)?;
+/// Canon's printed quoting is read off the name first, so a key copied from Canon's output
+/// names that key, and every answer names it without the quotes.
+fn read_census(conn: &Connection, given: &str) -> Result<(String, KeyCensus)> {
+    let (name, key) = read_convert_name(given);
+    let name = &name;
+    let key = key.map_err(ConvertRefused::Key)?;
     let census = key_census(conn, &key)?;
     if !census.facts.is_empty() {
         return Ok((key, census));
@@ -399,6 +402,35 @@ mod tests {
         err.downcast_ref::<ConvertRefused>()
             .unwrap_or_else(|| panic!("{err:?}"))
             .clone()
+    }
+
+    /// **A key copied from Canon's output names the key it printed**: in Canon's quotes or
+    /// bare, the plan previews the same facts, and an unknown key is named without the quotes.
+    #[test]
+    fn a_key_in_canons_quotes_names_the_key_it_printed() {
+        let mut conn = setup_test_db();
+        let root = insert_root(&conn, "/r", "source", false);
+        let a = insert_source(&conn, root, "a", None);
+        let b = insert_source(&conn, root, "b", None);
+        insert_fact(&conn, a, "content.File Size", "12");
+        insert_fact(&conn, b, "content.File Size", "misc");
+        let home = tempfile::tempdir().unwrap();
+        let to = Target::Type(FactType::Num);
+        let previews: Vec<String> = ["content.File Size", r#""content.File Size""#]
+            .into_iter()
+            .map(|name| {
+                let read = plan_convert(&mut conn, name, to, home.path()).unwrap();
+                assert_eq!(read.key, "content.File Size", "{name}");
+                format!("{:?} {:?}", read.plan, read.list())
+            })
+            .collect();
+        assert_eq!(previews[0], previews[1]);
+        assert!(previews[0].contains("misc"), "{}", previews[0]);
+        let unknown = refused(&mut conn, r#""content.No Such""#);
+        assert!(
+            matches!(&unknown, ConvertRefused::UnknownKey { name } if name == "content.No Such"),
+            "{unknown:?}"
+        );
     }
 
     fn is_emptied_by(refusal: &ConvertRefused, id: i64) -> bool {

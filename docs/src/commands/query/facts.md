@@ -172,13 +172,14 @@ Error: cannot use the key as given
     Modifiers for numbers: |bucket, |number
 ```
 
-A key name with a space is written in quotes; for a key that has facts, Canon shows it quoted:
+A key name with a space needs no quotes here: `--key "content.File Size"` reports that key. A key with no facts is rejected as an unknown key. Where the only refused item of a `--group-by` text reads as known keys with no commas between them, Canon also shows the text with the commas added:
 
 ```
 Error: cannot use the key as given
-  content.File Size
-               ^ `Size` cannot follow `content.File`
-    A key name contains letters, digits, _ . : / and -; quote a name with any other character: "content.File Size"
+  source.ext source.mtime|year
+  ^ `source.ext source.mtime` is an unknown key
+    `canon facts` lists the keys
+    separate grouping keys with a comma: source.ext,source.mtime|year
 ```
 
 Where the `--where` filter has a problem too, the first line is the filter's: `Error: cannot run the filter as given`.

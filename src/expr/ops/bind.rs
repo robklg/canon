@@ -24,8 +24,10 @@ use crate::expr::domain::bind::{
 };
 use crate::expr::domain::filter::UsedStatus;
 use crate::expr::domain::key::{InputKey, ParsedFactKey};
-use crate::expr::domain::problem::Problem;
-use crate::expr::domain::read::{read_filter, read_keys, AliasMode, AliasUse, Grammar, Reading};
+use crate::expr::domain::problem::{Fix, Problem};
+use crate::expr::domain::read::{
+    grouping_keys_rewrite, read_filter, read_keys, AliasMode, AliasUse, Grammar, Reading,
+};
 use crate::expr::ops::alias::{aliases_file, load_aliases};
 
 /// **A command's expression texts**: each `--where` string as given on the command line, or a
@@ -313,12 +315,9 @@ fn bind_filters(
     }))
 }
 
-/// Keep each quoted name the reader offers only where it names a key with facts, the types read
-/// from the stored keys it names.
-pub(in crate::expr) fn offer_quoted_names(
-    conn: &Connection,
-    problems: &mut [Problem],
-) -> Result<()> {
+/// Keep each quoted name a filter's reader offers only where it names a key with facts, the
+/// types read from the stored keys it names.
+fn offer_quoted_names(conn: &Connection, problems: &mut [Problem]) -> Result<()> {
     let names: Vec<String> = problems
         .iter()
         .filter_map(quoted_name_key)
@@ -346,22 +345,73 @@ fn report_keys(
     causes: &mut Vec<BindCause>,
 ) -> Result<Vec<ParsedFactKey>> {
     let mut reading = aliases.read(|mode| read_keys(text, index, grammar, mode))?;
-    offer_quoted_names(conn, &mut reading.problems)?;
+    // An item whose parts cannot follow one another may be keys a comma was meant to separate.
+    for problem in &mut reading.problems {
+        keep_grouping_keys_that_bind(conn, problem, aliases.mode())?;
+    }
     causes.extend(reading.problems.into_iter().map(BindCause::Read));
     let mut keys = Vec::new();
     for key in reading.value.unwrap_or_default() {
         match bind_report_key(conn, &key, aliases.mode())? {
             Ok(key) => keys.push(key),
-            Err(cause) => causes.push(cause),
+            Err(mut cause) => {
+                // So may an unknown item holding spaces.
+                if let BindCause::UnknownKey(problem) = &mut cause {
+                    if grammar == Grammar::KeyList && key.written.is_none() {
+                        if let Some(rewrite) =
+                            grouping_keys_rewrite(text, key.place.start, key.place.end)
+                        {
+                            problem.fix = Fix::GroupingKeys { rewrite };
+                            keep_grouping_keys_that_bind(conn, problem, aliases.mode())?;
+                        }
+                    }
+                }
+                causes.push(cause);
+            }
         }
     }
     Ok(keys)
 }
 
+/// **Keep a grouping-keys fix only where it is certain**: the rewrite, read back as a key list
+/// with the report's aliases, reads with no problem as two keys or more, every one of which binds
+/// — so every space-separated part of the item was a known key, its accessor or modifier kept.
+/// Otherwise the fix is dropped and the refusal stands plain.
+fn keep_grouping_keys_that_bind(
+    conn: &Connection,
+    problem: &mut Problem,
+    aliases: AliasMode,
+) -> Result<()> {
+    let Fix::GroupingKeys { rewrite } = &problem.fix else {
+        return Ok(());
+    };
+    let reading = read_keys(rewrite, 0, Grammar::KeyList, aliases);
+    let keys = reading.value.unwrap_or_default();
+    let mut binds = reading.problems.is_empty() && keys.len() > 1;
+    if binds {
+        let mut names: Vec<&str> = Vec::new();
+        for key in &keys {
+            if known_type(&key.base).is_none() && !names.contains(&key.base.as_str()) {
+                names.push(&key.base);
+            }
+        }
+        let types = if names.is_empty() {
+            HashMap::new()
+        } else {
+            key_types(conn, &names)?
+        };
+        binds = keys.iter().all(|key| bind_as_report(key, &types).is_ok());
+    }
+    if !binds {
+        problem.fix = Fix::None;
+    }
+    Ok(())
+}
+
 /// **Check one key a report names** against the modifier table: a modifier that cannot apply to
 /// the key's type is its cause, and so is any modifier on a key of mixed type (a bare one reports
-/// every type's rows). A key with no facts has its chain checked, and reads as itself — there is
-/// nothing to report. A fix is read with the report's own aliases.
+/// every type's rows). A key with no facts is an unknown key, as in a filter. A fix is read with
+/// the report's own aliases.
 fn bind_report_key(
     conn: &Connection,
     key: &InputKey,
@@ -421,8 +471,8 @@ mod tests {
     use crate::expr::ops::filter::apply_filters;
 
     /// The content hash's type (text) is known before any fact of it exists, so a comparison
-    /// on it binds on a database that holds none — `hash` too, which is read as it — where
-    /// any other key with no facts is refused as unknown.
+    /// on it, or a report key naming it, binds on a database that holds none — `hash` too,
+    /// which is read as it — where any other key with no facts is refused as unknown.
     #[test]
     fn the_content_hash_binds_with_no_stored_rows() {
         let conn = setup_test_db();
@@ -431,6 +481,10 @@ mod tests {
         }
         let other = refusal(&conn, &["content.Make = abc123"]);
         assert_eq!(kind(&other.causes[0]), "unknown key");
+        // A report key the same: the hash's type is known, so it is no unknown key.
+        for key in ["hash", "hash_short", "content.hash.sha256"] {
+            read_key(&conn, key).unwrap_or_else(|e| panic!("{key}: {e}"));
+        }
     }
 
     /// A `source.` name that is no source fact names no key, so it is refused as unknown in
@@ -736,7 +790,7 @@ mod tests {
     /// `facts --key` and `--group-by` read their key through the one key reader and the
     /// modifier table: a wrong-type modifier is refused (no "skipped N values" report), a
     /// modifier on a key of mixed type is refused as an answer, and the bare key runs. A key with
-    /// no facts has its chain checked like any other.
+    /// no facts is an unknown key, as in a filter.
     /// `has_answer` beside `is_answer`: a typo alone is no answer; a key of two types alone is
     /// one; both together are not all answers, but some are.
     #[test]
@@ -805,15 +859,18 @@ mod tests {
         assert!(all
             .to_string()
             .starts_with("cannot run the filter as given\n"));
-        assert!(read_key(&conn, "content.nothing|year").is_ok());
-        assert_eq!(
-            refused("content.nothing|year|time")
-                .causes
-                .iter()
-                .map(kind)
-                .collect::<Vec<_>>(),
-            ["wrong modifier"]
-        );
+        // A key with no facts is unknown, with a modifier or without, as in a filter.
+        for key in [
+            "content.nothing",
+            "content.nothing|year",
+            "content.nothing|year|time",
+        ] {
+            assert_eq!(
+                refused(key).causes.iter().map(kind).collect::<Vec<_>>(),
+                ["unknown key"],
+                "{key}"
+            );
+        }
     }
 
     /// **A text with a problem the reader met never runs**: what of it could be read is still
@@ -897,6 +954,17 @@ mod tests {
     fn a_key_reads_the_same_in_a_filter_a_report_and_a_pattern() {
         use crate::expr::domain::filter::Expr;
         use crate::expr::domain::pattern::{read_pattern_text, InputPiece};
+        let shape = |k: &InputKey| {
+            (
+                k.base.clone(),
+                k.key.clone(),
+                k.accessor.as_ref().map(|(a, _)| a.clone()),
+                k.modifiers
+                    .iter()
+                    .map(|(m, _)| m.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
         for key in [
             "Make",
             "hash",
@@ -913,17 +981,6 @@ mod tests {
             let report = read_keys(key, 0, Grammar::Key, AliasMode::NotLoaded);
             assert!(report.problems.is_empty(), "{key}");
             let in_report = &report.value.unwrap()[0];
-            let shape = |k: &InputKey| {
-                (
-                    k.base.clone(),
-                    k.key.clone(),
-                    k.accessor.as_ref().map(|(a, _)| a.clone()),
-                    k.modifiers
-                        .iter()
-                        .map(|(m, _)| m.clone())
-                        .collect::<Vec<_>>(),
-                )
-            };
             assert_eq!(shape(&in_filter), shape(in_report), "{key}");
             let pattern = read_pattern_text(&format!("{{{key}}}"));
             assert!(pattern.problems.is_empty(), "{key}: {:?}", pattern.problems);
@@ -931,6 +988,46 @@ mod tests {
                 panic!("{key}: not one key");
             };
             assert_eq!(shape(&in_pattern.key), shape(in_report), "{key}");
+        }
+        // A key holding a space: where a key stands alone, the same text with its name bare or
+        // in Canon's quotes reads as the key a filter reads in quotes — a report key, a
+        // `--group-by` item, a pattern's `{…}` — a space before its accessor or modifier
+        // included.
+        for (name, rest) in [
+            ("content.File Size", ""),
+            ("content.File Size", "|bucket(60,300)"),
+            ("Lens Name", " |lowercase"),
+            ("Make", " |lowercase"),
+            ("source.rel_path", " [0]"),
+        ] {
+            let quoted = format!(r#""{name}"{rest}"#);
+            let bare = format!("{name}{rest}");
+            let in_filter_text = format!(r#""{name}"{}?"#, rest.trim_start());
+            let filter = read_filter(&in_filter_text, 0, AliasMode::NotLoaded);
+            assert!(filter.problems.is_empty(), "{in_filter_text}");
+            let Some(Expr::Exists { key: in_filter, .. }) = filter.value else {
+                panic!("{in_filter_text}: not a condition");
+            };
+            let want = shape(&in_filter);
+            for key in [bare.as_str(), quoted.as_str()] {
+                let report = read_keys(key, 0, Grammar::Key, AliasMode::NotLoaded);
+                assert!(report.problems.is_empty(), "{key}: {:?}", report.problems);
+                assert_eq!(shape(&report.value.unwrap()[0]), want, "--key {key}");
+                let list = format!("source.ext, {key} ,Make");
+                let grouping = read_keys(&list, 0, Grammar::KeyList, AliasMode::NotLoaded);
+                assert!(grouping.problems.is_empty(), "{list}");
+                assert_eq!(
+                    shape(&grouping.value.unwrap()[1]),
+                    want,
+                    "--group-by {list}"
+                );
+                let pattern = read_pattern_text(&format!("{{{key}}}"));
+                assert!(pattern.problems.is_empty(), "{key}: {:?}", pattern.problems);
+                let Some([InputPiece::Key(in_pattern)]) = pattern.value.as_deref() else {
+                    panic!("{key}: not one key");
+                };
+                assert_eq!(shape(&in_pattern.key), want, "{{{key}}}");
+            }
         }
     }
 
@@ -1176,7 +1273,7 @@ mod tests {
                         for_type += 1;
                         vec![rewrite.clone()]
                     }
-                    Fix::None | Fix::KeyName { .. } => Vec::new(),
+                    Fix::None | Fix::KeyName { .. } | Fix::GroupingKeys { .. } => Vec::new(),
                 };
                 for rewrite in shown {
                     assert!(
@@ -1190,6 +1287,38 @@ mod tests {
             quoted >= 20 && pairs >= 5 && for_type >= 20,
             "{quoted} quoted, {pairs} pairs, {for_type} for the key's type"
         );
+        // A grouping-keys fix, read as a key list, binds; no part of one is an unknown key.
+        let conn = world_with_text(&["content.Make", "content.Camera"]);
+        let mut grouping = 0;
+        for item in [
+            "source.ext source.mtime|year",
+            "Make content.Camera",
+            "content.Camera Modle",
+            "Make source.size|bucket(60,300)",
+            "source.ext Make[0]",
+            "source.mtime|year source.ext",
+            "source.mtime|year Modle",
+            "Make, source.ext content.Camera",
+            r#""content.Camera" source.ext"#,
+        ] {
+            let grouped = [item.to_string()];
+            let Err(error) = read_report(&conn, None, &grouped, &ExpressionText::plain(&[])) else {
+                continue;
+            };
+            let refused = error.downcast::<ExpressionRefused>().expect("a refusal");
+            for cause in &refused.causes {
+                if let Some(Fix::GroupingKeys { rewrite }) = cause.problem().map(|p| &p.fix) {
+                    grouping += 1;
+                    let rewrite = [rewrite.clone()];
+                    assert!(
+                        read_report(&conn, None, &rewrite, &ExpressionText::plain(&[])).is_ok(),
+                        "{item}: the fix {} does not bind",
+                        rewrite[0]
+                    );
+                }
+            }
+        }
+        assert!(grouping >= 3, "{grouping} grouping-keys fixes");
         // The glob half is read by the glob reader: where it cannot be read, neither fix shows.
         for clause in [
             "filename=O'Brien*",
@@ -1421,34 +1550,178 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains(rule)), "{lines:#?}");
     }
 
-    /// In a report key, a space after a bare name with more after it is where the quoted name
-    /// is offered, since nothing may follow the key there; again only for a key with facts.
+    /// A report key stands alone, so a space inside a bare name is the name's: the key reads
+    /// whole, with Canon's quotes or without, in `--key` and in `--group-by`.
     #[test]
-    fn a_quoted_name_with_a_space_is_offered_for_a_report_key() {
+    fn a_report_key_holding_a_space_reads_whole() {
         let (conn, _) = world();
-        let lines = |key: &str| {
-            read_report(&conn, Some(key), &[], &ExpressionText::plain(&[]))
-                .err()
-                .expect("refused")
-                .downcast::<ExpressionRefused>()
-                .expect("a refusal")
-                .render("")
+        for key in ["content.File Size", r#""content.File Size""#] {
+            let reading = read_report(
+                &conn,
+                Some(key),
+                &[format!("source.ext, {key}")],
+                &ExpressionText::plain(&[]),
+            )
+            .unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert_eq!(reading.key.unwrap().base_key, "content.File Size", "{key}");
+            let grouping: Vec<_> = reading
+                .grouping
+                .iter()
+                .map(|k| k.base_key.as_str())
+                .collect();
+            assert_eq!(grouping, ["source.ext", "content.File Size"], "{key}");
+        }
+    }
+
+    /// A report's refusal, for `key` and the `--group-by` texts `grouping`.
+    fn report_refusal(
+        conn: &Connection,
+        key: Option<&str>,
+        grouping: &[&str],
+    ) -> ExpressionRefused {
+        let grouping: Vec<String> = grouping.iter().map(|g| g.to_string()).collect();
+        read_report(conn, key, &grouping, &ExpressionText::plain(&[]))
+            .err()
+            .expect("refused")
+            .downcast::<ExpressionRefused>()
+            .expect("a refusal")
+    }
+
+    /// **An unknown report key is refused as a filter refuses it**: the same sentence and rule
+    /// line as `--where`, with an accessor or modifier or without, in `--key` and `--group-by`.
+    #[test]
+    fn an_unknown_report_key_is_refused_as_a_filter_refuses_it() {
+        let (conn, a) = world();
+        insert_time_fact(&conn, a, "content.DateTimeOriginal", "2024-06-15T14:30:05");
+        let words = |problem: &Problem| (problem.sentence.clone(), problem.rule_line.clone());
+        for (key, name) in [
+            ("content.Nope", "content.Nope"),
+            ("content.Nope|lowercase", "content.Nope"),
+            ("content.DateTimeOrignal|year", "content.DateTimeOrignal"),
+        ] {
+            let filter = refusal(&conn, &[&format!("{name}=1")]);
+            let want = words(filter.causes[0].problem().unwrap());
+            for refused in [
+                report_refusal(&conn, Some(key), &[]),
+                report_refusal(&conn, Some("source.ext"), &[&format!("source.ext,{key}")]),
+            ] {
+                let [cause] = refused.causes.as_slice() else {
+                    panic!("{key}: {refused}");
+                };
+                assert_eq!(kind(cause), "unknown key", "{key}");
+                assert_eq!(words(cause.problem().unwrap()), want, "{key}");
+            }
+        }
+    }
+
+    /// A key's facts are read from all its rows, so a key whose only facts sit on a parked root
+    /// is no unknown key in a report.
+    #[test]
+    fn a_report_key_with_facts_out_of_view_is_not_unknown() {
+        let (conn, _) = world();
+        let parked = insert_root(&conn, "/parked", "source", true);
+        let away = insert_source(&conn, parked, "c.jpg", None);
+        insert_fact(&conn, away, "content.Lens", "50mm");
+        let reading = read_report(&conn, Some("Lens"), &[], &ExpressionText::plain(&[])).unwrap();
+        assert_eq!(reading.key.unwrap().base_key, "content.Lens");
+    }
+
+    /// **The forgotten-comma line**: a `--group-by` item holding spaces — an unknown key, or a
+    /// key whose modifier the next part cannot follow — every space-separated part a key that
+    /// binds, adds the item with commas at its spaces, each part keeping its accessor or
+    /// modifier; otherwise the refusal stands plain.
+    #[test]
+    fn a_forgotten_comma_between_known_keys_is_shown_with_the_commas() {
+        let (conn, a) = world();
+        for key in [
+            "content.Make",
+            "content.Model",
+            "content.Camera",
+            "content.Lens Name",
+        ] {
+            insert_fact(&conn, a, key, "x");
+        }
+        let line = |item: &str| {
+            let lines = report_refusal(&conn, Some("source.ext"), &[item]).to_string();
+            assert!(
+                lines.contains("is an unknown key") || lines.contains("cannot follow"),
+                "{item}: {lines}"
+            );
+            lines
+                .lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("separate grouping keys with a comma: ")
+                })
+                .map(str::to_string)
         };
-        assert_eq!(
-            lines("content.File Size"),
-            [
-                "content.File Size",
-                "             ^ `Size` cannot follow `content.File`",
-                r#"  A key name contains letters, digits, _ . : / and -; quote a name with any other character: "content.File Size""#,
-            ]
-        );
-        assert_eq!(
-            lines("content.No Such"),
-            [
-                "content.No Such",
-                "           ^ `Such` cannot follow `content.No`",
-            ]
-        );
+        for (item, rewrite) in [
+            ("source.ext source.mtime", "source.ext,source.mtime"),
+            (
+                "source.ext source.mtime|year",
+                "source.ext,source.mtime|year",
+            ),
+            (
+                "source.ext  source.size Make|lowercase",
+                "source.ext,source.size,Make|lowercase",
+            ),
+            ("Make Model", "Make,Model"),
+            // A modifier on an earlier part ends the key there: the same line.
+            (
+                "source.mtime|year source.ext",
+                "source.mtime|year,source.ext",
+            ),
+            (
+                "Make|lowercase Model source.ext",
+                "Make|lowercase,Model,source.ext",
+            ),
+            // The whole `--group-by` text, to paste back: the other items as typed.
+            ("Make, source.ext Model", "Make, source.ext,Model"),
+            (
+                "Make, source.mtime|year source.ext",
+                "Make, source.mtime|year,source.ext",
+            ),
+            // A `|` or `[` after spaces is its key's, as the key grammar reads it.
+            ("source.ext Make |lowercase", "source.ext,Make |lowercase"),
+            (
+                r#""content.Lens Name" |lowercase source.ext"#,
+                r#""content.Lens Name" |lowercase,source.ext"#,
+            ),
+            (
+                "source.ext source.rel_path [0]",
+                "source.ext,source.rel_path [0]",
+            ),
+            // Spaces at the ends of the text are left off.
+            ("  source.ext   Model  ,Make", "source.ext,Model  ,Make"),
+            // A quoted name holding a space is one part, and so is a `|bucket( … )`.
+            (
+                r#""content.File Size" source.ext"#,
+                r#""content.File Size",source.ext"#,
+            ),
+            (
+                r#"source.ext "content.Lens Name"|lowercase"#,
+                r#"source.ext,"content.Lens Name"|lowercase"#,
+            ),
+            (
+                "source.ext source.size|bucket(60, 300)",
+                "source.ext,source.size|bucket(60, 300)",
+            ),
+        ] {
+            assert_eq!(line(item).as_deref(), Some(rewrite), "{item}");
+        }
+        for item in [
+            "content.Camera Modle",
+            "source.ext @nope",
+            "Make content.Nope",
+            "source.mtime|year Modle",
+            // Where another item is refused too, the text would not run as printed.
+            "Make Model, content.Nope",
+        ] {
+            assert_eq!(line(item), None, "{item}");
+        }
+        let one_key = report_refusal(&conn, Some("source.ext source.mtime"), &[]).to_string();
+        assert!(one_key.contains("is an unknown key"), "{one_key}");
+        assert!(!one_key.contains("separate grouping keys"), "{one_key}");
     }
 
     // =========================================================================
@@ -1533,6 +1806,60 @@ mod tests {
             !lines.iter().any(|line| line.contains("numtext<")),
             "a fix rewrote the alias's value: {lines:?}"
         );
+    }
+
+    /// Where a key stands alone a key alias takes a `|` after spaces as a name does, and a `[`
+    /// where it may take an accessor: the alias with a spaced modifier reads as the alias with
+    /// none, in `--key` and `--group-by`; an alias whose value has transforms refuses a spaced
+    /// `[` as it refuses one straight on. Also the pin of "the key as typed up to the problem":
+    /// a refusal leaves off the spaces before a key's first modifier.
+    #[test]
+    fn a_key_alias_takes_a_modifier_after_spaces_where_a_key_stands_alone() {
+        let (conn, a) = world();
+        insert_fact(&conn, a, "content.Lens Name", "x");
+        let aliases = Some("lens = '\"content.Lens Name\"'\n");
+        let shape = |key: &ParsedFactKey| (key.base_key.clone(), key.modifiers.clone());
+        let read = |key: &str, grouping: &str| {
+            let (_dir, text) = given(aliases, &[]);
+            read_report(&conn, Some(key), &[grouping.to_string()], &text)
+                .unwrap_or_else(|e| panic!("{key} / {grouping}: {e}"))
+        };
+        let tight = read("@lens|lowercase", "@lens|lowercase, source.ext");
+        let spaced = read("@lens  |lowercase", "@lens |lowercase, source.ext");
+        assert_eq!(shape(&spaced.key.unwrap()), shape(&tight.key.unwrap()));
+        assert_eq!(shape(&spaced.grouping[0]), shape(&tight.grouping[0]));
+        assert_eq!(spaced.grouping[0].base_key, "content.Lens Name");
+        let spaced = read("@lens [0]", "source.ext");
+        assert!(spaced.key.unwrap().accessor.is_some());
+        // An alias whose value has its own transforms takes no accessor, spaced or not; the
+        // refusal names the alias as typed.
+        let aliases = Some("yr = 'source.mtime|year'\n");
+        for key in ["@yr[0]", "@yr [0]"] {
+            let (_dir, text) = given(aliases, &[]);
+            let refused = read_report(&conn, Some(key), &[], &text)
+                .err()
+                .expect("refused")
+                .downcast::<ExpressionRefused>()
+                .expect("a refusal")
+                .to_string();
+            assert!(
+                refused.contains("`[0]` cannot follow `@yr`"),
+                "{key}: {refused}"
+            );
+        }
+        // The key a refusal names as typed leaves off the spaces before its first modifier.
+        let refused = refusal_of_report(&conn, "source.size |year");
+        assert!(
+            refused.contains("source.size is of type number"),
+            "{refused}"
+        );
+    }
+
+    fn refusal_of_report(conn: &Connection, key: &str) -> String {
+        read_report(conn, Some(key), &[], &ExpressionText::plain(&[]))
+            .err()
+            .expect("refused")
+            .to_string()
     }
 
     /// **A key alias compared wrongly is answered as the key written out is**, every name the

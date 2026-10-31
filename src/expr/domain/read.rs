@@ -12,8 +12,8 @@ use super::alias::{alias_name_at, AliasValue, CheckedAliases};
 use super::filter::{CompareOp, Expr, InputValue, NeedsQuotes, STATUS_KEYWORDS};
 use super::glob::read_glob;
 use super::key::{
-    continue_key, follows_a_key_in_a_filter, is_name_char, read_key, InputKey, Written,
-    SCOPE_REL_PATH,
+    continue_key, follows_a_key_in_a_filter, is_name_char, read_key, spaces_before_transforms,
+    step_to_transforms, InputKey, Written, SCOPE_REL_PATH,
 };
 use super::problem::{cut, Fix, Place, Problem};
 
@@ -323,8 +323,13 @@ fn alias_at(cursor: &mut Cursor, mode: AliasMode, at_key: bool) -> AliasAt {
                 input: own.input.clone(),
             });
             key.input_name = typed.to_string();
-            // An accessor follows a key's name straight on, so only a key that is its name alone.
+            // An accessor follows a key's name, so only a key that is its name alone takes one.
             let accessor_may_follow = own.input == own.input_name;
+            // Where only a key stands, what may follow it after spaces is the key's, as after a
+            // name.
+            if at_key {
+                step_to_transforms(cursor, accessor_may_follow);
+            }
             match continue_key(cursor, at, &mut key, accessor_may_follow) {
                 Some(()) => AliasAt::Key(key),
                 None => AliasAt::Read,
@@ -366,9 +371,11 @@ pub(in crate::expr) fn stored_fact_line(word: &str) -> String {
 
 /// **Report keys**: `--key` (`Grammar::Key`: one key, then the end) and `--group-by`
 /// (`Grammar::KeyList`: keys separated by `,`, spaces allowed around it, a comma inside
-/// `|bucket( … )` or a quoted name belonging to the key). A space at the start or end of the
-/// text or of an item is allowed, as in a filter. A key may be a key alias, read by `aliases`.
-/// The keys read without a problem are the value.
+/// `|bucket( … )`, a quoted name or parentheses belonging to the key). A key stands alone here,
+/// so a bare name runs to its `[` or `|` (or `,`), a space inside it the name's; a space at the
+/// start or end of the text or of an item is not. A key may be a key alias, read by `aliases`.
+/// What follows a key's accessor or modifiers cannot follow it. The keys read without a problem
+/// are the value.
 pub(in crate::expr) fn read_keys(
     text: &str,
     index: usize,
@@ -419,7 +426,6 @@ pub(in crate::expr) fn read_keys(
         if let Some(key) = &key {
             key_position(&mut cursor, key, grammar);
         }
-        let key_end = cursor.at();
         cursor.skip_spaces();
         match cursor.peek() {
             None => {}
@@ -432,9 +438,14 @@ pub(in crate::expr) fn read_keys(
                 let rest = cursor.slice(rest_start, item_end);
                 let rest_end = rest_start + rest.trim_end_matches(is_space).len();
                 if let Some(key) = &key {
-                    let fix = key
-                        .quoted_name_fix(text, key_end, grammar)
-                        .map_or(Fix::None, |rewrite| Fix::KeyName { rewrite });
+                    // In a list, the text with commas at this item's spaces is offered; whether
+                    // it is shown is the report's (every key in it binds).
+                    let fix = match grouping_keys_rewrite(text, key.place.start, rest_end) {
+                        Some(rewrite) if list && key.written.is_none() => {
+                            Fix::GroupingKeys { rewrite }
+                        }
+                        Some(_) | None => Fix::None,
+                    };
                     cursor.problem(
                         rest_start,
                         rest_end,
@@ -462,6 +473,47 @@ pub(in crate::expr) fn read_keys(
         }
     }
     cursor.into_reading(Some(keys))
+}
+
+/// **A `--group-by` text with commas at one item's spaces**: the item at bytes `start..end` of
+/// `text` split at its spaces, read as the reader skips — quoted text where a part starts and a
+/// paired `(` stepped over, so a quoted name or `|bucket( … )` holding a space stays one part — and
+/// a `|` or `[` after spaces kept with its part — rejoined with commas, the rest of the text as
+/// typed: the whole `--group-by` value, to paste back, spaces at its ends left off. `None` where
+/// the item holds one part.
+pub(in crate::expr) fn grouping_keys_rewrite(
+    text: &str,
+    start: usize,
+    end: usize,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut at = start;
+    while at < end {
+        let rest = cut(text, at, end);
+        let spaces = rest.len() - rest.trim_start_matches(is_space).len();
+        at += spaces;
+        if at >= end {
+            break;
+        }
+        let stop = |scan: &Cursor, c| is_space(c) || scan.at() >= end;
+        let mut part_end = skip_end(text, at, stop).min(end);
+        // A `|` or `[` after spaces stays with its part; where the key read from the part takes
+        // no `[` (an alias whose value has transforms), the rewrite does not bind and is dropped.
+        while let Some(spaces) = spaces_before_transforms(cut(text, part_end, end), true) {
+            part_end = skip_end(text, part_end + spaces, stop).min(end);
+        }
+        parts.push(cut(text, at, part_end));
+        at = part_end;
+    }
+    (parts.len() > 1).then(|| {
+        let rewrite = format!(
+            "{}{}{}",
+            cut(text, 0, start),
+            parts.join(","),
+            cut(text, end, text.len())
+        );
+        rewrite.trim_matches(is_space).to_string()
+    })
 }
 
 /// What a key may not be where only a key stands — a report key, or a pattern's `{…}` — though
@@ -971,7 +1023,7 @@ impl<'t> FilterReader<'t> {
             if status.is_none() {
                 let at = self.cursor.at();
                 let fix = key
-                    .quoted_name_fix(self.cursor.text(), key_end, Grammar::Filter)
+                    .quoted_name_fix(self.cursor.text(), key_end)
                     .map_or(Fix::None, |rewrite| Fix::KeyName { rewrite });
                 self.cursor.problem(
                     at,
@@ -1678,7 +1730,7 @@ mod tests {
                 (3, "this quote is unclosed".to_string()),
             ]
         );
-        // In a report key, what cannot follow is named first, as in a filter.
+        // In a report key a quote that never closes inside a name is named where it opens.
         let said_keys = |text: &str| -> Vec<(usize, String)> {
             read_keys(text, 0, Grammar::Key, AliasMode::NotLoaded)
                 .problems
@@ -1688,17 +1740,11 @@ mod tests {
         };
         assert_eq!(
             said_keys("Make 'x"),
-            [
-                (5, "`'x` cannot follow `Make`".to_string()),
-                (5, "this quote is unclosed".to_string()),
-            ]
+            [(5, "this quote is unclosed".to_string())]
         );
         assert_eq!(
             said_keys("Make x 'y"),
-            [
-                (5, "`x 'y` cannot follow `Make`".to_string()),
-                (7, "this quote is unclosed".to_string()),
-            ]
+            [(7, "this quote is unclosed".to_string())]
         );
         // A quote mark where no part starts opens no quote, in a sentence's word as in a skip.
         assert_eq!(
@@ -1819,7 +1865,8 @@ mod tests {
             unclosed,
             at(3, &format!("AND or OR is missing before `f{open}`"))
         );
-        assert_eq!((report, nested), (1, 1));
+        // The report's `(` never closes, so it is a character of the name like any other.
+        assert_eq!((report, nested), (0, 1));
     }
 
     #[test]

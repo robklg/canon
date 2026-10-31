@@ -915,14 +915,8 @@ mod tests {
         let bare = ParsedFactKey::parse("source.ext").unwrap();
         let grouped =
             compute_grouped_distribution(&mut conn, &[s1, s2], &bare, &group, 0, &UserZone::utc());
-        // A key with no facts when it was read, which gains a time its modifier cannot take.
-        let absent =
-            crate::expr::read_report(&conn, Some("New|number"), &[], &ExpressionText::plain(&[]))
-                .unwrap()
-                .key
-                .unwrap();
-        crate::core::testing::insert_time_fact(&conn, s1, "content.New", "2024-06-15");
-        let gained = compute_distribution(&mut conn, &[s1, s2], &absent, 0, &UserZone::utc());
+        // A key with no facts is unknown when a report reads it, so a report key never reads
+        // as having none and cannot gain its first facts mid-report; the filter pins that arm.
         for err in [plain.err(), grouped.err()] {
             let err = err.expect("a changed type must stop the report");
             let refused = err
@@ -934,17 +928,6 @@ mod tests {
                 "content.Make's type changed while this ran; run it again"
             );
         }
-        let Err(err) = gained else {
-            panic!("a key gaining facts mid-report must stop it");
-        };
-        let refused = err
-            .downcast_ref::<crate::expr::ExpressionRefused>()
-            .unwrap_or_else(|| panic!("{err}"));
-        assert!(refused.is_answer(), "{refused}");
-        assert_eq!(
-            refused.to_string(),
-            "content.New gained facts while this ran; run it again"
-        );
     }
 
     /// A modifier finer than the value was written gives no value, and the report does

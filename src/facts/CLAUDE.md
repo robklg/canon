@@ -6,7 +6,8 @@ import). A leaf subsystem: no sibling
 reaches in, and it reaches no sibling.
 
 **Strata**: `domain.rs` — the import-vocabulary half of the fact noun (`ContentFactOnSource`,
-`is_content_fact`, `import_key`, `delete_key`, `names_the_root`), and what arrives and what
+`is_content_fact`, `import_key`, `delete_key` — which, like the conversion's `read_convert_name`, reads
+a name as typed (`expr::NameReading`), where import reads it as written — and `names_the_root`), and what arrives and what
 becomes of it: `JsonFact` (a value as the JSON its tool wrote, a number in its own spelling),
 and `decide`, which fits one value to its key's type as a `Disposition` — stored, or skipped
 for a `SkipCause`. Text is read through `core::domain::conversion`'s table, times through

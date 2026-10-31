@@ -23,7 +23,7 @@ Any fact key can be used in a pattern:
 - `{content.Make}` - Camera manufacturer (from EXIF)
 - `{content.hash.sha256}` - Content hash
 
-A key in a pattern is read as in `--where` and `canon facts --key`: a name that is not a built-in key and does not start with `source.` or `content.` is read under `content.`, so `{Make}` is `{content.Make}`. A name holding a character a name cannot contain is quoted, with `'…'` inside a pattern, which the manifest's `pattern = "…"` line holds as it is: `{'content.File Size'}`. A pattern cannot contain an alias: `{@taken}` is refused.
+A key in a pattern is read as in `--where` and `canon facts --key`: a name that is not a built-in key and does not start with `source.` or `content.` is read under `content.`, so `{Make}` is `{content.Make}`. A name with a space needs no quotes: `{content.Camera Model}`. A name holding `|`, `[` or `}` is quoted, with `'…'` inside a pattern, which the manifest's `pattern = "…"` line holds as it is: `{'content.a|b'}`. A pattern cannot contain an alias: `{@taken}` is refused.
 
 `{scope.rel_path}` is not a fact: it is the source's path below the *vantage*: the deepest directory containing every scope the manifest records **that Canon could resolve** and that lies in that source's own root. A recorded path Canon could not resolve is stated and left out of the measurement (see below). With one scope naming a folder, the vantage is that folder. With several, it is the directory they share, so each scope's own name survives in the result. A scope naming a single **file** measures from the folder that file sits in, so it renders as its own filename — which is what makes a shell wildcard mean the same thing whether it matched one file or a dozen. Scopes in different roots each get their own vantage.
 
@@ -137,7 +137,7 @@ Error: cannot use the pattern as specified
                                 ^ a pattern cannot end with `/`
 ```
 
-A key is checked against the type of all its facts, as in a filter: a key with no facts is an unknown key, a modifier its value cannot take is refused, and a key of mixed type is refused with `a pattern supports one type only`. The literal text cannot start or end with `/`, hold `//`, or have `.` or `..` as a whole name, and a `{` or `}` must be paired. A space cannot stand inside `{…}`, outside a quoted name and `|bucket( … )`; for a name with a space in it the fix is shown, such as `{'content.File Size'}`.
+A key is checked against the type of all its facts, as in a filter: a key with no facts is an unknown key, a modifier its value cannot take is refused, and a key of mixed type is refused with `a pattern supports one type only`. The literal text cannot start or end with `/`, hold `//`, or have `.` or `..` as a whole name, and a `{` or `}` must be paired.
 
 [`cluster status`](../commands/archive/cluster.md#cluster-status) states the same problems and exits 0. `cluster generate` and `cluster refresh` do not read the pattern.
 

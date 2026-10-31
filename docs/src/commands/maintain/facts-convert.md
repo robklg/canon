@@ -19,7 +19,7 @@ canon facts convert content.DateTimeOriginal --to time --allow removal=2 --yes \
 | `--yes` | Convert (default is a dry run) |
 | `--reason <why>` | Attach a reason to the [decision record](../../concepts/decisions.md) |
 
-The conversion takes no paths and no `--where`: a key's type belongs to the key, so it converts every fact of the key, on every root, suspended roots included.
+The key may be given as Canon prints it, in quotes or not ([Quoting](../../reference/filter.md#quoting)). The conversion takes no paths and no `--where`: a key's type belongs to the key, so it converts every fact of the key, on every root, suspended roots included.
 
 ## What a Key Holds
 

@@ -73,12 +73,13 @@ pub use domain::value::{resolve_fact_value, source_row_value, SourceAttributes};
 pub use domain::value::{source_value, source_values};
 pub use ops::value::{fetch_named_values, fetch_source_values};
 
-// The key vocabulary: the one reader of a key's name, the three kinds of key,
-// and what a written one parsed to — plus the content hash's key and the
+// The key vocabulary: the one reader of a key's name and how each caller declares it reads
+// one (a name a person typed, Canon's printed quoting read off; a tool's, as written), the
+// three kinds of key, and what a written one parsed to — plus the content hash's key and the
 // pattern-only key, which a manifest writes down.
 pub use domain::key::{
-    read_key_name, BuiltinKey, Key, KeyKind, Listing, ParsedFactKey, SourceFact, CONTENT_HASH,
-    SCOPE_REL_PATH,
+    read_key_name, BuiltinKey, Key, KeyKind, Listing, NameReading, ParsedFactKey, SourceFact,
+    CONTENT_HASH, SCOPE_REL_PATH,
 };
 
 // What a modifier gives — a value, or none — and the one printed form of what it gave.

@@ -848,7 +848,7 @@ const LAWS: &[Law] = &[
     Law {
         // A value or key Canon prints reads back, typed into `--where`, as itself: the
         // writer asks the reader — the filter reader, alias expansion and the binder — and keeps
-        // no character list of its own.
+        // no character list of its own. A name it printed reads back as that name.
         name: "printing rule",
         owner: "expr/domain/print.rs",
         verifier: "every_printed_value_reads_back_as_itself",
@@ -860,6 +860,9 @@ const LAWS: &[Law] = &[
         // Every command that takes a key's name reads it through one reader — the source fact,
         // the built-in key and the content fact the name may name — and each applies its own
         // rule: an expression takes them in that order, import the content reading alone.
+        // Each caller declares how it reads a name: a name a person typed has Canon's printed
+        // quoting read off (`facts delete`, `facts convert`, `--emit`), a tool's or an
+        // already-read name is read as written (import, `Key::read`).
         name: "key-name",
         owner: "expr/domain/key.rs",
         verifier: "a_key_is_read_by_the_name_import_stored_it_under",
@@ -868,8 +871,9 @@ const LAWS: &[Law] = &[
         record: "2026-10-17",
     },
     Law {
-        // A key is read by one grammar wherever a key stands — a filter, a report key and a
-        // pattern's `{…}` — each position saying only what may follow it.
+        // A key is read by one grammar in a filter, a report key and a pattern, each position
+        // saying what may end a bare name: in a filter a space, where a key stands alone only
+        // what may follow it.
         name: "one key grammar",
         owner: "expr/domain/key.rs",
         verifier: "a_key_reads_the_same_in_a_filter_a_report_and_a_pattern",

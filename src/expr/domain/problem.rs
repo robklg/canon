@@ -30,8 +30,16 @@ pub(in crate::expr) enum Fix {
         glob: String,
         exact: String,
     },
-    /// The key's name quoted, on the line that states the key-name rule.
+    /// The key's name quoted, on the line that states the key-name rule: a filter's, where a
+    /// space or an operator may follow a name, so a name holding another character needs quotes.
     KeyName {
+        rewrite: String,
+    },
+    /// A `--group-by` item holding spaces — an unknown key, or keys that cannot follow one
+    /// another — every space-separated part a key that binds: the item with commas at its spaces,
+    /// on its own line after the rule line. The reader offers it; the report keeps it only where
+    /// it reads back and binds.
+    GroupingKeys {
         rewrite: String,
     },
     /// A value that reads as a number or a time, for a key of type text or path: the clause with
@@ -90,10 +98,12 @@ impl Problem {
     /// **A fix shown reads back and binds**: drop the quoted value, the glob and exact pair, or
     /// the value quoted for the key's type, unless every filter it shows `binds` — both of a
     /// pair, or neither is shown. A quoted name is a key, not a filter, and is kept or dropped by
-    /// whether it names a key with facts.
+    /// whether it names a key with facts; grouping keys are a key list, kept or dropped where the
+    /// report reads its keys.
     pub(in crate::expr) fn keep_fix_that_binds(&mut self, binds: &dyn Fn(&str) -> bool) {
         let keep = match &self.fix {
-            Fix::None | Fix::KeyName { .. } => true,
+            // A grouping-keys fix is checked where the report reads its keys, which alone can.
+            Fix::None | Fix::KeyName { .. } | Fix::GroupingKeys { .. } => true,
             Fix::Quoted { rewrite } | Fix::ForKeyType { rewrite, .. } => binds(rewrite),
             Fix::GlobOrExact { glob, exact } => binds(glob) && binds(exact),
         };
@@ -102,20 +112,11 @@ impl Problem {
         }
     }
 
-    /// The same rule for a door whose quoted name rewrites more than the name — a pattern's,
-    /// the whole `{…}` with its modifiers: drop the quoted name unless what it rewrites to
-    /// `binds`. Every other fix is [`Self::keep_fix_that_binds`]'s.
-    pub(in crate::expr) fn keep_quoted_name_that_binds(&mut self, binds: &dyn Fn(&str) -> bool) {
-        if matches!(&self.fix, Fix::KeyName { rewrite } if !binds(rewrite)) {
-            self.fix = Fix::None;
-        }
-    }
-
-    /// The problem's block, `text` being the text it was found in: the typed line and the
-    /// caret line with the sentence (a quoted value after `: `, the glob and exact text or the
-    /// value for the key's type after `. `),
-    /// then the rule line and the key-name line, two spaces further in. A text with nothing but spaces in it has no line
-    /// to point into, so the sentence stands alone ("the filter is empty").
+    /// The problem's block, `text` being the text it was found in: the typed line and the caret
+    /// line with the sentence (a quoted value after `: `, the glob and exact text or the value for
+    /// the key's type after `. `), then the rule line and the key-name or grouping-keys line, two
+    /// spaces further in. A text with nothing but spaces in it has no line to point into, so the
+    /// sentence stands alone ("the filter is empty").
     pub(in crate::expr) fn render(&self, text: &str, indent: &str) -> Vec<String> {
         let message = match &self.fix {
             Fix::Quoted { rewrite } => format!("{}: {rewrite}", self.sentence),
@@ -130,7 +131,7 @@ impl Problem {
                 };
                 format!("{}. For a {key_type} key: {rewrite}", self.sentence)
             }
-            Fix::None | Fix::KeyName { .. } => self.sentence.clone(),
+            Fix::None | Fix::KeyName { .. } | Fix::GroupingKeys { .. } => self.sentence.clone(),
         };
         let mut lines = if text.trim_matches(is_space).is_empty() {
             vec![format!("{indent}{message}")]
@@ -142,8 +143,12 @@ impl Problem {
         if let Some(rule) = &self.rule_line {
             lines.push(format!("{indent}  {rule}"));
         }
-        if let Fix::KeyName { rewrite } = &self.fix {
-            lines.push(format!("{indent}  {KEY_NAME_RULE}: {rewrite}"));
+        match &self.fix {
+            Fix::KeyName { rewrite } => lines.push(format!("{indent}  {KEY_NAME_RULE}: {rewrite}")),
+            Fix::GroupingKeys { rewrite } => lines.push(format!(
+                "{indent}  separate grouping keys with a comma: {rewrite}"
+            )),
+            Fix::None | Fix::Quoted { .. } | Fix::GlobOrExact { .. } | Fix::ForKeyType { .. } => {}
         }
         lines
     }

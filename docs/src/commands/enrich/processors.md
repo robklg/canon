@@ -122,7 +122,7 @@ canon worklist \
   | canon import-facts
 ```
 
-The facts `canonargs` passes through include every field `worklist --emit` wrote, so they are imported again under their names as given. A fact the command writes replaces a passed-through fact of the same name; under another name for the same key, such as `Model` beside `content.Model`, the import takes neither (see [What Is Skipped](import-facts.md#what-is-skipped)). A source fact such as `source.mtime` is not imported, and is counted in the summary. A [built-in key](../../reference/builtins.md#built-in-keys) such as `filename` or `size` is stored as a content fact, `content.filename`, on the content of a hashed source, so every copy of that content shares it; a filter on `filename` still reads the built-in key.
+The facts `canonargs` passes through include every field `worklist --emit` wrote, so they are imported again under the field names it wrote. A fact the command writes replaces a passed-through fact of the same name; under another name for the same key, such as `Model` beside `content.Model`, the import takes neither (see [What Is Skipped](import-facts.md#what-is-skipped)). A source fact such as `source.mtime` is not imported, and is counted in the summary. A [built-in key](../../reference/builtins.md#built-in-keys) such as `filename` or `size` is stored as a content fact, `content.filename`, on the content of a hashed source, so every copy of that content shares it; a filter on `filename` still reads the built-in key.
 
 ## Using Existing Facts
 

@@ -70,7 +70,11 @@ the word is a value or a key's name. A status word (`archived`, `hashed`, `exclu
 is one only unquoted and in lower case, and takes `?` alone, refused with an operator, an accessor
 or a modifier; quoted or in other case it is a key name (`"archived"?` asks about
 `content.archived`; `status_words_count_only_in_lower_case_and_only_with_a_question_mark`). A key is read by one grammar, `domain/key.rs::read_key`,
-whose caller says what may follow it. A problem is recorded where it is met, as a byte range,
+whose caller says what may end a bare name: in a filter a space, where a key stands alone only
+what may follow it there (`[` or `|`, and `,` in `--group-by`), so a space inside is the name's.
+There a `|`, or a `[` where an accessor may follow, after spaces is still the key's, after a name,
+a quoted name or a key alias (`spaces_before_transforms`); the forgotten-comma line keeps a spaced
+`|` or `[` with its part. A problem is recorded where it is met, as a byte range,
 and reading goes on: after a problem in a value at the value's end, after any other at the next
 `AND` or `OR` of the same group or the `)` closing it, quotes and closed parentheses
 stepped over. Reading **stops** only where everything after a point is inside it — an unclosed quote,
@@ -124,21 +128,23 @@ of day is refused, and quoted it is text — what it reads as, never how it look
 against a number or time key, a quoted value means the same as a bare one. A typed number is read
 form first, fit second (`core::domain::number`): held exactly as written, or refused.
 A `source.` name that is no source fact is an unknown key wherever a key stands, `?` and report
-keys included (`a_source_name_that_is_no_source_fact_is_an_unknown_key_wherever_it_stands`).
+keys included (`a_source_name_that_is_no_source_fact_is_an_unknown_key_wherever_it_stands`), and
+so is a key with no facts wherever a value is read, a report key included; only `?` binds one.
 Pins: `a_value_that_cannot_mean_anything_is_refused_before_selection` (the verifier),
 `every_negated_operator_selects_what_its_not_form_selects` (`!=` is `NOT =`, a source with no
 value included) and `a_type_that_changes_mid_run_refuses_the_run`.
 
 **A key's type changing while a run reads it** is checked one way, `domain/bind.rs::check_read_as`,
-by the filter and by a `facts` report: a key is read as its one type, as having no facts, or as
-any type where no value is compared or read through a chain (a bare `?`, a bare report key), and
+by the filter and by a `facts` report: a key is read as its one type, as having no facts (a `?`
+alone), or as any type where no value is compared or read through a chain (a bare `?`, a bare
+report key), and
 a value that is not what the key was read as stops the run as an answer. A report key carries it
 as `ParsedFactKey`'s `read_as`. Pinned on the filter by `a_type_that_changes_mid_run_refuses_the_run`
 and `a_key_that_gains_its_first_facts_mid_run_refuses_the_run`, on the report by
 `a_type_that_changes_mid_report_refuses_the_report`.
 
 What a modifier reads and gives is one table, `result_of`, read by binding and agreeing with the
-chain; a key with no facts walks it too, its first step from any type. Every problem and cause is
+chain; a `?` on a key with no facts walks it too, its first step from any type. Every problem and cause is
 collected into one `ExpressionRefused`, its causes matched with no `_` arm (`unknown_keys` and
 `join` add a command's refused names). Each is a `Problem` drawn under its typed line, a caret under
 the value, the key's name, a modifier's `|` or an accessor's `[`: one sentence naming the key as
@@ -148,14 +154,13 @@ gives text, a character that needs quotes, or a wildcard after `=`, `!=` or in a
 sentence; any other type reads the value as that type. A glob binds only where the key gives text
 or a path, its one cause otherwise the type statement. **A fix shown reads back and binds**: each
 fix is read back and bound before it is shown, a filter's as a clause, a report's as a key
-(`keep_fix_that_binds`), and a pattern's quoted name, which rewrites its whole `{…}`, as a
-pattern (`a_pattern_quoted_name_is_shown_only_where_it_binds`); a quoted name only where it
-names a key with facts (`every_fix_shown_reads_back_and_binds`,
+(`keep_fix_that_binds`), and a `--group-by` item of known keys with no commas between them as a
+key list (`Fix::GroupingKeys`); a filter's quoted name only where it names a key with facts (`every_fix_shown_reads_back_and_binds`,
 `a_quoted_name_is_offered_only_for_a_key_with_facts`). No
 other filter is ever offered. A type mismatch on a key of type text carries the bottom line
 (`Conversion`), printed once, last, with each stored key's convert command
 (`the_conversion_line_is_printed_once_naming_each_stored_key`). **Held by discipline**: a new caller
-of `bind_key` calls the check. A cause about what a key is — mixed type, a type that changed or a
+of `bind_key` calls the check, and a new reader of a key list `keep_grouping_keys_that_bind`. A cause about what a key is — mixed type, a type that changed or a
 key that gained its first facts while the run read it — is an answer, printed without `Error:`
 (`ExpressionRefused::is_answer`). Evaluation compares text by code point, a glob through its matcher, numbers
 exactly, times through the time noun's period table, a modifier's part as a whole number, a bucket's
@@ -174,10 +179,8 @@ typed text selected (`the_recorded_text_selects_what_the_typed_text_selected`).
 key and a pattern, the `content.` default included (verifier
 `a_key_reads_the_same_in_a_filter_a_report_and_a_pattern`). `read_pattern_text` reads the literal
 text — a `}` with no `{`, a leading or trailing `/`, `//`, a whole name `.` or `..` — and each
-`{…}`: a space outside a quoted name and `|bucket( … )` is one problem with a caret under each
-(`Problem::also`), and the key is read on as if the spaces were not there, a space between two
-parts of a bare name read as the quoted name it would be, every place put back where it was typed
-(`ReadText`). `@name` is refused, a status word is not a key, and `scope.rel_path` binds as a
+`{…}`, read as `--key` reads its argument: a space inside a bare name is the name's, spaces at
+the ends of the `{…}` are not, and a quoted name may hold a `}`. `@name` is refused, a status word is not a key, and `scope.rel_path` binds as a
 path. **Binding** is `ops/pattern.rs::read_pattern`, through `bind_pattern_key`
 (`Reads::Pattern`): a key with no facts is unknown, a key of mixed type one of the pattern's
 problems and never an answer (`ExpressionRefused::is_answer`). Every problem and cause is in one
@@ -216,7 +219,9 @@ through the rule, and its `canon facts convert` command (`convert_command`) name
 key, quoted for the shell only, and the type to convert to where its reader names one
 (`the_convert_command_is_quoted_for_the_shell_only`). Every bucket label is spelled and recognized
 here (`bucket_label`, `is_plain_bucket_label`, `threshold_bucket_labels`), the modifier handing over
-only a `BucketRange`, so a report, a rejection and a directory name say one label. **Where it does
+only a `BucketRange`, so a report, a rejection and a directory name say one label. Its inverse
+for a name, `printed_name_read`, reads Canon's quotes off by `read_quoted`, which the key-name
+reader applies to a typed name (`a_printed_key_reads_back_as_its_name`). **Where it does
 not apply**: a `facts` row and a pattern's directory name print text as it is, bare.
 
 ## The statement grammar
@@ -374,12 +379,14 @@ by its `None` or by listing: a computed key the row cannot answer has no value. 
 the hash the lock entry recorded. Pinned per reader.
 
 **The key-name law**: every command taking a key's name reads it through `read_key_name`
-(`domain/key.rs`) — the source fact, built-in key and content fact it names — and applies its
-own rule: an expression and `--emit` take them in that order, import and `facts delete` the
+(`domain/key.rs`), declaring how (`NameReading`): a name a person typed has Canon's printed
+quoting read off (`facts delete`, `facts convert`, `--emit`), a tool's or an already-read name
+is read as written (import, `Key::read`). It gives the source fact, built-in key and content fact
+the name names, and each command applies its own rule: an expression and `--emit` take them in that order, import and `facts delete` the
 content reading alone, and `facts convert` the content reading with its own refusals. A consumer then decides by the key read (`ParsedFactKey::key`), never
 the text, since quoting never changes which key. Verifier
 `a_key_is_read_by_the_name_import_stored_it_under` (`facts/domain.rs`); `--emit`'s leg is in
-`worklist/ops.rs`.
+`worklist/ops.rs`, and both readings are pinned at the owner (`a_name_is_read_as_its_caller_declares`).
 
 ## Selection notes
 

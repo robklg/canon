@@ -87,7 +87,7 @@ Error: cannot run the filter as given
 
 A value can be written without quotes when it holds only letters and digits, of any language, accent marks written as their own character, and `_ . - / : +`: `filename=照片1.jpg`, `source.size>-5`, `source.mtime>=2024-06-15`. Any other character needs quotes, a space included: `content.Model="EOS 5D"`. A value ends at the first space, so in `content.Model=EOS 5D` the `5D` is a second value and the filter is rejected. After `=` and `!=`, `*`, `?` and `[` are wildcards, and Canon shows both ways to write them (see [When a Filter Is Rejected](#when-a-filter-is-rejected)).
 
-A key name can be written without quotes when it holds only letters, digits and `_ . : / -`: `content.XMP-dc:Subject`. A name with any other character, a space included, is written in quotes: `"content.File Size"`.
+In a filter, a key name can be written without quotes when it holds only letters, digits and `_ . : / -`: `content.XMP-dc:Subject`. A name with any other character, a space included, is written in quotes: `"content.File Size"`. Where a key stands alone, in `--key`, a `--group-by` item or a pattern's `{…}`, a name that starts with a letter or `_` needs quotes only for a character that ends it there: `|` or `[`, a `,` in `--group-by`, a `}` in a pattern. So `--key "content.File Size"` names that key. `facts delete`, `facts convert` and `worklist --emit` take the whole argument as the name. A name in quotes works in all of them.
 
 A value or a key that needs quotes is written in double quotes. A double quote inside is doubled. Single quotes work the same way, a single quote inside doubled. A backslash is an ordinary character.
 

@@ -20,13 +20,11 @@ use rusqlite::Connection;
 use crate::core::domain::fact::FactEntry;
 use crate::core::repo::fact::key_types;
 use crate::expr::domain::bind::{
-    bind_pattern_key, keep_fix_that_binds, keep_quoted_name_that_binds, known_type,
-    quoted_name_key, BindCause, ExpressionRefused, Refused,
+    bind_pattern_key, keep_fix_that_binds, known_type, BindCause, ExpressionRefused, Refused,
 };
 use crate::expr::domain::pattern::{
     is_context_supplied, read_pattern_text, BoundPattern, InputPiece, PatternFacts,
 };
-use crate::expr::ops::bind::offer_quoted_names;
 use crate::expr::ops::value::fetch_source_values;
 
 /// **Read and check a manifest's pattern**, as specified: every `{…}` read by the key grammar
@@ -38,14 +36,7 @@ pub fn read_pattern(
     conn: &Connection,
     specified: &str,
 ) -> Result<std::result::Result<BoundPattern, ExpressionRefused>> {
-    let mut reading = read_pattern_text(specified);
-    offer_quoted_names(conn, &mut reading.problems)?;
-    let offered: Vec<String> = reading
-        .problems
-        .iter()
-        .filter_map(quoted_name_key)
-        .map(|key| key.base)
-        .collect();
+    let reading = read_pattern_text(specified);
     let mut causes: Vec<BindCause> = reading.problems.into_iter().map(BindCause::Read).collect();
     let pieces = reading.value.unwrap_or_default();
     let mut names: Vec<&str> = Vec::new();
@@ -53,14 +44,13 @@ pub fn read_pattern(
         InputPiece::Key(input) if !input.scope => Some(input.key.base.as_str()),
         InputPiece::Key(_) | InputPiece::Literal(_) => None,
     });
-    for base in read_bases.chain(offered.iter().map(String::as_str)) {
+    for base in read_bases {
         if known_type(base).is_none() && !names.contains(&base) {
             names.push(base);
         }
     }
     let types = key_types(conn, &names)?;
-    // A fix shown reads back and binds. A pattern's quoted name rewrites its whole `{…}`,
-    // modifiers included, so it is read back as a pattern and bound like one.
+    // A fix shown reads back and binds, read back as a pattern and bound like one.
     let binds = |rewrite: &str| {
         let reading = read_pattern_text(rewrite);
         reading.problems.is_empty()
@@ -69,7 +59,6 @@ pub fn read_pattern(
     };
     for cause in &mut causes {
         keep_fix_that_binds(cause, &binds);
-        keep_quoted_name_that_binds(cause, &binds);
     }
     let mut bound = Vec::with_capacity(pieces.len());
     for piece in &pieces {
@@ -356,7 +345,6 @@ mod read_and_place {
     use crate::expr::domain::pattern::{
         evaluate, EvalContext, NoPlaceCause, NotPlaced, Unmeasured,
     };
-    use crate::expr::domain::problem::Fix;
     use crate::expr::domain::value::SourceAttributes;
     use crate::expr::ops::bind::{read_filters, ExpressionText};
 
@@ -406,63 +394,6 @@ mod read_and_place {
         vec![(Some(at), sentence.to_string())]
     }
 
-    /// **A pattern's quoted name is shown only where it binds**: it rewrites the whole `{…}`,
-    /// modifiers and accessors included, so each one shown is read again as a pattern and
-    /// binds; one that would be refused again is not shown. Walked over a number key and a text
-    /// key, each with facts and a space in its name, under modifiers and an accessor each
-    /// type does or does not take.
-    #[test]
-    fn a_pattern_quoted_name_is_shown_only_where_it_binds() {
-        let conn = world();
-        let source = insert_source(&conn, 1, "d.jpg", None);
-        insert_fact(&conn, source, "content.Lens Name", "50mm");
-        let mut met = Vec::new();
-        for name in ["content.File Size", "content.Lens Name"] {
-            for rest in ["", "|year", "|bucket(1,2)", "|lowercase", "|stem", "[0]"] {
-                let text = format!("{{{name}{rest}}}");
-                for cause in refused(&conn, &text).causes {
-                    let Some(problem) = cause.problem() else {
-                        continue;
-                    };
-                    if !problem.sentence.contains("a space cannot stand") {
-                        continue;
-                    }
-                    let shown = match &problem.fix {
-                        Fix::KeyName { rewrite } => {
-                            assert!(
-                                read_pattern(&conn, rewrite).unwrap().is_ok(),
-                                "{text}: the fix {rewrite} does not bind"
-                            );
-                            true
-                        }
-                        _ => false,
-                    };
-                    met.push((text.clone(), shown));
-                }
-            }
-        }
-        let row = |text: &str, shown: bool| (text.to_string(), shown);
-        assert_eq!(
-            met,
-            [
-                // A number key: the name alone and a number modifier.
-                row("{content.File Size}", true),
-                row("{content.File Size|year}", false),
-                row("{content.File Size|bucket(1,2)}", true),
-                row("{content.File Size|lowercase}", false),
-                row("{content.File Size|stem}", false),
-                row("{content.File Size[0]}", false),
-                // A text key: everything but a number modifier.
-                row("{content.Lens Name}", true),
-                row("{content.Lens Name|year}", true),
-                row("{content.Lens Name|bucket(1,2)}", false),
-                row("{content.Lens Name|lowercase}", true),
-                row("{content.Lens Name|stem}", true),
-                row("{content.Lens Name[0]}", true),
-            ]
-        );
-    }
-
     /// **Every sentence of the pattern grammar**: input, the caret's byte, the sentence — the
     /// literal text's rows, then each `{…}` row.
     #[test]
@@ -510,14 +441,14 @@ mod read_and_place {
             assert_eq!(said(&conn, text), at(*caret, sentence), "{text}");
         }
 
-        // A `{` inside a key: the text after the key cannot follow it, and the `}` left over has
+        // A `{` inside a key is the name's, which ends at the first `}`; the `}` left over has
         // no `{`.
         let mut nested = said(&conn, "{a{b}c}/{filename}");
         nested.sort();
         assert_eq!(
             nested,
             [
-                (Some(2), "`{b` cannot follow `a`".to_string()),
+                (Some(1), "`a{b` is an unknown key".to_string()),
                 (Some(6), "`}` has no matching `{`".to_string()),
             ]
         );
@@ -534,51 +465,44 @@ mod read_and_place {
             "{unknown}"
         );
 
-        // A space inside `{…}`: one problem, a caret under every such space, and the key read
-        // on past them, so it binds.
-        let spaced = refused(&conn, "{ source.mtime | year }/{filename}");
-        let [cause] = spaced.causes.as_slice() else {
-            panic!("{spaced}");
-        };
-        let problem = cause.problem().unwrap();
+        // A `{…}` is read as `--key` reads its argument: a space inside a name is the name's,
+        // spaces at its ends are not, and a quoted name may hold a `}`.
+        let file_size = bound(&conn, "{content.File Size}");
+        assert_eq!(file_size.stored_keys(), ["content.File Size"]);
         assert_eq!(
-            (
-                problem.place.start,
-                problem.also.as_deref(),
-                problem.sentence.as_str()
-            ),
-            (
-                1,
-                Some(&vec![14, 16, 21]),
-                "a space cannot stand inside `{…}`"
+            bound(&conn, "{ content.Make }").stored_keys(),
+            ["content.Make"]
+        );
+        assert_eq!(
+            bound(&conn, r#"{ "content.File Size" }"#).stored_keys(),
+            ["content.File Size"]
+        );
+        insert_fact(&conn, 1, "content.a}b", "x");
+        assert_eq!(
+            bound(&conn, r#"{"content.a}b"}"#).stored_keys(),
+            ["content.a}b"]
+        );
+        assert_eq!(
+            said(&conn, "{content.Lens Model}"),
+            at(1, "`content.Lens Model` is an unknown key")
+        );
+        // What follows a key's modifiers cannot follow it, as in `--key`.
+        assert_eq!(
+            said(&conn, "{Make|year |month}"),
+            at(11, "`|month` cannot follow `Make|year`")
+        );
+        // Inside a `{…}` that starts with spaces, a place points at the byte typed.
+        assert_eq!(
+            said(&conn, "{  Make|year |month}"),
+            at(13, "`|month` cannot follow `Make|year`")
+        );
+        assert_eq!(
+            said(&conn, "{  source.size|year}"),
+            at(
+                14,
+                "|year works on times or text; source.size is of type number"
             )
         );
-        assert_eq!(
-            spaced.to_string(),
-            [
-                "cannot use the pattern as specified",
-                "  { source.mtime | year }/{filename}",
-                "   ^            ^ ^    ^ a space cannot stand inside `{…}`",
-            ]
-            .join("\n")
-        );
-
-        // A space between two parts of a name: the key-name line and the quoted name, for a key
-        // with facts — and no fix for one with none.
-        let file_size = refused(&conn, "{content.File Size}");
-        assert_eq!(
-            said(&conn, "{content.File Size}"),
-            at(13, "a space cannot stand inside `{…}`")
-        );
-        assert_eq!(
-            file_size.causes[0].problem().unwrap().fix,
-            Fix::KeyName {
-                rewrite: "{'content.File Size'}".to_string()
-            }
-        );
-        assert!(file_size.to_string().ends_with(": {'content.File Size'}"));
-        let no_facts = refused(&conn, "{content.Lens Model}");
-        assert_eq!(no_facts.causes[0].problem().unwrap().fix, Fix::None);
 
         // A key of mixed type is one of the pattern's problems, under its first line.
         let mixed = refused(&conn, "{Model}/{filename}");
