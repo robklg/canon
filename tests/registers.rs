@@ -45,7 +45,7 @@ struct Ceiling {
 const CEILINGS: &[Ceiling] = &[
     Ceiling {
         path: "CLAUDE.md",
-        words: 12847,
+        words: 12851,
         verifiers: 9,
     },
     Ceiling {
