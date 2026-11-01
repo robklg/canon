@@ -1,6 +1,6 @@
 # canon facts convert
 
-Change the type of a stored key: see what the key holds, preview a conversion to text, a number or a time, and convert every fact of the key.
+Shows what a stored key holds, and converts it to text, a number or a time.
 
 ```bash
 canon facts convert content.DateTimeOriginal                      # what it holds, what it can become (read-only)
@@ -19,7 +19,7 @@ canon facts convert content.DateTimeOriginal --to time --allow removal=2 --yes \
 | `--yes` | Convert (default is a dry run) |
 | `--reason <why>` | Attach a reason to the [decision record](../../concepts/decisions.md) |
 
-The key may be given as Canon prints it, in quotes or not ([Quoting](../../reference/filter.md#quoting)). The conversion takes no paths and no `--where`: a key's type belongs to the key, so it converts every fact of the key, on every root, suspended roots included.
+A conversion takes no paths and no `--where`: it converts every fact of the key, on every root, suspended roots included.
 
 ## What a Key Holds
 
@@ -41,15 +41,6 @@ Can convert to:
 `canon facts convert content.DateTimeOriginal --to time` to preview
 `canon facts convert content.DateTimeOriginal --to number` to preview
 ```
-
-A type the key cannot be converted to is named with the reason:
-
-```
-Cannot convert to:
-  time    a number cannot be converted to a time; numbers that are years can go through text
-```
-
-Durations are stored as numbers; `--to duration` says how to import them with the `duration` hint ([Type Hints](../enrich/import-facts.md#type-hints)).
 
 ## The Preview
 
@@ -75,7 +66,7 @@ Every fact falls in one class:
 |---|---|---|
 | unchanged | The same value; a change of spelling only | nothing |
 | lossy | Converts, but loses something the value carried | `--allow loss=N` |
-| removed | Cannot be read as the target type | `--allow removal=N` |
+| removed | Cannot be converted to the target type | `--allow removal=N` |
 
 **Text to time** ([How Canon interprets a time](../../concepts/facts.md#how-canon-interprets-a-time)):
 
@@ -96,8 +87,6 @@ Every fact falls in one class:
 
 **Any type to text** is always unchanged: a number in its shortest spelling, a time in the spelling [`worklist --emit`](../enrich/worklist.md#emitting-existing-facts) writes.
 
-`--list` prints the class, the value, what it becomes, the path, and where the source is (`suspended`, `no longer present`, `archive copy`, `excluded`, `hidden`). A tab, a newline or a backslash in a field is escaped; with `-0`, nothing is. Canon does not keep this list: `--list > file` before converting does.
-
 ```
 $ canon facts convert DateTimeOriginal --to time --list
 removed	0000:00:00 00:00:00		/path/to/photos/c.jpg	
@@ -106,7 +95,7 @@ removed	0000:00:00 00:00:00		/path/to/backup/d.jpg	suspended
 
 ## Converting
 
-`--yes` converts, all or nothing, with each lossy and removed count acknowledged as the preview stated it:
+`--yes` converts, all or nothing. Give each lossy and removed count as the preview shows it:
 
 ```
 $ canon facts convert DateTimeOriginal --to time --allow removal=2 --yes --reason "the tool wrote dates as text"
@@ -117,30 +106,6 @@ content.DateTimeOriginal is of type time.
 `canon trail show 5` to read this conversion later
 ```
 
-A count that no longer matches the conversion refuses it, and nothing changes:
-
-```
-$ canon facts convert DateTimeOriginal --to time --allow removal=1 --yes
-content.DateTimeOriginal → time: not converted; --allow does not match the conversion now
-  --allow removal=1 given; the conversion removes 2 facts
-`canon facts convert content.DateTimeOriginal --to time` to see what changed
-`canon facts convert content.DateTimeOriginal --to time --allow removal=2 --yes` to convert
-```
-
-The conversion is recorded as a [decision](../../concepts/decisions.md) with no receipt; `canon trail show <id>` prints its summary.
-
-The conversion holds the database's write lock while it runs, a few seconds on a large key. Commands that only read go on; commands that write wait up to 30 seconds, then stop with `database is locked`.
-
 ## After the Conversion
 
-The next import reads each value as the key's new type ([The Key Decides](../enrich/import-facts.md#the-key-decides)); the preview's `After:` line says what that means. If the tool keeps writing a value the conversion removed, every import skips it; the lasting fix is the tool writing the right type ([Type Hints](../enrich/processors.md#type-hints)).
-
-Converting may change what a manifest's naming pattern produces.
-
-Converting back restores every unchanged value, in the spelling converting to text gives. Lost and removed values come back by importing them again.
-
-## See also
-
-- [`canon facts`](../query/facts.md) — the Type column that names a key of mixed type
-- [`facts delete`](facts-delete.md) — remove facts you do not want
-- [Value Types](../../concepts/facts.md#value-types)
+Converting back restores every unchanged value, though not always its original spelling. Lost and removed values come back by importing them again.

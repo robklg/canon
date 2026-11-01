@@ -1,14 +1,6 @@
-# Source vs. Object
+# Sources and Objects
 
-The relationship between sources and objects underlies Canon's deduplication and archive tracking.
-
-## Sources Are Locations
-
-When a [root](roots.md) is scanned, Canon indexes every file it finds as a **source**. Each source represents a specific file at a specific path.
-
-## Objects Are Content
-
-When sources are hashed, Canon creates or links them to **objects**. An object represents the underlying content, independent of where it was found.
+A **source** is a file on disk, at one [root](roots.md) and relative path. An **object** is content, identified by its SHA-256 hash. Two files with identical bytes have the same hash and share one object, wherever they are found.
 
 ```
 Source A: /backup1/photos/IMG_001.jpg  ─┐
@@ -16,30 +8,28 @@ Source B: /backup2/old/IMG_001.jpg     ─┼─► Object (hash: abc123...)
 Source C: /downloads/photo.jpg         ─┘
 ```
 
-All three sources above have identical content, so they reference the same object.
+For each source Canon tracks:
 
-## Fact Sharing
+- **Location**: Root path + relative path within the root
+- **Identity**: Device ID and inode for move detection
+- **Metadata**: Size and modification time
+- **Integrity**: Partial hash (first + last 8KB) for validation during transfers
+- **State**: A `basis_rev` counter that increments when size or mtime changes
 
-When a source is linked to an object:
+Hashing, by default part of [scanning](../commands/roots/scan.md), links a source to its object. Objects enable:
 
-- **Content facts** (like EXIF metadata) can be stored on the object and become available to all sources with that hash
-- **Source facts** (like file path) remain specific to each source
-
-Import a fact once, and it is available everywhere that content exists.
-
-## Archive Tracking
-
-Canon uses the source-object relationship to track archiving progress:
-
-- When you archive a file, Canon copies it to an archive root and records the object's hash
-- Any source with that same hash is now considered "archived"
-- The `coverage` command shows how many of your sources exist in an archive
-
-## Hashing
-
-By default, Canon hashes all files during scanning. Since hashing can be time-consuming for large collections, you can:
-
-- Use `--no-hash` during scan to skip hashing initially
-- Hash selectively via the [enrichment pipeline](../commands/enrich/index.md), targeting specific file types
+- **Deduplication**: Multiple sources can point to the same object
+- **Archive tracking**: When content exists in an archive, all sources with that hash count as archived
+- **Fact sharing**: A content fact stored on the object is available on all sources with that content
 
 Unhashed sources cannot be linked to objects, so they cannot be deduplicated or tracked for archive coverage.
+
+## Empty files are contentless
+
+A zero-byte file has no content, so Canon treats its source as **contentless**. Every
+empty file shares the one empty-content object, so its hash identifies nothing.
+
+- **In counts**: never [covered](resolution.md#standings), archived or unresolved, and
+  never a block on [retirement](retirement.md).
+- **As a file**: ordinary. `ls` finds it, it can be excluded, and archive operations
+  take it along with its directory, so a verbatim directory copy keeps its empty files.

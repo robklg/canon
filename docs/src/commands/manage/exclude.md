@@ -1,6 +1,6 @@
 # canon exclude
 
-Manage source [exclusions](../../concepts/exclusion.md). Excluded sources are skipped by most commands.
+Source [exclusions](../../concepts/exclusion.md): sources most commands skip.
 
 ```bash
 # Mark sources as excluded (e.g., small files, temp files)
@@ -21,47 +21,20 @@ canon exclude set --where 'source.ext=bak' --yes
 
 # View excluded sources
 canon ls --include excluded --where 'excluded?'
-canon ls --include excluded --where 'excluded?' /path/to/photos
 
 # Remove exclusions
 canon exclude clear
 canon exclude clear --where 'source.ext=tmp'
 
-# Preview what would be cleared
-canon exclude clear --where 'source.ext=tmp' --dry-run
-
 # Skip confirmation prompt
 canon exclude clear --yes
 ```
 
-When excluding or clearing more than one source, a confirmation prompt shows the count, root spread, and (for `exclude set`) archive coverage before proceeding. Use `--yes` to skip the prompt, or `--dry-run` to preview without executing.
-
-`!=`, `!~`, `NOT IN` and `NOT` select sources with no value too, so the count under a negated key says how many of them there are, and a time compared with a finer date says how many values it could not place ([What an Acting Command States](../../reference/filter.md#what-an-acting-command-states)):
-
-```
-$ canon exclude set /photos --where 'Make != Canon' --dry-run
-Would exclude 2,140 sources:
-  of which 312 have no Make
-  /photos/2011/a.jpg
-  ...
-```
-
-The lines stand under the count in the preview, the confirmation and the summary `--yes` prints, and the decision's summary keeps them. `exclude duplicates` counts the copies it would exclude. Where nothing is excluded, a time line with sources not selected still prints, under the sentence saying there is nothing to exclude or clear.
-
-Given several paths, one that holds no known sources (an empty folder matched by a shell glob, say) is skipped and named before the ceremony, and the rest proceed:
-
-```
-$ canon exclude set /photos/2011 /photos/2012 --dry-run
-no sources known at /photos/2012 — skipped
-Would exclude 1 sources:
-  /photos/2011/a.jpg
-```
-
-The line appears before any confirmation, under `--yes` and `--dry-run` alike. A skipped path never enters the decision record. See [Path scope](../index.md#common-options) for the rule in full.
+A filter with `!=`, `!~`, `NOT IN` or `NOT` also selects sources with no value; the preview [says how many](../../reference/filter.md#what-an-acting-command-states).
 
 ## canon exclude duplicates
 
-Automatically exclude duplicate files while keeping copies in a preferred location.
+Exclude duplicates, keeping the copies in a preferred location.
 
 ```bash
 # Exclude duplicates, keeping files under /preferred/path
@@ -77,11 +50,9 @@ canon exclude duplicates /scope/path --prefer /preferred/path --yes
 canon exclude duplicates /scope/path --prefer /preferred/path --where 'source.ext=jpg'
 ```
 
-When excluding more than one source, a confirmation prompt shows the count, number of duplicate groups, and skip statistics before proceeding. Use `--yes` to skip the prompt.
-
 ## canon exclude set-object / clear-object
 
-Exclude content by **hash** rather than by path. Object-level exclusion is universal: it affects *every* source sharing that content, in source roots and archive roots alike. Use it when content is unwanted wherever it turns up: corrupted files, known junk, the same clip scattered across storage.
+Exclude content by **hash** rather than by path, affecting every source sharing that content ([two levels](../../concepts/exclusion.md#two-levels)).
 
 ```bash
 # Exclude by a file's content (looks up its hash)
@@ -93,39 +64,26 @@ canon exclude set-object /scope --where 'content.mime=application/octet-stream' 
 # Exclude by hash directly (excluding empty content requires this explicit form)
 canon exclude set-object --hash <content-hash> --yes
 
-# Restore a content-level exclusion (hash as shown by `exclude list-objects`)
+# Restore a content-level exclusion (the full hash; list-objects prints its first 16 characters)
 canon exclude clear-object <content-hash>
 
 # List content-level exclusions
 canon exclude list-objects
 ```
 
-`exclude set-object` defaults to a dry-run; pass `--yes` to execute. See [Objects](../../concepts/object.md) for how content-level exclusion differs from path-level source exclusion.
+`exclude set-object` defaults to a dry-run; pass `--yes` to execute.
 
-Object exclusion is about the content everywhere, so it reaches copies on [suspended roots](../roots/roots.md) too — and says how many, under the sources line that count is a share of:
-
-```
-Would exclude 2 objects affecting 5 sources (4 in source roots, 1 in archives):
-  of which 1 on suspended roots
-```
-
-The line prints whether you are previewing or running with `--yes`. Under a negated key, the count below it is in objects: an object counts when none of its selected sources has a value (`of which 290 objects have no Make`).
-
-Nothing else is said about suspended roots. Suspending is how you take content out of scope, so `exclude` — like every other act — passes over what stands behind a closed door without remarking on it. A run that finds nothing outside them says so plainly.
-
-**How exclusions affect other commands:**
+## How exclusions affect other commands
 
 | Command | Default behavior | Override |
 |---------|------------------|----------|
-| `ls` | Skips excluded | `--include excluded` or `--excluded` filter mode |
+| `ls` | Skips excluded | `--include excluded` |
 | `worklist` | Skips excluded | `--include excluded` |
 | `facts` | Skips excluded, shows count | `--include excluded` |
-| `coverage` | Stats on included only | `--include excluded` shows excluded dimension |
-| `cluster generate` | Always skips excluded | No override (hard gate) |
-| `apply` | Blocks if manifest has excluded | No override (hard gate) |
-
-Exclusions are stored directly on sources and objects in the database.
+| `coverage` | Counts non-excluded sources | None |
+| `cluster generate` | Always skips excluded | None |
+| `apply` | Blocks if manifest has excluded | None |
 
 ## Provenance
 
-Every exclusion is recorded as a [decision](../../concepts/decisions.md). When an archive root is registered and active, a receipt listing the affected sources lands flat in the archive ledger root's `.canon-ledger/`; with none available the exclusion still records, and the decision's summary names why it carries no receipt. `exclude set`, `clear`, `duplicates`, and `set-object` accept `--reason` to annotate why; the global `--no-receipt` flag skips the receipt file for one invocation. See [Receipts](../../concepts/decisions.md#receipts) for placement and per-item detail.
+Every exclusion is recorded as a [decision](../../concepts/decisions.md), with a [receipt](../../concepts/decisions.md#receipts) where an archive root is available. `exclude set`, `clear`, `duplicates`, and `set-object` accept `--reason`.

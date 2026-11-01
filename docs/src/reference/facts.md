@@ -1,26 +1,24 @@
 # Facts Reference
 
-Facts are key-value metadata. See [Concepts: Facts](../concepts/facts.md) for an overview.
+Facts are key-value metadata. See the [overview](../concepts/facts.md) and [key names](../concepts/facts.md#reading-a-keys-name).
 
 ## Namespaces
 
 | Namespace | Description |
 |-----------|-------------|
-| `source.*` | Source facts: read from what the scanner records (path, size, mtime) |
+| `source.*` | Source facts: taken from what the scanner records (path, size, mtime) |
 | `content.*` | Content facts: imported (EXIF, mime type), and the content hash |
-
-The `content.` prefix is optional when querying. For example, `Make=Apple` is equivalent to `content.Make=Apple`. A name that is a [built-in key](builtins.md#built-in-keys), such as `size` or `filename`, reads as that key.
 
 ## Values
 
-Facts can hold three value types, and the path source facts a fourth:
+The [value types](../concepts/facts.md#value-types). Only the path source facts have the type path:
 
-| Type | Examples | Notes |
-|------|----------|-------|
-| Text | `Apple`, `image/jpeg`, `"2019"` | Compared in character order. A value that reads as a number or a time is quoted to be text ([Filters](filter.md#values-and-types)) |
-| Number | `1024`, `3.14`, `-5`, `1e6` | Compared as numbers |
-| Time | `2024-07-23 14:30:45`, `2024-07`, `2024` | Printed in your local time at the precision it was written; compared as spans of time. See [How Canon interprets a time](../concepts/facts.md#how-canon-interprets-a-time) |
-| Path | `source.rel_path` | Source facts only; compared as text, read in segments with [accessors](#path-accessors) |
+| Type | Examples |
+|------|----------|
+| Text | `Apple`, `image/jpeg`, `"2019"` |
+| Number | `1024`, `3.14`, `-5`, `1e6` |
+| Time | `2024-07-23 14:30:45`, `2024-07`, `2024` |
+| Path | `source.rel_path` |
 
 ## Modifiers
 
@@ -28,7 +26,7 @@ Transform values using `|` syntax:
 
 ### Time Modifiers
 
-For time values (like `source.mtime` or EXIF dates), and for text written as a time. Each works in [your local time](../concepts/facts.md#how-canon-shows-a-time), and no output has an offset. A modifier gives a number or a time, which is how a filter compares it; the Prints column is how `facts` and a pattern show it. The examples use the time `2024-07-23 14:30:45`:
+Time modifiers work on time values (like `source.mtime` or EXIF dates) and on text written as a time. Each works in [your local time](../concepts/facts.md#how-canon-shows-a-time). The examples use the time `2024-07-23 14:30:45`:
 
 | Modifier | Gives | Prints | In a filter | Needs a time known to the |
 |----------|-------|--------|-------------|---------------------------|
@@ -46,17 +44,11 @@ For time values (like `source.mtime` or EXIF dates), and for text written as a t
 | `weekday` | A number, 1–7 from Monday | `Tuesday` | `\|weekday=2` or `Tuesday` | day |
 | `quarter` | A number, 1–4 | `Q3` | `\|quarter=3` or `Q3` | month |
 
-With `=`, `!=` or `IN`, a number outside a modifier's range, such as `|month=13`, gives an error, and so does a name in another case (`|weekday=tuesday`; for that, see [Chaining](expr.md#chaining)). Ordered, any whole number works: `|hour<24`, `|month>0`. A year is written with four digits. A time of day has no date, so after `|time` only `|hour`, `|minute`, `|second` and the text modifiers work on it; those three also read a time of day stored as text (`14:30:00`).
-
-`|week` is the ISO week, whose week 01 can start in the year before: beside `|year`, a pattern `{content.Taken|year}/{content.Taken|week}` puts 2024-12-30 in `2024/01`. Canon has no modifier for the year an ISO week belongs to.
-
-A time written coarser than a modifier needs has no value for it: `|month` on a time known only to `2024` has none, and neither has `|hour` on a time known only to `2024-07-23`. A time is never padded to a precision nobody wrote. Where there is no value, [`canon facts`](../commands/query/facts.md) counts the source under `(no value)`, `--where 'content.DateTimeOriginal|month?'` leaves it out, and `--where 'NOT content.DateTimeOriginal|month?'` selects it ([Filters](filter.md)).
-
-`|datetime` and `|time` give a time at its own precision: `|datetime` prints exactly what Canon prints for the bare time (`2024-07`, `2024-07-23 14:30`), and `|time` prints `14:30` for a time known to the minute and `14:30:45` for one known to the second or finer.
+A time coarser than the last column has no value for that modifier ([Precision](../concepts/facts.md#precision)).
 
 ### String Modifiers
 
-These work on text and paths, and on the printed form of another modifier's result ([Chaining](expr.md#chaining)). Directly on a number or a time key they give an error. On a path, `lowercase`, `uppercase` and `capitalize` give a path, and `capitalize` changes each name.
+These work on text and paths, and on the printed form of another modifier's result ([Chaining](expr.md#chaining)).
 
 | Modifier | Description | Example |
 |----------|-------------|---------|
@@ -72,14 +64,14 @@ These work on text and paths, and on the printed form of another modifier's resu
 | Modifier | Takes | Gives |
 |----------|-------|-------|
 | `number` | Text, as a number; a number, as itself | A number. Text that is not a number has no value |
-| `bucket` | A number from 0 up | A range label: `0`, then powers of ten, `1-to-10`, `10-to-100`, `1K-to-10K`, `0.00001-to-0.0001`. A number below zero has no value: \|bucket groups numbers from 0 up |
+| `bucket` | A number from 0 up | A range label: `0`, then powers of ten, `1-to-10`, `10-to-100`, `1K-to-10K`, `0.00001-to-0.0001`. A number below zero has no value |
 | `bucket(a,b,c)` | Any number, negative ones included | A range label: `under-a`, `a-to-b`, `b-to-c`, `c-and-up`, a number below zero written with `minus-` (`\|bucket(-90,0,90)` gives `under-minus-90`, `minus-90-to-0`, `0-to-90`, `90-and-up`) |
 
-Example: `content.numtext|number>=10` compares text such as `9` and `10` as numbers, and `source.size|bucket` groups file sizes by order of magnitude. A range includes its lower edge and not its upper: `1K-to-10K` holds 1,000 up to 9,999, since `K` is 1,000, `M` 1,000,000 and `G` 1,000,000,000. A label holds only letters, digits, `-` and `.`. It is compared with `=`, `!=` and `IN`, typed as Canon prints it (`source.size|bucket(1e6)=1000000-and-up`); ordering a label gives an error.
+A range includes its lower edge and not its upper: `1K-to-10K` holds 1,000 up to 9,999, since `K` is 1,000, `M` 1,000,000 and `G` 1,000,000,000. A label is compared with `=`, `!=` and `IN`, and typed the way Canon shows it (`source.size|bucket(1e6)=1000000-and-up`).
 
 ## Path Accessors
 
-Python-style indexing for path values:
+Python-style indexing for path values, and for text, which an accessor splits into path segments (`content.SourceFile[-1]`):
 
 | Syntax | Meaning |
 |--------|---------|
@@ -88,16 +80,10 @@ Python-style indexing for path values:
 | `key[1:3]` | Slice segments 1 and 2 |
 | `key[:-1]` | All but last segment |
 
-Accessors can be combined with modifiers:
+An index past the end has no value; a slice past the end is a path with no segments.
 
 ```
 source.rel_path[-1]        → IMG_001.jpg
 source.rel_path[-1]|stem   → IMG_001
 source.rel_path[0]         → photos
 ```
-
-## See Also
-
-- [Source Facts and Built-in Keys](builtins.md) - The keys Canon provides without enrichment
-- [Filters](filter.md) - Using facts in queries
-- [Pattern Expressions](expr.md) - Using facts in archive patterns

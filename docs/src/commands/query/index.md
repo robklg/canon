@@ -1,13 +1,11 @@
 # Querying
 
-After scanning and enriching, you can explore your indexed files.
+- [`ls`](ls.md): sources matching [filter expressions](../../reference/filter.md)
+- [`facts`](facts.md): available facts and their coverage
+- [`compare`](compare.md): overlap between two directories
+- [`survey`](survey.md): a selection's archive status, related locations and unique content
+- [`sweep`](sweep.md): reduction opportunities across all roots, ranked
+- [`trail`](trail.md): the decision trail
+  - [`trail crossings`](trail-crossings.md): what was transferred between two places
 
-- [`ls`](ls.md) - List sources matching [filter expressions](../../reference/filter.md)
-- [`facts`](facts.md) - Discover available facts and check coverage
-- [`compare`](compare.md) - Compare directories to find overlap
-- [`survey`](survey.md) - Survey a selection for archive status, related locations, and unique content
-- [`sweep`](sweep.md) - Rank reduction opportunities across all roots
-
-All query commands except `sweep` support path scoping (limit to a subdirectory) and `--where` filters; `sweep` always operates across all roots.
-
-**Scope defaulting**: When no paths are given, query commands scope to the current directory if it's inside a known root. If the current directory is not inside any root, commands operate globally across all roots. Use `--global` to force global scope while inside a root.
+`ls`, `facts`, `compare` and `survey` take `--where` filters. Every command here but `sweep` takes a path. [Common options](../index.md#common-options) covers scope defaulting.

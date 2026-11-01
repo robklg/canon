@@ -1,6 +1,6 @@
 # canon note
 
-Annotate locations with timestamped notes. A note is a quick observation about a directory scope: "interesting photos from 2016 trip", "possible duplicates of archive set", "needs review". Notes surface automatically in [`survey`](../query/survey.md) output.
+Timestamped notes on locations: quick observations about a directory scope. Notes also show in [`survey`](../query/survey.md#notes).
 
 ```bash
 # Add a note to the current directory
@@ -26,10 +26,6 @@ canon note -r /mnt/old-drive
 canon note --global --by-scope
 canon note -r --by-scope
 
-# Show more entries (or all)
-canon note --global --limit 20
-canon note --global --limit 0
-
 # Clear notes at the current scope
 canon note --clear
 
@@ -47,71 +43,50 @@ canon note --clear -r --yes
 | `-m <TEXT>` | Add a note with the given text. |
 | `-r`, `--recursive` | List or clear notes for scope and all descendants. |
 | `--global` | List all notes across all roots. |
-| `--by-scope` | Group by location, show most recent note per location (spatial view). |
+| `--by-scope` | Group by location, show most recent note per location. |
 | `--limit <N>` | Maximum entries to display (default: 10, 0 = unlimited). |
 | `--clear` | Clear notes at the scope (or subtree with `-r`). |
 | `--yes` | Skip confirmation prompt (recursive clear only). |
 
-## The journal model
-
-Notes use an append-only journal model. Each `-m` call adds a new timestamped entry; notes are never replaced or edited in place. Multiple notes can exist at the same scope, forming a chronological log of observations. Clearing is the only way to remove notes.
-
-This is deliberate: notes capture evolving understanding. "Check for duplicates" and "confirmed: 80% overlap with backup" are two entries in the same log.
+Notes are a journal: each `-m` adds a timestamped entry, and notes are never edited in place.
 
 ## Modes
 
 ### Add (`-m`)
 
-Adds a note at the resolved scope. Prints confirmation to stderr.
-
 ```bash
-$ canon note -m "phone backup from 2019, mostly photos"
-Note added: /mnt/old-drive/phone-export
+$ canon note phone-export -m "phone backup from 2019, mostly photos"
+Note added: phone-export
 ```
 
 ### View (default)
 
-Shows notes at the exact scope, with spatial context indicators showing how many notes exist above (on parent scopes) and below (on descendant scopes).
+`canon note` shows the notes at the exact scope, with counts of the notes above and below it:
 
 ```bash
 $ canon note
-/mnt/old-drive/phone-export:
+phone-export:
   2026-03-15  phone backup from 2019, mostly photos
   2026-03-20  confirmed: 95% archived, 12 unique files remain
 
-2 noted locations below
+1 noted location below (-r to show)
 ```
-
-When there are no notes at the scope but notes exist nearby, the spatial indicators appear alone:
-
-```
-1 note on parent scopes · 3 noted locations below
-```
-
-When CWD is not under any known root, view mode falls back to the global temporal list.
 
 ### Temporal listing (`--global`, `-r`)
 
-Shows the most recent notes ordered by date: oldest at top, most recent at the bottom (closest to the prompt). Capped at 10 entries by default.
+The most recent notes, by date:
 
 ```bash
-$ canon note --global
-Photos/2011            2026-03-10  mixed bag, vacation + school stuff, worth sorting
-old-laptop/Desktop     2026-03-10  raket project — Daniel's, check with him
-old-laptop/Music       2026-03-12  check for unique .flac files
-Photos/2011            2026-03-15  tagged vacation photos, school stuff still needs triage
-Photos/2011/vacation   2026-03-20  subset tagged and clustered
-(14 more notes, 6 more locations)
+$ canon note --global --limit 5
+/mnt/photos/2011                      2026-03-15  tagged vacation photos, school stuff still needs triage
+/mnt/old-drive/phone-export           2026-03-20  confirmed: 95% archived, 12 unique files remain
+/mnt/photos/2011/vacation             2026-03-20  subset tagged and clustered
+/mnt/old-drive/phone-export/vacation  2026-03-22  unique sunset photos here
+/mnt/old-drive/other                  2026-03-23  not sure what this is
+(4 more notes, 2 more locations)
 ```
 
-The footer (on stderr) shows how many more notes and locations exist beyond the cap. Use `--limit` to see more:
-
-```bash
-$ canon note --global --limit 20    # show 20 entries
-$ canon note --global --limit 0     # show all entries
-```
-
-Recursive listing (`-r`) is the same but scoped to a subtree:
+`-r` lists a subtree the same way:
 
 ```bash
 $ cd /mnt/old-drive
@@ -119,84 +94,40 @@ $ canon note -r
 phone-export           2026-03-15  phone backup from 2019, mostly photos
 phone-export           2026-03-20  confirmed: 95% archived, 12 unique files remain
 phone-export/vacation  2026-03-22  unique sunset photos here
+other                  2026-03-23  not sure what this is
 ```
 
 ### Spatial listing (`--by-scope`)
 
-Shows one line per location: the most recent note and the total note count for that location. Locations ordered by their most recent note date, capped at 10.
+One line per location: its most recent note and its note count, capped at 10.
 
 ```bash
-$ canon note --global --by-scope
-old-laptop/Music       (1)  2026-03-12  check for unique .flac files
-Photos/2012/vacation   (2)  2026-03-14  need to check overlap with phone backup
-old-laptop/Desktop     (2)  2026-03-25  raket — checked with Daniel, archive
-Photos/2011/vacation   (4)  2026-03-28  beach photos assembled, ready to cluster
-(6 more locations with notes)
-```
-
-The note count shows which locations have longer histories; view one in full with `canon note <path>`.
-
-Inside a root, `--by-scope` without `--global` or `-r` implies `-r`, a spatial map of the subtree:
-
-```bash
-$ cd /mnt/old-drive
-$ canon note --by-scope
-phone-export           (3)  2026-03-20  confirmed: 95% archived, 12 unique files remain
-phone-export/vacation  (1)  2026-03-22  unique sunset photos here
+$ canon note --global --by-scope --limit 4
+/mnt/old-drive/phone-export           (2)  2026-03-20  confirmed: 95% archived, 12 unique files remain
+/mnt/photos/2011/vacation             (1)  2026-03-20  subset tagged and clustered
+/mnt/old-drive/phone-export/vacation  (1)  2026-03-22  unique sunset photos here
+/mnt/old-drive/other                  (1)  2026-03-23  not sure what this is
+(3 more locations with notes)
 ```
 
 ### Clear (`--clear`)
 
-Without `-r`, clears notes at the exact scope only; no confirmation needed.
+Without `-r`, `--clear` clears the notes at the exact scope, with no confirmation.
 
 ```bash
 $ canon note --clear
-Cleared 2 notes at /mnt/old-drive/phone-export
+Cleared 2 notes at phone-export
 ```
 
-With `-r`, clears all notes in the subtree. Shows a plan and prompts for confirmation:
+With `-r`, it clears all notes in the subtree, after confirmation:
 
 ```bash
 $ canon note --clear -r /mnt/old-drive
-Clear 5 notes across 3 locations under /mnt/old-drive?
+Clear 3 notes across 3 locations under /mnt/old-drive?
 Proceed? [y/N] y
-Cleared 5 notes
+Cleared 3 notes
 ```
-
-## CWD defaulting
-
-When no path argument is given, `canon note` uses the current working directory, the same pattern as other Canon commands.
-
-- **CWD inside a root**: scope resolves to `(root_id, rel_path)` for that location
-- **CWD not in any root**: view mode falls back to global temporal list; add and clear modes error
-
-## Notes at a suspended location
-
-Reading is unaffected: the view, the listings and the [trail](../query/trail.md) work at a [suspended](../roots/roots.md#suspending-roots) location, with the pause stated once. Adding or clearing a note there is rejected by name, with the way back.
-
-## The directional model
-
-The listing modes look in different directions:
-
-- **View** (default): looks at *this level* — notes attached to the exact scope, with counts pointing up and down
-- **Recursive** (`-r`): looks *down* — notes at this scope and everything below it
-- **Global** (`--global`): looks at *everything* — all notes across all roots
-
-Both temporal and spatial modes work with either `--global` or `-r`. Temporal (by date) is the default; `--by-scope` switches to spatial (by location).
-
-## Notes in survey
-
-Notes surface automatically in [`survey`](../query/survey.md) output, appearing after the scope header. Survey shows notes from the scope and its descendants (the subtree), capped at 5 most recent entries. See the [survey documentation](../query/survey.md#notes) for details.
 
 ## Notes and the decision trail
 
-Notes hold thoughts ("what did I think about this?"); the [decision trail](../query/trail.md) holds actions ("what did I do?"). Don't write notes to record actions: effectful commands record themselves, and `--reason` attaches your why. [`canon trail`](../query/trail.md) shows both as one timeline, with notes visually distinct.
-
-## Distinction from other annotations
-
-Canon has several annotation mechanisms, each serving a different purpose:
-
-- **Notes** (`canon note`): Location-level observations during exploration. Timestamped journal. Surface in survey.
-- **Root comments** (`canon roots comment`): A single descriptive label on a root. Shown in `canon roots` listings.
-- **Manifest notes** (`# === Notes ===` in manifest files): Free-form text in a specific manifest. Preserved across `cluster refresh`.
-- **Facts** (`canon import-facts`): Structured key-value metadata on files or content. Used in filters and patterns.
+Notes hold thoughts; the [decision trail](../query/trail.md) holds actions. Effectful commands record themselves, and `--reason` attaches your reason.

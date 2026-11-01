@@ -30,6 +30,7 @@ It contains:
 |------|---------|
 | `canon.db` | SQLite database (roots, sources, objects, facts) |
 | `aliases.toml` | Filter aliases (optional — see [Aliases](reference/filter.md#aliases)) |
+| `config.toml` | Ledger settings (see [Recording Modes](concepts/decisions.md#recording-modes)) |
 
 The directory is created automatically on first use.
 
@@ -40,10 +41,10 @@ You can relocate canon home with the `CANON_HOME` environment variable or the `-
 ```bash
 # Via environment variable
 export CANON_HOME=/mnt/archive/.canon
-canon scan /photos
+canon scan --add --role source /photos
 
-# Via flag (takes precedence over environment variable)
-canon --canon-home /tmp/test-canon scan /photos
+# Via flag
+canon --canon-home /tmp/test-canon scan --add --role source /photos
 ```
 
 Precedence: `--canon-home` flag > `CANON_HOME` env var > `~/.canon/`
@@ -55,4 +56,4 @@ canon --version
 canon --help
 ```
 
-You should see the version, then the list of available commands. Continue with [Getting Started](getting-started.md).
+Continue with [Getting Started](getting-started.md).

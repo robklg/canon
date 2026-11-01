@@ -1,21 +1,14 @@
 # Scan
 
-Scan directories and index files.
+Index directories or single files into a [root](../../concepts/roots.md): a directory is walked, and a named file is scanned on its own. By default new and changed files are hashed.
 
-When you scan a [root](../../concepts/roots.md), Canon walks the directory tree starting at the given path(s). A path that names a single file is observed on its own, without a walk.
-For each file it collects basic metadata, such as last modification time and size, and by default computes the content hash.
-After scanning, Canon knows about the existence of all [sources](../../concepts/source.md) in that root; hashed sources are linked to [objects](../../concepts/object.md).
-
-Collections of files that belong together can be scanned as separate roots. Each root can be given a comment, to recall what it contains or to note what you discovered there.
-
-To have Canon treat an already organized location as your canonical archive, scan it with `--role archive` from the start. The role is set when the root is added; to change it, remove the root and re-add it with the new role.
-You can add multiple archive roots, for instance one for a music collection and another for eBooks.
+A root's role is set when it is added; to change it, remove the root and re-add it with the new role.
 
 ## When to run scan
 
-Re-scan a root after its contents change, so Canon detects the changes and no files are missed for archiving. When archiving, Canon always checks the validity of the files to be archived.
+Re-scan a root after its contents change.
 
-Scan also serves periodic integrity verification of your archives: `--verify` recomputes hashes to detect corruption, and Canon exits with a non-zero status if any mismatches are found, making it suitable for cron jobs that alert on failure.
+`--verify` recomputes hashes for all files, even unchanged ones, and exits non-zero if a file's hash changed without its mtime changing, so it suits cron jobs that alert on failure.
 
 ## Examples
 
@@ -35,6 +28,10 @@ canon scan --add --role archive /path/to/archive
 # Re-scan an existing root (--role optional, validated against existing)
 canon scan /path/to/photos
 
+# Re-scan all roots, or all roots of one role
+canon scan --all
+canon scan --all --role archive
+
 # Scan just a subtree within an existing root
 canon scan /path/to/photos/2024
 
@@ -47,17 +44,16 @@ canon scan --no-hash /path/to/photos
 # Verify archive integrity by recomputing all hashes (good for cron jobs)
 canon scan --verify /Volumes/Archive
 
-# Mark sources under a deleted folder as not present
-canon scan --missing /path/to/deleted/folder
+# Disable mount protection, when device IDs change between scans (e.g., NAS remounts)
+canon scan --ignore-device-id /Volumes/NAS
+
+# Mark sources under a deleted directory as not present
+canon scan --missing /path/to/deleted/directory
 ```
 
-**Several paths:** Every path is checked first, and a refused path stops the whole scan before anything is walked.
+**Hash computation:** `--no-hash` indexes files without hashing, for speed or to hash only certain kinds of files.
 
-**Hash computation:** By default, Canon computes content hashes for new and changed files during scan; hashes enable deduplication and archive tracking. Hashing can take long. Use `--no-hash` to index files without hashing, either for speed or when you intend to hash only certain kinds of files. Sources left without a hash are reported at the end of the scan and hashed by the next scan that hashes (see [Hash debt](#hash-debt)).
-
-**Integrity verification:** `--verify` recomputes hashes for all files, even unchanged ones. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.
-
-**Discovering untracked directories:** Use `--candidates` to find directories with files that aren't yet under any root, for instance when exploring a drive or backup to see what could be added:
+**Discovering untracked directories:** `--candidates` finds directories with files that aren't yet under any root:
 
 ```bash
 # Find candidate roots to add under a path
@@ -70,135 +66,45 @@ Candidate roots to add:
   /Volumes/Backup/imports  (1 directory with files)
 ```
 
-Directories under existing roots are skipped. When multiple subdirectories share a common ancestor that could be added as a single root, they're rolled up (unless that ancestor contains an existing root).
+**Single files:** Nothing else under the root is looked at. A named file that is gone is skipped with a warning, never recorded as deleted.
 
-**Scanning single files:** A path argument names a place, and a place can be a single file. Canon observes that file the way it observes a subtree of one: metadata read, the index updated, the content hashed. Nothing else under the root is looked at, so bringing a handful of changed files current costs a handful of reads rather than a walk:
+## Reading the summary
 
-```bash
-# Re-observe two files that changed
-canon scan /Volumes/Photos/2024/img_0042.jpg /Volumes/Photos/2024/img_0043.jpg
-```
-
-```
-Scanned 2 files: 0 new, 2 updated, 0 moved, 0 unchanged, 0 missing
-Hashed 2 files
-```
-
-The decision is recorded against the paths it was aimed at, so [`canon trail`](../query/trail.md) shows it at those files.
-
-A named file that is gone is skipped with a warning, never recorded as deleted: one look cannot tell a deleted file from an unmounted or a mistyped one. The warning says where to make that assertion:
-
-```
-Warning: skipping /Volumes/Photos/2024/img_0042.jpg: No such file or directory (os error 2)
-  If it is gone for good, record it with: canon scan --missing /Volumes/Photos/2024/img_0042.jpg
-```
-
-The pointer to `--missing` appears only where asserting a deletion would be sound: inside a live root, below its top, over content Canon has indexed, and where the storage those records name is the storage answering at the root now. That last check is what withholds the pointer over an unmounted volume: a mount point is still a folder — it is there, it is readable, and it is empty — so everything under it looks gone at every depth, and whether the path exists cannot tell that apart from a deletion. Such a path gets the warning alone. The check is made against the root's own storage, so if you keep a separate drive mounted *inside* a scanned folder, the pointer stays absent for content deleted on that drive even while it is attached — the warning is still shown, and `--missing` still works when you run it yourself. `--missing` works at file grain with the same recording as a folder, described below.
-
-A root is a folder, so `--add` and `--candidates` reject a file argument and name the directory to use instead. It is also a folder you chose: `/` is rejected, because every path would lie inside it and no scope could then mean less than everything.
-
-**Marking deleted paths as missing:** When you delete a folder that was under a scanned root, Canon still considers those files present. Re-scanning the parent would let Canon discover they're gone, but that can be expensive when the parent holds many other files. Use `--missing` to tell Canon directly that a path no longer exists:
-
-```bash
-# Deleted a backup folder: mark its 140 sources as not present
-canon scan --missing /Volumes/Backup/old-phone
-
-# Works with any path under a known root, including the root itself
-canon scan --missing /Volumes/Backup
-```
-
-The sources are marked as not present but remain in the database with their hashes and metadata intact. If the path reappears later (e.g., storage remounted), a normal scan will reconcile them back. Cannot be combined with `--all` or `--add`.
-
-The decision is recorded against the folder it was aimed at, so [`canon trail`](../query/trail.md) shows it at that location rather than as a global decision.
-
-**A scan never concludes a file was deleted just because it could not read it.** A locked file, a permission change, or a brief network drop stops a scan from reading a path it already indexed, but that is not evidence the file is gone: the source keeps its record exactly as it stood, counted in the summary as `skipped (read errors)`, and is reported again on the next scan that can read it. Only a path genuinely absent from a directory the walk could fully list is ever marked missing.
-
-**Deletions are recorded.** Whether Canon infers a deletion by re-scanning a parent (files that were present but weren't seen this time) or you mark one directly with `--missing`, the disappearance is captured as [decision provenance](../../concepts/decisions.md): each vanished source is linked to the scan decision, and a **source-local receipt** listing exactly what was lost is written to `.canon-ledger/` on the affected storage. Add `--reason` to say why; the reason travels into both the record and the receipt:
-
-```bash
-canon scan --missing /Volumes/Backup/old-phone \
-  --reason "Phone backed up to archive, originals confirmed"
-```
-
-Deletion is a recorded fate alongside archiving and exclusion: what the storage held, what you kept, released, or discarded, and why, stays reconstructible from the files alone. A deletion is recorded even when no archive root exists. To suppress the receipt for one run use `--no-receipt`; to disable recording entirely set `recording = "Off"` (see [Decision Provenance](../../concepts/decisions.md)).
-
-**Absolute paths need no current directory.** A shell whose working directory has been deleted (a root retired or unmounted in another window, for example) can still run `canon scan /some/absolute/path`. A relative path does need one, and says so:
-
-```
-Error: cannot resolve relative path './photos': the current directory is unavailable
-```
-
-Output shows what was found:
 ```
 Scanned 1234 files: 100 new, 5 updated, 2 moved, 1127 unchanged, 0 missing
 Hashed 105 files
 ```
 
-**Reading the counts:** `new` counts paths the index has not held before. `updated` counts files whose content changed at a path already indexed, whichever way the application saved them: written in place, or written to a temporary file and renamed over the path. A file whose content is recreated exactly as it was, by a restore or a deduplication pass, is neither new nor updated: it counts as unchanged, and the scan records where the file now sits.
-
-`moved` counts files found at a new path that Canon can tie to a path it already knew. A move is reported only when the content matches and the old path is confirmed gone. When either test fails, the file counts as `new` and the old path counts as `missing`: two accurate records rather than one guess. Rescanning storage that was remounted, or whose filesystem hands out fresh internal identifiers each session, reports nothing at all.
-
-**Hardlink companions.** A file can occupy several paths at once through hardlinks. Each path is its own source, sharing content with the others. A path that appears alongside an already-indexed file counts as `new`, and the summary states how many of the new paths are companions:
-
-```
-Scanned 31892 files: 27753 new (27751 hardlink companions of already-indexed files), 0 updated, 0 moved, 4139 unchanged, 0 missing
-```
-
-The first scan after upgrading reports this once, for every companion path in the library, and the counts can be large. The scan is otherwise ordinary: it can be interrupted and re-run, and the next scan reports nothing.
-
-**Unverified moves.** Checking whether a file moved means checking whether its old path is gone from the storage that recorded it. Two things make that check impossible: the root holding the old path cannot be read at all, or its directory is readable but its storage is not currently mounted, so everything under it would look gone whether it is or not. Either way the summary says so rather than assuming an answer:
-
-```
-Scanned 12 files: 3 new, 0 updated, 0 moved, 9 unchanged, 0 missing, 2 possible moves could not be verified
-```
-
-The files count as `new`, and stay that way: the old path keeps its own source until the root holding it is scanned again, which reports it missing. Canon does not join the two records afterwards.
-
-The same line appears for one scan after a root is remounted, because the remount renumbers the storage and the recorded identifiers have not caught up. Scanning that root refreshes them.
-
-**Skipped entries.** Only regular files become sources. Symlinks are skipped, and never followed. Named pipes, sockets and devices are skipped too, counted separately as `special files`. Both counts reach the summary, so a path visible on disk and absent from the index is accounted for:
-
-```
-Scanned 1043 files: 1043 new, 0 updated, 0 moved, 0 unchanged, 0 missing, skipped 214 symlinks
-```
-
-The counts say what the walk saw, so they repeat on every scan of the same directory, where `new` and `moved` say what changed.
-
-Some network clients, SMB shares in particular, present a symlink to the operating system as an ordinary file. Canon indexes what the operating system presents, so such a link becomes a source and is not counted here. Its content is the target's content, so both paths resolve to the same object.
+| Clause | Meaning |
+|---|---|
+| `new` | Paths not in the index before |
+| `updated` | Files whose content changed at a path already indexed |
+| `moved` | Files found at a new path, with matching content and the old path confirmed gone. Otherwise the file counts as `new` and the old path as `missing` |
+| `missing` | Indexed paths gone from disk |
+| `27753 new (27751 hardlink companions of already-indexed files)` | Each hardlink path is its own source |
+| `2 possible moves could not be verified` | The old path could not be checked. The files count as `new` |
+| `3 skipped (read errors)` | Files that could not be read, see [Deletions](#deletions) |
+| `skipped 214 symlinks`, `skipped 3 special files` | Only regular files become sources. Symlinks are never followed |
 
 ### Hash debt
 
-A source with no content hash is invisible to everything that reads content: coverage, duplicate detection, and cluster selection all pass over it. Canon states how many sources a scan leaves in that state:
+Coverage, duplicate detection, and cluster selection skip sources with no content hash.
 
 ```
 Scanned 4820 files: 4820 new, 0 updated, 0 moved, 0 unchanged, 0 missing
 4820 sources remain unhashed
 ```
 
-The count covers the paths this scan walked, and appears after any scan that leaves sources unhashed. When some of that debt is content the scan tried to read and could not, the line says how much:
-
-```
-Scanned 3 files: 0 new, 0 updated, 0 moved, 3 unchanged, 0 missing
-Hashed 2 files (2 from backlog)
-1 sources remain unhashed (1 could not be read)
-```
-
-The qualifier counts what is still in debt when the scan ends, so it is always part of the number in front of it, and it covers only files that hold no hash at all. Two neighbouring cases are reported elsewhere: a file that cannot be read during the walk never becomes a source, and appears as `skipped (read errors)` on the first line (see "Deletions are recorded" below for what happens to a file already indexed); and a file that `--verify` cannot re-read keeps the hash it already had, so it is not in debt and is reported only as a warning.
-
-Files that could not be read do not change the exit status: the non-zero exit is reserved for hash mismatches, which say something about the content rather than about access to it.
-
-The next scan that hashes reads them, whatever else it finds: a file Canon has never read is hashed even when nothing about it changed. The summary separates that backlog from work this scan caused, so a large pay-down is readable:
+The next scan that hashes reads them, and counts them as backlog:
 
 ```
 Scanned 4820 files: 0 new, 0 updated, 0 moved, 4820 unchanged, 0 missing
 Hashed 4820 files (4820 from backlog)
 ```
 
-Clearing a root indexed with `--no-hash` can take as long as hashing it the first time would have. The pass can be interrupted: what remains unhashed is reported again, and the next scan continues from there. A file that could not be read this time is warned about individually, counted in the line above, and stays in debt until a later scan reads it.
+Hashing can be interrupted: the next scan continues from there.
 
-`--verify` re-reads every file regardless, so it clears debt as a side effect and reports no backlog count.
-
-### Keeping continuity across a move
+## Moves
 
 Canon follows files that move within or between roots, provided it sees the destination:
 
@@ -213,8 +119,29 @@ mv /Volumes/Photos/inbox/trip /Volumes/Photos/2024/trip
 canon scan /Volumes/Photos
 ```
 
-Scanning a subtree is enough, as long as the destination is inside it, and so is naming the moved file's new path on its own: Canon checks the old path directly rather than needing to have walked it. Moving files to a different root works the same way, and only the destination root needs scanning for the move to be recognized.
+Scanning the destination is enough, also for a move between roots.
 
-Two cases are not followed. Edit the files and move them in the same step, and Canon reports `new` plus `missing` instead: nothing ties the two paths together once both the location and the content have changed. And a move out of a [suspended](roots.md) root is not followed, because a suspended root's contents keep the standing they had; unsuspend it and scan again.
+A file edited and moved in the same step is reported as `new` plus `missing`.
 
-In both cases the records stay: the new path is indexed, the old path is reported missing when its root is scanned, and the old path's deletion receipt names the decision that preceded it.
+## Deletions
+
+Use `--missing` to record that a path is gone without re-scanning its parent:
+
+```bash
+# Deleted a backup directory: mark its 140 sources as not present
+canon scan --missing /Volumes/Backup/old-phone
+
+# Works with any path under a known root, including the root itself
+canon scan --missing /Volumes/Backup
+```
+
+The sources are marked as not present but remain in the database with their hashes and metadata intact. If the path reappears later, a scan marks them present again.
+
+**A scan never concludes a file was deleted just because it could not read it.** The source keeps its record, and the summary counts it as `skipped (read errors)`.
+
+A deletion, inferred by a scan or marked with `--missing`, is recorded as a [decision](../../concepts/decisions.md) with a source-local receipt, even when no archive root exists:
+
+```bash
+canon scan --missing /Volumes/Backup/old-phone \
+  --reason "Phone backed up to archive, originals confirmed"
+```

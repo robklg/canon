@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks through a typical Canon workflow: scanning files, enriching with metadata, querying, orienting, archiving, and resolving what remains.
+A typical Canon workflow, from scanning to resolving what remains.
 
 ## Scanning
 
@@ -16,7 +16,7 @@ canon scan --add --role source --comment "Old backup, possibly duplicates" /Volu
 canon scan --add --role archive /Volumes/Archive
 ```
 
-By default, Canon computes content hashes during scanning. This enables deduplication and archive tracking.
+By default, Canon computes content hashes during scanning.
 
 ## Enriching
 
@@ -57,7 +57,7 @@ Survey a location to see how it relates to everything else you've indexed:
 canon survey /Volumes/OldDrive/photos
 ```
 
-The summary shows what's archived, which other locations share content, and how much exists only here. When you don't know where to work next, sweep ranks the places where one decision resolves the most:
+Sweep ranks the places where one action resolves the most:
 
 ```bash
 canon sweep
@@ -100,14 +100,14 @@ Files are copied to the archive with paths like:
 
 ## Resolving
 
-Content that isn't worth keeping is [excluded](concepts/exclusion.md) rather than deleted: nothing is destroyed, and the decision is recorded.
+Content that isn't worth keeping is [excluded](concepts/exclusion.md) rather than deleted: nothing is destroyed, and the action is recorded.
 
 ```bash
-# This folder's content is verified in the archive; dismiss the redundant copies
+# This directory's content is verified in the archive; dismiss the redundant copies
 canon exclude set /Volumes/OldDrive/photos --reason "verified archived, originals redundant"
 ```
 
-Every action is recorded. Read a place's history back at any time:
+Read a place's history back at any time:
 
 ```bash
 canon trail /Volumes/OldDrive/photos

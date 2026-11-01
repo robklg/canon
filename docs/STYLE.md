@@ -44,3 +44,6 @@ and the prose stays plain. A separate user guide is planned; warmth belongs ther
    literal output, separating a term from its definition.
 10. **Today's product only.** No promises about where Canon is heading; the docs
     describe what exists.
+11. **Full clauses, not compressed ones.** No elliptical phrases such as "read as in X"
+    or "as per X": say what is shared, as in "follows the same rules as X". Never use
+    "read" to mean parsed or interpreted.

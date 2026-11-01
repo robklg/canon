@@ -1,14 +1,11 @@
 # `canon roots story`
 
-What's resolved on this root, and where did it end up? The trail answers in events
-and the retirement review answers in counts. The story answers in **places**: where
-you acted and why, and what no decision ever touched.
+A root's resolution story as a map of **places**: where you acted and why, and what no
+action ever touched.
 
 ```
 canon roots story <id:N|path:/path> [--limit N | --all]
 ```
-
-Each run reads the index fresh and prints the map.
 
 ## The map of places
 
@@ -59,97 +56,47 @@ For the readiness gate: canon roots retire path:/mnt/old-disk --dry-run
 
 ## Reading a place
 
-Each place shows what you did there, what stands there now, and a handoff to the
-trail.
+**Lines starting with a [transition](../../concepts/decisions.md#transitions)**: the
+actions at this place. A deletion a scan observed is marked `scan-observed`.
 
-**Act lines** carry the transition word, the counts, the destination you chose (`→`),
-the decision id, and your reason. The transitions are `archived`, `excluded`, and
-`deleted`; a deletion a scan observed is marked `scan-observed`, so it never looks like
-your act. Repeated decisions at one place aggregate, though acts that went to
-different destinations never merge.
+**One action at several places**: partial counts at each, none of them the action's
+total. `#66` above is two such lines.
 
-One decision touching several places renders as **slices**: partial counts at each
-place, all carrying the same `#id`, none of them the decision's total. `#66` above is
-two slices. A reason is quoted in full at its first slice and cited as a bare `#id`
-after that.
-
-**Standing lines** say what is there now, whether or not a decision touched it:
+**Other lines**: what is there now, whether or not an action touched it:
 
 | Line | Meaning |
 |---|---|
 | `covered` | content verified present in the archive; `copies stand in` says where |
-| `archived from here` | archived from this root with the copy left standing (a copy-mode apply) |
-| `excluded` | shown when it says something the act lines don't |
+| `archived from here` | the original, still here, of content copied to the archive |
+| `excluded` | shown when the lines above don't already say it |
 | `unresolved` | neither archived nor excluded; any never-hashed count is called out |
-| `empty files (no content to cover)` | [contentless](../../concepts/object.md#empty-files-are-contentless), outside coverage, never blocking retirement |
+| `empty files (no content to cover)` | [contentless](../../concepts/source-object.md#empty-files-are-contentless), outside coverage, never blocking retirement |
 
-`→` always means *sent there by your act*. `copies stand in` always means *observed
-there today*. The two never mix.
+`→` always means sent there by your action. `copies stand in` always means observed there
+today.
 
-A place nobody decided on is marked `no decision here`, and its covered content is
-worth a second look: coverage is content identity alone, so "covered in a staging
-folder you never picked" is exactly what that line exists to catch.
+## Why some directories aren't listed
 
-Notes render verbatim at their place, and a noted place always gets its own line
-however uniform its surroundings.
+Only some directories get a line. The rest merge into the nearest listed place, and
+`· across 214 folders` shows how many that covers. A directory gets a line when:
 
-Every place ends with `→ canon trail <path>`, which tells that place's full event
-story. The story shows the shape; [the trail](../query/trail.md) shows the sequence.
-
-## Why some folders aren't listed
-
-The map is path-ordered and lists only places worth a look: those whose standing mix,
-act mix, or covered-copy locations differ from their surroundings, and those carrying
-a note or a decision you gave a reason. Everything else merges into the nearest
-listed place, with `· across N folders` showing the breadth. Uniformly resolved
-territory is one line however vast it is.
+- **It differs from its surroundings**: in standings, actions or covered-copy locations
+- **It has a note**
+- **It has an action you gave a reason**
 
 ## The gate
 
-The story renders no verdict, neither NOT READY nor ready. It closes with the
-standing totals and hands the gate to [`canon roots retire --dry-run`](retire.md),
-whose review states the same totals as counts.
-
-At retirement this same map is written again for a future reader and bound into the
-book as [`story.md`](../../reference/book-format.md#storymd), with plain fate words,
-no handoffs, and a beginning and a last page around it.
-
-## Edge cases
-
-- `#63 — no reason given` is a real recorded decision that had no `--reason`
-  attached. The id renders so the line shows a decision without a reason rather
-  than a missing decision.
-- `N excluded (no recorded decision)` is the opposite gap: excluded content whose
-  deciding record is absent, either excluded before provenance existed or with
-  recording off.
-- A noted place whose content has all moved on says `nothing stands here now`.
-- The excluded standing line is omitted when it would exactly restate what the act
-  lines already say. Covered, unresolved, and missing lines are never omitted.
-- `empty files` reports what stands there now. Whether a past archive pass carried
-  those files is the trail's and the receipts' story; passes made before the
-  contentless rule skipped empty files as "already archived".
+The story gives no verdict. For that, run
+[`canon roots retire --dry-run`](retire.md).
 
 ## Flags
 
-- `--limit N` — cap the number of place lines (default 50). Omissions are counted,
-  never silent.
-- `--all` — every place line.
+- `--limit N`: cap the number of place lines (default 50). Omissions are counted.
+- `--all`: every place line.
 
 ## Requirements
 
-- The target is a **source** root — an archive root's places are served by
+- The target is a **source** root. An archive root's places are served by
   [`canon trail`](../query/trail.md) and its composition card.
-- A suspended or unreachable root works fine — the story as last observed, stated
-  in the header.
-- Where content is covered only by archive copies on
-  [suspended](roots.md#suspending-roots) roots, the location carries `(suspended)`
-  and the closing totals count it:
-
-  ```
-    3,412 covered — copies stand in /archive-b/staging-2019 (3,401) (suspended), /archive/games (11)
-
-  Standing: 20,911 sources — 3,980 covered (3,401 only on suspended /archive-b) · 16,896 excluded · 35 unresolved (19 never hashed)
-  ```
-
-  Each location speaks for its own copies. A location holding any copy on a
-  live root is not marked.
+- For a suspended or unreachable root, the story shows what Canon last observed
+  there, and the header says so.

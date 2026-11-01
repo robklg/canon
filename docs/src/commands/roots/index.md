@@ -1,14 +1,8 @@
 # Managing Roots
 
-To track files in Canon, first you add and scan [roots](../../concepts/roots.md).
-This makes these sources available for further enrichment or archive operations.
-You can suspend a root to close the door on it: everything in it stays as you left it, set aside until you open it again.
+Adding, listing and retiring [roots](../../concepts/roots.md):
 
-Adding new roots, or scanning existing is performed through the [scan](scan.md) command.
-
-Managing roots, such as suspending or listing them is done with [canon roots](roots.md).
-
-[`canon roots story`](story.md) shows a root's resolution story between triage
-passes: where you acted and why, and what no decision ever touched. When you judge it
-resolved, [`canon roots retire`](retire.md) binds that story into a book and releases
-the root from the index.
+- [`scan`](scan.md): add a new root, or re-scan an existing one
+- [`roots`](roots.md): list, suspend, comment on or remove roots
+- [`roots story`](story.md): a root's resolution story
+- [`roots retire`](retire.md): bind that story into a book and release the root from the index

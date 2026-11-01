@@ -1,6 +1,8 @@
 # canon survey
 
-Survey a location to understand what's here, where it connects, and what's unique. The default output is an orientation map: what's archived, which other locations share content, and how much exists only here. Use it as a starting point when arriving at a new folder, an old drive, or any scope you want to understand.
+An orientation map of a location: what's archived, which other locations share content, and what exists only here.
+
+Survey works on source-side selections: a scope inside archive roots is refused.
 
 ```bash
 # Survey current directory
@@ -32,15 +34,6 @@ canon survey /mnt/old-drive/photos --where "@image" --detail complement
 
 # Compare against specific locations instead of discovering them
 canon survey /mnt/old-drive/photos --other /mnt/backup/vacation/
-
-# Filter archive section to a specific archive
-canon survey /mnt/old-drive/photos --archive path:/archive/photos
-
-# Include excluded sources in the selection
-canon survey /mnt/old-drive/photos --include excluded
-
-# Survey all roots globally (when inside a root but want the full picture)
-canon survey --global
 ```
 
 ## Options
@@ -56,95 +49,11 @@ canon survey --global
 | `--other <PATH>` | Compare against specific locations (repeatable). Bypasses scope discovery. |
 | `--brief` | Skip per-location affinity computation when `--affinity` is active. |
 | `--verbose` | Show all locations (summary) or all paths per location (detail views). |
-| `-0` | Null-delimited output for `--detail unique`, `--detail overlap`, or `--detail residual`. |
-
-## Surveying a suspended location
-
-A scope on a [suspended](../roots/roots.md#suspending-roots) root is stated rather than surveyed: the pause and the way back, nothing listed, exit code 1. A scope naming a suspended path beside a live one narrows to the live one and says what it set aside.
-
-`--other` names a location the question rests on, so if it is suspended, the whole ask is rejected rather than answered about a smaller world.
-
-A suspended `--archive` is measured against, and the header says so:
-
-```
-Archived (in /archive/photos (suspended)): 412 of 1,100 (37.5%)
-```
-
-Copies on suspended roots count on the outward side. A survey answers the same whether the roots holding your content are suspended or not: what changes is that every location carrying only suspended copies is marked, and never leads the list.
-
-```
-Related locations:
-  /path/to/backup2/2019    318 of 1,100 overlap (402 total)
-  /path/to/backup3/photos   47 of 1,100 overlap (51 total) (suspended)
-```
-
-A location with any copy on a live root is not marked: nothing there needs opening. Ordering puts live locations first, then the relation, so the marked ones sit at the end of the list.
-
-## Surveying an archive location
-
-Survey works on source-side selections. Archive content is its outward side,
-always visible in the archive sections, so an archive location has no
-selection of its own to survey. A scope that lies entirely inside archive
-roots is stated rather than surveyed, and the command exits non-zero:
-
-```
-Survey: /archive/media/2014-holiday
-This place is inside the archive root /archive.
-Survey works on source-side selections; archive content is its outward
-side, always visible — nothing here has a source-side selection to survey.
-For what stands here and where it came from: canon trail
-For a listing of what's here: canon ls
-```
-
-When several archive places are named, each root is listed with the places
-asked for under it, and the frame is still stated once:
-
-```
-Survey: /archive/media, /archive2/old
-inside archive root /archive: /archive/media
-inside archive root /archive2: /archive2/old
-Survey works on source-side selections; archive content is its outward
-side, always visible — nothing here has a source-side selection to survey.
-For what stands here and where it came from: canon trail
-For a listing of what's here: canon ls
-```
-
-Under `-0` with a machine-rendering detail view the statement goes to stderr,
-leaving the requested stream on stdout empty; the non-zero exit still carries
-the rejection.
-
-This is decided from the roles of the containing roots, not from an empty
-result: a source-side scope that genuinely selects nothing still shows the
-ordinary summary with zero counts. The statement never lists what stands in
-the archive location.
-
-A scope that is partly source-side proceeds on the source side and names what
-it set aside, one line per archive root. The reason is stated once for the view,
-however many roots the places fall under:
-
-```
-Survey: /mnt/old-drive/exports
-set aside — inside archive root /archive: /archive/media
-set aside — inside archive root /archive2: /archive2/old
-(survey works on source-side selections; archive content is its outward side, always visible; for these places see canon trail or canon ls)
-  517 sources here (0 unhashed, 517 hashed)
-```
-
-`--include archived` gives an error for the same reason:
-
-```
-Error: --include archived is not valid for survey.
-Survey works on source-side selections; archive content is its outward
-side, always visible.
-For what stands in an archive location: canon trail
-For a listing of what's there: canon ls
-```
+| `-0` | Null-delimited output for `--detail archived`, `unique`, `overlap`, or `residual`. |
 
 ## Reading the output
 
 ### Summary view (default)
-
-The default output is the **orientation** view.
 
 ```
 Survey: /mnt/old-drive/exports
@@ -166,68 +75,34 @@ Related locations:
   ... and 6 more locations (use --verbose to show all)
 ```
 
-The output has three sections:
+**Survey header**: unhashed files can't be matched. "Unique here" is content that exists nowhere else in Canon's universe.
 
-**Survey header**: Shows your scope, any active filters, and source counts. The unhashed/hashed split tells you how many files can participate in content comparison; unhashed files can't be matched. When the selection holds empty files, a counted line states them (`N empty files (no content to compare)`): they are [contentless](../../concepts/object.md#empty-files-are-contentless), set aside from overlap, coverage, and uniqueness entirely, and always counted. "Unique here" is the count of content that exists nowhere else in Canon's universe.
+**Archived**: your files with a copy in an archive. `--detail overlap --other <archive-path>` shows which files are at a given location.
 
-**Archived**: How many of your files have copies in an archive. The archive paths show *where* in the archive this content lives. Use `--detail overlap --other <archive-path>` to see which specific files are archived at a given location.
-
-**Related locations**: Other places in Canon's universe that share content with your selection. Each line shows:
-- **N of M overlap**: How many of your files also exist at this location
-- **(T total)**: How many files are at this location overall; this tells you the location's scale relative to the overlap
-
-Use `--detail overlap` to see which of your files appear at each location. Locations are sorted by overlap count, highest first.
+**Related locations**: other places that share content with your selection:
+- **N of M overlap**: your files that also exist at this location
+- **(T total)**: all files at this location
 
 ### Notes
 
-If you've annotated locations with [`canon note`](../manage/note.md), those notes surface in survey output between the scope header and the statistics. Survey shows notes from the surveyed scope and its descendants (the subtree), capped at the 5 most recent:
+Survey shows the 5 most recent [notes](../manage/note.md) on the scope and the directories below it, or all of them with `--verbose`:
 
 ```
 Survey: /mnt/old-drive/exports
+  12 sources here (0 unhashed, 12 hashed)
+  12 unique here
   Notes:
-    2026-03-20  .              confirmed: 95% archived, 12 unique remain
-    2026-03-18  vacation/      interesting sunset photos, check originals
-    2026-03-15  .              phone backup from 2019, mostly photos
-  (2 earlier notes across 1 location)
-  517 sources here (0 unhashed, 517 hashed)
-  ...
+    2026-03-20  .          confirmed: 95% archived, 12 unique remain
+    2026-03-19  .          looks clean
+    2026-03-18  vacation/  interesting sunset photos, check originals
+    2026-03-16  .          check dates
+    2026-03-15  .          phone backup from 2019, mostly photos
+    (2 earlier notes across 2 locations)
 ```
-
-Each note shows a date, a relative path indicator (`.` for the scope itself, `subfolder/` for descendant locations), and the note text.
-
-Use `--verbose` to show all notes instead of capping at 5.
-
-When no notes exist in the subtree but ancestor scopes have notes, a summary line appears:
-
-```
-  (3 ancestral notes)
-```
-
-Related locations also show note count indicators when they have notes:
-
-```
-Related locations:
-  /mnt/backup/pictures/phone/                161 of 517 overlap (18,057 total)  (2 notes)
-  /mnt/sandisk-export/camera-roll/2019/dec    82 of 517 overlap (370 total)
-```
-
-### Adding filters
-
-The summary works without any `--where` filters. Filters narrow what you're looking at:
-
-```bash
-# Only the images
-canon survey /mnt/old-drive/exports --where "@image"
-
-# Content from one year
-canon survey /mnt/old-drive/exports --where "source.mtime|year=2019"
-```
-
-The same related locations may appear with different overlap counts, because the overlap is computed against your filtered selection.
 
 ### Affinity mode (`--affinity`)
 
-When you have a `--where` filter and want to understand what related locations have *beyond* the overlap, `--affinity` adds classification columns:
+With a `--where` filter, `--affinity` shows what related locations have beyond the overlap:
 
 ```
 Related locations:
@@ -236,25 +111,20 @@ Related locations:
   /mnt/backup-2022/photos/misc/     ⊆   30 of 388 overlap (30 total)
 ```
 
-The additional columns:
-- **+N more**: Files at this location that match your filters but have *different* content from your selection; what you'd find if you went there
-- **(K unique)**: Of those, how many exist nowhere else
-- **Classification symbol**: How this location relates to your selection (see below)
+- **+N more**: files here that match your filters but have different content from your selection
+- **(K unique)**: of those, how many exist nowhere else
+- **Classification symbol**: how this location relates to your selection (see below)
 
 ### The four dispositions
 
-With `--affinity`, each related location is classified:
-
-- **Superset** (≥) — Has nearly everything you have, plus more matching content. A more complete version of what you're looking at.
-- **Lead** (>) — Has complementary content with partial overlap. A related collection with additional material.
-- **Subset** (⊆) — High overlap, no complementary content, and most of the location's own content overlaps with yours. A smaller copy.
-- **Mirror** (=) — Overlap but no complementary content, and the location has significant other content outside your filter. A partial copy within a larger collection.
-
-Locations are sorted by classification: supersets first, then leads, then subsets, then mirrors. Within each group, sorted by complementary count descending, then overlap count descending.
+- **Superset** (≥): nearly everything you have, plus more matching content
+- **Lead** (>): complementary content with partial overlap
+- **Subset** (⊆): high overlap, no complementary content, and most of the location's own content overlaps with yours
+- **Mirror** (=): overlap, no complementary content, and significant other content outside your filter
 
 ## Detail views
 
-Detail views replace the summary with specific file listings. Each answers a question the summary raises.
+A detail view shows file listings in place of the summary's sections:
 
 | Summary signal | Question | Detail view |
 |---------------|----------|-------------|
@@ -264,9 +134,9 @@ Detail views replace the summary with specific file listings. Each answers a que
 | "+95 more" (affinity) | What matching content is over there? | `--detail complement` |
 | — | What's here that's NOT at a specific location? | `--detail residual` |
 
-### Archived (`--detail archived`)
+`-0` gives flat, deduplicated, absolute paths from your selection.
 
-Shows which of your files are archived, grouped by archive location, with counterpart paths showing where each file lives in the archive:
+### Archived (`--detail archived`)
 
 ```
 Archived files (201 sources across 6 locations):
@@ -284,13 +154,9 @@ Archived files (201 sources across 6 locations):
     ...
 ```
 
-Locations are sorted by file count (most files first). When results are small (20 or fewer per location), all paths are shown; otherwise capped at 5. Use `--verbose` to see all. With `-0`, output is flat, deduplicated selection-side paths only (for piping to `xargs -0`).
-
-Use `--archive` to filter to a specific archive root.
-
 ### Unique (`--detail unique`)
 
-Outputs paths of files whose content exists nowhere else:
+Paths of files whose content exists nowhere else:
 
 ```
 photos/2016-07-14/IMG_4201.jpg
@@ -298,11 +164,7 @@ photos/2016-07-14/IMG_4202.jpg
 photos/2016-07-18/DSC_0891.jpg
 ```
 
-Paths are relative when the scope is under the current directory, absolute otherwise. Use `-0` for null-delimited absolute paths (for `xargs -0`).
-
 ### Overlap (`--detail overlap`)
-
-Shows which of your files have copies at each related location, along with the counterpart paths at that location:
 
 ```
 Overlapping with related locations (overlap):
@@ -317,13 +179,9 @@ Overlapping with related locations (overlap):
       → DCIM/2020-W48/IMG_0042 2.JPG
 ```
 
-Each `→` line shows where the matching content lives at the other location. Multiple counterparts appear when the same content exists more than once (e.g., OS-generated duplicates like `IMG_0042 2.JPG`). Counterpart paths are relative to the location.
-
-When results are small (20 or fewer), all paths are shown. For larger results, paths are capped at 5 per location; use `--verbose` to see all. With `-0`, output is flat and deduplicated selection-side paths only (no counterpart data), for piping to `xargs -0`.
-
 ### Complement (`--detail complement`)
 
-Requires `--where`. Shows files at related locations that match your filters but have different content from your selection. Implies affinity computation.
+Requires `--where`. Files at related locations that match your filters but have different content from your selection:
 
 ```
 Complementary content at related locations:
@@ -337,11 +195,9 @@ Complementary content at related locations:
     ... and 90 more
 ```
 
-Paths are relative to the location. When results are small (20 or fewer), all paths are shown; otherwise capped at 5 per location. Use `--verbose` to see all.
-
 ### Residual (`--detail residual`)
 
-Requires `--other`. Shows which of your files are NOT shared with the reference location:
+Requires `--other`. Your files not shared with the reference location:
 
 ```
 Not at /mnt/backup/vacation/ (residual):
@@ -350,31 +206,12 @@ Not at /mnt/backup/vacation/ (residual):
   photos/IMG_4203.raw
 ```
 
-Unhashed files are always included in residual output: without a hash, their presence at the reference location can't be confirmed. Empty files are never included, for the opposite reason — there is no content whose absence could be claimed; they stay counted in the header. Use `-0` for flat output. With multiple `--other` locations, each gets a separate listing.
-
 ## Directed comparison (`--other`)
 
-By default, survey discovers related locations by searching Canon's full universe for content overlap. `--other` lets you specify locations directly:
+`--other` names locations instead of discovering them:
 
 ```bash
 canon survey /mnt/old-drive/photos \
     --other /mnt/backup/vacation_italy/ \
     --other /mnt/partner-laptop/DCIM/
 ```
-
-Differences from default mode:
-- The header shows "Comparing with:" instead of "Related locations:"
-- Locations are displayed in user-specified order (not sorted)
-- In `--detail complement`, mirrors are shown with a note rather than omitted
-
-Archive status and unique counts are always computed against the full universe regardless of `--other`.
-
-## How exploration typically flows
-
-**Orientation**: Survey a location and read the summary. From there, scope down to a subfolder, add `--where` filters, or drill into a detail view.
-
-**Following a thread**: Survey a related location directly (`canon survey <that-path>`) to understand it. Use `--detail overlap` to see which files connect the two places, and `canon facts` to see what metadata is available before refining with `--where`.
-
-**Assessing coverage**: Use `--affinity` with a `--where` filter to see which locations have more matching content. Drill into `--detail complement` to list it, and `--detail residual --other <location>` to see what is not covered.
-
-**Acting on results**: Pipe `--detail unique -0` or `--detail overlap -0` to downstream tools (`xargs -0 open` for inspection, `xargs -0 ls -la` for sizes, or further processing).

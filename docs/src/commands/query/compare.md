@@ -1,6 +1,6 @@
 # canon compare
 
-Compare two folders by content hash. Useful for verifying backups or finding differences between directories.
+Two directories compared by content hash.
 
 ```bash
 # Compare current directory against another location
@@ -19,19 +19,16 @@ canon compare /path/to/folder_a /path/to/folder_b --include excluded
 canon compare /path/to/folder_a /path/to/folder_b --verbose
 ```
 
-With one path argument, the current directory is used as side A and the argument as side B. With two paths, they are used as A and B explicitly. The current directory must be inside a known root when used as side A.
+With one path argument, the current directory is side A and the argument is side B.
 
-Output shows:
-- Files only in A (by content)
-- Files only in B (by content)
-- Files in both (matching content hash)
+```
+Comparing:
+  A: /mnt/old-drive/photos/italy
+  B: /mnt/old-drive/photos/misc
 
-Unhashed files are skipped and counted on stderr. Empty files are skipped and
-counted the same way (`Skipped N empty files (no content to compare)`): they
-are [contentless](../../concepts/object.md#empty-files-are-contentless).
-Compare reports on content; whether two folders correspond file-by-file,
-empty files included, is a question it deliberately does not answer.
+Files in both (by content): 21
+Only in A: 26
+Only in B: 0
+```
 
 Exit code is 0 if identical, 1 if differences found.
-
-Both sides are load-bearing here, so if a side is on a [suspended](../roots/roots.md#suspending-roots) root, the whole comparison is rejected by name rather than answered about one side alone. The same holds for the current directory when only one path is given.

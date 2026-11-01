@@ -1,26 +1,23 @@
 # canon sweep
 
-Sweep the whole [universe](../../concepts/resolution.md) for reduction opportunities: the ranked places where one dismissal decision resolves the most. Every other query command asks you to say *where*; the sweep answers that question itself. The sweep finds places, survey judges one, you decide, and the decision is recorded with `canon exclude`.
+Reduction opportunities across the whole [universe](../../concepts/resolution.md): the ranked places where one dismissal resolves the most.
 
 ```bash
 # The leaderboard: the ten best reduction opportunities, ranked
 canon sweep
 
-# More entries
-canon sweep --limit 25
-
 # Everything: all entries, all members, findings below the emit floors
 canon sweep --all
 ```
 
-The sweep takes no paths and no filters; it is universe-wide, computed fresh from current database state on every run. Acting on a finding (excluding, archiving) removes it: the next run reflects the new state, and the top slot always holds the current best move.
+The sweep takes no paths and no filters, and is computed fresh on every run.
 
 ## Options
 
 | Flag | Description |
 |------|-------------|
 | `--limit <N>` | Show up to N leaderboard entries (default: 10). |
-| `--all` | No cap: every entry, every member of a multi-place entry, and findings below the emit floors. |
+| `--all` | No cap: every entry, every place of a multi-place entry, and findings below the emit floors. |
 
 ## Reading a finding
 
@@ -32,21 +29,18 @@ The sweep takes no paths and no filters; it is universe-wide, computed fresh fro
     → canon survey /Volumes/OldBackup/ARCHIVED/Super8 --other /Volumes/Archive/Media/Super8
 ```
 
-- **The subject** (the full path on the first line) is the place the finding is about, the side you might dismiss. The other side is the **counterpart**: where the copies live. A single finding's headline is its *subject*; a hub's headline is the shared *counterpart* (the hub's own "shared counterpart" line states this).
-- **The relation** states how the subject's content connects elsewhere, in survey's vocabulary: a *subset* sits inside a counterpart that holds more; a *mirror* matches its counterpart in both directions. Both percentages matter: a large gap between "by size" and "by count" means many small files carry little weight.
-- **The counterpart line** states the counterpart's [*standing*](../../concepts/resolution.md#standings) (`archived` or `present`), which is what makes acting on the finding safe or not. The wording is declarative ("inside X", never "keep X"): the relation implies no preferred side; even for a subset, the smaller side can still be the better copy. Both sides carry their scan age; the claim rests on the last scan.
-- **Gain** is what acting on the finding resolves. **Residual** is content existing nowhere else in the universe. `residual: none` means a clean dismissal; a small residual often means one rescue away from a clean one.
-- **The `→` handoff** is the ready-to-run judging command, and it runs as printed from anywhere. An entry with no `→` line has no single place on a source root to compare. The sweep only ever hands off to judgment, never to a ready-made exclusion.
+- **Subject** (the first line): the place the finding is about, the side you might dismiss
+- **Counterpart**: where the copies live, with its [standing](../../concepts/resolution.md#standings) and each side's scan age
+- **Relation**: `inside` a larger counterpart, or `mirrors` one in both directions; a large gap between "by size" and "by count" means many small files
+- **Gain**: what acting on the finding resolves
+- **Residual**: content existing nowhere else in the universe; `residual: none` means a clean dismissal
+- **`→` line**: the command to judge the finding; an entry with none has no single place on a source root to compare
 
-When the subject is not fully hashed, the finding says so (`compared on 92% by size`): unhashed content is unverified, never silently omitted. Notes you've left on the subject or counterpart (`canon note`) surface beside the finding.
-
-A subject that itself stands on an archive root is marked `(in the archive)` and ranks below an equivalent place on a source root: its content is already resolved, so it does not compete for triage attention, and the real opportunity usually sits on the counterpart side. It is demoted, not removed, and the relation is stated anyway; the sweep compares any location to any other. Its `→` line surveys the source side, so survey's numbers read from that side and can differ from the entry's. A hub headlined by an archive counterpart is untouched by this: its members are the subjects, and live source members keep the hub competing at full weight.
-
-A subject that is a whole root, rather than a folder inside one, is marked `(whole root)`. Both markers appear where both apply.
+Excluded content creates no findings and blocks no dismissal.
 
 ### Scattered findings
 
-When no single counterpart concentrates the match, the finding states the spread:
+When no single counterpart holds the copies, the finding says `scattered`:
 
 ```
 #4  /Volumes/Backup/laptop-import/mixed
@@ -54,13 +48,9 @@ When no single counterpart concentrates the match, the finding states the spread
     scattered; consolidation candidate · subject scanned 12d ago
 ```
 
-Scattered content with nothing archived ranks last, but it stays visible: scattered redundancy is a consolidation candidate.
-
-The parenthetical counts how many of those locations are archive roots, and how many stand on [suspended](../roots/roots.md#suspending-roots) roots. The suspended count is omitted when it is zero. No other number moves: a location behind a closed door is still a location, and the content is still there.
-
 ### Hubs
 
-Many places pointing into one counterpart render as a single leaderboard entry:
+Many places with copies in one counterpart show as a single entry, with the counterpart on its first line:
 
 ```
 #2  /Volumes/Archive/Media/iphone-backup
@@ -72,11 +62,9 @@ Many places pointing into one counterpart render as a single leaderboard entry:
     → canon survey /Volumes/OldBackup/iphone-2019 --other /Volumes/Archive/Media/iphone-backup
 ```
 
-The hub occupies one leaderboard slot and shares one handoff. Surveying a source counterpart shows every member as a related location; an archive hub compares its first source member with the counterpart.
-
 ### Roots close to done
 
-A source root with few [unresolved](../../concepts/resolution.md) sources left takes one leaderboard slot of its own, headlined by the root and carrying its places as members:
+A source root with few [unresolved](../../concepts/resolution.md) sources left shows as one entry, with the root on its first line:
 
 ```
 #1  /Volumes/oldmac  (whole root)
@@ -88,16 +76,13 @@ A source root with few [unresolved](../../concepts/resolution.md) sources left t
     → canon roots retire path:/Volumes/oldmac --dry-run
 ```
 
-The count is the same remainder the [retirement](../roots/retire.md) readiness review measures: sources on the root that are neither archived, nor covered, nor excluded, nor empty. It is a fact about the root and not a verdict about it; the review the handoff names is what judges whether the root is ready, and `--dry-run` reports that verdict rather than acting on it. A zero remainder shows `no unresolved sources remain`.
+The count is what the [retirement](../roots/retire.md) review measures.
 
-The figure is an upper bound (`up to`), not a total. Places on one root can be each other's evidence: two folders holding copies of each other both report those bytes, and only one of them can be let go, so what acting would actually resolve is never more than the figure shown.
+The `up to` figure is an upper bound: two places can each have copies of the other, and only one of them can be let go.
 
-Each member states its own counterpart [standing](../../concepts/resolution.md#standings), which is what makes acting on it safe; hub members take theirs from the hub's headline instead. Members are capped like hub members, with the omission counted and `--all` revealing the rest. A qualifying root with only one place forms no such entry: one place is already one slot. Archive roots never form one; they are not retired.
+### Sibling directories under one parent
 
-### Sibling folders under one parent
-
-When several places under one parent each pair with their own counterpart, they take one
-leaderboard slot headlined by the parent, carrying the places as members:
+Several places under one parent, each with its own counterpart, show as one entry, with the parent on its first line:
 
 ```
 #1  /Volumes/Backup/photos
@@ -109,62 +94,20 @@ leaderboard slot headlined by the parent, carrying the places as members:
     → canon survey /Volumes/Backup/photos
 ```
 
-The percentage on the second line is the share of the parent's own sources that lie under the
-members. It is what the entry claims: that the parent is where one decision covers the whole
-situation. Sources under the parent that no member accounts for are the rest of that figure, and
-the handoff surveys the whole parent rather than the members, so what the members leave out stays
-visible.
-
-Where places could group either way, the parent claims them: a hub groups places by the
-counterpart they share, a parent groups them by the one decision that covers them. Places under
-different roots never group together, whatever they hold in common. The parent may be a root's own
-top, when the places sit directly on it; the entry then shows as a bare root path and hands off to
-`canon survey` at that root.
-
-A parent whose members account for less than 60% of it forms no entry, and its places compete
-individually as they otherwise would. Nothing is hidden either way. Grouping applies at the
-immediate parent only and never recurses, so a folder and its own child can each headline an
-entry.
-
-The members share one root, so the entry carries that root's remainder line where nearness is in
-play, above the figure, exactly as a single finding does.
-
-The figure is an upper bound (`up to`), not a total, for the same reason a root entry's is: two
-places under one parent can be each other's evidence, and only one of them can be let go. Each
-member states its own counterpart [standing](../../concepts/resolution.md#standings). Members are
-capped like hub members, with the omission counted and `--all` revealing the rest. Two places
-under one parent are enough to group; one place is already one slot.
-
-### Places that mirror each other
-
-Two places can each mirror a folder inside the other, which is one overlap stated from both ends.
-They take one slot, and the entry that keeps it says so:
-
-```
-#7  /Volumes/Backup/downloads/tools
-    mirrors /Volumes/Backup/tools/vendor/app  (100% by size · 100% by count)
-    counterpart: present, scanned today · subject scanned today
-    also mirrored by /Volumes/Backup/tools — one decision resolves both
-    gain: 812 files · 3.2 GB     residual: none
-    → canon survey /Volumes/Backup/downloads/tools --other /Volumes/Backup/tools/vendor/app
-```
-
-Which of the two keeps the slot is decided by path, so an unchanged database always shows the
-same one. A place inside a second, with that second inside a third, is not this shape: those are
-two situations and both keep their slots.
+The percentage is the share of the parent's own sources that lie under those places; the `→` line surveys the whole parent.
 
 ## Ranking
 
-There is no composite score: every ranking factor is visible on the finding, in this order:
+Findings rank by these factors, in order, each visible on the finding:
 
-1. **Cleanliness**: ready-to-assess findings (at or above the lifting tolerance) above consolidation-grade overlap.
-2. **Archive standing**: a place standing on a source root above an equivalent place standing in the archive.
-3. **Root nearness**: a place on a source root with little left unresolved above a place on a root barely started. Archive roots carry no nearness and tie here.
-4. **Weight**: resolution gain, size-led (counts always shown beside sizes).
-5. **Counterpart standing**: archived above merely-present; scattered content with nothing archived last.
-6. **Residual burden**: content existing nowhere else penalizes; a clean dismissal outranks one that needs a rescue first.
+1. **Cleanliness**: ready-to-assess findings above consolidation candidates.
+2. **Archive standing**: a place on a source root above an equivalent place in the archive.
+3. **Root nearness**: a place on a source root with little left unresolved above a place on a root barely started. Archive roots tie here.
+4. **Weight**: gain, by size.
+5. **Counterpart standing**: archived above present; scattered content with nothing archived last.
+6. **Residual**: less content existing nowhere else ranks higher.
 
-Nearness sorts ahead of weight, so a small place on a root close to done outranks a large one elsewhere. Where it applies, the finding says so on its own line:
+A small place on a root close to done outranks a large one elsewhere, and says so on its own line:
 
 ```
 #1  /Volumes/oldmac/Pictures/2019
@@ -175,32 +118,12 @@ Nearness sorts ahead of weight, so a small place on a root close to done outrank
     → canon survey /Volumes/oldmac/Pictures/2019 --other /Volumes/Archive/Media/2019
 ```
 
-The line appears only where nearness is in play; its absence means the order rests on the other factors. Nearness separates entries only among roots close enough to done for the board to say so; above that, roots tie on it and weight leads. The remainder is bucketed by order of magnitude, so it takes a tenfold change to move a place on the board.
-
-Two runs against an unchanged database produce identical output.
-
 ## Suspended roots
 
-Places on a [suspended](../roots/roots.md#suspending-roots) root are not ranked, and neither are places whose counterpart stands on one. Each suspended root that kept places off the board gets a footer line naming both causes, what each is worth at most, and the way back:
+Places on a [suspended](../../concepts/roots.md#suspended-roots) root are not ranked, and neither are places whose counterpart is on one. Each such root gets a footer line:
 
 ```
 /Volumes/OldBackup suspended — not ranked: 8 places on it (up to 185.3 GB), 4 with copies on it (up to 12.1 GB) · canon roots unsuspend path:/Volumes/OldBackup
 ```
 
-Places **on** the root stand there; places **with copies on** it stand elsewhere and rest their claim on content behind the closed door.  Each cause carries its own figure, and each is an upper bound: parked places can be each other's evidence, so what unsuspending would actually resolve is never more than the figure shown. Whether the suspended root is a source or an archive root makes no difference. Above three suspended roots the lines collapse to one, counting roots rather than naming them, with `canon roots list --suspended` as the way back.
-
-Suspended roots stay in the computation: their copies still count as gain rather than residual, so a folder duplicated entirely inside a suspended root does not show as unique. What changes is position, not existence. `--all` does not reveal these places; `canon roots unsuspend` brings them back, and inspecting one parked place is `canon survey <path>`.
-
-The below-floor footer count includes places that are not ranked, so `--all` reveals fewer entries than that count names.
-
-## Honesty rules
-
-- **The header declares every omission**: ubiquitous objects (present in too many places to signal anything) and empty files (zero-byte content is [contentless](../../concepts/object.md#empty-files-are-contentless): it never creates overlap, never counts in percentages, never blocks a residual).
-- **Excluded content is resolution, not overlap**: it neither creates findings nor blocks dismissal, and surfaces as context where substantial (`3,000 sources here already excluded`).
-- **Floors trim output, never existence**: small findings are counted in the footer (`12 more below the emit floors (--all)`) and reachable with `--all`.
-- **A board that changes without you acting on it explains itself**: suspending a root changes what the sweep ranks, and the suspended-root footer lines state the count, the mass, and the way back on every run where places were not ranked.
-- **An empty leaderboard is an answer, never a false one**: the board says there is no folder-level redundancy worth attention only when nothing was withheld from it. Where suspension or `--limit` emptied it, the line says that instead. An unscanned or unhashed universe gets a pointer, not an empty list.
-
-## The journey
-
-Run the sweep, read the top finding, run the handoff survey, judge, then record the decision with `canon exclude` and a reason. Declining to act leaves no trace, unless you leave a note, which comes back beside the finding on the next run.
+`--all` does not reveal these places.
