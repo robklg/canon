@@ -355,7 +355,7 @@ Named `--where` aliases in `$CANON_HOME/aliases.toml` (e.g. `image = "content.mi
 
 **Status predicates** — `archived?`, `hashed?`, `excluded?`, `enriched?` — are computed state, not stored facts, and take only `?`. Which ones a filter used travels with its result (`UsedStatus`, through `Selection` and `SurveyResult`), so a command can hint when its view hides what the predicate asks about. How the reader recognizes them is in `src/expr/CLAUDE.md`.
 
-**Modifiers** (`|`): `source.mtime|year`, `source.ext|lowercase`, etc. **Path accessors** (Python-style): `source.rel_path[-1]|stem`. **Key names** — a plain name reads as a content fact (`Make` is `content.Make`) unless it is a source fact or a built-in key; manifest patterns do not take that default (`{Make}` is unknown where `{content.Make}` resolves). How each command reads a name is in `src/expr/CLAUDE.md`. Any imported fact is filterable.
+**Modifiers** (`|`): `source.mtime|year`, `source.ext|lowercase`, etc. **Path accessors** (Python-style): `source.rel_path[-1]|stem`. **Key names** — a plain name reads as a content fact (`Make` is `content.Make`) unless it is a source fact or a built-in key. How each command reads a name is in `src/expr/CLAUDE.md`. Any imported fact is filterable.
 
 ### Manifest Patterns (`expr/domain/pattern.rs`)
 
