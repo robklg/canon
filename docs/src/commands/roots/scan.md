@@ -51,6 +51,8 @@ canon scan --verify /Volumes/Archive
 canon scan --missing /path/to/deleted/folder
 ```
 
+**Several paths:** Every path is checked first, and a refused path stops the whole scan before anything is walked.
+
 **Hash computation:** By default, Canon computes content hashes for new and changed files during scan; hashes enable deduplication and archive tracking. Hashing can take long. Use `--no-hash` to index files without hashing, either for speed or when you intend to hash only certain kinds of files. Sources left without a hash are reported at the end of the scan and hashed by the next scan that hashes (see [Hash debt](#hash-debt)).
 
 **Integrity verification:** `--verify` recomputes hashes for all files, even unchanged ones. If a file's hash changes without its mtime changing, Canon warns about possible corruption and exits with an error.

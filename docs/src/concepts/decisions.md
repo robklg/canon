@@ -66,7 +66,7 @@ Recording happens in two phases:
 1. **Start**: A "started" record is written after you confirm (or just before execution for commands without confirmation)
 2. **Complete**: The record is updated with the outcome after execution finishes
 
-A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`. A refused `facts convert` records nothing.
+A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`. A refused `facts convert` or `scan` records nothing.
 
 If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives as a durable trace that the operation was attempted. A row left `started` means its outcome was never written. That has three readings: the run was killed or crashed; or it ended and the outcome could not be written down, for example when another canon process held the database locked at that moment; or the row was written by a version of Canon older than the one that settles every ordinary error. `canon trail show` prints the row's version and time, and says the same thing on the row itself.
 

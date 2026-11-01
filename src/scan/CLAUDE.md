@@ -177,19 +177,27 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   whole walk while the file path resolves immediately, and extracting it would restructure
   `scan_root`'s hot loop. What `observe_file` *lacks* is the point: no `expected_ids` fetch, no
   `find_missing`, no mount-stability gate, no `capture_deletions`. The interface picks the sibling
-  from one question — is the canonicalized path a directory.
+  from one fact on the target — whether the canonicalized path is a directory.
 - **The door is asked about once, before the recorder opens a row.** `cli::run` walks the
   resolved scan paths against `core::ops::scope::parked_root_of` ahead of
   `DecisionRecorder::start`, so a scan aimed behind a closed door is refused by name with the
   way back and leaves *nothing* behind — not even the `started` row that would read as a scan
   killed mid-walk. Both arms arrive there: a walk canonicalizes its path, and `--missing` —
   whose whole premise is that the folder is gone — resolves lexically against the known roots,
-  which is the same list the decision's scope was built from. The inline check that used to sit
-  in the walk loop is gone; a second spelling of one rule is free to drift from the sentence the
-  first one speaks (`cli::a_scan_at_a_parked_root_is_refused_before_any_row_is_written`).
+  which is the same list the decision's scope was built from. The walk loop holds no check of its
+  own, because a second spelling of one rule is free to drift from the sentence the first one
+  speaks (`cli::a_scan_at_a_parked_root_is_refused_before_any_row_is_written`).
   **`--all` never reaches the door**: it selects the active roots up front, so a parked root is
   simply not among what it was asked to scan, and there is nothing to refuse. That is a
   different question from naming a place behind a door, and it is unchanged.
+- **Every per-path refusal precedes the recorder.** `ops::pipeline::resolve_scan_target` settles
+  each path into a typed `ScanTarget` before `DecisionRecorder::start`, so a refused scan walks
+  nothing and writes no row, and a row reading `interrupted` means a run that really started
+  (`cli::a_refused_scan_writes_no_row`). The loop consuming the targets can warn and skip but has
+  no refusal left, which makes this a shape rather than an order of lines. The rule is scan's own:
+  `apply` settles a refusal by recording `refused`. A path gone from disk is not refused; it is
+  skipped with a warning, inside the run. `mark_missing_path` asks `resolve_missing_target` again,
+  which is a second ask of one owner, not a second spelling.
 - **A suggestion consults the act's preconditions; it never re-derives them.**
   `resolve_missing_target` asks the index, and **both halves of the form-tolerance law run
   there** — it is the one deletion arm with no disk to fall back on, so a root matched in one
@@ -222,7 +230,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   read together — `hash.rs` already depends on this stratum, so the pairing costs no edge against
   the grain), `pipeline.rs` (the walk: `scan_root`, `reconcile_file`, `persist_file`,
   `flush_unchanged`, `mark_missing_sources`, `capture_deletion_items`, `mark_missing_path`,
-  `resolve_missing_target`, `missing_is_worth_suggesting`, empty-dir classification — and beside the walk, `observe_file`, the
+  `resolve_scan_target`, `resolve_missing_target`, `missing_is_worth_suggesting`, empty-dir classification — and beside the walk, `observe_file`, the
   file-grain entry: the same reconcile/persist helpers, no walk and no missing detection),
   `receipt.rs` (`coalesce_by_root` + `write_deletion_receipts`), `candidates.rs` (root-candidate
   discovery, pure filesystem, no DB), `hash.rs` (the hash pass itself, and the scope-bounded count
@@ -261,6 +269,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   | The `--missing` hint is offered **only where the act would be both accepted and sound** (acceptance: the bullet above). Soundness asks the rows the act would flip whether the storage that recorded them is the storage answering **at the root** now — `recorded_storage_answers`, the move check's own spelling. **Existence is not that evidence**: a mountpoint with nothing behind it answers yes and reads as though everything under it vanished, which is where obeying the hint receipts a deletion of untouched content. The bar is positive evidence — at least one row, none disagreeing, an unknown device counting as disagreement. Anchored at the root, so a row on storage mounted *inside* its root never agrees: a withheld pointer, never a wrong one | `pipeline::the_missing_hint_is_withheld_where_asserting_would_be_wrong` (root top, mountpoint shell, no root, suspended root, absent storage, unknown storage, nothing indexed — each with its permitting control). It sits with the decision in `ops`, not at the interface the sentence is printed from: the fixture states storages a scan cannot reach, and a battery written at the interface would need the database spoken to from there |
   | A root is a folder: `--add` and `--candidates` refuse a file argument naming both it and the directory to use instead, and a file outside every root is refused the same way. A root whose own path is a file is **skipped with a warning, never fatal, and before its scope is recorded** — a per-path fact must not end a run over several paths, nor leave a claim behind it | `cli::a_file_shaped_root_is_skipped_not_fatal` |
   | **Every error inside the wrapped body** completes its own decision row as `interrupted` with the error as summary — the fallible work between `start()` and the summary runs inside one closure with a single failure exit, because a dangling `started` row misreads as a scan killed mid-walk. What sits **outside** the closure stays out: the `unexpected_hash_changes` bail and `run_analyze()` both fire *after* `complete(Completed)`, and routing either through the interrupted exit would double-complete a finished decision | `cli::a_scan_that_errors_after_start_completes_its_decision_as_interrupted` |
+  | **The summary prints last**, after the row settles and its warnings drain: a closed pipe ends the process at that line, so stdout must not run ahead of a deletion's receipt or of the warning that a receipt failed | `process::a_closed_pipe_leaves_a_scans_record_whole` |
   | Mount-stability skip is **counted**, reaching the durable summary | `pipeline::scan_root_unstable_mount_records_no_deletion` |
   | A walk that could not see everything **never infers deletion**, and its error count is **counted, reaching the durable summary** — same shape as the mount-stability skip, second gate on the same `if` | `pipeline::scan_root_walk_error_skips_missing_detection` |
   | Empty-dir classification is not missing detection (`handled_ids` unioned into `all_accounted`) | `pipeline::mark_missing_sources_disconnected_with_ignore_flag` (partial) |

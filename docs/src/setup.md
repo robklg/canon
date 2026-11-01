@@ -51,7 +51,8 @@ Precedence: `--canon-home` flag > `CANON_HOME` env var > `~/.canon/`
 ## Verify Installation
 
 ```bash
+canon --version
 canon --help
 ```
 
-You should see the list of available commands. Continue with [Getting Started](getting-started.md).
+You should see the version, then the list of available commands. Continue with [Getting Started](getting-started.md).

@@ -237,7 +237,7 @@ pub(super) fn print_human(
         TrailView::Days(_) => Vec::new(),
     };
 
-    if !rollup_lines.is_empty() || result.earlier_decisions > 0 || result.unscoped_decisions > 0 {
+    if !rollup_lines.is_empty() || result.earlier_decisions > 0 {
         println!();
     }
     for line in &rollup_lines {
@@ -249,13 +249,6 @@ pub(super) fn print_human(
             "{} earlier {} not shown (--limit N or --all; showing {cap}).",
             format_count(result.earlier_decisions),
             plural(result.earlier_decisions as i64, "decision")
-        );
-    }
-    if result.unscoped_decisions > 0 {
-        println!(
-            "{} global {} not shown (--global).",
-            format_count(result.unscoped_decisions),
-            plural(result.unscoped_decisions, "decision")
         );
     }
 
@@ -1767,9 +1760,9 @@ fn format_rearrangement_rollup(rollup: &RearrangementRollup) -> String {
 /// For a decision, the place named is the one the operations layer says
 /// **matched** this view (`TrailResult.scope_matches`) — the join the query
 /// already computed to decide the decision surfaces at all. Nothing is
-/// re-derived here: a 31-prefix scan used to be labelled by its *first*
-/// recorded prefix, which had nothing to do with the view the reader was
-/// standing in. `+N` counts the decision's other recorded places.
+/// re-derived here: a decision's *first* recorded prefix can have nothing to
+/// do with the view the reader is standing in. `+N` counts the decision's
+/// other recorded places.
 ///
 /// Falls back to the display column's first entry when no match was carried
 /// — a global view (which matched nothing by construction) and a decision
@@ -4702,7 +4695,7 @@ mod tests {
 
     /// **One invitation, never two.** A capped card's remainder absorbs the
     /// teacher; an uncapped card still teaches, because that is exactly where
-    /// the handles are and where nothing used to say so.
+    /// the handles are.
     #[test]
     fn a_capped_card_renders_one_invitation_not_two() {
         let origins: Vec<OriginLine> = (0..12)

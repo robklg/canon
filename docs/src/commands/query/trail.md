@@ -55,7 +55,6 @@ Decision trail: /mnt/old-drive/photos
       2026-07-11 16:50            italy  ~ unsure about the RAW files — revisit
 
 12 earlier decisions not shown (--limit N or --all; showing 20).
-2 global decisions not shown (--global).
 ```
 
 A decision *touches* the scope in either direction: a decision on a parent folder happened to this folder too, and a decision on a subfolder is activity here. Sibling folders' decisions don't appear. That rule applies to a decision's *acted-on scope*. The extraction and arrival lines below follow recorded *placements* instead, which appear only in views that contain them (see [the extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction)).
@@ -78,7 +77,7 @@ Places are relative to this folder; a leading / is relative to /archive.
 
 Views spanning several roots, and global views, render full paths, capped from the left. `-l` renders every place in full, absolute and uncapped (see [Full paths](#full-paths--l)).
 
-The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Global decisions can't be attributed to any folder, so scoped views count them in a footer rather than hiding them.
+The listing is capped at the 20 most recent decisions; the footer tells you what's beyond the cap (`--limit N` or `--all` to widen). Decisions recorded without a place are listed by `canon trail --global`.
 
 The trail is the sequence view: what happened here, in order. Its shape-first counterpart is [`canon roots story`](../roots/story.md), which renders a whole root as a map of places and hands each place back to the trail for its full event story.
 
@@ -115,7 +114,7 @@ Scoped scope-lens views end with a whole-history rollup, independent of the `--l
 Archived from here: 1,251 files (22.1 GB) → 2 destinations.
 ```
 
-Omitted when nothing has ever been drawn from here. Sizes are omitted, not guessed, if any contributing decision's bytes can't be determined. Global views carry no single "here" to roll up, so neither the rollup nor extraction lines appear there; an apply still counts toward the "not shown" footer at any view it doesn't touch.
+Omitted when nothing has ever been drawn from here. Sizes are omitted, not guessed, if any contributing decision's bytes can't be determined. Global views carry no single "here" to roll up, so neither the rollup nor extraction lines appear there.
 
 ## The inbound direction: what arrived here
 
@@ -184,7 +183,7 @@ Standing here: 3 files (21 B)
 
 An origin line takes three lines at most — the path, then its marker where it has one, then its counts — the same shape the counterpart door uses for the same facts. The path ends its own line and is never elided or wrapped, because it is what you copy into the next command. Where a line's counts name exactly **one** decision, they name the decision itself (`decision #12`) rather than telling you there is one; two or more stay a count.
 
-Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `arrived from <root>` entry, carrying how many decisions are behind it and the date range they span (open them with [`trail crossings --origin <root>`](#the-counterpart-door-trail-crossings)); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins come **standings**: what present content here was last touched by, one line per transition (`excluded: 28,412 files (19.2 GB)`), merged across every decision that produced it. A standing is a statement about this place now, so it carries no decision id; the decisions behind it are the timeline above. Then a `first indexed here` bucket for content this location saw first via a scan, and an `arrival unrecorded` bucket for content carrying no stamp at all. That content *is* tracked — it is indexed, present, and counted in the header above; what is missing is the record of how it arrived, and the row cannot say why, so the line names the absence and stops there.
+Origin lines come first, busiest first: a single-origin root that fed this location across one or more applies merges into one `arrived from <root>` entry, carrying how many decisions are behind it and the date range they span (open them with [`trail crossings --origin <root>`](#the-counterpart-door-trail-crossings)); an apply that drew from several roots in a single decision gets its own `via apply #N from M origins` line, since its content isn't merge-worthy with anything else. After origins come **standings**: what present content here was last touched by, one line per transition (`excluded: 28,412 files (19.2 GB)`), merged across every decision that produced it. A standing is a statement about this place now, so it carries no decision id; the decisions behind it are the timeline above, or `canon trail --global` for a decision recorded without a place. Then a `first indexed here` bucket for content this location saw first via a scan, and an `arrival unrecorded` bucket for content carrying no stamp at all. That content *is* tracked — it is indexed, present, and counted in the header above; what is missing is the record of how it arrived, and the row cannot say why, so the line names the absence and stops there.
 
 Where the record has a **gap**, the line names the one decision it is about, after the standings: `archived (origin unknown) here (#88)` for an apply the extraction ledger cannot attribute, `transition unrecorded here (#404)` for a stamp whose decision row no longer exists. A gap must show as a gap, so it is never merged away.
 

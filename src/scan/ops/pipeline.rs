@@ -24,7 +24,7 @@ use crate::scan::repo as scan_repo;
 
 use super::types::{
     DeletionReceiptItem, FileAction, FileToHash, HashNeed, MarkMissingPathResult, MissingTarget,
-    ScanOptions, ScanProgress, ScanRootResult, ScanStats, SourceOutcome,
+    ScanOptions, ScanProgress, ScanRootResult, ScanStats, ScanTarget, SourceOutcome,
 };
 
 /// Scan a root directory, processing each entry through the
@@ -1386,6 +1386,125 @@ pub fn resolve_missing_target(
         root_id,
         root_path,
         rel_prefix,
+    })
+}
+
+/// Settle one path of a scan, refusing it if it cannot be scanned.
+///
+/// **Every per-path refusal precedes the recorder.** The caller runs this for
+/// every path before the decision row opens, so a refused scan walks nothing
+/// and writes no row: a row reading `interrupted` then means a run that really
+/// started. The typed result is what makes that a shape rather than an order
+/// of lines, because the loop consuming it has no refusal left to make. The
+/// roots are the list the caller fetched once, so an answer here is the answer
+/// the same check would give inside the loop.
+///
+/// The door is asked by the caller first, over the same roots and the same
+/// resolved paths; a second check here would be a second spelling of one rule,
+/// free to drift from the sentence the first one speaks.
+pub fn resolve_scan_target(
+    conn: &Connection,
+    path: &Path,
+    roots: &[crate::core::domain::root::Root],
+    add_root: bool,
+    role: Option<&str>,
+    missing: bool,
+) -> Result<ScanTarget> {
+    let canonical = match fs::canonicalize(path) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            // A relative path against a working directory that no longer
+            // exists fails as "no such file", which names the wrong thing: the
+            // path may well be there, and only the place it was to be resolved
+            // from is gone. Asking for the directory this path needs lets its
+            // refusal speak instead — a scan that could resolve nothing must
+            // not report a walk of nothing.
+            let cwd = crate::core::ops::scope::cwd_for(std::slice::from_ref(&path))?;
+            let path = path.to_path_buf();
+            // Reaching this arm is the condition for --missing: the path could
+            // not be resolved, so it cannot be walked. Handling --missing
+            // anywhere else would mark live files deleted.
+            if missing {
+                resolve_missing_target(conn, &path, roots, &cwd)?;
+                return Ok(ScanTarget::Gone { path, cwd });
+            }
+            return Ok(ScanTarget::Unreadable { path, error, cwd });
+        }
+    };
+
+    // A path argument names a place, and a place may be a single file.
+    // Everything that is not a directory takes the file-grain path — regular
+    // files, and the residue the observer counts and declines.
+    let names_a_directory = canonical.is_dir();
+
+    // Check if path is inside an existing root (including suspended)
+    let Some((root_id, root_path, existing_role, rel_path)) =
+        crate::core::ops::scope::resolve_root_path_any(roots, &canonical)?
+    else {
+        // A root is a folder. A file outside every root is refused by name,
+        // and both arms point at its directory: `--add` has nothing to make a
+        // root from, and sending the user to `--add` with the file path would
+        // only land them in the other refusal.
+        if !names_a_directory {
+            let dir = canonical
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            if add_root {
+                bail!(
+                    "Cannot create a root from '{}': a root is a folder. Scan its directory '{dir}' with --add instead.",
+                    canonical.display()
+                );
+            }
+            bail!(
+                "Path '{}' is not inside any existing root. Scan its directory '{dir}' with --add to create a new root.",
+                canonical.display()
+            );
+        }
+        // Path is not inside any root
+        if !add_root {
+            bail!(
+                "Path '{}' is not inside any existing root. Use --add to create a new root.",
+                canonical.display()
+            );
+        }
+        // role is guaranteed to be Some when add_root is true — the CLI
+        // parser's own invariant (`#[arg(requires = "role")]` on `--add`), not
+        // a check re-derived here.
+        let new_role = match role {
+            Some(r) => r,
+            None => unreachable!("clap's `--add requires role` makes this Some"),
+        };
+        crate::scan::domain::check_not_filesystem_root(&canonical)?;
+        crate::scan::domain::check_no_overlap(roots, &canonical)?;
+        return Ok(ScanTarget::NewRoot {
+            canonical,
+            role: new_role.to_string(),
+        });
+    };
+
+    // Path is inside an existing active root
+    if add_root {
+        bail!(
+            "Path '{}' is already inside {} root '{}'. Remove --add to scan as subtree.",
+            canonical.display(),
+            existing_role,
+            root_path
+        );
+    }
+    // Check role matches if --role was specified
+    if let Some(r) = role {
+        if existing_role != r {
+            bail!("Root '{root_path}' has role '{existing_role}', cannot scan with --role {r}");
+        }
+    }
+    Ok(ScanTarget::Known {
+        canonical,
+        names_a_directory,
+        root_id,
+        root_path: root_path.into(),
+        // An empty remainder scans the entire root; anything else, a subtree.
+        scan_prefix: (!rel_path.is_empty()).then_some(rel_path),
     })
 }
 

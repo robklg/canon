@@ -82,9 +82,8 @@ passes stdin and stderr; a test passes a reader that breaks partway or is held o
 it reads. A run that stops early, on a broken input or a batch that cannot be written, settles
 explicitly rather than leaving it to the armed recorder behind it, because there — and nowhere else in this subsystem — the counts, the touched roots and
 the error text are all in hand. The scopes are the load-bearing part: `record_scopes` otherwise
-runs only after the loop, so a run that died mid-stream would leave a scope-less row, hidden
-from a scoped `trail` view behind its "global decisions not shown" footer — invisible from the
-folder being enriched.
+runs only after the loop, so a run that died mid-stream would leave a scope-less row, absent
+from a scoped `trail` view — invisible from the folder being enriched.
 
 **The two commands keep separate cli files.** They share no helper, type or call — "parse,
 dispatch, display" is a property every cli file has, not a bond between these two. Their

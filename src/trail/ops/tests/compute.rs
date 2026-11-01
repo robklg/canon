@@ -58,7 +58,7 @@ fn global_decisions_counted_not_listed_in_scoped_view() {
     assert_eq!(decision_ids(&result.view), vec![scoped]);
     assert_eq!(result.unscoped_decisions, 1);
 
-    // The global view lists it and reports no unscoped footer.
+    // The global view lists it, so there is nothing left to count.
     let global = compute_trail(&conn, &params(Vec::new())).unwrap();
     assert_eq!(decision_ids(&global.view).len(), 2);
     assert_eq!(global.unscoped_decisions, 0);
@@ -188,13 +188,13 @@ fn extraction_row_surfaces_scoped_view_despite_global_selection_scope() {
         aspects_of(&view_a.placements, decision_id),
         vec![RowAspect::Extraction]
     );
-    // ...and being shown here means it must not double as "not shown".
+    // ...and being shown here means it must not also be counted.
     assert_eq!(view_a.unscoped_decisions, 0);
 
     // A sibling root never touched by the extraction doesn't see it...
     let view_b = compute_trail(&conn, &params(vec!["/b".to_string()])).unwrap();
     assert!(decision_ids(&view_b.view).is_empty());
-    // ...and its footer still counts the untouched global decision.
+    // ...and its count still takes in the untouched global decision.
     assert_eq!(view_b.unscoped_decisions, 1);
 }
 
@@ -412,7 +412,7 @@ fn arrival_row_surfaces_scoped_view_despite_unrelated_source_root() {
         aspects_of(&view.placements, decision_id),
         vec![RowAspect::Arrival]
     );
-    // ...and being shown here means it must not double as "not shown".
+    // ...and being shown here means it must not also be counted.
     assert_eq!(view.unscoped_decisions, 0);
 
     // A view of the source root sees the outbound extraction aspect, not
@@ -426,11 +426,9 @@ fn arrival_row_surfaces_scoped_view_despite_unrelated_source_root() {
 
 #[test]
 fn arrival_matching_is_descendant_or_equal_and_segment_aware() {
-    // Re-pointed from `arrival_matching_is_bidirectional_and_segment_aware`
-    // when the placement law landed: an ancestor destination used to match
-    // (`shallower` surfaced at `/archive/x`), which is exactly how a
-    // common-prefix destination manufactured arrivals at sibling folders.
-    // The recorded location must now be *contained by* the view.
+    // An ancestor destination must not match (`shallower` at `/archive/x`):
+    // that is how a common-prefix destination would manufacture arrivals at
+    // sibling folders. The recorded location must be *contained by* the view.
     let conn = open_in_memory_for_test();
     let source_root = insert_test_root(&conn, "/a", "source", false);
     insert_test_root(&conn, "/archive", "archive", false);
@@ -660,7 +658,7 @@ fn arrival_surfaces_when_the_destination_root_was_removed() {
         aspects_of(&result.placements, decision_id),
         vec![RowAspect::Arrival]
     );
-    // Shown here means it must not also count as "not shown".
+    // Shown here means it must not also be counted.
     assert_eq!(result.unscoped_decisions, 0);
 }
 
@@ -1409,9 +1407,9 @@ fn started_decision_appears_in_timeline() {
 // The carried scope match — which of a decision's places brought it here
 // ----------------------------------------------------------------------
 
-/// The defect this story exists for. A scan naming many prefixes surfaced in
-/// a leaf folder labelled by its *first* recorded prefix, which had nothing
-/// to do with the view. Nothing pinned this before.
+/// A scan naming many prefixes surfaces in a leaf folder labelled by the prefix
+/// that matched, never by its *first* recorded prefix, which can have nothing to
+/// do with the view.
 #[test]
 fn a_multi_prefix_decision_names_the_prefix_that_matched() {
     let conn = open_in_memory_for_test();
@@ -1720,7 +1718,7 @@ fn the_first_day_of_a_since_minute_is_partial() {
 }
 
 /// A note and a global decision one second outside the period are left out, and the scoped
-/// view's "not shown" count agrees with what the lens shows.
+/// view's count of global decisions agrees with what the lens shows.
 #[test]
 fn notes_and_the_unscoped_count_follow_the_lens() {
     let conn = open_in_memory_for_test();

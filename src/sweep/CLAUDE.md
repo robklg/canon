@@ -148,12 +148,12 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   (`grouping_never_recurses_past_the_immediate_parent`). A finding that *is* its root's top has no
   parent; a root's own top **is** an eligible parent, and no `(whole root)` marker is manufactured
   for such a headline — that marker is derived from the folder tree, never read off an empty prefix.
-- **A parent entry on an archive root emits a handoff that does not run**: sibling findings whose
-  subjects stand on an archive root can clear the gate, and the entry's way back,
-  `canon survey <archive parent>`, meets survey's refusal of a scope resolving entirely inside
-  archive roots (`SurveyExit::FrameRefused`, exit non-zero). The axis deliberately grows no archive
-  test of its own — archive-ness is spoken once, in the nearness projection — and parse-only
-  round-trip checking cannot see it, so it is stated here rather than papered over.
+- **A parent entry on an archive root hands off through a member's source counterpart**, because a
+  survey scope must hold source content (`SurveyExit::FrameRefused` refuses the rest) and a line
+  that fails is worse than none. Sibling findings on an archive root can clear the gate; the line
+  surveys the first member's counterpart that stands on a source root against that member, and an
+  entry with no such member prints no line. The axis still grows no archive test of its own:
+  `handoff` reads the existing flags, so archive-ness stays spoken once.
 - **No coined noun on the surface**: "N places under here", a percentage, the members.
   `ParentEntry` names tree structure, not a concept, and the surface must not mint a domain word
   sideways (`a_parent_entry_states_its_coverage` pins the absence).
@@ -246,12 +246,10 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   and the review the handoff names is what is entitled to judge
   (`a_root_entry_states_a_remainder_and_never_claims_readiness`).
 - **The handoff is `canon roots retire path:<root> --dry-run`**, a report that **exits 0 on either
-  verdict**, so what is printed runs as printed on a root that is not ready. One precondition sits
-  ahead of the review and is not a verdict: with **no archive root registered** the ceremony refuses
-  (the book would have no shelf) and the handoff exits non-zero. The board can reach that state —
-  with no archive root nothing reads as covered, so only a root holding very few sources buckets low
-  enough to form an entry — and `every_emitted_argv_parses` checks parsing, never execution, so it
-  cannot see it.
+  verdict**, so what is printed runs as printed on a root that is not ready. With **no archive root
+  registered** the ceremony itself refuses (the book would have no shelf), and `--dry-run` says so
+  inside its report and still exits 0. The board can reach that state — with no archive root nothing
+  reads as covered, so only a root holding very few sources buckets low enough to form an entry.
 - **A root entry's members state their own counterpart standing**; a hub's do not. Every ranking
   factor is a stated fact on the entry, and a root entry ranks on `counterpart_standing` aggregated
   over members that each have their own — a hub's share one counterpart, whose standing sits on the
@@ -346,7 +344,9 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   `(display, argv)`, and a test parses every emittable argv through the real clap definitions, so
   CLI drift is a test failure rather than user-facing rot. It covers the footer's ways back too
   (`suspended_lines`, `every_emitted_argv_parses`): `roots unsuspend` takes a root specifier
-  (`path:<path>`), never a bare path, and a way back that does not run is worse than none. Handoffs
+  (`path:<path>`), never a bare path, and a way back that does not run is worse than none. An entry
+  with no pair to compare and no source place to survey builds no line. Parsing never meets survey's
+  refusal, so `sweep_lines::every_printed_line_runs_as_printed` runs a real board's lines. Handoffs
   judge (survey), never a ready-made exclusion: the journey is find → judge → decide → record.
 - **The anti-creep guard**: no `--where` or population shaping, no per-pair/threshold/scope flags,
   no JSONL. Drill-down belongs to survey and compare — the sweep must not become a worse survey.

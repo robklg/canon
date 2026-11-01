@@ -84,8 +84,8 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   `parse_when` reads `today`, `yesterday` and weekday names, and the rest through core's list
   of spellings. The lens reads the period once into a `ClockSpan` (the label, in `cli.rs`, again
   by the same rule); `selects` reads each row's time on the clock and asks the span, so the
-  repeated hour selects both its moments and the "not shown" count matches what is shown
-  (`unscoped_times_in` returns times, never a count). `fetch_window` is a speed path wider than
+  repeated hour selects both its moments, and the count of decisions with no recorded place follows
+  the same span (`unscoped_times_in` returns times, never a count). `fetch_window` is a speed path wider than
   any offset, never deciding a row. A day covered in part is headed by its part (`day_part`).
   Pin: `the_time_lens_selects_both_moments_of_the_repeated_hour`.
 **Crossings conventions** (`domain/crossings.rs`, `ops/crossings.rs`, `render::print_crossings`) — the counterpart door, the trail's fourth axis beside place, time and one decision:
@@ -113,11 +113,10 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   unchanged and the door follows it: substituting the door for the cause would offer a way back
   that leads nowhere, since unsuspending reveals nothing about a path Canon never heard of. A parked prefix is gated exactly the
   way a CWD-defaulted one is — both arrive ungated, for different reasons — with a root's own top
-  exempt at every door alike. **`crossings`'
-  suspended arm is gone** — it re-detected the door from `current_dir()` and refused, which made
-  the same place answer differently named and stood in, against this subsystem's own rule. The
-  boundary now hands back the parked root's own scope, so there *is* a boundary to measure
-  against; `boundless_refusal` has two causes and neither is a door.
+  exempt at every door alike. **`crossings` has no suspended arm**: re-detecting the door from
+  `current_dir()` and refusing would make the same place answer differently named and stood in,
+  against this subsystem's own rule. The boundary hands back the parked root's own scope, so there
+  *is* a boundary to measure against; `boundless_refusal` has two causes and neither is a door.
 
 - **The view is the boundary, and a global view borrows the named counterpart.** A crossing is a
   row that crosses the view's boundary; a global view has none of its own, so membership-by-view
@@ -460,8 +459,9 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
 - **`decision_family()`** (`core::domain::fate`) is a total mapping over the frozen
   `DecisionCommand` identifiers — when adding a decision command, add its family arm too (unknown
   identifiers land in `Unrecognized`, rendered raw, never dropped).
-- **Global decisions** (no `decision_scopes` rows) surface in scoped views as a counted footer —
-  absence is never silent.
+- **Global decisions** (no `decision_scopes` rows) stand in `canon trail --global`, not in a scoped
+  view. `TrailResult.unscoped_decisions` counts those a view does not show; the book's
+  `timeline.md` reads it, and no trail surface prints it.
 - **Timeline lines carry a scope column** (decisions and notes alike), rendered in the three frames
   above and capped. Capping goes through `core::domain::format::cap_path` — the one shared
   path-capping helper (char-safe; also used by coverage and facts labels — never re-implement

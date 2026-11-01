@@ -13,11 +13,11 @@ use crate::core::ops::scope::{cwd_for, resolve_root_path_any};
 use crate::core::repo::{self, Connection, Db};
 use crate::progress::Progress;
 use crate::scan::ops::hash::HashProgress;
-use crate::scan::ops::pipeline::{mark_missing_path, observe_file, scan_root};
+use crate::scan::ops::pipeline::{mark_missing_path, observe_file, resolve_scan_target, scan_root};
 use crate::scan::ops::receipt::write_deletion_receipts;
 use crate::scan::ops::types::{
     current_timestamp, DeletionReceiptItem, FileAction, FileToHash, ScanOptions, ScanProgress,
-    ScanStats,
+    ScanStats, ScanTarget,
 };
 use crate::scan::ops::{candidates::find_root_candidates, hash::run_hash_pass};
 
@@ -160,6 +160,13 @@ pub fn run(
         }
     }
 
+    // Every path is settled before the row opens, so one refused path stops
+    // the whole scan with nothing walked and nothing recorded.
+    let targets = paths_to_scan
+        .iter()
+        .map(|p| resolve_scan_target(conn, p, &roots, add_root, role, missing))
+        .collect::<Result<Vec<_>>>()?;
+
     let decision = DecisionParams {
         command: DecisionCommand::Scan,
         scope: DecisionScope::decompose(&scan_scope, &roots),
@@ -189,153 +196,73 @@ pub fn run(
         // freshly created root lands in the durable scope index (it didn't exist at start()).
         let mut scope_pairs: Vec<DecisionScope> = Vec::new();
 
-        for path in &paths_to_scan {
-            let canonical = match fs::canonicalize(path) {
-                Ok(p) => p,
-                Err(e) => {
-                    // Reaching this arm is the condition for --missing: the path
-                    // could not be resolved, so it cannot be walked. Handling
-                    // --missing anywhere else would mark live files deleted.
-                    if missing {
-                        // The folder is gone, so it can't be walked — mark its sources
-                        // deleted directly, with the same stamp + source-local receipt
-                        // the sweep produces.
-                        let cwd = cwd_for(std::slice::from_ref(&path.as_path()))?;
-                        let result = mark_missing_path(
-                            conn,
-                            path,
-                            &roots,
-                            &cwd,
-                            now,
-                            recorder.decision_id(),
-                            decision.receipt_enabled,
-                        )?;
-                        // The folder this deletion was aimed at is the decision's
-                        // scope. Without it the record would say `global` — a
-                        // whole-universe claim for an act on one folder.
-                        scope_pairs.push(DecisionScope::new(
-                            result.root_id,
-                            result.root_path.clone(),
-                            result.rel_prefix.clone(),
-                        ));
-                        if result.missing_count == 0 {
-                            eprintln!("No present sources found under {}", path.display());
-                        } else {
-                            total_stats.missing += result.missing_count;
-                            if !result.deleted_items.is_empty() {
-                                deleted_by_root.push((
-                                    result.root_id,
-                                    result.root_path,
-                                    result.deleted_items,
-                                ));
-                            }
+        for target in targets {
+            let (canonical, names_a_directory, root_id, root_path, scan_prefix) = match target {
+                ScanTarget::Known {
+                    canonical,
+                    names_a_directory,
+                    root_id,
+                    root_path,
+                    scan_prefix,
+                } => (
+                    canonical,
+                    names_a_directory,
+                    root_id,
+                    root_path,
+                    scan_prefix,
+                ),
+                ScanTarget::NewRoot { canonical, role } => {
+                    let new_root = create_root(conn, &canonical, &role, comment)?;
+                    (canonical.clone(), true, new_root.id, canonical, None)
+                }
+                ScanTarget::Gone { path, cwd } => {
+                    // The folder is gone, so it can't be walked — mark its sources
+                    // deleted directly, with the same stamp + source-local receipt
+                    // the sweep produces.
+                    let result = mark_missing_path(
+                        conn,
+                        &path,
+                        &roots,
+                        &cwd,
+                        now,
+                        recorder.decision_id(),
+                        decision.receipt_enabled,
+                    )?;
+                    // The folder this deletion was aimed at is the decision's
+                    // scope. Without it the record would say `global` — a
+                    // whole-universe claim for an act on one folder.
+                    scope_pairs.push(DecisionScope::new(
+                        result.root_id,
+                        result.root_path.clone(),
+                        result.rel_prefix.clone(),
+                    ));
+                    if result.missing_count == 0 {
+                        eprintln!("No present sources found under {}", path.display());
+                    } else {
+                        total_stats.missing += result.missing_count;
+                        if !result.deleted_items.is_empty() {
+                            deleted_by_root.push((
+                                result.root_id,
+                                result.root_path,
+                                result.deleted_items,
+                            ));
                         }
-                        continue;
                     }
-                    // A relative path against a working directory that no
-                    // longer exists fails as "no such file", which names the
-                    // wrong thing: the path may well be there, and only the
-                    // place it was to be resolved from is gone. Ask for the
-                    // directory this path actually needs and let its refusal
-                    // speak instead — a scan that could resolve nothing must
-                    // not report a walk of nothing.
-                    let cwd = cwd_for(std::slice::from_ref(&path.as_path()))?;
-                    eprintln!("Warning: skipping {}: {}", path.display(), e);
-                    if let Some(hint) = missing_hint(conn, path, &roots, &cwd) {
+                    continue;
+                }
+                ScanTarget::Unreadable { path, error, cwd } => {
+                    eprintln!("Warning: skipping {}: {}", path.display(), error);
+                    if let Some(hint) = missing_hint(conn, &path, &roots, &cwd) {
                         eprintln!("{hint}");
                     }
                     continue;
                 }
             };
 
-            // A path argument names a place, and a place may be a single
-            // file. Everything that is not a directory takes the file-grain
-            // path below — regular files, and the residue the observer counts
-            // and declines.
-            let names_a_directory = canonical.is_dir();
-
-            // Check if path is inside an existing root (including suspended)
-            let (root_id, root_path, scan_prefix, _root_role) = match resolve_root_path_any(
-                &roots, &canonical,
-            )? {
-                Some((id, root_path, existing_role, rel_path)) => {
-                    // The door was asked about above, once, over the same
-                    // roots and the same resolved paths — a second check here
-                    // would be a second spelling of one rule, free to drift
-                    // from the sentence the first one speaks.
-
-                    // Path is inside an existing active root
-                    if add_root {
-                        bail!(
-                        "Path '{}' is already inside {} root '{}'. Remove --add to scan as subtree.",
-                        canonical.display(),
-                        existing_role,
-                        root_path
-                    );
-                    }
-                    // Check role matches if --role was specified
-                    if let Some(r) = role {
-                        if existing_role != r {
-                            bail!(
-                            "Root '{root_path}' has role '{existing_role}', cannot scan with --role {r}"
-                        );
-                        }
-                    }
-                    let scan_prefix = if rel_path.is_empty() {
-                        None // Scanning entire root
-                    } else {
-                        Some(rel_path) // Scanning subtree
-                    };
-                    (id, PathBuf::from(root_path), scan_prefix, existing_role)
-                }
-                None => {
-                    // A root is a folder. A file outside every root is refused
-                    // by name, and both arms point at its directory: `--add`
-                    // has nothing to make a root from, and sending the user to
-                    // `--add` with the file path would only land them in the
-                    // other refusal.
-                    if !names_a_directory {
-                        let dir = canonical
-                            .parent()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default();
-                        if add_root {
-                            bail!(
-                            "Cannot create a root from '{}': a root is a folder. Scan its directory '{dir}' with --add instead.",
-                            canonical.display()
-                        );
-                        }
-                        bail!(
-                        "Path '{}' is not inside any existing root. Scan its directory '{dir}' with --add to create a new root.",
-                        canonical.display()
-                    );
-                    }
-                    // Path is not inside any root
-                    if !add_root {
-                        bail!(
-                        "Path '{}' is not inside any existing root. Use --add to create a new root.",
-                        canonical.display()
-                    );
-                    }
-                    // role is guaranteed to be Some when add_root is true — the
-                    // CLI parser's own invariant (`#[arg(requires = "role")]` on
-                    // `--add`), not a check re-derived here.
-                    let new_role = match role {
-                        Some(r) => r,
-                        None => unreachable!("clap's `--add requires role` makes this Some"),
-                    };
-                    crate::scan::domain::check_not_filesystem_root(&canonical)?;
-                    crate::scan::domain::check_no_overlap(&roots, &canonical)?;
-                    let new_root = create_root(conn, &canonical, new_role, comment)?;
-                    (new_root.id, canonical.clone(), None, new_role.to_string())
-                }
-            };
-
             // A root whose own path is not a folder is a fact about that root:
             // said and skipped, like every other per-path trouble in this loop.
             // Refused *before* the scope is recorded — a path that produced no
-            // observation must not leave a decision claiming the whole root,
-            // which is the `--missing` scope repair's own lesson.
+            // observation must not leave a decision claiming the whole root.
             if !names_a_directory && scan_prefix.is_none() {
                 eprintln!(
                     "Warning: skipping {}: a root is a folder, and this root's own path is a file.",
@@ -431,9 +358,7 @@ pub fn run(
         let pass = run_hash_pass(conn, &all_files_to_hash, &scope_pairs, &hash_progress)?;
         total_stats.carry_hash_pass(&pass);
 
-        // Print summary (composed by ops)
         let summary = total_stats.compose_summary();
-        println!("{}", summary);
 
         // Record the scope index for every walked root (including any created this run)
         // before linking receipts to those roots. Idempotent with the start()-time write.
@@ -486,6 +411,11 @@ pub fn run(
     for w in recorder.take_warnings() {
         eprintln!("{w}");
     }
+
+    // Printed last, because a closed pipe ends the process at this line: the
+    // user may lose the summary, never the record of what the scan deleted,
+    // nor a warning that the record could not be written.
+    println!("{summary}");
 
     // Exit with error if there were unexpected hash changes (possible corruption).
     // Raised only after the decision and its receipts are finalized above —
@@ -642,8 +572,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // Pipeline tests (process_file, mark_missing_sources) and mark_missing_path
-    // (relocated in the deletion-fate work) live in ops::pipeline::tests.
+    // Pipeline tests (process_file, mark_missing_sources, mark_missing_path)
+    // live in ops::pipeline::tests.
 
     // =========================================================================
     // Scan honesty: what a --missing scan records, and what an error leaves behind
@@ -725,38 +655,23 @@ mod tests {
     /// only backfilled at completion.
     ///
     /// The distinction is only visible on a run that never *reaches*
-    /// completion, so this drives one: a second `--missing` path under no
-    /// known root bails after `start()`, `record_scopes` never runs, and the
-    /// only scope row that can exist is the one start-time wrote for the
-    /// first path. Deleting the lexical fallback leaves an interrupted
-    /// decision claiming nowhere.
-    ///
-    /// **The vehicle used to be a suspended root**, which no longer reaches
-    /// this far: the door is asked about once, before the recorder opens a
-    /// row, so a refused scan writes no decision at all. The subject here is
-    /// start-time decomposition, not the door, and it needs only *some*
-    /// failure after `start()`.
+    /// completion, so this drives one: a planted failure stops the marking
+    /// after `start()`, `record_scopes` never runs, and the only scope row
+    /// that can exist is the one start-time wrote. Deleting the lexical
+    /// fallback leaves an interrupted decision claiming nowhere.
     #[test]
     fn a_scan_scope_survives_a_path_that_no_longer_canonicalizes() {
         assert!(
             std::fs::canonicalize("/photos/vacation").is_err(),
             "the fixture path must not exist on disk"
         );
-        let conn = repo::open_in_memory_for_test();
-        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
-        let db = Db::from_connection(conn);
+        let (db, root_id) = gone_folder_under_a_root();
+        crate::core::testing::plant_failure(db.conn(), "UPDATE", "sources");
 
-        let err = run_scan(
-            &db,
-            &[
-                PathBuf::from("/photos/vacation"),
-                PathBuf::from("/elsewhere/gone"),
-            ],
-            true,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("not under any known root"), "{err}");
+        let err = run_scan(&db, &[PathBuf::from("/photos/vacation")], true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("planted"), "{err}");
 
         let status: String = db
             .conn()
@@ -786,18 +701,18 @@ mod tests {
     /// which outcome an error deserves is the caller's knowledge. This test is
     /// that projection's pin — it fails if the arm stops settling.
     ///
-    /// The vehicle is a `--missing` path under no known root; a suspended
-    /// root used to serve, and no longer reaches past the door.
+    /// It plants a failure while `--missing` marks a real source, because a
+    /// refusal never reaches `start()`: `a_refused_scan_writes_no_row` is this
+    /// test's refusal twin.
     #[test]
     fn a_scan_that_errors_after_start_completes_its_decision_as_interrupted() {
-        let conn = repo::open_in_memory_for_test();
-        repo::insert_test_root(&conn, "/photos", "source", false);
-        let db = Db::from_connection(conn);
+        let (db, _root_id) = gone_folder_under_a_root();
+        crate::core::testing::plant_failure(db.conn(), "UPDATE", "sources");
 
-        let err = run_scan(&db, &[PathBuf::from("/elsewhere/gone")], true)
+        let err = run_scan(&db, &[PathBuf::from("/photos/vacation")], true)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not under any known root"), "{err}");
+        assert!(err.contains("planted"), "{err}");
 
         let (status, summary): (String, Option<String>) = db
             .conn()
@@ -807,12 +722,18 @@ mod tests {
             .unwrap();
         assert_eq!(status, "interrupted");
         assert!(
-            summary
-                .as_deref()
-                .unwrap_or_default()
-                .contains("not under any known root"),
+            summary.as_deref().unwrap_or_default().contains("planted"),
             "the summary carries the error: {summary:?}"
         );
+    }
+
+    /// A root that is not on disk, with one present source under a folder that
+    /// is not on disk either: the whole premise of `--missing`.
+    fn gone_folder_under_a_root() -> (Db, i64) {
+        let conn = repo::open_in_memory_for_test();
+        let root_id = repo::insert_test_root(&conn, "/photos", "source", false);
+        crate::core::testing::insert_source(&conn, root_id, "vacation/img.jpg", None);
+        (Db::from_connection(conn), root_id)
     }
 
     /// **The door precedes the recorder**: a scan aimed behind a closed door
@@ -1255,6 +1176,187 @@ mod tests {
         );
     }
 
+    fn decision_count(db: &Db) -> i64 {
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn source_count(db: &Db) -> i64 {
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// **Every per-path refusal precedes the recorder.** Each one says its own
+    /// sentence and leaves no row: a row reading `interrupted` would claim a
+    /// run that never started. The allowed case is the same library with a
+    /// path inside the known root.
+    #[test]
+    fn a_refused_scan_writes_no_row() {
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let loose = outside.join("loose.jpg");
+        std::fs::write(&loose, "bytes").unwrap();
+        let outside = std::fs::canonicalize(outside).unwrap();
+        let top = std::fs::canonicalize(temp.path()).unwrap();
+
+        struct Case<'a> {
+            name: &'a str,
+            path: PathBuf,
+            role: Option<&'a str>,
+            add: bool,
+            missing: bool,
+            says: &'a str,
+        }
+        let library = temp.path().join("library");
+        let cases = [
+            Case {
+                name: "directory in no root",
+                path: outside.clone(),
+                role: None,
+                add: false,
+                missing: false,
+                says: "Use --add to create a new root",
+            },
+            Case {
+                name: "file in no root",
+                path: loose.clone(),
+                role: None,
+                add: false,
+                missing: false,
+                says: "with --add to create a new root",
+            },
+            Case {
+                name: "--add of a file",
+                path: loose.clone(),
+                role: Some("source"),
+                add: true,
+                missing: false,
+                says: "a root is a folder",
+            },
+            Case {
+                name: "--add inside a root",
+                path: library.join("inbox"),
+                role: Some("source"),
+                add: true,
+                missing: false,
+                says: "Remove --add to scan as subtree",
+            },
+            Case {
+                name: "--role mismatch",
+                path: library.join("inbox"),
+                role: Some("archive"),
+                add: false,
+                missing: false,
+                says: "cannot scan with --role archive",
+            },
+            Case {
+                name: "--add overlapping a root",
+                path: top,
+                role: Some("source"),
+                add: true,
+                missing: false,
+                says: "overlaps with existing root",
+            },
+            Case {
+                name: "--add at the top of the filesystem",
+                path: PathBuf::from("/"),
+                role: Some("source"),
+                add: true,
+                missing: false,
+                says: "every path lies under it",
+            },
+            Case {
+                name: "--missing under no root",
+                path: PathBuf::from("/elsewhere/gone"),
+                role: None,
+                add: false,
+                missing: true,
+                says: "not under any known root",
+            },
+        ];
+
+        let (db, _root_id, dir) = registered_root(&temp, false);
+        for case in &cases {
+            let err = run_scan_on(
+                &db,
+                std::slice::from_ref(&case.path),
+                case.role,
+                case.add,
+                true,
+                RecordingMode::Records,
+                case.missing,
+            )
+            .expect_err(case.name)
+            .to_string();
+            assert!(err.contains(case.says), "{}: {err}", case.name);
+            assert_eq!(decision_count(&db), 0, "{}: no row", case.name);
+        }
+
+        // The allowed case, in the same state.
+        run_scan_on(
+            &db,
+            &[dir.join("inbox")],
+            None,
+            false,
+            true,
+            RecordingMode::Records,
+            false,
+        )
+        .unwrap();
+        let status: String = db
+            .conn()
+            .query_row("SELECT status FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    /// One refused path stops the whole scan before anything is walked: a good
+    /// path named first is not half of a run that then fails. A path that is
+    /// merely gone from disk is a different thing, warned about and skipped.
+    #[test]
+    fn a_refused_path_among_several_walks_nothing() {
+        let temp = TempDir::new().unwrap();
+        let (db, _root_id, dir) = registered_root(&temp, false);
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+
+        let err = run_scan_on(
+            &db,
+            &[dir.join("inbox"), outside],
+            None,
+            false,
+            true,
+            RecordingMode::Records,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Use --add to create a new root"), "{err}");
+        assert_eq!(decision_count(&db), 0, "no row");
+        assert_eq!(source_count(&db), 0, "the good path was not walked");
+
+        // Allowed: the path beside the good one does not exist on disk.
+        run_scan_on(
+            &db,
+            &[dir.join("inbox"), dir.join("gone")],
+            None,
+            false,
+            true,
+            RecordingMode::Records,
+            false,
+        )
+        .expect("a gone path is warned about and skipped");
+        assert_eq!(source_count(&db), 1, "the good path was walked");
+        let status: String = db
+            .conn()
+            .query_row("SELECT status FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "completed");
+    }
+
     /// A root whose own path is no longer a folder is a fact about that root.
     /// It is said and skipped, like every other per-path trouble in the loop —
     /// a run over several roots must not end because one of them broke.
@@ -1263,7 +1365,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (db, _root_id, dir) = registered_root(&temp, false);
         // A second root that is a file on disk. Registered directly: the CLI
-        // now refuses to create one, which is the other half of this pair.
+        // refuses to create one, which is the other half of this pair.
         let broken = temp.path().join("broken-root");
         std::fs::write(&broken, "not a folder").unwrap();
         let canonical = std::fs::canonicalize(&broken).unwrap();

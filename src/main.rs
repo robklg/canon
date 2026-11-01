@@ -154,7 +154,7 @@ mod contentless_law_tests;
 mod source_value_law_tests;
 
 #[derive(Parser)]
-#[command(name = "canon")]
+#[command(name = "canon", version)]
 #[command(about = "Organize large media libraries into a canonical archive")]
 struct Cli {
     /// Canon home directory (default: ~/.canon/, env: CANON_HOME)
@@ -558,7 +558,7 @@ enum ExcludeAction {
         #[arg(long = "where")]
         filters: Vec<String>,
         /// Exclude specific source by ID (as shown in ls --duplicates)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "filters")]
         id: Option<i64>,
         /// Show what would be excluded without making changes
         #[arg(long)]
@@ -621,7 +621,7 @@ enum ExcludeAction {
         #[arg(long = "where")]
         filters: Vec<String>,
         /// Exclude specific object by hash (use this for empty files)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "filters")]
         hash: Option<String>,
         /// Execute the exclusion (default is dry-run for safety)
         #[arg(long)]
@@ -1007,6 +1007,14 @@ fn door_channel_for(command: &Commands) -> scope::DoorChannel {
 /// on the same rule. Everything else is a real failure and renders exactly as
 /// before.
 fn main() -> std::process::ExitCode {
+    // Rust ignores SIGPIPE at startup, which turns a closed pipe into a panic in
+    // `println!`. Restoring the default ends the process quietly, as it ends any
+    // other Unix filter. A row left open reads `started`, the same as a panic.
+    #[cfg(unix)]
+    // SAFETY: called once, before any thread starts or any signal handler is set.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let channel = door_channel_for(&cli.command);
     match run(cli) {
@@ -2275,8 +2283,8 @@ mod tests {
         }
     }
 
-    /// `--show-aliases` is gone: an alias is an `@name` from the aliases file, and the
-    /// built-in keys it listed end the plain `canon facts` list instead.
+    /// `canon facts` takes no `--show-aliases`: an alias is an `@name` from the aliases
+    /// file, and the built-in keys end the plain `canon facts` list.
     #[test]
     fn show_aliases_is_an_unknown_flag() {
         let refused = Cli::try_parse_from(["canon", "facts", "--show-aliases"])
@@ -2284,5 +2292,45 @@ mod tests {
             .expect("--show-aliases must be refused");
         assert_eq!(refused.kind(), clap::error::ErrorKind::UnknownArgument);
         assert!(Cli::try_parse_from(["canon", "facts"]).is_ok());
+    }
+
+    /// An exclusion by id names one source, so a filter beside it can only be
+    /// ignored. Refused while parsing: nothing opens the database and a broken
+    /// filter is never read.
+    #[test]
+    fn exclude_id_with_a_filter_is_refused() {
+        let refused = Cli::try_parse_from([
+            "canon",
+            "exclude",
+            "set",
+            "--id",
+            "5",
+            "--where",
+            "BROKEN(((",
+        ])
+        .err()
+        .expect("--id with --where must be refused");
+        assert_eq!(refused.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(Cli::try_parse_from(["canon", "exclude", "set", "--id", "5"]).is_ok());
+        assert!(Cli::try_parse_from(["canon", "exclude", "set", "--where", "x=1"]).is_ok());
+    }
+
+    /// The same for an object named by its hash.
+    #[test]
+    fn exclude_object_hash_with_a_filter_is_refused() {
+        let refused = Cli::try_parse_from([
+            "canon",
+            "exclude",
+            "set-object",
+            "--hash",
+            "abc",
+            "--where",
+            "BROKEN(((",
+        ])
+        .err()
+        .expect("--hash with --where must be refused");
+        assert_eq!(refused.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(Cli::try_parse_from(["canon", "exclude", "set-object", "--hash", "abc"]).is_ok());
+        assert!(Cli::try_parse_from(["canon", "exclude", "set-object", "--where", "x=1"]).is_ok());
     }
 }

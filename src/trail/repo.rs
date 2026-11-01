@@ -1,6 +1,6 @@
 //! Trail's own SQL — the repo stratum. Read-only queries backing the
 //! timeline merge, the extraction ledger's whole-table reads, and the
-//! scoped-footer adjustments; `decisions`/`decision_scopes`/
+//! count of decisions with no recorded place; `decisions`/`decision_scopes`/
 //! `decision_extractions` access shared with other subsystems (root_story,
 //! ledger reindex, apply) stays in `core::repo::decision`/`core::repo::source`.
 
@@ -77,8 +77,8 @@ pub fn unscoped_times_in(conn: &Connection, start: i64, end: i64) -> Result<Vec<
 }
 
 /// Of the given decision ids, return those with no `decision_scopes` row
-/// (chunked). Serves the scoped-trail footer adjustment: decisions surfaced
-/// via an extraction row must not also be double-counted as "not shown".
+/// (chunked). Serves the count of decisions with no recorded place: decisions
+/// surfaced via an extraction row are in the view and must not also be counted.
 pub fn filter_unscoped_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
     let mut out = Vec::new();
     for chunk in ids.chunks(BATCH_SIZE) {

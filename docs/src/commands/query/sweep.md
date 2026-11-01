@@ -29,18 +29,18 @@ The sweep takes no paths and no filters; it is universe-wide, computed fresh fro
     96% inside /Volumes/Archive/Media/Super8  (by size · 89% by count)
     counterpart: archived, scanned 5d ago · subject scanned 2d ago
     gain: 1,204 files · 33.7 GB     residual: 1 file · 3.9 GB nowhere else
-    → canon survey . --other /Volumes/Archive/Media/Super8
+    → canon survey /Volumes/OldBackup/ARCHIVED/Super8 --other /Volumes/Archive/Media/Super8
 ```
 
 - **The subject** (the full path on the first line) is the place the finding is about, the side you might dismiss. The other side is the **counterpart**: where the copies live. A single finding's headline is its *subject*; a hub's headline is the shared *counterpart* (the hub's own "shared counterpart" line states this).
 - **The relation** states how the subject's content connects elsewhere, in survey's vocabulary: a *subset* sits inside a counterpart that holds more; a *mirror* matches its counterpart in both directions. Both percentages matter: a large gap between "by size" and "by count" means many small files carry little weight.
 - **The counterpart line** states the counterpart's [*standing*](../../concepts/resolution.md#standings) (`archived` or `present`), which is what makes acting on the finding safe or not. The wording is declarative ("inside X", never "keep X"): the relation implies no preferred side; even for a subset, the smaller side can still be the better copy. Both sides carry their scan age; the claim rests on the last scan.
 - **Gain** is what acting on the finding resolves. **Residual** is content existing nowhere else in the universe. `residual: none` means a clean dismissal; a small residual often means one rescue away from a clean one.
-- **The `→` handoff** is the ready-to-run judging command, written as if you `cd` into the subject first. The sweep only ever hands off to judgment, never to a ready-made exclusion.
+- **The `→` handoff** is the ready-to-run judging command, and it runs as printed from anywhere. An entry with no `→` line has no single place on a source root to compare. The sweep only ever hands off to judgment, never to a ready-made exclusion.
 
 When the subject is not fully hashed, the finding says so (`compared on 92% by size`): unhashed content is unverified, never silently omitted. Notes you've left on the subject or counterpart (`canon note`) surface beside the finding.
 
-A subject that itself stands on an archive root is marked `(in the archive)` and ranks below an equivalent place on a source root: its content is already resolved, so it does not compete for triage attention, and the real opportunity usually sits on the counterpart side. It is demoted, not removed, and the relation is stated anyway; the sweep compares any location to any other. A hub headlined by an archive counterpart is untouched by this: its members are the subjects, and live source members keep the hub competing at full weight.
+A subject that itself stands on an archive root is marked `(in the archive)` and ranks below an equivalent place on a source root: its content is already resolved, so it does not compete for triage attention, and the real opportunity usually sits on the counterpart side. It is demoted, not removed, and the relation is stated anyway; the sweep compares any location to any other. Its `→` line surveys the source side, so survey's numbers read from that side and can differ from the entry's. A hub headlined by an archive counterpart is untouched by this: its members are the subjects, and live source members keep the hub competing at full weight.
 
 A subject that is a whole root, rather than a folder inside one, is marked `(whole root)`. Both markers appear where both apply.
 
@@ -69,10 +69,10 @@ Many places pointing into one counterpart render as a single leaderboard entry:
       /Volumes/OldBackup/iphone-2019  98% inside · 402 files · 2.1 GB
       /Volumes/old-disk/dumps/phone   97% inside · 371 files · 1.9 GB
       … 34 more (--all)
-    → canon survey /Volumes/Archive/Media/iphone-backup
+    → canon survey /Volumes/OldBackup/iphone-2019 --other /Volumes/Archive/Media/iphone-backup
 ```
 
-The hub occupies one leaderboard slot and shares one handoff: surveying the counterpart shows every member as a related location.
+The hub occupies one leaderboard slot and shares one handoff. Surveying a source counterpart shows every member as a related location; an archive hub compares its first source member with the counterpart.
 
 ### Roots close to done
 
@@ -146,7 +146,7 @@ They take one slot, and the entry that keeps it says so:
     counterpart: present, scanned today · subject scanned today
     also mirrored by /Volumes/Backup/tools — one decision resolves both
     gain: 812 files · 3.2 GB     residual: none
-    → canon survey . --other /Volumes/Backup/tools/vendor/app
+    → canon survey /Volumes/Backup/downloads/tools --other /Volumes/Backup/tools/vendor/app
 ```
 
 Which of the two keeps the slot is decided by path, so an unchanged database always shows the
@@ -172,7 +172,7 @@ Nearness sorts ahead of weight, so a small place on a root close to done outrank
     counterpart: archived, scanned today · subject scanned today
     20 unresolved sources remain on /Volumes/oldmac
     gain: 30 files · 61.4 KB     residual: none
-    → canon survey . --other /Volumes/Archive/Media/2019
+    → canon survey /Volumes/oldmac/Pictures/2019 --other /Volumes/Archive/Media/2019
 ```
 
 The line appears only where nearness is in play; its absence means the order rests on the other factors. Nearness separates entries only among roots close enough to done for the board to say so; above that, roots tie on it and weight leads. The remainder is bucketed by order of magnitude, so it takes a tenfold change to move a place on the board.
@@ -203,4 +203,4 @@ The below-floor footer count includes places that are not ranked, so `--all` rev
 
 ## The journey
 
-Run the sweep, read the top finding, `cd` there, run the handoff survey, judge, then record the decision with `canon exclude` and a reason. Declining to act leaves no trace, unless you leave a note, which comes back beside the finding on the next run.
+Run the sweep, read the top finding, run the handoff survey, judge, then record the decision with `canon exclude` and a reason. Declining to act leaves no trace, unless you leave a note, which comes back beside the finding on the next run.

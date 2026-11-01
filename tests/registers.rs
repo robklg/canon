@@ -105,7 +105,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/scan/CLAUDE.md",
-        words: 4290,
+        words: 4444,
         verifiers: 1,
     },
     Ceiling {
@@ -120,12 +120,12 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/sweep/CLAUDE.md",
-        words: 4529,
+        words: 4545,
         verifiers: 27,
     },
     Ceiling {
         path: "src/trail/CLAUDE.md",
-        words: 7755,
+        words: 7772,
         verifiers: 31,
     },
     Ceiling {

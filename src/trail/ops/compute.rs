@@ -89,7 +89,8 @@ pub struct TrailResult {
     pub view: TrailView,
     /// Decisions beyond the cap (older than the shown window).
     pub earlier_decisions: usize,
-    /// Global decisions invisible to this scoped view (0 for global views).
+    /// Decisions recorded without a place that this view does not show (0 for
+    /// global views).
     pub unscoped_decisions: i64,
     /// Matching decisions before capping.
     pub total_decisions: usize,
@@ -226,9 +227,9 @@ pub fn compute_trail(conn: &Connection, params: &TrailParams) -> Result<TrailRes
                 }
                 None => crate::trail::repo::count_unscoped(conn)?,
             };
-            // Footer honesty: a decision surfaced here only via an extraction
-            // or arrival row (no decision_scopes row of its own) must not
-            // also be counted as "not shown" — restricted to ids that
+            // A decision surfaced here only via an extraction or arrival row
+            // (no decision_scopes row of its own) is shown here, so it must
+            // not also be counted — restricted to ids that
             // actually survived the time-range filter above, since a
             // touching id outside --since/--on was never part of
             // unscoped_raw's count either.
@@ -410,9 +411,8 @@ pub(super) fn single_view_root(pairs: &[(i64, String)], roots: &[Root]) -> Optio
 ///
 /// One entry per decision that a `decision_scopes` row matched. Where several
 /// of a decision's rows match, the **deepest** wins: a scope inside the view
-/// is a more precise statement of where the act was than an ancestor of it,
-/// and an ancestor is what a 31-prefix scan used to be labelled by. Depth is
-/// measured in path segments, ties broken lexicographically so repeated runs
+/// is a more precise statement of where the act was than an ancestor of it.
+/// Depth is measured in path segments, ties broken lexicographically so repeated runs
 /// render identically.
 ///
 /// The display path is composed snapshot-first (`root_path` as written, then
@@ -631,8 +631,8 @@ struct Rollups {
 /// Partitioning is **per row**: one apply drawing from inside the view and
 /// from outside it contributes to the arrival rollup *and* the rearrangement
 /// rollup at once. The sets are disjoint, so no row is counted twice — which
-/// is the whole point, since a rearrangement used to be claimed by both
-/// crossing rollups and read as double the activity.
+/// is the whole point, since a rearrangement claimed by both crossing rollups
+/// would read as double the activity.
 ///
 /// `floors` are the live root paths the outbound grouping stays below; they
 /// are threaded from the roots this query already loaded rather than fetched,

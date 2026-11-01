@@ -84,18 +84,19 @@ fn print_report(report: &SweepReport, now: i64, all: bool) {
 
     for (i, entry) in report.entries.iter().enumerate() {
         println!();
-        let (handoff_line, _) = handoff(entry);
+        let line = handoff(entry).map(|(line, _)| line);
+        let handoff_line = line.as_deref();
         match entry {
             LeaderboardEntry::Single(finding) => {
-                print_finding(i + 1, finding, report, now, &handoff_line)
+                print_finding(i + 1, finding, report, now, handoff_line)
             }
             LeaderboardEntry::Root(root) => {
-                print_root_entry(i + 1, root, report, all, &handoff_line)
+                print_root_entry(i + 1, root, report, all, handoff_line)
             }
             LeaderboardEntry::Parent(parent) => {
-                print_parent_entry(i + 1, parent, report, all, &handoff_line)
+                print_parent_entry(i + 1, parent, report, all, handoff_line)
             }
-            LeaderboardEntry::Hub(hub) => print_hub(i + 1, hub, report, now, all, &handoff_line),
+            LeaderboardEntry::Hub(hub) => print_hub(i + 1, hub, report, now, all, handoff_line),
         }
     }
     print_footers(report, all);
@@ -292,7 +293,7 @@ fn print_finding(
     finding: &StructuralFinding,
     report: &SweepReport,
     now: i64,
-    handoff_line: &str,
+    handoff_line: Option<&str>,
 ) {
     println!(
         "#{rank}  {}{}",
@@ -386,7 +387,14 @@ fn print_finding(
     if let RelationShape::Pair { counterpart, .. } = &finding.shape {
         print_notes(counterpart, report, "    ", Some("at counterpart"));
     }
-    println!("    {handoff_line}");
+    print_handoff(handoff_line);
+}
+
+/// An entry with nothing to compare prints no line at all.
+fn print_handoff(line: Option<&str>) {
+    if let Some(line) = line {
+        println!("    {line}");
+    }
 }
 
 fn print_hub(
@@ -395,7 +403,7 @@ fn print_hub(
     report: &SweepReport,
     now: i64,
     all: bool,
-    handoff_line: &str,
+    handoff_line: Option<&str>,
 ) {
     let about = hub_lines(hub, report, now);
     let mut about = about.into_iter();
@@ -416,7 +424,7 @@ fn print_hub(
             format_count(hub.members.len() - shown)
         );
     }
-    println!("    {handoff_line}");
+    print_handoff(handoff_line);
 }
 
 /// A near-retirable source root as one slot: the root headlines, its places
@@ -432,7 +440,7 @@ fn print_root_entry(
     entry: &RootEntry,
     report: &SweepReport,
     all: bool,
-    handoff_line: &str,
+    handoff_line: Option<&str>,
 ) {
     let (about, members) = root_entry_lines(entry, all);
     let mut about = about.into_iter();
@@ -445,7 +453,7 @@ fn print_root_entry(
     for line in members {
         println!("      {line}");
     }
-    println!("    {handoff_line}");
+    print_handoff(handoff_line);
 }
 
 /// A run of siblings as one slot, headlined by the parent they share. Ten
@@ -456,7 +464,7 @@ fn print_parent_entry(
     entry: &ParentEntry,
     report: &SweepReport,
     all: bool,
-    handoff_line: &str,
+    handoff_line: Option<&str>,
 ) {
     let (about, members) = parent_entry_lines(entry, report, all);
     let mut about = about.into_iter();
@@ -469,7 +477,7 @@ fn print_parent_entry(
     for line in members {
         println!("      {line}");
     }
-    println!("    {handoff_line}");
+    print_handoff(handoff_line);
 }
 
 /// A parent entry's own text: the parent, what the run is and how much of the
@@ -780,26 +788,35 @@ fn counterpart_line(
 /// round-trip test parses. One builder for both, so the test parses exactly
 /// what the user sees. Judging handoffs only — never an exclusion
 /// invocation: the journey is find → judge → decide → record.
-fn handoff(entry: &LeaderboardEntry) -> (String, Vec<String>) {
+///
+/// `None` where the entry has no place on a source root to compare: a survey
+/// refuses a scope that lies wholly in the archive, and a line that fails is
+/// worse than none. Every path is absolute, because the sweep is universe-wide
+/// and the user is not standing in the place it names.
+fn handoff(entry: &LeaderboardEntry) -> Option<(String, Vec<String>)> {
     let argv: Vec<String> = match entry {
         LeaderboardEntry::Single(finding) => match &finding.shape {
-            RelationShape::Pair { counterpart, .. } => vec![
-                "canon".into(),
-                "survey".into(),
-                ".".into(),
-                "--other".into(),
-                abs_path(counterpart),
-            ],
-            RelationShape::Coverage { .. } => vec!["canon".into(), "survey".into(), ".".into()],
+            RelationShape::Pair {
+                counterpart,
+                counterpart_is_archive,
+                ..
+            } => survey_pair(
+                &finding.subject,
+                finding.subject_is_archive,
+                counterpart,
+                *counterpart_is_archive,
+            )?,
+            RelationShape::Coverage { .. } if finding.subject_is_archive => return None,
+            RelationShape::Coverage { .. } => survey_place(&finding.subject),
         },
         // A root entry hands off to the review entitled to judge readiness —
         // the one judgment this board never makes. `--dry-run` is a report and
         // exits 0 on either verdict, so the printed command runs as printed on
-        // a root that is not ready. One precondition sits ahead of the review
-        // and is not a verdict: with no archive root registered the ceremony
-        // refuses, because the book would have no shelf. The board can reach
-        // that state — with no archive root nothing reads as covered, so only
-        // a root holding very few sources buckets low enough to form an entry.
+        // a root that is not ready. With no archive root registered the
+        // ceremony itself refuses, because the book would have no shelf, and
+        // the report says so and still exits 0. The board can reach that state
+        // — with no archive root nothing reads as covered, so only a root
+        // holding very few sources buckets low enough to form an entry.
         LeaderboardEntry::Root(entry) => vec![
             "canon".into(),
             "roots".into(),
@@ -811,16 +828,73 @@ fn handoff(entry: &LeaderboardEntry) -> (String, Vec<String>) {
         // too. Surveying the parent is right at any coverage the gate admits,
         // because survey shows the **whole** parent — including the part no
         // member accounts for — which is the honest picture rather than a
-        // narrowed one.
+        // narrowed one. A parent in the archive cannot be a survey's scope, so
+        // its first member with a counterpart on a source root stands in.
+        // Members share one root, so `all` reads one fact.
         LeaderboardEntry::Parent(entry) => {
-            vec!["canon".into(), "survey".into(), abs_path(&entry.parent)]
+            if entry.members.iter().all(|m| m.subject_is_archive) {
+                entry.members.iter().find_map(survey_of_member)?
+            } else {
+                survey_place(&entry.parent)
+            }
         }
+        // An archive counterpart cannot be a survey's scope, so the first
+        // source member in list order is compared against it.
         LeaderboardEntry::Hub(hub) => {
-            vec!["canon".into(), "survey".into(), abs_path(&hub.counterpart)]
+            if hub.counterpart_is_archive {
+                let member = hub.members.iter().find(|m| !m.subject_is_archive)?;
+                survey_pair(&member.subject, false, &hub.counterpart, true)?
+            } else {
+                survey_place(&hub.counterpart)
+            }
         }
     };
     let display = display_argv(&argv);
-    (format!("→ {display}"), argv)
+    Some((format!("→ {display}"), argv))
+}
+
+fn survey_place(place: &Location) -> Vec<String> {
+    vec!["canon".into(), "survey".into(), abs_path(place)]
+}
+
+/// Survey the source side against the other side: a survey scope must hold
+/// source content. `None` where neither side does.
+fn survey_pair(
+    subject: &Location,
+    subject_is_archive: bool,
+    counterpart: &Location,
+    counterpart_is_archive: bool,
+) -> Option<Vec<String>> {
+    let (scope, other) = match (subject_is_archive, counterpart_is_archive) {
+        (false, _) => (subject, counterpart),
+        (true, false) => (counterpart, subject),
+        (true, true) => return None,
+    };
+    Some(vec![
+        "canon".into(),
+        "survey".into(),
+        abs_path(scope),
+        "--other".into(),
+        abs_path(other),
+    ])
+}
+
+/// A member's own pair as a survey. A coverage-shaped member has no single
+/// counterpart to compare with.
+fn survey_of_member(member: &StructuralFinding) -> Option<Vec<String>> {
+    match &member.shape {
+        RelationShape::Pair {
+            counterpart,
+            counterpart_is_archive,
+            ..
+        } => survey_pair(
+            &member.subject,
+            member.subject_is_archive,
+            counterpart,
+            *counterpart_is_archive,
+        ),
+        RelationShape::Coverage { .. } => None,
+    }
 }
 
 /// An emitted command as the user sees it: shell-quoted, space-joined. The
@@ -949,27 +1023,97 @@ mod tests {
         }
     }
 
-    /// Every handoff shape the sweep can emit must parse through the real
-    /// argument definitions — CLI drift becomes a test failure, not
-    /// user-facing rot.
-    #[test]
-    fn every_handoff_shape_parses() {
-        let entries = vec![
+    fn coverage() -> RelationShape {
+        RelationShape::Coverage {
+            locations: 5,
+            archived_locations: 1,
+            suspended_locations: 0,
+        }
+    }
+
+    /// A pair whose counterpart stands in the archive.
+    fn pair_in_archive(counterpart: Location) -> RelationShape {
+        let RelationShape::Pair {
+            counterpart,
+            class,
+            pair_size_pct,
+            pair_count_pct,
+            counterpart_share_pct,
+            counterpart_suspended,
+            counterpart_last_scanned_at,
+            ..
+        } = pair(counterpart)
+        else {
+            unreachable!("`pair` builds a pair");
+        };
+        RelationShape::Pair {
+            counterpart,
+            class,
+            pair_size_pct,
+            pair_count_pct,
+            counterpart_share_pct,
+            counterpart_suspended,
+            counterpart_is_archive: true,
+            counterpart_last_scanned_at,
+        }
+    }
+
+    fn source_place(subject: Location, shape: RelationShape) -> StructuralFinding {
+        StructuralFinding {
+            subject,
+            ..finding(shape)
+        }
+    }
+
+    fn archive_place(subject: Location, shape: RelationShape) -> StructuralFinding {
+        StructuralFinding {
+            subject,
+            subject_is_archive: true,
+            ..finding(shape)
+        }
+    }
+
+    fn hub(
+        counterpart: Location,
+        counterpart_is_archive: bool,
+        members: Vec<StructuralFinding>,
+    ) -> LeaderboardEntry {
+        LeaderboardEntry::Hub(HubEntry {
+            counterpart,
+            counterpart_is_archive,
+            counterpart_last_scanned_at: None,
+            nearness_root: None,
+            members,
+            total_gain_bytes: 1_000,
+            total_gain_files: 10,
+        })
+    }
+
+    fn parent_in_archive(members: Vec<StructuralFinding>) -> LeaderboardEntry {
+        LeaderboardEntry::Parent(ParentEntry {
+            parent: loc("/a1", "parent"),
+            coverage: 0.9,
+            gain_bytes_upper: 1_000,
+            gain_files_upper: 10,
+            members,
+        })
+    }
+
+    /// The argv an entry builds, as the words the user would read.
+    fn line_of(entry: &LeaderboardEntry) -> Vec<String> {
+        handoff(entry).expect("this entry builds a line").1
+    }
+
+    /// Every shape that builds a survey line.
+    fn entries_with_a_line() -> Vec<LeaderboardEntry> {
+        vec![
             LeaderboardEntry::Single(finding(pair(loc("/r2", "q")))),
-            LeaderboardEntry::Single(finding(RelationShape::Coverage {
-                locations: 5,
-                archived_locations: 1,
-                suspended_locations: 0,
-            })),
-            LeaderboardEntry::Hub(HubEntry {
-                counterpart: loc("/r2", "hub"),
-                counterpart_is_archive: false,
-                counterpart_last_scanned_at: None,
-                nearness_root: None,
-                members: vec![finding(pair(loc("/r2", "hub")))],
-                total_gain_bytes: 1_000,
-                total_gain_files: 10,
-            }),
+            LeaderboardEntry::Single(finding(coverage())),
+            hub(
+                loc("/r2", "hub"),
+                false,
+                vec![finding(pair(loc("/r2", "hub")))],
+            ),
             LeaderboardEntry::Single(finding(pair(loc("/Volumes/My Drive", "old backup/photos")))),
             // A run hands off to its parent — the headline is where the
             // decision is, and the handoff goes there too. Surveying the
@@ -977,12 +1121,47 @@ mod tests {
             // accounts for, which is the honest picture rather than a
             // narrowed one.
             LeaderboardEntry::Parent(parent_entry("photos", 0.88, 3)),
-        ];
-        for entry in &entries {
-            let (display, argv) = handoff(entry);
+            // A pair headlined in the archive surveys its source side.
+            LeaderboardEntry::Single(archive_place(loc("/a1", "q"), pair(loc("/r2", "q")))),
+            // A hub on an archive counterpart compares a source member to it.
+            hub(
+                loc("/a1", "hub"),
+                true,
+                vec![finding(pair_in_archive(loc("/a1", "hub")))],
+            ),
+            // A parent in the archive surveys a member's source counterpart.
+            parent_in_archive(vec![archive_place(
+                loc("/a1", "parent/m"),
+                pair(loc("/r2", "q")),
+            )]),
+        ]
+    }
+
+    /// Every handoff shape the sweep can emit must parse through the real
+    /// argument definitions — CLI drift becomes a test failure, not
+    /// user-facing rot.
+    #[test]
+    fn every_handoff_shape_parses() {
+        for entry in &entries_with_a_line() {
+            let (display, argv) = handoff(entry).expect("this entry builds a line");
             assert!(display.starts_with("→ canon survey"));
             crate::Cli::try_parse_from(&argv)
                 .unwrap_or_else(|e| panic!("handoff must parse: {display}\n{e}"));
+        }
+    }
+
+    /// The sweep is universe-wide and the user is not standing in the place it
+    /// names, so a relative place would survey wherever they happen to be.
+    #[test]
+    fn a_handoff_names_no_relative_place() {
+        for entry in &entries_with_a_line() {
+            let argv = line_of(entry);
+            assert!(
+                argv[2..]
+                    .iter()
+                    .all(|word| word == "--other" || word.starts_with('/')),
+                "{argv:?}"
+            );
         }
     }
 
@@ -990,9 +1169,115 @@ mod tests {
     fn spaced_paths_are_quoted_for_display_but_raw_in_argv() {
         let entry =
             LeaderboardEntry::Single(finding(pair(loc("/Volumes/My Drive", "old backup/photos"))));
-        let (display, argv) = handoff(&entry);
+        let (display, argv) = handoff(&entry).unwrap();
         assert!(display.contains("'/Volumes/My Drive/old backup/photos'"));
         assert_eq!(argv.last().unwrap(), "/Volumes/My Drive/old backup/photos");
+    }
+
+    /// Survey refuses a scope that lies wholly in the archive, so the archive
+    /// side follows `--other`. An archive member can lead the list, because
+    /// tier ranks ahead of archive standing, and it is passed over.
+    #[test]
+    fn an_archive_hub_hands_off_to_its_first_source_member() {
+        let entry = hub(
+            loc("/a1", "hub"),
+            true,
+            vec![
+                archive_place(loc("/a1", "copy"), pair_in_archive(loc("/a1", "hub"))),
+                source_place(loc("/r1", "first"), pair_in_archive(loc("/a1", "hub"))),
+                source_place(loc("/r1", "second"), pair_in_archive(loc("/a1", "hub"))),
+            ],
+        );
+        assert_eq!(
+            line_of(&entry),
+            ["canon", "survey", "/r1/first", "--other", "/a1/hub"]
+        );
+
+        // Allowed: a hub on a source counterpart surveys the counterpart,
+        // which shows every member.
+        let on_source = hub(
+            loc("/r2", "hub"),
+            false,
+            vec![source_place(loc("/r1", "first"), pair(loc("/r2", "hub")))],
+        );
+        assert_eq!(line_of(&on_source), ["canon", "survey", "/r2/hub"]);
+    }
+
+    /// The parent itself cannot be surveyed, so the first member that has a
+    /// counterpart on a source root stands in for it.
+    #[test]
+    fn an_archive_parent_hands_off_through_its_first_source_counterpart() {
+        let entry = parent_in_archive(vec![
+            archive_place(loc("/a1", "parent/a"), pair_in_archive(loc("/a2", "x"))),
+            archive_place(loc("/a1", "parent/b"), coverage()),
+            archive_place(loc("/a1", "parent/c"), pair(loc("/r2", "c"))),
+            archive_place(loc("/a1", "parent/d"), pair(loc("/r2", "d"))),
+        ]);
+        assert_eq!(
+            line_of(&entry),
+            ["canon", "survey", "/r2/c", "--other", "/a1/parent/c"]
+        );
+    }
+
+    /// An entry prints no line exactly where it has no place on a source root
+    /// to compare. Each refusal sits beside its allowed twin.
+    #[test]
+    fn an_entry_with_no_source_side_prints_no_line() {
+        // A pair with both sides in the archive; the twin has a source side.
+        let both = LeaderboardEntry::Single(archive_place(
+            loc("/a1", "q"),
+            pair_in_archive(loc("/a2", "q")),
+        ));
+        assert!(handoff(&both).is_none());
+        let twin = LeaderboardEntry::Single(archive_place(loc("/a1", "q"), pair(loc("/r2", "q"))));
+        assert_eq!(
+            line_of(&twin),
+            ["canon", "survey", "/r2/q", "--other", "/a1/q"]
+        );
+
+        // Coverage in the archive; the twin is coverage on a source root.
+        let scattered = LeaderboardEntry::Single(archive_place(loc("/a1", "q"), coverage()));
+        assert!(handoff(&scattered).is_none());
+        let twin = LeaderboardEntry::Single(source_place(loc("/r1", "q"), coverage()));
+        assert_eq!(line_of(&twin), ["canon", "survey", "/r1/q"]);
+
+        // A parent in the archive with no source counterpart; the twin has one.
+        let parent = parent_in_archive(vec![
+            archive_place(loc("/a1", "parent/a"), pair_in_archive(loc("/a2", "x"))),
+            archive_place(loc("/a1", "parent/b"), coverage()),
+        ]);
+        assert!(handoff(&parent).is_none());
+        let twin = parent_in_archive(vec![archive_place(
+            loc("/a1", "parent/a"),
+            pair(loc("/r2", "x")),
+        )]);
+        assert_eq!(
+            line_of(&twin),
+            ["canon", "survey", "/r2/x", "--other", "/a1/parent/a"]
+        );
+
+        // A hub with every member in the archive; the twin has a source member.
+        let all_archive = hub(
+            loc("/a1", "hub"),
+            true,
+            vec![archive_place(
+                loc("/a2", "copy"),
+                pair_in_archive(loc("/a1", "hub")),
+            )],
+        );
+        assert!(handoff(&all_archive).is_none());
+        let twin = hub(
+            loc("/a1", "hub"),
+            true,
+            vec![source_place(
+                loc("/r1", "copy"),
+                pair_in_archive(loc("/a1", "hub")),
+            )],
+        );
+        assert_eq!(
+            line_of(&twin),
+            ["canon", "survey", "/r1/copy", "--other", "/a1/hub"]
+        );
     }
 
     #[test]
@@ -1177,11 +1462,14 @@ mod tests {
         // the same law: `roots retire` takes a root specifier, never a bare
         // path, and `--dry-run` is a report that exits 0 whatever the verdict —
         // so what is printed runs as printed on a root that is not ready.
-        emitted.push(handoff(&LeaderboardEntry::Root(root_entry(
-            "/Volumes/My Drive",
-            3,
-            2,
-        ))));
+        emitted.push(
+            handoff(&LeaderboardEntry::Root(root_entry(
+                "/Volumes/My Drive",
+                3,
+                2,
+            )))
+            .expect("a root entry always hands off"),
+        );
         for (display, argv) in &emitted {
             assert!(display.contains("canon roots "));
             crate::Cli::try_parse_from(argv)
@@ -1413,14 +1701,15 @@ mod tests {
     fn an_archive_root_top_gets_markers_but_no_retirement_handoff() {
         // A place that *is* a root's top says so wherever it appears, and an
         // archive root's top says both things — but an archive root is never
-        // retired, so it is handed off to judgment like any other place.
-        let mut f = finding(pair(loc("/a1", "q")));
+        // retired, so it is handed off to judgment, and a survey starts from
+        // the counterpart on the source root.
+        let mut f = finding(pair(loc("/r2", "q")));
         f.subject = loc("/a1", "");
         f.subject_is_root_top = true;
         f.subject_is_archive = true;
         assert_eq!(markers(&f), "  (whole root)  (in the archive)");
-        let (display, argv) = handoff(&LeaderboardEntry::Single(f));
-        assert!(display.starts_with("→ canon survey"));
+        let (display, argv) = handoff(&LeaderboardEntry::Single(f)).unwrap();
+        assert_eq!(argv, ["canon", "survey", "/r2/q", "--other", "/a1"]);
         assert!(!display.contains("retire"));
         crate::Cli::try_parse_from(&argv).expect("handoff must parse");
     }

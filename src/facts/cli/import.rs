@@ -26,8 +26,8 @@ use crate::facts::ops::import::{
 /// The roots this run actually touched, as whole-root scopes.
 ///
 /// The command reads a stream, so no scope exists at `start()`; these are what
-/// make the row visible from the folder the user was enriching instead of
-/// behind a scoped view's "global decisions not shown" footer. Reached from
+/// make the row visible from the folder the user was enriching, which a
+/// scope-less row is not. Reached from
 /// both the completing path and the failure arm, which is the point — a run
 /// that died mid-stream is the one a user is most likely to go looking for.
 fn touched_scopes(conn: &Connection, touched_roots: &BTreeSet<i64>) -> Result<Vec<DecisionScope>> {
@@ -1106,8 +1106,8 @@ mod tests {
     ///
     /// The scopes are the part worth holding: `record_scopes` normally runs
     /// after the loop, so a run that died mid-stream would leave a scope-less
-    /// row, hidden from a scoped `trail` view behind its "global decisions not
-    /// shown" footer — invisible from the very folder being enriched.
+    /// row, absent from a scoped `trail` view — invisible from the very folder
+    /// being enriched.
     #[test]
     fn a_failed_import_settles_partial_with_its_counts_and_scopes() {
         let conn = setup_test_db();

@@ -433,6 +433,34 @@ pub struct ScanRootResult {
     pub warnings: Vec<String>,
 }
 
+/// One path of a scan, settled before the decision row opens. Every per-path
+/// refusal has already been said by the time one of these exists, so the loop
+/// that consumes them can warn and skip but can no longer refuse.
+#[derive(Debug)]
+pub enum ScanTarget {
+    /// Inside a known root: walked if a directory, observed singly otherwise.
+    Known {
+        canonical: PathBuf,
+        names_a_directory: bool,
+        root_id: i64,
+        root_path: PathBuf,
+        /// The path below its root. `None` when the root itself was named.
+        scan_prefix: Option<String>,
+    },
+    /// `--add`: the folder a new root is created at, inside the run, so the
+    /// row records it.
+    NewRoot { canonical: PathBuf, role: String },
+    /// `--missing`: gone from disk, under a known open root.
+    Gone { path: PathBuf, cwd: PathBuf },
+    /// Gone from disk without `--missing`: warned about and skipped in the
+    /// loop.
+    Unreadable {
+        path: PathBuf,
+        error: std::io::Error,
+        cwd: PathBuf,
+    },
+}
+
 /// Where `--missing` would act: the root that holds the path, and the path's
 /// own remainder below it. Produced by `resolve_missing_target`, which is the
 /// one place the act's preconditions are asked — by the act, and by the
