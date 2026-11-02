@@ -376,7 +376,17 @@ origin is already gone the copy stays. The arm's own link is read from the file'
 test reaches it: `the_cross_device_arm_proves_before_the_one_origin_removal`. A write that fails partway (a full disk) returns before the
 proof and leaves its partial file, as a plain copy does; the origin stands, and a resume reports
 the partial file by its size. **Where it does not apply**: plain `copy_file` (no origin removed,
-no sync), and a same-device rename (the file is not copied).
+no proof), and a same-device rename (the file is not copied).
+
+A plain copy syncs with plain `fsync`, which reports a late write error `close` would drop and does
+not show the data reached the disk. A failed sync fails the copy and leaves the file, which a resume
+records as a good copy. It then opens its destination once between closing it and setting
+its modification time, because an SMB server's pending update otherwise overwrites that time;
+`copy_file`'s comment states the mechanism, and `a_plain_copy_syncs_and_opens_before_setting_the_time`
+pins the order. The open was seen to work on one macOS client and one server; the pin holds its place, not its effect,
+so a client that stopped sending its deferred close on an open would lose the time with the suite
+green. A move's full sync settles the update, so it has no such step; where that sync falls back to
+plain `fsync`, the server's update can overwrite the time set after it.
 
 Apply's two preflight helpers deliberately do *not* live here: they answer a planning question
 only apply asks, and sit with it in `archive/ops/plan.rs`.

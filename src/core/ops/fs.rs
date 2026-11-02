@@ -73,6 +73,9 @@ pub fn compute_full_hash(path: &Path) -> Result<String> {
 }
 
 /// Preserve source file metadata (mtime, permissions) on a destination file.
+///
+/// Success means the storage accepted the time, not that it will keep it: a pending update
+/// from the destination's write can overwrite it later (`copy_file`).
 #[cfg(unix)]
 fn preserve_metadata(dest: &Path, src_meta: &Metadata) -> Result<()> {
     use filetime::FileTime;
@@ -165,12 +168,40 @@ fn write_copy(src: &Path, dest: &Path, noclobber: bool) -> Result<File> {
 /// Copy a file and preserve its metadata (mtime, permissions).
 /// If noclobber is true, uses atomic O_EXCL create to prevent overwriting.
 ///
-/// No sync: the destination is closed, then its modification time is set. A move that
-/// removes its origin proves the copy first (`move_file`).
+/// A plain `fsync` on the writing descriptor reports a late write error that `close` would
+/// drop, except on a filesystem that offers no sync (`offers_no_sync`). It is not a full
+/// sync, so nothing here shows the data reached the disk. A move that removes its origin
+/// proves the copy first (`move_file`). A failed sync fails the copy and leaves the file,
+/// which a resume cannot tell from a good copy.
+///
+/// The destination is opened once between its close and setting its modification time.
+/// An SMB client can keep a written file open on the server after `close`, and the server
+/// then updates the file's write time about two seconds after the write, over a time set
+/// sooner. A new open makes the macOS client send that close, which clears the pending
+/// update. No data is read, and a failed open is ignored: the copy is whole, and a
+/// destination that can be written but not read is a legitimate one.
 pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
+    copy_file_with(src, dest, noclobber, plain_fsync)
+}
+
+/// `copy_file` with its sync passed in, so a test can fail it.
+fn copy_file_with(
+    src: &Path,
+    dest: &Path,
+    noclobber: bool,
+    sync: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<()> {
     let src_meta =
         fs::metadata(src).with_context(|| format!("Failed to read metadata: {}", src.display()))?;
-    drop(write_copy(src, dest, noclobber)?);
+    let written = write_copy(src, dest, noclobber)?;
+    match sync(&written) {
+        Err(e) if !offers_no_sync(&e) => {
+            return Err(e).with_context(|| format!("Failed to write out {}", dest.display()));
+        }
+        _ => {}
+    }
+    drop(written);
+    drop(File::open(dest));
     preserve_metadata(dest, &src_meta)
 }
 
@@ -405,15 +436,47 @@ fn sync_to_storage(file: &File) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Err(e) = &full {
         if e.raw_os_error() == Some(libc::ENOTSUP) {
-            use std::os::unix::io::AsRawFd;
-            // SAFETY: the descriptor is open for as long as `file` is borrowed.
-            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
-                return Ok(());
-            }
-            return Err(std::io::Error::last_os_error());
+            return plain_fsync(file);
         }
     }
     full
+}
+
+/// `fsync(2)` itself, which `File::sync_all` is not on macOS. A signal that interrupts it
+/// retries it, so a Ctrl-C does not read as a failed write.
+#[cfg(unix)]
+fn plain_fsync(file: &File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    loop {
+        // SAFETY: the descriptor is open for as long as `file` is borrowed.
+        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn plain_fsync(file: &File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
+/// Whether a sync's error says the filesystem offers no such sync, which says nothing
+/// about the write.
+#[cfg(unix)]
+fn offers_no_sync(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(code) if code == libc::ENOTSUP || code == libc::EINVAL
+    )
+}
+
+#[cfg(not(unix))]
+fn offers_no_sync(_e: &std::io::Error) -> bool {
+    false
 }
 
 /// Sync the directory that holds `dest`, so the new name survives a power cut.
@@ -428,15 +491,7 @@ fn sync_parent_dir(dest: &Path) -> Result<()> {
         .with_context(|| format!("Failed to open directory: {}", parent.display()))?;
     match sync_to_storage(&dir) {
         Ok(()) => Ok(()),
-        #[cfg(unix)]
-        Err(e)
-            if matches!(
-                e.raw_os_error(),
-                Some(code) if code == libc::ENOTSUP || code == libc::EINVAL
-            ) =>
-        {
-            Ok(())
-        }
+        Err(e) if offers_no_sync(&e) => Ok(()),
         Err(e) => Err(e).with_context(|| format!("could not sync {}", parent.display())),
     }
 }
@@ -865,6 +920,80 @@ mod tests {
             helper.contains("remove_file(") && helper.contains("src"),
             "the one origin removal sits inside move_across_devices"
         );
+    }
+
+    /// A plain copy syncs on the writing descriptor, so a late write error is seen, then
+    /// closes it and opens the destination once before setting the modification time, so an
+    /// SMB server's pending update cannot overwrite that time. The behaviour needs a share,
+    /// so the order is read from this file's production text.
+    ///
+    /// **Blind spots, named:** it matches spellings, and it says nothing about what a
+    /// client or server does with the open. A client that does not send its deferred close
+    /// on an open leaves the copy as it was without this step.
+    #[test]
+    fn a_plain_copy_syncs_and_opens_before_setting_the_time() {
+        let text = include_str!("fs.rs");
+        let production = text.split("\n#[cfg(test)]").next().unwrap();
+        let copy = production
+            .split("fn copy_file_with(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("copy_file_with is in production");
+        assert!(
+            production.contains("copy_file_with(src, dest, noclobber, plain_fsync)"),
+            "copy_file hands over the real sync"
+        );
+
+        let synced = copy.find("sync(&written)");
+        let closed = copy.find("drop(written);");
+        let opened = copy.find("drop(File::open(dest));");
+        let dated = copy.find("preserve_metadata(dest");
+        assert!(
+            synced.is_some() && synced < closed && closed < opened && opened < dated,
+            "sync the written file, close it, open it once, then set the time"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_filesystem_with_no_sync_excuses_a_failed_sync() {
+        use std::io::Error;
+        assert!(offers_no_sync(&Error::from_raw_os_error(libc::ENOTSUP)));
+        assert!(offers_no_sync(&Error::from_raw_os_error(libc::EINVAL)));
+        assert!(!offers_no_sync(&Error::from_raw_os_error(libc::EIO)));
+        assert!(!offers_no_sync(&Error::from_raw_os_error(libc::ENOSPC)));
+    }
+
+    /// A failed sync fails the copy; a filesystem that offers no sync does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_sync_fails_the_copy() {
+        use std::io::Error;
+        let (_dir, src, dest) = move_fixture(b"content");
+        let err = copy_file_with(&src, &dest, true, |_| {
+            Err(Error::from_raw_os_error(libc::EIO))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("Failed to write out"));
+
+        let (_dir, src, dest) = move_fixture(b"content");
+        copy_file_with(&src, &dest, true, |_| {
+            Err(Error::from_raw_os_error(libc::ENOTSUP))
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"content");
+    }
+
+    #[test]
+    fn plain_fsync_accepts_a_written_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        plain_fsync(&file).unwrap();
     }
 
     #[test]
