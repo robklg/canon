@@ -1,10 +1,12 @@
-//! Archive's own SQL — the four writes and reads that only apply performs.
+//! Archive's own SQL — the writes and reads that apply performs, and the one read
+//! `cluster status` shares with it.
 //!
 //! Registering a file that has landed in an archive, re-pointing a source
 //! that was moved there rather than copied, reading the decision that last
-//! stood at a destination path, and the preflight that asks which
-//! destinations are already occupied. Nothing else in Canon does these
-//! things, so they live here rather than in the shared source repository.
+//! stood at a destination path, and asking which destinations are already
+//! occupied and by which content (the read `apply`'s preflight and `cluster
+//! status` both make). Nothing else in Canon does these things, so they live
+//! here rather than in the shared source repository.
 
 use anyhow::Result;
 use rusqlite::OptionalExtension;
@@ -56,24 +58,41 @@ pub fn fetch_decision_id_at_path(
 ///     // This path is already occupied
 /// }
 /// ```
+///
+/// This is the key set of [`batch_objects_at_paths`], which holds the query.
 pub fn batch_check_paths_exist(
     conn: &Connection,
     archive_root_id: i64,
     rel_paths: &[&str],
 ) -> Result<std::collections::HashSet<String>> {
-    use std::collections::HashSet;
+    Ok(batch_objects_at_paths(conn, archive_root_id, rel_paths)?
+        .into_keys()
+        .collect())
+}
 
-    if rel_paths.is_empty() {
-        return Ok(HashSet::new());
-    }
+/// The content object each present row at these paths holds.
+///
+/// A path with no present row is absent from the result. A present row that
+/// holds no object (the file was never hashed) is present with `None`. A row
+/// that is not present (a tombstone) is not here: it vouches for nothing.
+///
+/// Used by `--resume` and by `cluster status` to ask one question the same way:
+/// does the index record this entry's content at its destination?
+pub fn batch_objects_at_paths(
+    conn: &Connection,
+    archive_root_id: i64,
+    rel_paths: &[&str],
+) -> Result<std::collections::HashMap<String, Option<i64>>> {
+    use std::collections::HashMap;
 
-    let mut result = HashSet::new();
+    let mut result = HashMap::new();
 
     // Process rel_paths in batches to avoid SQLite variable limit
     for chunk in rel_paths.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
-            "SELECT rel_path FROM sources WHERE root_id = ? AND present = 1 AND rel_path IN ({})",
+            "SELECT rel_path, object_id FROM sources \
+             WHERE root_id = ? AND present = 1 AND rel_path IN ({})",
             placeholders.join(", ")
         );
 
@@ -85,10 +104,13 @@ pub fn batch_check_paths_exist(
         }
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
 
         for row in rows {
-            result.insert(row?);
+            let (path, object) = row?;
+            result.insert(path, object);
         }
     }
 
@@ -826,6 +848,79 @@ mod tests {
         assert!(result.contains("file_0.jpg"));
         assert!(result.contains("file_999.jpg"));
         assert!(result.contains("file_1000.jpg"));
+    }
+
+    // =========================================================================
+    // batch_objects_at_paths tests
+    // =========================================================================
+
+    #[test]
+    fn batch_objects_at_paths_reads_each_rows_object() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let other_root = crate::core::repo::insert_test_root(&conn, "/other", "archive", false);
+        let obj = insert_object(&conn, "h1", false);
+        insert_source(&conn, root_id, "with_object.jpg", Some(obj), true, false);
+        insert_source(&conn, root_id, "no_object.jpg", None, true, false);
+        // A tombstone and a row on another root vouch for nothing here.
+        insert_source(&conn, root_id, "deleted.jpg", Some(obj), false, false);
+        insert_source(&conn, other_root, "elsewhere.jpg", Some(obj), true, false);
+
+        let result = batch_objects_at_paths(
+            &conn,
+            root_id,
+            &[
+                "with_object.jpg",
+                "no_object.jpg",
+                "deleted.jpg",
+                "elsewhere.jpg",
+                "absent.jpg",
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("with_object.jpg"), Some(&Some(obj)));
+        assert_eq!(result.get("no_object.jpg"), Some(&None));
+    }
+
+    #[test]
+    fn batch_objects_at_paths_crosses_the_batch_size_exactly() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "h1", false);
+        let paths: Vec<String> = (0..1001).map(|i| format!("file_{i}.jpg")).collect();
+        for p in &paths {
+            insert_source(&conn, root_id, p, Some(obj), true, false);
+        }
+
+        // 999, 1000 and 1001 paths: under, at and one over the chunk size.
+        for n in [999usize, 1000, 1001] {
+            let refs: Vec<&str> = paths.iter().take(n).map(|s| s.as_str()).collect();
+            let result = batch_objects_at_paths(&conn, root_id, &refs).unwrap();
+            assert_eq!(result.len(), n);
+            assert!(result.values().all(|o| *o == Some(obj)));
+        }
+    }
+
+    #[test]
+    fn the_existence_check_is_the_key_set_of_the_object_read() {
+        let conn = setup_test_db();
+        let root_id = crate::core::repo::insert_test_root(&conn, "/archive", "archive", false);
+        let obj = insert_object(&conn, "h1", false);
+        insert_source(&conn, root_id, "a.jpg", Some(obj), true, false);
+        insert_source(&conn, root_id, "b.jpg", None, true, false);
+        insert_source(&conn, root_id, "c.jpg", Some(obj), false, false);
+        let paths = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"];
+
+        let exist = batch_check_paths_exist(&conn, root_id, &paths).unwrap();
+        let keys: std::collections::HashSet<String> =
+            batch_objects_at_paths(&conn, root_id, &paths)
+                .unwrap()
+                .into_keys()
+                .collect();
+        assert_eq!(exist, keys);
+        assert_eq!(exist.len(), 2);
     }
 
     // =========================================================================

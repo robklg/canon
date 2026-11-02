@@ -98,7 +98,8 @@ pub trait TransferProgress {
         dest_path: &str,
         outcome: &TransferOutcome,
     );
-    /// Called when an interrupt is detected after the current transfer completes.
+    /// Called when an interrupt is detected: after the current transfer completes, or
+    /// before the first one when the press came during the checks.
     fn on_interrupt(&self);
     /// Called once after the transfer loop ends.
     fn on_finish(&self);
@@ -127,8 +128,10 @@ pub struct ApplyExecuteParams {
     pub transfer_mode: TransferMode,
     /// Whether this is a resume operation.
     pub resume: bool,
-    /// Interrupt flag — set to true to stop after current transfer.
-    /// If None, signal handling is set up automatically.
+    /// Interrupt flag — set to true to stop after the current transfer, or before
+    /// the first one when it is set during the checks.
+    /// If None, the run has a fresh flag nothing sets: no signal handling is
+    /// installed (the interface installs it, `setup_interrupt_flag`).
     pub interrupt_flag: Option<Arc<AtomicBool>>,
     /// Sources skipped by --root filter (for summary).
     pub skipped_by_filter: usize,
@@ -148,10 +151,14 @@ pub struct ApplyResult {
     pub skipped_missing: u64,
     pub skipped_stale: Vec<StaleSource>,
     pub errors: Vec<TransferError>,
-    /// Resume mode: count of entries already at destination (registered in DB during execute).
+    /// Resume mode: count of entries already at destination, whether the index
+    /// already recorded them or this run proved and recorded them.
     pub already_there: u64,
     /// Resume mode: count of already-there entries where source file still exists.
     pub already_there_source_present: u64,
+    /// Resume mode: how many of `already_there` this run proved by hashing the
+    /// destination and then recorded (row, receipt item, ledger row).
+    pub proven: u64,
     /// Whether the operation was interrupted by Ctrl+C.
     pub interrupted: bool,
     /// Number of files remaining when interrupted.
@@ -176,26 +183,33 @@ pub struct TransferError {
 // Execute function
 // ===========================================================================
 
-/// Execute file transfers from a computed apply plan.
+/// Set up two-tier Ctrl+C handling for an apply.
+/// Returns an Arc<AtomicBool> that becomes true on the first SIGINT; the second
+/// SIGINT gets the default action, which ends the process.
 ///
-/// Performs: source readability checks, resume disk classification (if resume mode),
-/// batch staleness validation, and the transfer loop. Each transfer is independent
-/// (no transaction wrapping) — the operation is idempotent and resume-safe.
-///
-/// Does NOT handle: manifest parsing, confirmation prompts, dry-run display,
-/// output formatting. These are interface concerns.
-/// Set up two-tier Ctrl+C handling for the transfer loop.
-/// Returns an Arc<AtomicBool> that becomes true on first SIGINT.
-/// Second SIGINT gets default OS termination.
-fn setup_interrupt_flag() -> Result<Arc<AtomicBool>> {
+/// The order of the two registrations is the contract: the conditional default
+/// reads the flag before the second registration sets it, so the first signal
+/// arms and the second fires. Reversed, the first signal would set the flag and
+/// then fire the default in the same round.
+pub fn setup_interrupt_flag() -> Result<Arc<AtomicBool>> {
     let flag = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register_conditional_default(
         signal_hook::consts::SIGINT,
         Arc::clone(&flag),
     )?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
     Ok(flag)
 }
 
+/// Execute file transfers from a computed apply plan.
+///
+/// Performs: source readability checks, batch staleness validation, the transfer
+/// loop, and (in resume mode) recording the entries the plan proved were already at
+/// their destination. Each transfer is independent (no transaction wrapping) — the
+/// operation is idempotent and resume-safe.
+///
+/// Does NOT handle: manifest parsing, confirmation prompts, dry-run display,
+/// output formatting. These are interface concerns.
 pub fn execute_apply(
     conn: &Connection,
     plan: &ApplyPlan,
@@ -203,11 +217,12 @@ pub fn execute_apply(
     progress: &dyn TransferProgress,
     decision: Option<&DecisionParams>,
 ) -> Result<ApplyResult> {
-    // Before the recorder: installing the handler can fail, and a decision row
-    // registered first would be left standing by the `?`.
+    // `None` means no signal handling: the interface installs the handler
+    // (`setup_interrupt_flag`) before the run, so a test that passes nothing
+    // never registers a process-wide handler.
     let interrupt_flag = match &params.interrupt_flag {
         Some(flag) => Arc::clone(flag),
-        None => setup_interrupt_flag()?,
+        None => Arc::new(AtomicBool::new(false)),
     };
 
     let mut recorder =
@@ -222,6 +237,7 @@ pub fn execute_apply(
         errors: Vec::new(),
         already_there: plan.already_archived_count as u64,
         already_there_source_present: plan.resume_already_there_source_present as u64,
+        proven: 0,
         interrupted: false,
         remaining: 0,
         summary: String::new(),
@@ -248,9 +264,13 @@ pub fn execute_apply(
             }
         }
         progress.on_validation_progress(i + 1);
+        if interrupt_flag.load(Ordering::Relaxed) {
+            break;
+        }
     }
     progress.on_validation_finish();
-    if !unreadable.is_empty() {
+    // A sweep that stopped early has only a partial list, so it refuses nothing.
+    if !unreadable.is_empty() && !interrupt_flag.load(Ordering::Relaxed) {
         // The run refuses before anything moves. This is the decision's last
         // act, so the row settles here: `refused` names what happened, the
         // counts stay empty, and the receipt registered at start() — a file
@@ -279,8 +299,13 @@ pub fn execute_apply(
 
     // --- Batch staleness validation ---
     if !transfers_to_execute.is_empty() {
-        let stale = validate_transfers_disk(&transfers_to_execute, progress, &params.lock_zone);
-        if !stale.is_empty() {
+        let stale = validate_transfers_disk(
+            &transfers_to_execute,
+            progress,
+            &params.lock_zone,
+            &interrupt_flag,
+        );
+        if !stale.is_empty() && !interrupt_flag.load(Ordering::Relaxed) {
             // The other pre-transfer refusal, settled the same way — the two
             // must never diverge, which is what pins them separately.
             if let Some(recorder) = recorder.as_mut() {
@@ -306,11 +331,32 @@ pub fn execute_apply(
 
     // --- Transfer loop ---
     let total = transfers_to_execute.len();
-    progress.on_start(total);
     let decision_id = recorder.as_ref().and_then(|r| r.decision_id());
     let mut receipt_items: Vec<ApplyReceiptItem> = Vec::new();
 
-    for (i, transfer) in transfers_to_execute.iter().enumerate() {
+    // A press during the checks above ends the run before the first transfer:
+    // nothing moves, and the run settles through the ordinary interrupted path
+    // with nothing completed. A run that stops here records nothing, the entries
+    // a resume proved included: a press at this point is often the user seeing
+    // a wrong run, and the receipt's origin disposition comes from the run's mode.
+    // The next resume proves and records them.
+    let stopped_before_transfer = total > 0 && interrupt_flag.load(Ordering::Relaxed);
+    let proven_to_record: &[ApplyTransfer] = if stopped_before_transfer {
+        &[]
+    } else {
+        &plan.resume_already_there
+    };
+    let to_run: &[&ApplyTransfer] = if stopped_before_transfer {
+        progress.on_interrupt();
+        result.interrupted = true;
+        result.remaining = total;
+        &[]
+    } else {
+        progress.on_start(total);
+        &transfers_to_execute
+    };
+
+    for (i, transfer) in to_run.iter().enumerate() {
         let (outcome, prev_decision_id) = match execute_single_transfer(
             transfer,
             &params.base_dir,
@@ -373,31 +419,57 @@ pub fn execute_apply(
 
     progress.on_finish();
 
-    // --- Resume mode: register "already there" entries in DB ---
+    // --- Resume mode: record the entries this run proved were already there ---
     //
-    // These rows are stamped with this decision, but no receipt item is added
-    // for them and they are not counted into the extraction ledger below —
-    // the transfer that put the files there belongs to an earlier decision,
-    // whose receipt already lists them. One consequence is worth knowing
-    // before changing either side: rebuilding the ledger from receipts on
-    // disk cannot re-derive these rows, because this decision's receipt does
-    // not mention them.
-    if params.resume && !plan.resume_already_there.is_empty() {
-        for transfer in &plan.resume_already_there {
-            let new_source = build_new_source_from_lock(
+    // The plan lists only entries whose destination it hashed to the lock's
+    // content and that no present row records. No earlier receipt lists them: a
+    // killed run wrote none, and a run whose index write failed reported an
+    // error and listed nothing for that file. So this run is the one that
+    // records them — the row, a receipt item, and (through the extraction block
+    // below, with no code of its own) the ledger row. Without the item,
+    // `ledger reindex` could not rebuild the row and the card could not say
+    // where the file came from.
+    //
+    // An entry the index already records is not here: it is counted and left
+    // alone, its row keeping the decision that put it there.
+    if params.resume {
+        for transfer in proven_to_record {
+            let dest_path = transfer.dest_rel_path.under(&params.base_dir);
+            let recorded = crate::archive::repo::fetch_decision_id_at_path(
+                conn,
                 params.archive_root_id,
                 transfer.archive_rel_path.as_str(),
-                transfer.object_id,
-                &transfer.partial_hash,
-                transfer.size,
-                transfer.mtime,
-                decision_id,
-            );
-            if let Err(e) = crate::archive::repo::insert_destination(conn, &new_source) {
-                result.errors.push(TransferError {
+            )
+            .and_then(|previous| {
+                register_destination(
+                    conn,
+                    transfer,
+                    &dest_path,
+                    params.archive_root_id,
+                    decision_id,
+                )
+                .map(|()| previous)
+            });
+            match recorded {
+                Ok(previous_decision_id) => {
+                    receipt_items.push(ApplyReceiptItem {
+                        source_root: transfer.source_root_path.clone(),
+                        source_rel_path: transfer.source_rel_path.clone(),
+                        destination_rel_path: transfer.archive_rel_path.as_str().to_string(),
+                        hash: transfer.hash.clone(),
+                        size: transfer.size,
+                        mtime: transfer.mtime,
+                        previous_decision_id,
+                    });
+                    result.proven += 1;
+                }
+                Err(e) => result.errors.push(TransferError {
                     path: transfer.source_path.clone(),
-                    error: format!("Failed to register in DB: {e}"),
-                });
+                    error: format!(
+                        "{} is in the archive, but the index was not updated: {e:#}",
+                        dest_path.display()
+                    ),
+                }),
             }
         }
     }
@@ -448,8 +520,10 @@ pub fn execute_apply(
     };
 
     if let Some(recorder) = recorder.as_mut() {
-        let total = plan.transfers.len() as i64;
-        let completed = (result.copied + result.renamed + result.moved) as i64;
+        // A proven entry is work this run did: it counts as attempted and completed
+        // so the row agrees with the receipt that lists it.
+        let total = (plan.transfers.len() + proven_to_record.len()) as i64;
+        let completed = (result.copied + result.renamed + result.moved + result.proven) as i64;
         let failed = result.errors.len() as i64;
         let skipped = (result.skipped_missing as i64)
             + (result.skipped_stale.len() as i64)
@@ -586,30 +660,6 @@ fn record_extractions(
     warnings
 }
 
-/// Build a NewSource from lock entry data for DB registration.
-/// Used for "already there" entries in resume mode — no disk read needed.
-fn build_new_source_from_lock(
-    archive_root_id: i64,
-    rel_path: &str,
-    object_id: Option<i64>,
-    partial_hash: &str,
-    size: i64,
-    mtime: i64,
-    decision_id: Option<i64>,
-) -> NewSource {
-    NewSource {
-        root_id: archive_root_id,
-        rel_path: rel_path.to_string(),
-        size,
-        mtime,
-        partial_hash: partial_hash.to_string(),
-        object_id,
-        device: None,
-        inode: None,
-        decision_id,
-    }
-}
-
 // ===========================================================================
 // Execute helpers (private)
 // ===========================================================================
@@ -651,58 +701,105 @@ fn execute_single_transfer(
     match transfer_mode {
         TransferMode::Copy => {
             copy_file(src_path, &dest_path, true)?;
-            let new_source = build_new_source(
-                &dest_path,
-                archive_root_id,
-                transfer.archive_rel_path.as_str(),
-                transfer.object_id,
-                &transfer.partial_hash,
-                decision_id,
-            )?;
-            crate::archive::repo::insert_destination(conn, &new_source)?;
+            register_destination(conn, transfer, &dest_path, archive_root_id, decision_id)
+                .map_err(|e| index_not_updated("copied", &dest_path, e))?;
             Ok((TransferOutcome::Copied, prev_decision_id))
         }
         TransferMode::Rename => {
             rename_file(src_path, &dest_path, true)?;
-            relocate_source(
-                conn,
-                transfer.source_id,
-                archive_root_id,
-                transfer.archive_rel_path.as_str(),
-                decision_id,
-            )?;
+            record_relocation(conn, transfer, &dest_path, archive_root_id, decision_id)
+                .map_err(|e| index_not_updated("moved", &dest_path, e))?;
             Ok((TransferOutcome::Renamed, prev_decision_id))
         }
         TransferMode::Move => match move_file(src_path, &dest_path, true)? {
             MoveOutcome::Renamed => {
-                relocate_source(
-                    conn,
-                    transfer.source_id,
-                    archive_root_id,
-                    transfer.archive_rel_path.as_str(),
-                    decision_id,
-                )?;
+                record_relocation(conn, transfer, &dest_path, archive_root_id, decision_id)
+                    .map_err(|e| index_not_updated("moved", &dest_path, e))?;
                 Ok((TransferOutcome::Renamed, prev_decision_id))
             }
             MoveOutcome::CopiedAndDeleted => {
-                // Clear the origin before registering the destination. A crash
-                // between the two then reports the file at neither end, which a
-                // later scan heals. The other order would report it at both,
-                // which reads as a duplicate and invites acting on it.
-                mark_source_not_present(conn, transfer.source_id, decision_id)?;
-                let new_source = build_new_source(
-                    &dest_path,
-                    archive_root_id,
-                    transfer.archive_rel_path.as_str(),
-                    transfer.object_id,
-                    &transfer.partial_hash,
-                    decision_id,
-                )?;
-                crate::archive::repo::insert_destination(conn, &new_source)?;
+                clear_origin_and_register(conn, transfer, &dest_path, archive_root_id, decision_id)
+                    .map_err(|e| index_not_updated("moved", &dest_path, e))?;
                 Ok((TransferOutcome::Moved, prev_decision_id))
             }
         },
     }
+}
+
+/// Clear the origin before registering the destination. A crash between the two
+/// reports the file at neither end, which a later scan heals; the other order
+/// reports it at both, which reads as a duplicate and invites acting on it.
+fn clear_origin_and_register(
+    conn: &Connection,
+    transfer: &ApplyTransfer,
+    dest_path: &Path,
+    archive_root_id: i64,
+    decision_id: Option<i64>,
+) -> Result<()> {
+    mark_source_not_present(conn, transfer.source_id, decision_id)?;
+    register_destination(conn, transfer, dest_path, archive_root_id, decision_id)
+}
+
+/// Register the file now standing at the destination: a new row, or the row
+/// already at that path revived with this content (`insert_destination`).
+fn register_destination(
+    conn: &Connection,
+    transfer: &ApplyTransfer,
+    dest_path: &Path,
+    archive_root_id: i64,
+    decision_id: Option<i64>,
+) -> Result<()> {
+    let new_source = build_new_source(
+        dest_path,
+        archive_root_id,
+        transfer.archive_rel_path.as_str(),
+        transfer.object_id,
+        &transfer.partial_hash,
+        decision_id,
+    )?;
+    crate::archive::repo::insert_destination(conn, &new_source)?;
+    Ok(())
+}
+
+/// Record a relocation the filesystem has already carried out.
+///
+/// The origin row can take the destination path only where no row holds it:
+/// `UNIQUE(root_id, rel_path)` refuses otherwise, and a row stands there when the
+/// path was deleted (a tombstone, `present = 0`) or when a stale present row is
+/// left over. Where one does, the origin is cleared and the destination is
+/// registered through the route a move across devices already takes.
+fn record_relocation(
+    conn: &Connection,
+    transfer: &ApplyTransfer,
+    dest_path: &Path,
+    archive_root_id: i64,
+    decision_id: Option<i64>,
+) -> Result<()> {
+    if repo::source::source_exists_at_path(
+        conn,
+        archive_root_id,
+        transfer.archive_rel_path.as_str(),
+    )? {
+        clear_origin_and_register(conn, transfer, dest_path, archive_root_id, decision_id)
+    } else {
+        relocate_source(
+            conn,
+            transfer.source_id,
+            archive_root_id,
+            transfer.archive_rel_path.as_str(),
+            decision_id,
+        )
+    }
+}
+
+/// The error for an index write that failed after the file was already placed.
+/// It says where the file now is, because the file is the only thing that is
+/// certain; `--resume` registers a destination the index does not record.
+fn index_not_updated(verb: &str, dest_path: &Path, cause: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{verb} to {}, but the index was not updated: {cause:#}. `--resume` registers it.",
+        dest_path.display()
+    )
 }
 
 /// Validate that a source file on disk matches the state recorded in the transfer.
@@ -777,6 +874,7 @@ fn validate_transfers_disk(
     transfers: &[&ApplyTransfer],
     progress: &dyn TransferProgress,
     clock: &RecordedZone,
+    interrupt: &AtomicBool,
 ) -> Vec<StaleSource> {
     let mut stale = Vec::new();
     progress.on_validation_start(ValidationSweep::LockAgreement, transfers.len());
@@ -788,6 +886,9 @@ fn validate_transfers_disk(
             });
         }
         progress.on_validation_progress(i + 1);
+        if interrupt.load(Ordering::Relaxed) {
+            break;
+        }
     }
     progress.on_validation_finish();
     stale
@@ -1542,6 +1643,26 @@ mod tests {
         fn on_finish(&self) {}
     }
 
+    /// A press that lands while the first file is in transfer: the flag is set
+    /// when that file ends, as the signal handler would set it.
+    struct PressAfterFirstFile(Arc<AtomicBool>);
+
+    impl TransferProgress for PressAfterFirstFile {
+        fn on_start(&self, _total: usize) {}
+        fn on_transfer(
+            &self,
+            _index: usize,
+            _total: usize,
+            _source_path: &str,
+            _dest_path: &str,
+            _outcome: &TransferOutcome,
+        ) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+        fn on_interrupt(&self) {}
+        fn on_finish(&self) {}
+    }
+
     #[test]
     fn test_execute_apply_respects_interrupt_flag() {
         use std::io::Write;
@@ -1619,10 +1740,11 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
-        // Pre-set the interrupt flag before calling execute
-        let flag = Arc::new(AtomicBool::new(true));
+        // The flag is set while the first transfer is in flight.
+        let flag = Arc::new(AtomicBool::new(false));
 
         let params = ApplyExecuteParams {
             lock_zone: lock_zone(),
@@ -1630,15 +1752,16 @@ mod tests {
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
             resume: false,
-            interrupt_flag: Some(flag),
+            interrupt_flag: Some(Arc::clone(&flag)),
             skipped_by_filter: 0,
             manifest_display: "test.toml".to_string(),
             receipt_ctx: None,
         };
 
-        let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
+        let result =
+            execute_apply(&conn, &plan, &params, &PressAfterFirstFile(flag), None).unwrap();
 
-        // Flag was pre-set, so first transfer executes then loop breaks
+        // The first transfer finishes, then the loop breaks
         assert!(result.interrupted);
         assert_eq!(result.remaining, 1); // 2 total - 1 completed = 1 remaining
         assert_eq!(result.copied, 1);
@@ -1662,6 +1785,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let flag = Arc::new(AtomicBool::new(true));
@@ -1760,6 +1884,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let receipt_ctx = ReceiptPlacement::Targeted {
@@ -1862,6 +1987,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
         (plan, size, mtime)
     }
@@ -2020,9 +2146,12 @@ mod tests {
         );
 
         // A resumed run finds the file already copied. Nothing is transferred;
-        // the destination row is what the run still owes.
+        // the destination row is what the run still owes. Registration reads the
+        // file standing at the destination, so the file stands there.
         let (mut plan, _size, _mtime) =
             single_transfer_plan(src_dir.path(), "2016/a.jpg", "2016/a.jpg", b"hi");
+        std::fs::create_dir_all(archive_dir.path().join("2016")).unwrap();
+        std::fs::write(archive_dir.path().join("2016/a.jpg"), b"hi").unwrap();
         plan.resume_already_there = std::mem::take(&mut plan.transfers);
         plan.resume_already_there_source_present = 1;
         plan.already_archived_count = 1;
@@ -2050,6 +2179,181 @@ mod tests {
             .unwrap()
             .expect("the already-there entry should be registered at the destination");
         assert_eq!(row.decision_id, Some(decision_id));
+    }
+
+    /// A resume over one entry, planned for real and then executed for real.
+    /// The destination holds `bytes` (the lock's own, so the entry can be
+    /// proven); `registered` puts a present row there for the lock's object
+    /// with a decision, device, inode and `basis_rev` of its own; `origin`
+    /// says whether the source file is still on disk.
+    struct ResumeRun {
+        conn: Connection,
+        archive_root: i64,
+        result: ApplyResult,
+        decision_id: i64,
+        dest: std::path::PathBuf,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    fn resume_over(bytes: &[u8], registered: bool, origin: bool) -> ResumeRun {
+        use crate::archive::domain::LockEntry;
+        use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+        use crate::core::testing::insert_source_with_metadata;
+        use crate::expr::Unmeasured;
+        use sha2::{Digest, Sha256};
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::write(&src_file, bytes).unwrap();
+        let dest = archive_dir.path().join("photo.jpg");
+        std::fs::write(&dest, bytes).unwrap();
+
+        let mut conn = setup_test_db();
+        let src_root = insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let object = insert_object(&conn, "locked", false);
+        let source_id = insert_source_with_metadata(
+            &conn,
+            src_root,
+            "photo.jpg",
+            Some(object),
+            bytes.len() as i64,
+            1704067200,
+        );
+        if registered {
+            let id = insert_source_with_metadata(
+                &conn,
+                archive_root,
+                "photo.jpg",
+                Some(object),
+                bytes.len() as i64,
+                1704067200,
+            );
+            conn.execute(
+                "UPDATE sources SET decision_id = 77, device = 5, inode = 6, basis_rev = 3 WHERE id = ?",
+                [id],
+            )
+            .unwrap();
+        }
+        if !origin {
+            std::fs::remove_file(&src_file).unwrap();
+        }
+
+        let entry = LockEntry {
+            id: source_id,
+            root_id: src_root,
+            path: src_file.display().to_string(),
+            scope_rel_path: None,
+            device: 0,
+            inode: 0,
+            size: bytes.len() as i64,
+            mtime: 1704067200,
+            partial_hash: "testhash".to_string(),
+            object_id: Some(object),
+            hash_type: Some("sha256".to_string()),
+            hash_value: Some(format!("{:x}", Sha256::digest(bytes))),
+        };
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = crate::expr::read_pattern(&conn, "{filename}")
+            .unwrap()
+            .unwrap();
+        let root_paths: std::collections::HashMap<i64, String> = repo::root::fetch_all(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.id, r.path))
+            .collect();
+        let base_dir = ContainedPath::default();
+        let zone = lock_zone();
+        let plan = plan_apply(
+            &mut conn,
+            &ApplyPlanParams {
+                sources: &sources,
+                pattern: &pattern,
+                unmeasured: Unmeasured::NoScopeRecorded,
+                pattern_needs_a_scope_it_lacks: false,
+                root_paths: &root_paths,
+                lock_zone: &zone,
+                archive_root_id: archive_root,
+                base_dir: &base_dir,
+                resume: true,
+                progress: None,
+            },
+        )
+        .unwrap();
+
+        let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: true,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+        let decision = make_decision_params(false);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        let decision_id = latest_decision_id(&conn);
+        ResumeRun {
+            conn,
+            archive_root,
+            result,
+            decision_id,
+            dest,
+            _dirs: (src_dir, archive_dir),
+        }
+    }
+
+    /// An entry the index already records is counted and left alone: its row
+    /// keeps the decision that put it there, and its device, inode and
+    /// `basis_rev`. Re-registering it would stamp this run over an earlier,
+    /// correct act.
+    #[test]
+    fn a_resume_leaves_a_registered_row_untouched() {
+        let run = resume_over(b"hello world", true, true);
+        assert_eq!(run.result.already_there, 1);
+        assert_eq!(run.result.proven, 0);
+        let row = repo::source::fetch_by_path(&run.conn, run.archive_root, "photo.jpg")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.decision_id, Some(77));
+        assert_eq!((row.device, row.inode), (5, 6));
+        assert_eq!(row.basis_rev, 3);
+        assert_ne!(Some(run.decision_id), row.decision_id);
+    }
+
+    /// An entry no row records, whose destination hashes to the lock's content,
+    /// is registered by this run from the file itself: its real device and save
+    /// time, not the lock's. The origin need not still stand — the file at the
+    /// destination is what was shown to hold the content.
+    #[test]
+    fn a_resume_proves_and_registers_an_unregistered_destination() {
+        for origin in [true, false] {
+            let run = resume_over(b"hello world", false, origin);
+            assert_eq!(run.result.proven, 1, "origin present: {origin}");
+            assert_eq!(run.result.already_there, 1);
+            assert!(run.result.errors.is_empty());
+            let row = repo::source::fetch_by_path(&run.conn, run.archive_root, "photo.jpg")
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.decision_id, Some(run.decision_id));
+            assert!(row.object_id.is_some());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let meta = std::fs::metadata(&run.dest).unwrap();
+                assert_eq!(row.device, meta.dev() as i64, "the real device");
+                assert_eq!(row.inode, meta.ino() as i64);
+                assert_eq!(row.mtime, meta.mtime(), "the file's own modification time");
+            }
+        }
     }
 
     #[test]
@@ -2119,6 +2423,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let params = ApplyExecuteParams {
@@ -2171,6 +2476,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let params = ApplyExecuteParams {
@@ -2330,6 +2636,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         // Placement points at a file, not a directory → receipt setup fails,
@@ -2417,6 +2724,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         // receipt_ctx is None — no receipt written
@@ -2489,6 +2797,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let receipt_ctx = ReceiptPlacement::Targeted {
@@ -2588,6 +2897,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let receipt_ctx = ReceiptPlacement::Targeted {
@@ -2695,6 +3005,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let params = ApplyExecuteParams {
@@ -2786,6 +3097,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let receipt_ctx = ReceiptPlacement::Targeted {
@@ -3325,6 +3637,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         };
 
         let receipt_ctx = ReceiptPlacement::Targeted {
@@ -3333,8 +3646,9 @@ mod tests {
             base_dir_rel: String::new(),
         };
 
-        // Pre-set interrupt flag — first transfer completes, then loop breaks
-        let flag = Arc::new(AtomicBool::new(true));
+        // The flag is set while the first transfer is in flight — it completes,
+        // then the loop breaks
+        let flag = Arc::new(AtomicBool::new(false));
 
         let params = ApplyExecuteParams {
             lock_zone: lock_zone(),
@@ -3342,14 +3656,21 @@ mod tests {
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
             resume: false,
-            interrupt_flag: Some(flag),
+            interrupt_flag: Some(Arc::clone(&flag)),
             skipped_by_filter: 0,
             manifest_display: "test.toml".to_string(),
             receipt_ctx: Some(receipt_ctx),
         };
 
         let decision = make_decision_params(true);
-        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        let result = execute_apply(
+            &conn,
+            &plan,
+            &params,
+            &PressAfterFirstFile(flag),
+            Some(&decision),
+        )
+        .unwrap();
         assert!(result.interrupted);
         assert_eq!(result.copied, 1); // Only first transfer completed
 
@@ -3402,14 +3723,15 @@ mod tests {
 
         let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"data");
 
+        let flag = Arc::new(AtomicBool::new(false));
         let params = ApplyExecuteParams {
             lock_zone: lock_zone(),
             base_dir: archive_dir.path().to_path_buf(),
             archive_root_id: archive_root,
             transfer_mode: TransferMode::Copy,
             resume: false,
-            // Already set: the loop completes the current transfer, then stops.
-            interrupt_flag: Some(Arc::new(AtomicBool::new(true))),
+            // Set when the first transfer ends: the loop stops after it.
+            interrupt_flag: Some(Arc::clone(&flag)),
             skipped_by_filter: 0,
             manifest_display: "test.toml".to_string(),
             receipt_ctx: Some(ReceiptPlacement::Targeted {
@@ -3419,7 +3741,14 @@ mod tests {
             }),
         };
         let decision = make_decision_params(true);
-        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        let result = execute_apply(
+            &conn,
+            &plan,
+            &params,
+            &PressAfterFirstFile(flag),
+            Some(&decision),
+        )
+        .unwrap();
         assert_eq!(result.copied, 1);
         assert!(result.interrupted);
 
@@ -3517,5 +3846,570 @@ mod tests {
             Some(42),
             "Rename should set decision_id"
         );
+    }
+
+    // =========================================================================
+    // A move onto a path that already holds a row
+    // =========================================================================
+
+    /// What stands in the index at the destination before the run.
+    #[derive(Clone, Copy)]
+    enum DestRow {
+        /// A row the index holds as deleted (`present = 0`).
+        Tombstone,
+        /// A row still marked present, carrying a different object.
+        StalePresent,
+    }
+
+    struct OccupiedRun {
+        conn: Connection,
+        result: ApplyResult,
+        archive_dir: tempfile::TempDir,
+        _src_dir: tempfile::TempDir,
+        archive_root: i64,
+        origin_id: i64,
+        object_id: i64,
+    }
+
+    /// Run one real transfer of `a.jpg` into `dest/a.jpg` in `mode`, with a row already
+    /// in the index at the destination path and no file there.
+    fn run_onto_a_row(mode: TransferMode, row: DestRow, resume: bool) -> OccupiedRun {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_root = insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let object_id = insert_object(&conn, "aaaa", false);
+        let other_object = insert_object(&conn, "bbbb", false);
+
+        let (mut plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "dest/a.jpg", b"data");
+        let origin_id = crate::core::testing::insert_source(&conn, src_root, "a.jpg", None);
+        plan.transfers[0].source_id = origin_id;
+        plan.transfers[0].object_id = Some(object_id);
+
+        let present = matches!(row, DestRow::StalePresent) as i64;
+        conn.execute(
+            "UPDATE sources SET present = ? WHERE id = ?",
+            rusqlite::params![
+                present,
+                crate::core::testing::insert_source(
+                    &conn,
+                    archive_root,
+                    "dest/a.jpg",
+                    Some(other_object)
+                )
+            ],
+        )
+        .unwrap();
+        let standing: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE root_id = ? AND rel_path = 'dest/a.jpg' AND present = ?",
+                rusqlite::params![archive_root, present],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(standing, 1, "the row the scenario needs is in place");
+
+        let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: mode,
+            resume,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(ReceiptPlacement::Targeted {
+                archive_root_id: archive_root,
+                archive_root_path: archive_dir.path().display().to_string(),
+                base_dir_rel: String::new(),
+            }),
+        };
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        OccupiedRun {
+            conn,
+            result,
+            archive_dir,
+            _src_dir: src_dir,
+            archive_root,
+            origin_id,
+            object_id,
+        }
+    }
+
+    /// The index agrees with the disk after a move onto a path that held a row.
+    fn assert_move_recorded(run: &OccupiedRun) {
+        assert!(
+            run.result.errors.is_empty(),
+            "a move onto a held path must not error"
+        );
+        assert!(run.archive_dir.path().join("dest/a.jpg").exists());
+        let decision_id = latest_decision_id(&run.conn);
+
+        let (present, object, stamp): (i64, Option<i64>, Option<i64>) = run
+            .conn
+            .query_row(
+                "SELECT present, object_id, decision_id FROM sources
+                 WHERE root_id = ? AND rel_path = 'dest/a.jpg'",
+                rusqlite::params![run.archive_root],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(present, 1, "the destination row is present");
+        assert_eq!(object, Some(run.object_id), "with this content");
+        assert_eq!(stamp, Some(decision_id), "and this decision");
+
+        let (origin_present, origin_stamp): (i64, Option<i64>) = run
+            .conn
+            .query_row(
+                "SELECT present, decision_id FROM sources WHERE id = ?",
+                rusqlite::params![run.origin_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(origin_present, 0, "the origin row is absent");
+        assert_eq!(origin_stamp, Some(decision_id), "stamped by this decision");
+
+        let extractions: i64 = run
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_extractions WHERE decision_id = ?",
+                rusqlite::params![decision_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(extractions, 1, "the extraction row is recorded");
+
+        let row = repo::decision::fetch_by_id(&run.conn, decision_id)
+            .unwrap()
+            .expect("decision row");
+        let receipt = std::fs::read_to_string(
+            run.archive_dir
+                .path()
+                .join(row.receipt_rel_path.expect("receipt written")),
+        )
+        .unwrap();
+        assert!(receipt.contains("dest/a.jpg"), "the receipt lists the file");
+    }
+
+    #[test]
+    fn a_move_onto_a_deleted_path_succeeds() {
+        let run = run_onto_a_row(TransferMode::Move, DestRow::Tombstone, false);
+        assert_move_recorded(&run);
+    }
+
+    #[test]
+    fn a_rename_onto_a_deleted_path_succeeds() {
+        let run = run_onto_a_row(TransferMode::Rename, DestRow::Tombstone, false);
+        assert_move_recorded(&run);
+    }
+
+    #[test]
+    fn a_move_over_a_stale_present_row_succeeds() {
+        // The state `--resume --move` meets: a present row carrying another object, its
+        // file deleted by hand, and nothing in the way of the move.
+        let run = run_onto_a_row(TransferMode::Move, DestRow::StalePresent, true);
+        assert_move_recorded(&run);
+    }
+
+    #[test]
+    fn a_rename_over_a_stale_present_row_succeeds() {
+        let run = run_onto_a_row(TransferMode::Rename, DestRow::StalePresent, true);
+        assert_move_recorded(&run);
+    }
+
+    /// A plain copy onto a path whose row was deleted records the destination under
+    /// this decision and leaves the origin's row alone, as the move and rename cases
+    /// beside it record theirs.
+    #[test]
+    fn a_copy_onto_a_deleted_path_succeeds() {
+        let run = run_onto_a_row(TransferMode::Copy, DestRow::Tombstone, false);
+        assert!(
+            run.result.errors.is_empty(),
+            "a copy onto a held path must not error"
+        );
+        assert!(run.archive_dir.path().join("dest/a.jpg").exists());
+        let decision_id = latest_decision_id(&run.conn);
+
+        let (present, object, stamp): (i64, Option<i64>, Option<i64>) = run
+            .conn
+            .query_row(
+                "SELECT present, object_id, decision_id FROM sources
+                 WHERE root_id = ? AND rel_path = 'dest/a.jpg'",
+                rusqlite::params![run.archive_root],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(present, 1);
+        assert_eq!(object, Some(run.object_id));
+        assert_eq!(stamp, Some(decision_id));
+
+        let origin_present: i64 = run
+            .conn
+            .query_row(
+                "SELECT present FROM sources WHERE id = ?",
+                rusqlite::params![run.origin_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(origin_present, 1, "a copy leaves the origin row present");
+    }
+
+    #[test]
+    fn a_relocation_with_no_row_at_the_destination_keeps_its_one_row() {
+        // The allowed case beside the three above: the ordinary same-device move
+        // re-points the origin's own row, and no second row appears.
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_root = insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let (mut plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "dest/a.jpg", b"data");
+        let origin_id = crate::core::testing::insert_source(&conn, src_root, "a.jpg", None);
+        plan.transfers[0].source_id = origin_id;
+        let dest_dir = archive_dir.path().join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let (outcome, _) = execute_single_transfer(
+            &plan.transfers[0],
+            archive_dir.path(),
+            TransferMode::Move,
+            &conn,
+            archive_root,
+            Some(7),
+            &lock_zone(),
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, TransferOutcome::Renamed));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let (root, rel): (i64, String) = conn
+            .query_row(
+                "SELECT root_id, rel_path FROM sources WHERE id = ?",
+                rusqlite::params![origin_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((root, rel.as_str()), (archive_root, "dest/a.jpg"));
+    }
+
+    #[test]
+    fn a_failed_index_write_after_a_move_says_where_the_file_is() {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_root = insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let (mut plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "dest/a.jpg", b"data");
+        let origin_id = crate::core::testing::insert_source(&conn, src_root, "a.jpg", None);
+        plan.transfers[0].source_id = origin_id;
+        std::fs::create_dir_all(archive_dir.path().join("dest")).unwrap();
+
+        // The row the trigger refuses to update exists before it is planted.
+        let matching: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE id = ?",
+                [origin_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(matching, 1);
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_relocation BEFORE UPDATE ON sources
+             BEGIN SELECT RAISE(ABORT, 'database is locked'); END;",
+        )
+        .unwrap();
+
+        let err = execute_single_transfer(
+            &plan.transfers[0],
+            archive_dir.path(),
+            TransferMode::Move,
+            &conn,
+            archive_root,
+            Some(7),
+            &lock_zone(),
+        )
+        .unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(archive_dir.path().join("dest/a.jpg").exists());
+        assert!(said.contains("moved to"), "{said}");
+        assert!(said.contains("dest/a.jpg"), "{said}");
+        assert!(said.contains("the index was not updated"), "{said}");
+        assert!(said.contains("database is locked"), "{said}");
+        assert!(said.contains("--resume"), "{said}");
+    }
+
+    // =========================================================================
+    // Ctrl-C
+    // =========================================================================
+
+    /// The one test in this binary that installs the handler and raises a real
+    /// SIGINT: the first press sets the flag and the process survives it. It
+    /// raises exactly once — a second press is the default action and would end
+    /// the test run — and no other test in this binary installs a handler
+    /// (`ApplyOptions::handle_interrupts` is false for the interface tests that call `run`).
+    #[test]
+    fn a_first_interrupt_sets_the_flag_and_a_process_survives_it() {
+        let flag = setup_interrupt_flag().unwrap();
+        assert!(!flag.load(Ordering::Relaxed), "nothing has been pressed");
+
+        signal_hook::low_level::raise(signal_hook::consts::SIGINT).unwrap();
+
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "the first press must set the flag"
+        );
+    }
+
+    /// The signal test above is the only test in this binary that installs a handler
+    /// because `setup_interrupt_flag` has exactly two callers: the interface's `run`
+    /// (behind `ApplyOptions::handle_interrupts`) and that test. A third caller, in a
+    /// test or not, could set the signal test's neighbours' flags with its real press.
+    /// The list is exact in both directions, so a caller added or removed fails here.
+    ///
+    /// **Blind spots, named:** it counts the spelling of a direct call. A call through an
+    /// alias (`use … as`) or a function pointer, and a handler registered by calling the
+    /// signal crate directly, pass unseen.
+    #[test]
+    fn only_the_interface_and_the_signal_test_install_the_handler() {
+        fn collect(dir: &Path, found: &mut std::collections::BTreeMap<String, usize>, root: &Path) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(&path, found, root);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    // Built in two parts so this file does not count itself.
+                    let call = concat!("setup_interrupt_flag", "()");
+                    let definition = concat!("fn setup_interrupt_flag", "()");
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let callers = text.matches(call).count() - text.matches(definition).count();
+                    if callers > 0 {
+                        let rel = path.strip_prefix(root).unwrap().display().to_string();
+                        found.insert(rel, callers);
+                    }
+                }
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = std::collections::BTreeMap::new();
+        collect(&root, &mut found, &root);
+        let expected: std::collections::BTreeMap<String, usize> = [
+            ("archive/cli/apply.rs".to_string(), 1),
+            ("archive/ops/execute.rs".to_string(), 1),
+        ]
+        .into();
+        assert_eq!(found, expected);
+    }
+
+    /// Two real files, a flag already set (a press during the checks), and a
+    /// decision recorded: the run ends before the first transfer.
+    fn run_pressed_during_the_checks() -> (
+        Connection,
+        ApplyResult,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let (mut plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"aaaa");
+        let (second, _, _) = single_transfer_plan(src_dir.path(), "b.jpg", "b.jpg", b"bbbb");
+        plan.transfers.extend(second.transfers);
+
+        let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Move,
+            resume: false,
+            interrupt_flag: Some(Arc::new(AtomicBool::new(true))),
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(ReceiptPlacement::Targeted {
+                archive_root_id: archive_root,
+                archive_root_path: archive_dir.path().display().to_string(),
+                base_dir_rel: String::new(),
+            }),
+        };
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        (conn, result, src_dir, archive_dir)
+    }
+
+    #[test]
+    fn an_interrupt_during_the_checks_moves_nothing() {
+        let (_conn, result, src_dir, archive_dir) = run_pressed_during_the_checks();
+
+        assert!(result.interrupted);
+        assert_eq!(result.remaining, 2, "both transfers are still to do");
+        assert_eq!(result.copied + result.renamed + result.moved, 0);
+        assert!(result.errors.is_empty());
+        assert!(src_dir.path().join("a.jpg").exists());
+        assert!(src_dir.path().join("b.jpg").exists());
+        assert!(!archive_dir.path().join("a.jpg").exists());
+        assert!(!archive_dir.path().join("b.jpg").exists());
+        assert!(
+            result.summary.contains("Interrupted — 2 files remaining."),
+            "{}",
+            result.summary
+        );
+    }
+
+    #[test]
+    fn an_interrupt_during_the_checks_settles_the_row_interrupted_with_no_receipt() {
+        let (conn, _result, _src, _archive) = run_pressed_during_the_checks();
+
+        let decision_id = latest_decision_id(&conn);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM decisions WHERE id = ?",
+                [decision_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        let row = repo::decision::fetch_by_id(&conn, decision_id)
+            .unwrap()
+            .expect("decision row");
+        assert_eq!(row.count_completed, Some(0));
+        assert_eq!(row.receipt_rel_path, None, "no receipt, so no claim");
+        assert_eq!(row.receipt_root_id, None);
+    }
+
+    /// A resume holding one pending transfer and one entry it proved was already
+    /// at its destination, run with the flag as given.
+    fn resume_with_a_proven_entry(
+        pressed: bool,
+    ) -> (Connection, ApplyResult, i64, tempfile::TempDir) {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let (mut plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"aaaa");
+        let (mut proven, _, _) = single_transfer_plan(src_dir.path(), "b.jpg", "b.jpg", b"bbbb");
+        std::fs::write(archive_dir.path().join("b.jpg"), b"bbbb").unwrap();
+        plan.resume_already_there = std::mem::take(&mut proven.transfers);
+        plan.resume_already_there_source_present = 1;
+        plan.already_archived_count = 1;
+
+        let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: true,
+            interrupt_flag: Some(Arc::new(AtomicBool::new(pressed))),
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(ReceiptPlacement::Targeted {
+                archive_root_id: archive_root,
+                archive_root_path: archive_dir.path().display().to_string(),
+                base_dir_rel: String::new(),
+            }),
+        };
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        (conn, result, archive_root, archive_dir)
+    }
+
+    /// A press before the transfer loop records nothing, the entries a resume
+    /// proved included: a run that reached the loop finishes its record, and a
+    /// run that did not makes none. The allowed twin is the same state with no
+    /// press: the transfer runs and the proven entry is recorded beside it.
+    #[test]
+    fn a_press_before_the_loop_records_no_proven_entry() {
+        let (conn, result, archive_root, _dir) = resume_with_a_proven_entry(true);
+        assert!(result.interrupted);
+        assert_eq!(result.proven, 0);
+        assert!(repo::source::fetch_by_path(&conn, archive_root, "b.jpg")
+            .unwrap()
+            .is_none());
+        let row = repo::decision::fetch_by_id(&conn, latest_decision_id(&conn))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.count_attempted, Some(1), "only the pending transfer");
+        assert_eq!(row.count_completed, Some(0));
+        assert_eq!(row.receipt_rel_path, None, "no receipt, so no claim");
+
+        let (conn, result, archive_root, _dir) = resume_with_a_proven_entry(false);
+        assert!(!result.interrupted);
+        assert_eq!(result.copied, 1);
+        assert_eq!(result.proven, 1);
+        assert!(repo::source::fetch_by_path(&conn, archive_root, "b.jpg")
+            .unwrap()
+            .is_some());
+        let row = repo::decision::fetch_by_id(&conn, latest_decision_id(&conn))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.count_completed, Some(2));
+        assert!(row.receipt_rel_path.is_some());
+    }
+
+    #[test]
+    fn a_run_nobody_interrupts_still_transfers_everything() {
+        // The allowed case beside the two refusals above, in the state the
+        // production caller is in: a handler's flag, never pressed.
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+        let (plan, _, _) = single_transfer_plan(src_dir.path(), "a.jpg", "a.jpg", b"aaaa");
+        let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: false,
+            interrupt_flag: Some(Arc::new(AtomicBool::new(false))),
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: None,
+        };
+
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, None).unwrap();
+
+        assert!(!result.interrupted);
+        assert_eq!(result.copied, 1);
+        assert!(archive_dir.path().join("a.jpg").exists());
     }
 }

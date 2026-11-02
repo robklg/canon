@@ -365,6 +365,19 @@ database access, no terminal I/O, and no business decisions: this module does wh
 Hashing belongs here rather than beside the object noun because identification is a physical
 act — the identity warrant's positive mechanic is a read of the disk.
 
+The **origin-removal law**: *an origin is removed only after its destination is proven.* Owner
+`move_file`'s cross-device arm (`move_across_devices`); verifier `a_failed_proof_keeps_the_origin`;
+reach `core`. *Proven* means the copy was written out to storage on the descriptor that wrote it
+(a late write error is reported there and dropped at close), its length equals the origin's, and
+the origin's length and modification time are unchanged since before the copy; the bytes are not read
+back. The one removal sits past the proof, and where the proof or the removal fails the destination
+this call created is removed with the origin standing, so the entry is pending again; where the
+origin is already gone the copy stays. The arm's own link is read from the file's text, since no
+test reaches it: `the_cross_device_arm_proves_before_the_one_origin_removal`. A write that fails partway (a full disk) returns before the
+proof and leaves its partial file, as a plain copy does; the origin stands, and a resume reports
+the partial file by its size. **Where it does not apply**: plain `copy_file` (no origin removed,
+no sync), and a same-device rename (the file is not copied).
+
 Apply's two preflight helpers deliberately do *not* live here: they answer a planning question
 only apply asks, and sit with it in `archive/ops/plan.rs`.
 

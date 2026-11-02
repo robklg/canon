@@ -244,6 +244,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         }
     }
 
@@ -330,6 +331,80 @@ mod tests {
 
         let backfilled_rows = fetch_rows(&conn, decision_id);
         assert_eq!(backfilled_rows, forward_rows);
+    }
+
+    /// An entry a resume proves was already at its destination is recorded by
+    /// that run: the receipt lists it, the extraction ledger counts it, and
+    /// `ledger reindex` rebuilds the same row from the receipt. No earlier
+    /// receipt lists it (a killed run wrote none), so without the item the row
+    /// could not be rebuilt and the file would read as having no origin.
+    #[test]
+    fn a_proven_entry_is_in_the_receipt_and_the_ledger() {
+        let conn = setup_test_db();
+        let src_dir = tempfile::tempdir().unwrap();
+        insert_root(&conn, src_dir.path().to_str().unwrap(), "source", false);
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_root = insert_root(
+            &conn,
+            archive_dir.path().to_str().unwrap(),
+            "archive",
+            false,
+        );
+
+        // The file is already at its destination; the plan has proven it.
+        let mut plan = single_transfer_plan(
+            src_dir.path(),
+            "2016/italy/a.jpg",
+            "2016/Italy/a.jpg",
+            b"hello world",
+        );
+        std::fs::create_dir_all(archive_dir.path().join("2016/Italy")).unwrap();
+        std::fs::write(archive_dir.path().join("2016/Italy/a.jpg"), b"hello world").unwrap();
+        plan.resume_already_there = std::mem::take(&mut plan.transfers);
+        plan.resume_already_there_source_present = 1;
+        plan.already_archived_count = 1;
+
+        let params = ApplyExecuteParams {
+            lock_zone: lock_zone(),
+            base_dir: archive_dir.path().to_path_buf(),
+            archive_root_id: archive_root,
+            transfer_mode: TransferMode::Copy,
+            resume: true,
+            interrupt_flag: None,
+            skipped_by_filter: 0,
+            manifest_display: "test.toml".to_string(),
+            receipt_ctx: Some(ReceiptPlacement::Targeted {
+                archive_root_id: archive_root,
+                archive_root_path: archive_dir.path().display().to_string(),
+                base_dir_rel: String::new(),
+            }),
+        };
+        let decision = make_decision_params(true);
+        let result = execute_apply(&conn, &plan, &params, &NoopProgress, Some(&decision)).unwrap();
+        assert_eq!(result.proven, 1);
+        assert!(result.errors.is_empty(), "{:?}", result.errors.len());
+        let decision_id = latest_decision_id(&conn);
+
+        // Forward: the ledger counts the entry.
+        let forward_rows = fetch_rows(&conn, decision_id);
+        assert_eq!(forward_rows.len(), 1);
+        assert_eq!(forward_rows[0].files, 1);
+
+        // The decision's counts agree with the receipt that lists the entry.
+        let (attempted, completed): (i64, i64) = conn
+            .query_row(
+                "SELECT count_attempted, count_completed FROM decisions WHERE id = ?",
+                [decision_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((attempted, completed), (1, 1));
+
+        // Backfilled from the receipt on disk: the same row, so the receipt lists it.
+        wipe_extractions(&conn);
+        let reindexed = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        assert_eq!(reindexed.indexed, vec![decision_id]);
+        assert_eq!(fetch_rows(&conn, decision_id), forward_rows);
     }
 
     #[test]

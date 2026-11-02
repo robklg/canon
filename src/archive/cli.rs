@@ -11,6 +11,7 @@ pub(super) mod cluster;
 use std::path::Path;
 
 use crate::archive::domain::ZoneRefusal;
+use crate::archive::ops::execute::TransferMode;
 use crate::archive::ops::pattern::PatternGaps;
 use crate::core::domain::format::{shell_quote, with_visible_nulls};
 use crate::core::domain::format_count;
@@ -187,12 +188,30 @@ fn refresh_command(manifest: &Path, edit: bool) -> String {
 /// its files. A parameter rather than a second function because the two differ
 /// in one flag and must not differ in anything else — the flag's position
 /// included, which is why it is composed here and not appended by the caller.
-fn apply_command(manifest: &Path, resume: bool) -> String {
-    let flag = if resume { "--resume " } else { "" };
+///
+/// `mode` is the transfer mode of the run the line speaks for: a line that
+/// finishes a stopped `--move` has to say `--move`, or it runs as a copy and
+/// leaves every origin standing. Flags come in one order: `--resume`, then the
+/// mode. A report holds no mode and passes `Copy`.
+fn apply_command(manifest: &Path, resume: bool, mode: TransferMode) -> String {
+    let resume = if resume { "--resume " } else { "" };
+    let mode = match mode {
+        TransferMode::Copy => "",
+        TransferMode::Rename => "--rename ",
+        TransferMode::Move => "--move ",
+    };
+    let flag = format!("{resume}{mode}");
     format!(
         "canon apply {flag}{}",
         shell_quote(&manifest.display().to_string())
     )
+}
+
+/// A scan of the given places, as a user would type it — quoted by the same owner
+/// as its siblings, for the same reason. Several places are one command, in order.
+fn scan_command(paths: &[String]) -> String {
+    let quoted: Vec<String> = paths.iter().map(|p| shell_quote(p)).collect();
+    format!("canon scan {}", quoted.join(" "))
 }
 
 /// The report, as a user would type it — the sibling of [`refresh_command`],
@@ -363,11 +382,10 @@ fn scan_or_edit_scope(manifest: &Path, set_aside: &[String]) -> Vec<String> {
     if set_aside.is_empty() {
         return vec![edit];
     }
-    let paths: Vec<String> = set_aside.iter().map(|p| shell_quote(p)).collect();
     vec![
         format!(
-            "If the files are there, `canon scan {}` to index them.",
-            paths.join(" ")
+            "If the files are there, `{}` to index them.",
+            scan_command(set_aside)
         ),
         edit,
     ]
@@ -882,6 +900,48 @@ fn unplaced_statement(count: usize) -> String {
 mod tests {
     use std::path::Path;
 
+    /// **The printed line keeps the run's mode, and every mode's line is a command that
+    /// parses.** A stopped `--move` resumed by a line without `--move` runs as a copy and
+    /// leaves every origin standing; the line is parsed back through the program's own
+    /// argument definition, so a flag that is not real, or in a position the program refuses,
+    /// fails here. Each case also asserts the flags that must NOT be set.
+    #[test]
+    fn apply_command_carries_the_runs_mode_and_parses_back() {
+        use super::apply_command;
+        use crate::archive::TransferMode;
+        use clap::Parser;
+
+        let manifest = Path::new("/m/trip.toml");
+        for (mode, resume, want_move, want_rename) in [
+            (TransferMode::Copy, true, false, false),
+            (TransferMode::Move, true, true, false),
+            (TransferMode::Rename, true, false, true),
+            (TransferMode::Move, false, true, false),
+        ] {
+            let line = apply_command(manifest, resume, mode);
+            let parsed = crate::Cli::try_parse_from(line.split_whitespace())
+                .unwrap_or_else(|e| panic!("`{line}` does not parse: {e}"));
+            match parsed.command {
+                crate::Commands::Apply {
+                    resume: got_resume,
+                    move_files,
+                    rename,
+                    ..
+                } => {
+                    assert_eq!(got_resume, resume, "{line}");
+                    assert_eq!(move_files, want_move, "{line}");
+                    assert_eq!(rename, want_rename, "{line}");
+                }
+                _ => panic!("`{line}` is not an apply"),
+            }
+        }
+        assert_eq!(
+            apply_command(manifest, true, TransferMode::Move),
+            "canon apply --resume --move /m/trip.toml",
+            "one spelling, the flags in one fixed order"
+        );
+    }
+
     /// The bypass this file exists to refuse: a remedy that spells a command
     /// and pastes a path into it on its own, rather than through the two
     /// spellings above.
@@ -896,7 +956,7 @@ mod tests {
     /// command surface is in this file**, and there are exactly four. A new
     /// one anywhere in `cli/` fails here, and the repair is to route it
     /// through [`refresh_command`], [`apply_command`], [`status_command`] or
-    /// [`scan_or_edit_scope`] — each of which quotes through the tree's own
+    /// [`scan_command`] — each of which quotes through the tree's own
     /// owner. Matched both directions, so a spelling that moves out of this
     /// file fails too, rather than leaving the list asserting a site that has
     /// gone.
@@ -947,8 +1007,8 @@ mod tests {
             vec![
                 r#"cli.rs: "canon cluster refresh {flag}{}","#.to_string(),
                 r#"cli.rs: "canon apply {flag}{}","#.to_string(),
+                r#"cli.rs: format!("canon scan {}", quoted.join(" "))"#.to_string(),
                 r#"cli.rs: "canon cluster status {}","#.to_string(),
-                r#"cli.rs: "If the files are there, `canon scan {}` to index them.","#.to_string(),
             ],
             "a command spelled with a path outside this file's four owners"
         );

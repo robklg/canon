@@ -474,6 +474,25 @@ pub fn mtime_change(locked: i64, now: i64, clock: &RecordedZone) -> String {
     line
 }
 
+/// Whether the index row standing at a destination records this entry's
+/// content.
+///
+/// `row_object` is what the index holds there: `None` for no present row,
+/// `Some(None)` for a present row with no object, `Some(Some(id))` for a row
+/// with one. Only a present row with the entry's own object vouches for it.
+/// A row with no object, a row with another object, no row, and an entry with
+/// no object all fail to vouch: each leaves the question to the disk.
+///
+/// **One predicate, two readers**: `--resume` asks it before it hashes a
+/// destination, and `cluster status` asks it so a report never says "accounted
+/// for" over a file the resume would refuse. It reads no disk.
+pub fn row_vouches_for(row_object: Option<&Option<i64>>, entry_object: Option<i64>) -> bool {
+    match (row_object, entry_object) {
+        (Some(Some(row)), Some(entry)) => *row == entry,
+        (Some(Some(_)) | Some(None) | None, _) => false,
+    }
+}
+
 // ============================================================================
 // The `[options]` vocabulary
 // ============================================================================
@@ -1203,6 +1222,22 @@ impl ManifestStanding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // row_vouches_for
+    // =========================================================================
+
+    #[test]
+    fn only_a_present_row_with_the_entrys_object_vouches_for_it() {
+        assert!(row_vouches_for(Some(&Some(7)), Some(7)));
+        // Another object, a row with none, no row, and an entry with none.
+        assert!(!row_vouches_for(Some(&Some(8)), Some(7)));
+        assert!(!row_vouches_for(Some(&None), Some(7)));
+        assert!(!row_vouches_for(None, Some(7)));
+        assert!(!row_vouches_for(Some(&Some(7)), None));
+        assert!(!row_vouches_for(Some(&None), None));
+        assert!(!row_vouches_for(None, None));
+    }
 
     // =========================================================================
     // parse_manifest_allow

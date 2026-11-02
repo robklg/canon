@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::archive::domain::{
-    settle_manifest_zone, LockEntry, LockHeaderStanding, LockStanding, ManifestStanding,
-    ManifestZone, NextStep, OwedWayBack, PatternStanding, RefreshRefusal, ZoneRefusal,
+    row_vouches_for, settle_manifest_zone, LockEntry, LockHeaderStanding, LockStanding,
+    ManifestStanding, ManifestZone, NextStep, OwedWayBack, PatternStanding, RefreshRefusal,
+    ZoneRefusal,
 };
 use crate::core::domain::path::{ContainedPath, NotContained};
 use crate::core::domain::root::{ParkedRoot, Root};
@@ -48,10 +49,15 @@ pub enum NoDestination {
 /// report ends up disagreeing with itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryStatus {
-    /// The destination holds the file, at the expected size.
+    /// The destination holds a file of the expected size, and the index records
+    /// this entry's content there.
     AtDestination,
     /// The destination holds a file of a different size.
     SizeMismatch,
+    /// The destination holds a file of the expected size, but no present row
+    /// records this entry's content there. Whether the bytes are the lock's is
+    /// not known without reading them, which only `apply --resume` does.
+    Unconfirmed,
     /// Not at the destination yet; the source is still there to bring.
     Pending,
     /// Not at the destination, and the source is gone.
@@ -108,10 +114,19 @@ pub fn parked_lock_entries(
     Ok(counts)
 }
 
-/// The one derivation of an entry's status from what was found on disk.
-fn classify_entry(source_exists: bool, dest_exists: bool, dest_size_match: bool) -> EntryStatus {
-    if dest_exists && dest_size_match {
+/// The one derivation of an entry's status from what was found on disk and in
+/// the index. `vouched` is [`row_vouches_for`]'s answer, the same predicate
+/// `apply --resume` asks before it hashes a destination.
+fn classify_entry(
+    source_exists: bool,
+    dest_exists: bool,
+    dest_size_match: bool,
+    vouched: bool,
+) -> EntryStatus {
+    if dest_exists && dest_size_match && vouched {
         EntryStatus::AtDestination
+    } else if dest_exists && dest_size_match {
+        EntryStatus::Unconfirmed
     } else if dest_exists {
         EntryStatus::SizeMismatch
     } else if source_exists {
@@ -119,6 +134,14 @@ fn classify_entry(source_exists: bool, dest_exists: bool, dest_size_match: bool)
     } else {
         EntryStatus::SourceLost
     }
+}
+
+/// What the disk showed at one entry's destination, with the lock's object for it:
+/// the inputs `classify_entry` needs besides the index's answer.
+struct DiskFinding {
+    dest_exists: bool,
+    size_match: bool,
+    object: Option<i64>,
 }
 
 /// State of a single lock entry in status assessment.
@@ -156,7 +179,8 @@ pub struct ManifestStatus {
     pub lock: LockStanding,
     /// Per-entry status assessment.
     pub entries: Vec<StatusEntry>,
-    /// Count of entries where dest exists with correct size.
+    /// Count of entries where dest exists with correct size and the index
+    /// records the entry's content there.
     pub at_destination: usize,
     /// Count of entries where source exists but dest does not.
     pub pending: usize,
@@ -164,6 +188,9 @@ pub struct ManifestStatus {
     pub source_lost: usize,
     /// Count of entries where dest exists but size doesn't match.
     pub size_mismatch: usize,
+    /// Count of entries where dest has the expected size but no present row
+    /// records the entry's content there.
+    pub content_unconfirmed: usize,
     /// Count of entries at dest where source file still exists.
     pub source_still_present: usize,
     /// Scope prefixes the manifest records that resolve to no known root.
@@ -250,11 +277,12 @@ impl ManifestStatus {
         }
     }
 
-    /// Whether the entries that were checked found no source lost and no destination of the
-    /// wrong size — the outermost gate of the next step, which a lock placed nowhere passes:
-    /// nothing was found wrong, and its step is the rebuild.
+    /// Whether the entries that were checked found no source lost, no destination of the
+    /// wrong size and none the index does not record — the outermost gate of the next step,
+    /// which a lock placed nowhere passes: nothing was found wrong, and its step is the
+    /// rebuild.
     pub fn found_nothing_lost_or_wrong(&self) -> bool {
-        self.source_lost == 0 && self.size_mismatch == 0
+        self.source_lost == 0 && self.size_mismatch == 0 && self.content_unconfirmed == 0
     }
 
     /// This manifest as the decision table reads it.
@@ -474,6 +502,9 @@ pub fn compute_manifest_status(
     let mut pattern_gaps = PatternGaps::for_lock(pattern_needs_a_scope_it_lacks);
     let mut entries = Vec::with_capacity(lock_entry_count);
     let mut dest_rel_paths: Vec<String> = Vec::with_capacity(lock_entry_count);
+    // What the disk showed at each destination, beside the lock's object for the
+    // entry: the inputs `classify_entry` needs once the index has been asked (step 7).
+    let mut findings: Vec<DiskFinding> = Vec::with_capacity(lock_entry_count);
 
     for (lock_entry, zone) in placed {
         let filename = Path::new(&lock_entry.path)
@@ -483,19 +514,26 @@ pub fn compute_manifest_status(
         let source_exists = Path::new(&lock_entry.path).exists();
         // Where no destination is worked out the source file is still checked
         // against the lock, and the destination is never looked for.
-        let not_worked_out = |entries: &mut Vec<StatusEntry>, dest_rel_paths: &mut Vec<String>| {
+        let not_worked_out = |entries: &mut Vec<StatusEntry>,
+                              dest_rel_paths: &mut Vec<String>,
+                              findings: &mut Vec<DiskFinding>| {
             entries.push(StatusEntry {
                 source_path: lock_entry.path.clone(),
                 source_filename: filename.clone(),
                 source_exists,
                 destination: Destination::NotWorkedOut,
                 db_registered: false,
-                status: classify_entry(source_exists, false, false),
+                status: EntryStatus::Pending, // settled in step 7
             });
             dest_rel_paths.push(String::new());
+            findings.push(DiskFinding {
+                dest_exists: false,
+                size_match: false,
+                object: None,
+            });
         };
         let (Ok(pattern), Ok(base_dir)) = (&pattern, &base_dir) else {
-            not_worked_out(&mut entries, &mut dest_rel_paths);
+            not_worked_out(&mut entries, &mut dest_rel_paths, &mut findings);
             continue;
         };
         let dest_rel =
@@ -506,12 +544,12 @@ pub fn compute_manifest_status(
                 // has seen one must not go on to name apply.
                 Err(NotPlaced::NoPlace(no_place)) => {
                     pattern_gaps.met(&no_place);
-                    not_worked_out(&mut entries, &mut dest_rel_paths);
+                    not_worked_out(&mut entries, &mut dest_rel_paths, &mut findings);
                     continue;
                 }
                 Err(NotPlaced::NotContained { why, .. }) => {
                     pattern_gaps.not_contained(&why);
-                    not_worked_out(&mut entries, &mut dest_rel_paths);
+                    not_worked_out(&mut entries, &mut dest_rel_paths, &mut findings);
                     continue;
                 }
                 Err(NotPlaced::TypeChanged(refused)) => return Err(refused.into()),
@@ -535,23 +573,44 @@ pub fn compute_manifest_status(
             source_filename: filename,
             source_exists,
             destination: Destination::At(dest_full),
-            db_registered: false, // filled in below
-            status: classify_entry(source_exists, dest_exists, dest_size_match),
+            db_registered: false,         // filled in below
+            status: EntryStatus::Pending, // settled in step 7
         });
         dest_rel_paths.push(archive_rel_path.as_str().to_string());
+        findings.push(DiskFinding {
+            dest_exists,
+            size_match: dest_size_match,
+            object: lock_entry.object_id,
+        });
     }
 
-    // 7. Batch check DB registration
+    // 7. Ask the index what it records at each destination, then settle every status.
+    // A file of the right size is "at destination" only where a present row records
+    // this entry's content there (`row_vouches_for`, the question `apply --resume`
+    // asks before it reads the file); no disk is read for it here.
     let rel_refs: Vec<&str> = dest_rel_paths.iter().map(|s| s.as_str()).collect();
-    let registered = crate::archive::repo::batch_check_paths_exist(
+    let rows = crate::archive::repo::batch_objects_at_paths(
         conn,
         config.output.archive_root_id,
         &rel_refs,
     )?;
-    for (entry, rel_path) in entries.iter_mut().zip(dest_rel_paths.iter()) {
-        if !rel_path.is_empty() && registered.contains(rel_path.as_str()) {
-            entry.db_registered = true;
-        }
+    for ((entry, rel_path), seen) in entries
+        .iter_mut()
+        .zip(dest_rel_paths.iter())
+        .zip(findings.iter())
+    {
+        let row = if rel_path.is_empty() {
+            None
+        } else {
+            rows.get(rel_path.as_str())
+        };
+        entry.db_registered = row.is_some();
+        entry.status = classify_entry(
+            entry.source_exists,
+            seen.dest_exists,
+            seen.size_match,
+            row_vouches_for(row, seen.object),
+        );
     }
 
     // 8. Compute counts
@@ -559,6 +618,7 @@ pub fn compute_manifest_status(
     let mut pending = 0usize;
     let mut source_lost = 0usize;
     let mut size_mismatch = 0usize;
+    let mut content_unconfirmed = 0usize;
     let mut source_still_present = 0usize;
     let mut no_destination = 0usize;
 
@@ -580,6 +640,7 @@ pub fn compute_manifest_status(
                 }
             }
             EntryStatus::SizeMismatch => size_mismatch += 1,
+            EntryStatus::Unconfirmed => content_unconfirmed += 1,
             EntryStatus::Pending => pending += 1,
             EntryStatus::SourceLost => source_lost += 1,
         }
@@ -597,6 +658,7 @@ pub fn compute_manifest_status(
         pending,
         source_lost,
         size_mismatch,
+        content_unconfirmed,
         source_still_present,
         unrooted_scope: scope.unrooted().to_vec(),
         set_aside_scope: scope.set_aside().to_vec(),
@@ -652,6 +714,27 @@ mod tests {
     /// call), the manifest path and the archive directory.
     fn status_fixture(names: &[&str]) -> (Connection, tempfile::TempDir, PathBuf, PathBuf) {
         status_fixture_in(names, "UTC")
+    }
+
+    /// Record the way a finished apply leaves the index: a present row at the
+    /// destination holding the same object as the source of the same name.
+    fn register_at_destination(conn: &Connection, name: &str) {
+        let object: i64 = conn
+            .query_row(
+                "SELECT s.object_id FROM sources s JOIN roots r ON r.id = s.root_id \
+                 WHERE r.role = 'source' AND s.rel_path = ?",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        insert_source_with_size(conn, archive_root_id(conn), name, Some(object), 4);
+    }
+
+    fn archive_root_id(conn: &Connection) -> i64 {
+        conn.query_row("SELECT id FROM roots WHERE role = 'archive'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     /// [`status_fixture`], with the manifest and its lock recording `zone`.
@@ -1097,6 +1180,7 @@ mod tests {
     fn an_unrooted_scope_is_carried_out_of_the_computation() {
         let (mut conn, dir, manifest, _archive) = status_fixture(&["settled.jpg"]);
         std::fs::write(dir.path().join("archive").join("settled.jpg"), b"aaaa").unwrap();
+        register_at_destination(&conn, "settled.jpg");
 
         // A manifest that records two places, one of which no root answers
         // for. The other names the source root itself, so the resolution has
@@ -1153,6 +1237,7 @@ mod tests {
     fn compute_manifest_status_counts_a_file_at_its_destination() {
         let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
         std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+        register_at_destination(&conn, "settled.jpg");
 
         let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.at_destination, 1);
@@ -1201,6 +1286,7 @@ mod tests {
     fn manifest_status_is_accounted_for_unless_content_is_lost_or_wrong() {
         let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
         std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+        register_at_destination(&conn, "settled.jpg");
         let settled = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert!(settled.all_accounted_for());
 
@@ -1224,14 +1310,20 @@ mod tests {
     /// missing and the destination not good.
     #[test]
     fn every_entry_lands_in_exactly_one_class() {
-        let (mut conn, dir, manifest, archive) = status_fixture(&["settled.jpg", "broken.jpg"]);
+        let (mut conn, dir, manifest, archive) =
+            status_fixture(&["settled.jpg", "broken.jpg", "unrecorded.jpg", "waiting.jpg"]);
         std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+        register_at_destination(&conn, "settled.jpg");
         std::fs::write(archive.join("broken.jpg"), b"aa").unwrap();
         std::fs::remove_file(dir.path().join("photos").join("broken.jpg")).unwrap();
+        // The right size, and no row records the content there.
+        std::fs::write(archive.join("unrecorded.jpg"), b"aaaa").unwrap();
 
         let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
         assert_eq!(status.at_destination, 1);
         assert_eq!(status.size_mismatch, 1);
+        assert_eq!(status.content_unconfirmed, 1);
+        assert_eq!(status.pending, 1);
         assert_eq!(
             status.source_lost, 0,
             "a wrong-size destination is not lost"
@@ -1240,13 +1332,113 @@ mod tests {
         let counted = |class| status.entries.iter().filter(|e| e.status == class).count();
         assert_eq!(counted(EntryStatus::AtDestination), status.at_destination);
         assert_eq!(counted(EntryStatus::SizeMismatch), status.size_mismatch);
+        assert_eq!(
+            counted(EntryStatus::Unconfirmed),
+            status.content_unconfirmed
+        );
         assert_eq!(counted(EntryStatus::Pending), status.pending);
         assert_eq!(counted(EntryStatus::SourceLost), status.source_lost);
         assert_eq!(
-            status.at_destination + status.size_mismatch + status.pending + status.source_lost,
+            status.at_destination
+                + status.size_mismatch
+                + status.content_unconfirmed
+                + status.pending
+                + status.source_lost,
             status.entries.len(),
             "the classes partition the entries"
         );
+    }
+
+    /// A destination of the right size that no present row records is not
+    /// "accounted for": `apply --resume` would refuse or hash it, so a report
+    /// saying otherwise would invite what the act turns away. The allowed case
+    /// stands beside it in the state a finished apply leaves.
+    #[test]
+    fn a_same_size_destination_no_row_records_is_not_accounted_for() {
+        let (mut conn, _dir, manifest, archive) = status_fixture(&["settled.jpg"]);
+        std::fs::write(archive.join("settled.jpg"), b"aaaa").unwrap();
+
+        let unrecorded = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert_eq!(unrecorded.content_unconfirmed, 1);
+        assert_eq!(unrecorded.at_destination, 0);
+        assert!(!unrecorded.found_nothing_lost_or_wrong());
+        assert!(!unrecorded.all_accounted_for());
+
+        register_at_destination(&conn, "settled.jpg");
+        let recorded = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        assert_eq!(recorded.content_unconfirmed, 0);
+        assert!(recorded.all_accounted_for());
+    }
+
+    /// `cluster status` and `apply --resume` answer one question the same way
+    /// for a same-size destination, whatever the index holds there: a row with
+    /// the entry's object is settled for both; no row, and a row holding
+    /// another object, are not settled for either.
+    #[test]
+    fn status_and_resume_agree_about_a_same_size_destination() {
+        use crate::archive::ops::plan::{plan_apply, ApplyPlanParams};
+        use crate::core::domain::time::zone::parse_zone_name;
+        use crate::expr::Unmeasured;
+
+        let (mut conn, dir, manifest, archive) =
+            status_fixture(&["registered.jpg", "unrecorded.jpg", "other.jpg"]);
+        for name in ["registered.jpg", "unrecorded.jpg", "other.jpg"] {
+            std::fs::write(archive.join(name), b"aaaa").unwrap();
+        }
+        register_at_destination(&conn, "registered.jpg");
+        let stray = insert_object(&conn, "stray", false);
+        insert_source_with_size(&conn, archive_root_id(&conn), "other.jpg", Some(stray), 4);
+
+        let status = compute_manifest_status(&mut conn, &manifest, &UserZone::utc()).unwrap();
+        let status_of = |name: &str| {
+            status
+                .entries
+                .iter()
+                .find(|e| e.source_filename == name)
+                .unwrap()
+                .status
+        };
+        assert_eq!(status_of("registered.jpg"), EntryStatus::AtDestination);
+        assert_eq!(status_of("unrecorded.jpg"), EntryStatus::Unconfirmed);
+        assert_eq!(status_of("other.jpg"), EntryStatus::Unconfirmed);
+
+        // The resume's reading of the same lock and index.
+        let lock = read_lock_file(&dir.path().join("cluster.lock"))
+            .unwrap()
+            .unwrap();
+        let sources: Vec<&LockEntry> = lock.entries.iter().collect();
+        let pattern = read_pattern(&conn, "{filename}").unwrap().unwrap();
+        let root_paths: HashMap<i64, String> = repo::root::fetch_all(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.id, r.path))
+            .collect();
+        let base_dir = ContainedPath::default();
+        let zone = parse_zone_name("UTC").unwrap();
+        let archive_id = archive_root_id(&conn);
+        let plan = plan_apply(
+            &mut conn,
+            &ApplyPlanParams {
+                sources: &sources,
+                pattern: &pattern,
+                unmeasured: Unmeasured::NoScopeRecorded,
+                pattern_needs_a_scope_it_lacks: false,
+                root_paths: &root_paths,
+                lock_zone: &zone,
+                archive_root_id: archive_id,
+                base_dir: &base_dir,
+                resume: true,
+                progress: None,
+            },
+        )
+        .unwrap();
+
+        // Settled for the resume: counted, never read, never written.
+        assert_eq!(plan.already_archived_count, 1);
+        assert!(plan.resume_already_there.is_empty());
+        // The other two it had to read; the fixture's fake hashes make them
+        // differ, so the resume refuses both.
+        assert_eq!(plan.resume_content_mismatches.len(), 2);
     }
 
     #[test]

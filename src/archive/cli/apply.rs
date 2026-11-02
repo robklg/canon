@@ -2,6 +2,9 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::archive::domain::{
     extract_notes, parse_manifest_allow, parse_manifest_config, LockEntry,
@@ -32,6 +35,10 @@ pub struct ApplyOptions {
     pub transfer_mode: TransferMode,
     pub yes: bool,
     pub resume: bool,
+    /// Whether this run installs the process-wide Ctrl-C handler. The command sets
+    /// it; a test calling `run` in-process does not, so the one test that raises a
+    /// real signal is the only registrar in its binary.
+    pub handle_interrupts: bool,
 }
 
 pub fn run(
@@ -358,7 +365,11 @@ pub fn run(
             bail!("Aborting due to missing source files in resume mode");
         }
 
-        if !plan.resume_size_mismatches.is_empty() {
+        // Both lists are told in the one run, so each can be dealt with in one
+        // pass; the run ends on one line.
+        let size_bad = !plan.resume_size_mismatches.is_empty();
+        let content_bad = !plan.resume_content_mismatches.is_empty();
+        if size_bad {
             eprintln!(
                 "Resume failed: {} destination files are not the size the lock records.",
                 plan.resume_size_mismatches.len()
@@ -378,9 +389,26 @@ pub fn run(
             eprintln!("edited rather than half-copied. Delete the ones that are partial copies,");
             eprintln!(
                 "then retry: {}",
-                super::apply_command(config_path.as_ref(), true)
+                super::apply_command(config_path.as_ref(), true, options.transfer_mode)
             );
-            bail!("Aborting due to size mismatches in resume mode");
+        }
+        if content_bad {
+            if size_bad {
+                eprintln!();
+            }
+            for line in content_mismatch_lines(
+                &plan.resume_content_mismatches,
+                &MismatchCommands {
+                    refresh: super::refresh_command(config_path.as_ref(), false),
+                    scan: super::scan_command(&[base_dir.display().to_string()]),
+                    resume: super::apply_command(config_path.as_ref(), true, options.transfer_mode),
+                },
+            ) {
+                eprintln!("{line}");
+            }
+        }
+        if size_bad || content_bad {
+            bail!("Aborting due to destination files that do not match the lock in resume mode");
         }
     }
 
@@ -537,7 +565,10 @@ pub fn run(
             }
             eprintln!();
             eprintln!("This may be from a previously interrupted apply. To resume:");
-            eprintln!("  canon apply --resume <manifest>");
+            eprintln!(
+                "  {}",
+                super::apply_command(config_path.as_ref(), true, options.transfer_mode)
+            );
             eprintln!();
             eprintln!("Or to see what would be skipped:");
             eprintln!("  canon apply --resume --dry-run <manifest>");
@@ -666,6 +697,18 @@ pub fn run(
         None
     };
 
+    // Installed here, after the confirmation: a Ctrl-C at the prompt keeps its
+    // default. Before the recorder, since installing can fail.
+    let interrupt_flag = if options.handle_interrupts {
+        Some(execute::setup_interrupt_flag()?)
+    } else {
+        None
+    };
+    let finished = Arc::new(AtomicBool::new(false));
+    if let Some(flag) = &interrupt_flag {
+        announce_first_interrupt(Arc::clone(flag), Arc::clone(&finished));
+    }
+
     let result = execute::execute_apply(
         conn,
         &plan,
@@ -674,7 +717,7 @@ pub fn run(
             archive_root_id: config.output.archive_root_id,
             transfer_mode: options.transfer_mode,
             resume: options.resume,
-            interrupt_flag: None,
+            interrupt_flag,
             skipped_by_filter,
             manifest_display: format!("{}", config_path.display()),
             receipt_ctx,
@@ -682,7 +725,10 @@ pub fn run(
         },
         &progress_impl,
         Some(&decision),
-    )?;
+    );
+    // The run is over, so the notice thread has nothing left to wait for.
+    finished.store(true, Ordering::Relaxed);
+    let result = result?;
 
     // Display stale sources found during transfer (race conditions)
     if !result.skipped_stale.is_empty() {
@@ -697,7 +743,10 @@ pub fn run(
         // This site reports on a run that already moved files, so its retry is
         // not the other two sites' retry: a plain re-apply would collide with
         // everything this run placed and be sent here anyway.
-        eprintln!("  {}", super::apply_command(&lock_path, true));
+        eprintln!(
+            "  {}",
+            super::apply_command(&lock_path, true, options.transfer_mode)
+        );
     }
 
     // Summary output
@@ -711,7 +760,7 @@ pub fn run(
     if result.interrupted {
         eprintln!(
             "Resume with: {}",
-            super::apply_command(config_path.as_ref(), true)
+            super::apply_command(config_path.as_ref(), true, options.transfer_mode)
         );
         // Update query planner statistics after bulk changes
         eprintln!("Updating query statistics...");
@@ -730,14 +779,20 @@ pub fn run(
         eprintln!();
         eprintln!("Some files failed to transfer. To recover:");
         eprintln!("  1. Fix any reported errors (permissions, disk space, etc.)");
-        eprintln!("  2. Delete any partial files left in the archive");
-        eprintln!("     (--resume will detect and report size mismatches)");
-        eprintln!("  3. Re-run with --resume: canon apply --resume <manifest>");
+        eprintln!(
+            "  2. Re-run with --resume: {}",
+            super::apply_command(config_path.as_ref(), true, options.transfer_mode)
+        );
+        eprintln!("     It reports any destination file that does not match the lock.");
+        eprintln!("     Look at those before deleting anything.");
         eprintln!();
         eprintln!("If source files changed during apply:");
         eprintln!("  1. Scan the sources: canon scan <source-paths>");
         eprintln!("  2. Refresh manifest: canon cluster refresh <manifest.toml>");
-        eprintln!("  3. Re-apply: canon apply <manifest.lock>");
+        eprintln!(
+            "  3. Re-apply: {}",
+            super::apply_command(config_path.as_ref(), false, options.transfer_mode)
+        );
     }
 
     // Update query planner statistics after bulk changes
@@ -746,6 +801,30 @@ pub fn run(
 
     Ok(())
 }
+
+/// Answer the first Ctrl-C at once.
+///
+/// The transfer loop reads the flag only when a file ends, and ops may not
+/// print, so on a large file a silent first press would make the second press
+/// the natural reflex, and the second press loses this run's receipt. One
+/// detached thread polls the flag, states the cost of each choice once, and
+/// returns; it also returns when the run ends without a press.
+fn announce_first_interrupt(flag: Arc<AtomicBool>, finished: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !finished.load(Ordering::Relaxed) {
+            if flag.load(Ordering::Relaxed) {
+                eprintln!();
+                eprintln!("{FIRST_INTERRUPT_NOTICE}");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
+
+/// What the first Ctrl-C prints. The second press is the process's default
+/// action, and the run's receipt is written after the loop, so it is lost.
+const FIRST_INTERRUPT_NOTICE: &str = "Stopping once the current file is done. Ctrl-C again stops at once, and this run then writes no receipt.";
 
 // ============================================================================
 // Sample destination computation
@@ -1016,6 +1095,89 @@ fn show_directory_preview(dir: &Path, max_items: usize) {
     }
 }
 
+/// How many mismatched files a refusal names before it says "and N more".
+const MISMATCHES_SHOWN: usize = 10;
+
+/// The commands a content-mismatch refusal tells the user to type, each composed by
+/// its owner in `cli.rs` (path quoting is theirs): the manifest's refresh, a scan of
+/// the destination directory the files stand in, and the run's own resume (mode
+/// included).
+struct MismatchCommands {
+    refresh: String,
+    scan: String,
+    resume: String,
+}
+
+/// The refusal for destination files of the right size whose content is not the lock's.
+///
+/// Canon cannot tell why the content differs, so the line names one way, as a
+/// question, and claims none. Both remedies are stated, because only the user knows
+/// which version to keep.
+fn content_mismatch_lines(paths: &[String], commands: &MismatchCommands) -> Vec<String> {
+    let one = paths.len() == 1;
+    let mut lines = vec![
+        if one {
+            "Resume failed: 1 destination file doesn't match the lock.".to_string()
+        } else {
+            format!(
+                "Resume failed: {} destination files don't match the lock.",
+                format_count(paths.len())
+            )
+        },
+        String::new(),
+    ];
+    for path in paths.iter().take(MISMATCHES_SHOWN) {
+        lines.push(format!("  {path}"));
+        lines.push(
+            "    same size, different content (was the source edited after copying?)".to_string(),
+        );
+    }
+    if paths.len() > MISMATCHES_SHOWN {
+        lines.push(format!(
+            "  ... and {} more",
+            format_count(paths.len() - MISMATCHES_SHOWN)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(
+        if one {
+            "To keep the archive's version:"
+        } else {
+            "To keep the archive's versions:"
+        }
+        .to_string(),
+    );
+    lines.push(
+        if one {
+            "  1. leave its source out of the manifest (exclude it or narrow the query)"
+        } else {
+            "  1. leave their sources out of the manifest (exclude them or narrow the query)"
+        }
+        .to_string(),
+    );
+    lines.push(format!("  2. {}", commands.refresh));
+    lines.push(String::new());
+    lines.push(
+        if one {
+            "To replace it with the source:"
+        } else {
+            "To replace them with their sources:"
+        }
+        .to_string(),
+    );
+    lines.push(
+        if one {
+            "  1. delete the destination file"
+        } else {
+            "  1. delete the destination files"
+        }
+        .to_string(),
+    );
+    lines.push(format!("  2. {}", commands.scan));
+    lines.push(format!("  3. {}", commands.resume));
+    lines
+}
+
 /// Display dry-run transfer plan.
 fn display_dry_run_plan(
     plan: &plan::ApplyPlan,
@@ -1116,11 +1278,11 @@ impl execute::TransferProgress for CliTransferProgress {
     }
 
     fn on_interrupt(&self) {
+        // The first press was answered at once by `announce_first_interrupt`;
+        // this only closes the progress bar, once the current file has ended.
         if let Some(ref p) = *self.progress.borrow() {
             p.finish();
         }
-        eprintln!();
-        eprintln!("Interrupt received, stopping after current file.");
     }
 
     fn on_finish(&self) {
@@ -1187,6 +1349,56 @@ impl plan::PlanProgress for CliTransferProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The commands a content-mismatch refusal prints, composed by their owners in
+    /// `cli.rs` for a manifest and a destination directory that need quoting.
+    fn mismatch_commands(mode: TransferMode) -> MismatchCommands {
+        let manifest = Path::new("/My Manifests/trip.toml");
+        MismatchCommands {
+            refresh: super::super::refresh_command(manifest, false),
+            scan: super::super::scan_command(&["/Volumes/My Archive/2024".to_string()]),
+            resume: super::super::apply_command(manifest, true, mode),
+        }
+    }
+
+    /// The refusal for destination files whose content is not the lock's reads exactly
+    /// as below for one file, says plural where there are several, caps
+    /// its list, and tells the user to type real commands: the refresh, a scan of the
+    /// destination directory and the run's own resume (mode included), each quoted so
+    /// it runs as printed.
+    #[test]
+    fn the_content_mismatch_refusal_reads_as_worded() {
+        let one = content_mismatch_lines(
+            &["/Volumes/Archive/2024/img_0042.jpg".to_string()],
+            &mismatch_commands(TransferMode::Move),
+        )
+        .join("\n");
+        assert_eq!(
+            one,
+            "Resume failed: 1 destination file doesn't match the lock.\n\
+             \n\
+             \x20 /Volumes/Archive/2024/img_0042.jpg\n\
+             \x20   same size, different content (was the source edited after copying?)\n\
+             \n\
+             To keep the archive's version:\n\
+             \x20 1. leave its source out of the manifest (exclude it or narrow the query)\n\
+             \x20 2. canon cluster refresh '/My Manifests/trip.toml'\n\
+             \n\
+             To replace it with the source:\n\
+             \x20 1. delete the destination file\n\
+             \x20 2. canon scan '/Volumes/My Archive/2024'\n\
+             \x20 3. canon apply --resume --move '/My Manifests/trip.toml'"
+        );
+
+        let paths: Vec<String> = (0..12).map(|i| format!("/a/f{i}.jpg")).collect();
+        let many =
+            content_mismatch_lines(&paths, &mismatch_commands(TransferMode::Copy)).join("\n");
+        assert!(many.starts_with("Resume failed: 12 destination files don't match the lock."));
+        assert!(many.contains("/a/f9.jpg") && !many.contains("/a/f10.jpg"));
+        assert!(many.contains("... and 2 more"));
+        assert!(many.contains("leave their sources out of the manifest"));
+        assert!(many.contains("To replace them with their sources:"));
+    }
     use crate::core::domain::time::zone::{parse_zone_name, UserZone};
     use crate::expr::BoundFilters;
 
@@ -1676,6 +1888,7 @@ mod tests {
             transfer_mode: TransferMode::Copy,
             yes: true,
             resume: false,
+            handle_interrupts: false,
         };
         let manifest = fixture.manifest.clone();
         run(

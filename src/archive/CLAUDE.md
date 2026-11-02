@@ -27,7 +27,7 @@ archive/
     generate.rs   # plan + execute for cluster generate/refresh, manifest emission
     manifest.rs   # the manifest and lock file readers and writers
     status.rs     # the diagnostic read: what landed, what is still waiting
-  repo.rs         # archive's own SQL — the four writes and reads only apply performs
+  repo.rs         # archive's own SQL — what apply writes and reads, and the one read cluster status shares
 ```
 
 **The internal dependency direction is a DAG, and the split is what keeps it one**:
@@ -36,7 +36,9 @@ manifest`, `status → pattern` (a function-local `use` inside `compute_manifest
 and `receipt` are the sinks, pointing at nothing above `domain`. An edge from `plan` to `execute`
 would undo the separation the split exists to hold.
 
-**One exception, and it is test-only**: `receipt.rs`'s test module imports `execute` and `plan`
+**The exceptions are all test-only**: `status.rs`'s test module imports `plan` for the one pin
+that asks both readers (`cluster status` and `--resume`) the same question of one lock and one
+index, and `generate.rs`'s imports `plan` too. And `receipt.rs`'s test module imports `execute` and `plan`
 (the transfer types) for the extraction ledger's round-trip corpus, which runs a real apply. Those
 imports sit inside `mod tests`, so production `receipt.rs` is still a true sink — but the edge is
 real and no build rule catches it, because reaching within one's own subsystem is legal at any
@@ -385,7 +387,7 @@ the report invited the one command that refuses, in four separate ways.
   refuses by name instead, straight after reading the manifest and in one sentence for both
   absences, pointing at the report: it exists to act and cannot, and infers nothing about why.
 - **One spelling for the remedies naming a command.** `cli.rs` owns `refresh_command`,
-  `apply_command`, `status_command`, `rebuild_remedy`, `missing_lock_refusal`,
+  `apply_command`, `status_command`, `scan_command`, `rebuild_remedy`, `missing_lock_refusal`,
   `empty_selection_remedy`, `source_lost_remedy`,
   `scan_or_edit_scope`, `scope_kept_nothing_way_back` and `adjust_pattern_remedy`. The **quoting belongs to the spelling**, not
   to each sentence — but the
@@ -440,10 +442,13 @@ the report invited the one command that refuses, in four separate ways.
   every input varied, the one pair construction rules out skipped by name). **The claim reaches the table's answers and no further**: the
   interface's outermost gate — nothing pending and no entry lacking a destination over a lock that
   is there, or a source
-  lost, or a destination of the wrong size — returns before the table is asked, and a report stopped there names no act. For a lost
+  lost, or a destination of the wrong size, or one of the right size that no row records — returns
+  before the table is asked, and a report stopped there names no act of its own accord. For a lost
   source the line above has already said to check the volume; for a wrong-sized destination
   nothing has, and `apply --resume` on the same manifest holds the look-before-deleting guidance
-  the report withholds. That gap is the gate's, older than the table, and stands.
+  the report withholds. That gap is the gate's, older than the table, and stands. The unrecorded
+  destination's line is the exception: it carries its own act, `apply --resume`, because the gate
+  would otherwise leave it unnamed, and names it only where `standing().can_run(Act::Apply)`.
   The pattern arm and `apply`'s pattern refusal are one composition, `adjust_pattern_remedy`, so
   wherever both reach it they say the same words. Both reach it only over a lock carrying a zone
   this machine reads: `apply` refuses any other before it evaluates the pattern, and the report
@@ -529,10 +534,12 @@ the report invited the one command that refuses, in four separate ways.
   Both files are synced all the way to disk (`write_and_sync` for the manifest, `write_lock_file`
   for the lock), so the durable manifest cannot name a lock that did not survive beside it — don't
   reopen that window by writing the lock through a plain buffered writer.
-- **`repo.rs` holds the SQL only apply performs** — registering a file that has landed in an
+- **`repo.rs` holds the SQL apply performs** — registering a file that has landed in an
   archive, re-pointing a source that was moved rather than copied, reading the decision that last
-  stood at a destination path, and the preflight asking which destinations are already occupied.
-  Nothing else in Canon does these things. `fetch_by_path` and `BATCH_SIZE` are reached from the
+  stood at a destination path, and the preflight asking which destinations are already occupied
+  and by which content (`batch_objects_at_paths`; the existence check is its key set, so the query
+  is written once; `cluster status` makes the same read). Nothing else in Canon does these
+  things. `fetch_by_path` and `BATCH_SIZE` are reached from the
   shared source repository; the three test fixtures are **duplicated** rather than shared, because
   the tests that stayed there use them too.
 - **The contentless law applies to apply's archive conflicts and to cluster's skip set**, via the
@@ -575,6 +582,47 @@ the report invited the one command that refuses, in four separate ways.
   the bail's output is reachable from a test
   (`the_pre_transfer_bail_prints_the_shared_staleness_body`); the two `cli` printers speak through
   `eprintln!` and are unpinned in-process — a stated gap, not a covered one.
+- **A resume registers a row only for what the disk is shown to hold.** `classify_resume_entries`
+  stays pure filesystem; `plan_apply` then reads each right-sized destination in two steps. A
+  present row with the entry's own object settles it with no disk read: counted as at the
+  destination, nothing written (`row_vouches_for`, which `cluster status` asks too, so a report
+  never says "accounted for" over what `--resume` would turn away). Anything else (no row, a
+  tombstone, another object, no object) has its destination hashed against the lock: equal is
+  *proven*, and `execute_apply` registers it from the file's own metadata and records it in this
+  run's receipt and extraction ledger, since no earlier receipt lists it; different is refused
+  before any transfer, beside the size refusal. Verifier
+  `a_same_size_destination_with_other_content_is_refused`; the two readers agree in
+  `status_and_resume_agree_about_a_same_size_destination`; the record is
+  `a_proven_entry_is_in_the_receipt_and_the_ledger`. **Where it does not apply**: a row that vouches
+  is believed, so bytes that changed behind a correct row are not seen; an entry with no recorded
+  hash reads as different; and a proven entry's receipt item carries the run's origin disposition,
+  though a resume never removes an origin that still stands.
+- **A relocation re-points the origin's row only where no row holds the destination.**
+  `record_relocation` asks `source_exists_at_path`, which counts tombstones: the set
+  `UNIQUE(root_id, rel_path)` enforces. Where a row stands it clears the origin and registers the
+  destination through `insert_destination`, which settles any row at the path, the route a copy and a
+  cross-device move already take. Preflight asks only for present rows, so the write may not assume a
+  free path. Every index step after a placement reports through `index_not_updated`, which says where
+  the file now is and that a resume registers it. Verifiers `a_move_onto_a_deleted_path_succeeds`, and
+  `a_relocation_with_no_row_at_the_destination_keeps_its_one_row` as its allowed case. **Where it does
+  not apply**: scan's moved arm deletes a tombstone at the path and re-points the row by its own
+  code in `scan/repo.rs`, a separate spelling.
+- **Ctrl-C: the interface installs, ops reads, the interface answers.** `cli/apply.rs` calls
+  `execute::setup_interrupt_flag` just before `execute_apply` — after the confirmation, so a press at
+  the prompt keeps its default — and passes the flag; `None` in `ApplyExecuteParams` means no signal
+  handling, and `ApplyOptions::handle_interrupts` is false for the interface tests that call `run`, so
+  those tests never register one (the callers are listed exactly by
+  `only_the_interface_and_the_signal_test_install_the_handler`). The two registrations in `setup_interrupt_flag` are
+  order-bound: the conditional default first, then the flag, so the first press arms and the second
+  ends the process (pinned by `a_first_interrupt_sets_the_flag_and_a_process_survives_it`, the one
+  test that raises a real SIGINT, once). Both sweeps and the loop read the flag; a press before the
+  first transfer ends the run with nothing moved or recorded (the entries a resume proved included;
+  the next resume proves them again), settled `interrupted` with no receipt, and a sweep
+  that stopped early refuses nothing, its list being partial. Ops cannot print and the loop reads the
+  flag only when a file ends, so the first press is answered at once by a thread in the interface
+  that also states the cost of a second one: the receipt is written after the loop, so a hard stop
+  writes none. `apply_command` takes the run's `TransferMode`: a line that finishes a stopped
+  `--move` must say `--move`, or it runs as a copy.
 - **Extraction rows are written by `ops/execute.rs` right after the transfer loop**, through the
   same `build_extraction_rows` helper the ledger's backfill path uses — sharing the code, not just
   the shape, is what makes a backfilled row indistinguishable from a forward-recorded one.

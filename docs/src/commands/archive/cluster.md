@@ -392,6 +392,17 @@ test an apply: none of `apply`'s pre-flight checks run, so it can name an `apply
 version it does not support, a lock it cannot read, and a key the pattern names whose type
 changed while it ran, which it states and stops on.
 
+An entry is at its destination, pending, source-lost, of the wrong size (`WRONG SIZE`), or of the
+right size with no index record naming its content there (`NOT CONFIRMED`). The report lists the
+last three kinds of concern, and says `All source files accounted for.` only when none is found.
+The unconfirmed ones are counted under the summary, and the line names the resume that compares
+them only where `apply` can run:
+
+```
+Summary: 0 at destination, 1 pending, 0 source files missing.
+         2 destinations are the right size, but the index does not record this content there. `canon apply --resume manifest.toml` compares them (add --move or --rename if you are moving the files).
+```
+
 It reads the pattern only to work out each source's destination. Where it cannot work one out,
 each cause is stated once with how many sources met it, then the first sources:
 

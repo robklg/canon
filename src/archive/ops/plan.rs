@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::archive::domain::{mtime_change, LockEntry};
+use crate::archive::domain::{mtime_change, row_vouches_for, LockEntry};
 use crate::core::domain::format::{first_chars, shell_quote};
 use crate::core::domain::path::{path_strip_prefix, ContainedPath, NotContained};
 use crate::core::domain::time::zone::RecordedZone;
@@ -41,6 +41,17 @@ pub trait PlanProgress {
     fn on_preflight_progress(&self, done: usize);
     /// Called once the sweep ends.
     fn on_preflight_finish(&self);
+}
+
+/// The hash type `core::ops::fs::compute_full_hash` computes: what a destination's
+/// bytes are compared as. A lock entry of another type reads as different.
+const FULL_HASH_TYPE: &str = "sha256";
+
+/// A content hash as a transfer and its receipt item carry it, `{type}:{value}`.
+/// Within this plan the transfer's hash and the destination's compared hash are
+/// composed here, so the two cannot differ in form.
+fn hash_label(hash_type: &str, value: &str) -> String {
+    format!("{hash_type}:{value}")
 }
 
 /// Parameters for planning an apply operation.
@@ -115,12 +126,15 @@ pub struct ApplyPlan {
     /// Sources whose DB state has changed since lock file (size/mtime/partial_hash).
     /// Computed via DB check. Interface may also do disk-based validation.
     pub stale_sources: Vec<StaleSource>,
-    /// Resume mode: count of sources already registered in archive DB.
-    /// Kept for backward compatibility; superseded by resume_already_there in resume mode.
+    /// Resume mode: count of entries already at their destination: those the index
+    /// already records there plus those this plan proved by hashing the file
+    /// (`resume_already_there` lists only the second kind).
     pub already_archived_count: usize,
-    /// Resume mode: entries to register in DB during execute (already at destination).
+    /// Resume mode: entries to register in DB during execute. Only the proven
+    /// ones: a destination whose bytes hash to the lock's. An entry the index
+    /// already records there is counted, not listed.
     pub resume_already_there: Vec<ApplyTransfer>,
-    /// Resume mode: count of already-there entries where the source file still exists.
+    /// Resume mode: count of already-there entries (recorded or proven) where the source file still exists.
     pub resume_already_there_source_present: usize,
     /// Resume mode: entries where source is lost (source missing, dest missing).
     /// (source_id, source_path)
@@ -128,6 +142,10 @@ pub struct ApplyPlan {
     /// Resume mode: entries with size mismatch at destination.
     /// (dest_path, expected_size, actual_size)
     pub resume_size_mismatches: Vec<(String, u64, u64)>,
+    /// Resume mode: destinations of the right size whose content is not the lock's.
+    /// Absolute destination paths. Neither the index nor a hash of the file
+    /// shows the entry's content there.
+    pub resume_content_mismatches: Vec<String>,
 }
 
 /// Violations found during apply planning. The interface inspects each field
@@ -330,7 +348,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
                     .hash_type
                     .as_deref()
                     .zip(source.hash_value.as_deref())
-                    .map(|(t, v)| format!("{t}:{v}"));
+                    .map(|(t, v)| hash_label(t, v));
                 transfers.push(ApplyTransfer {
                     source_id: source.id,
                     source_path: source.path.clone(),
@@ -534,6 +552,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
     let mut resume_already_there_source_present = 0usize;
     let mut resume_source_lost = Vec::new();
     let mut resume_size_mismatches = Vec::new();
+    let mut resume_content_mismatches: Vec<String> = Vec::new();
 
     if params.resume {
         // Build base_dir from archive root path + base_dir_rel
@@ -562,15 +581,63 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             resume_size_mismatches.push((dest_path.display().to_string(), expected, actual));
         }
 
-        // Count already-there entries where source is still present
-        resume_already_there_source_present = classification
+        // A destination of the right size is not yet a destination holding the
+        // entry's content. Ask the index first (no disk read); hash the file
+        // only where no present row records this entry's object there.
+        let there_paths: Vec<&str> = classification
             .already_there
             .iter()
+            .map(|(t, _)| t.archive_rel_path.as_str())
+            .collect();
+        let rows = crate::archive::repo::batch_objects_at_paths(
+            conn,
+            params.archive_root_id,
+            &there_paths,
+        )?;
+        let (vouched, to_hash): (Vec<_>, Vec<_>) =
+            classification.already_there.iter().partition(|(t, _)| {
+                row_vouches_for(rows.get(t.archive_rel_path.as_str()), t.object_id)
+            });
+
+        let mut proven: Vec<(&ApplyTransfer, bool)> = Vec::new();
+        if !to_hash.is_empty() {
+            if let Some(p) = params.progress {
+                p.on_preflight_start(to_hash.len());
+            }
+            for (i, &(t, source_present)) in to_hash.iter().enumerate() {
+                let dest_path = t.dest_rel_path.under(&base_dir);
+                let found =
+                    crate::core::ops::fs::compute_full_hash(&dest_path).with_context(|| {
+                        format!(
+                            "Could not read {} to compare it with the lock",
+                            dest_path.display()
+                        )
+                    })?;
+                // An entry with no recorded hash reads as different, never as proven.
+                if t.hash.as_deref() == Some(hash_label(FULL_HASH_TYPE, &found).as_str()) {
+                    proven.push((t, source_present));
+                } else {
+                    resume_content_mismatches.push(dest_path.display().to_string());
+                }
+                if let Some(p) = params.progress {
+                    p.on_preflight_progress(i + 1);
+                }
+            }
+            if let Some(p) = params.progress {
+                p.on_preflight_finish();
+            }
+        }
+
+        // Count already-there entries (registered and proven) whose source is still present
+        resume_already_there_source_present = vouched
+            .iter()
+            .chain(proven.iter())
             .filter(|(_, source_present)| *source_present)
             .count();
 
-        // Build resume_already_there list (transfers to register in DB during execute)
-        for (t, _source_present) in &classification.already_there {
+        // Build resume_already_there list: only the proven entries, which execute registers.
+        // A registered entry needs no write.
+        for (t, _source_present) in &proven {
             resume_already_there.push(ApplyTransfer {
                 source_id: t.source_id,
                 source_path: t.source_path.clone(),
@@ -586,7 +653,8 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
             });
         }
 
-        already_archived_count = classification.already_there.len();
+        // Registered and proven; a content mismatch is neither.
+        already_archived_count = vouched.len() + proven.len();
 
         // Replace transfers with only pending entries
         let pending_ids: std::collections::HashSet<i64> =
@@ -683,6 +751,7 @@ pub fn plan_apply(conn: &mut Connection, params: &ApplyPlanParams) -> Result<App
         resume_already_there_source_present,
         resume_source_lost,
         resume_size_mismatches,
+        resume_content_mismatches,
     })
 }
 
@@ -1740,7 +1809,10 @@ mod tests {
         // File classified as "already there" by filesystem check
         assert!(plan.transfers.is_empty());
         assert_eq!(plan.already_archived_count, 1);
-        assert_eq!(plan.resume_already_there.len(), 1);
+        // The archive already records this entry's object at the path, so the
+        // entry is counted and left alone: nothing to register, nothing to hash.
+        assert!(plan.resume_already_there.is_empty());
+        assert!(plan.resume_content_mismatches.is_empty());
         // Source still present
         assert_eq!(plan.resume_already_there_source_present, 1);
     }
@@ -1945,12 +2017,15 @@ mod tests {
             1704067200,
         );
 
+        // No row at the destination: the plan reads the file, so the lock
+        // carries the hash the file really has.
+        let real_hash = crate::core::ops::fs::compute_full_hash(&dest_file).unwrap();
         let entry = make_lock_entry(
             src_id,
             root_id,
             &src_file.display().to_string(),
             Some(obj_id),
-            Some("hash1"),
+            Some(&real_hash),
         );
         let sources: Vec<&LockEntry> = vec![&entry];
         let pattern = read(&conn, "{filename}");
@@ -2019,6 +2094,212 @@ mod tests {
         assert_eq!(plan.transfers.len(), 1);
         assert_eq!(plan.already_archived_count, 0);
         assert!(plan.resume_already_there.is_empty());
+    }
+
+    /// What the archive index holds at a resumed entry's destination.
+    #[derive(Clone, Copy)]
+    enum Row {
+        None,
+        SameObject,
+        OtherObject,
+        NoObject,
+        Tombstone,
+    }
+
+    /// Plan a resume over one entry whose destination file holds `on_disk` and
+    /// whose lock records the hash of `locked`, with `row` standing in the
+    /// archive index. The file is as long as the lock says, so only its bytes
+    /// can differ. The state is the one a real resume meets: the destination
+    /// exists, the source exists, and the index holds whatever the earlier run
+    /// left.
+    fn plan_resume_over(
+        on_disk: &[u8],
+        locked: &[u8],
+        row: Row,
+        progress: Option<&dyn PlanProgress>,
+    ) -> Result<ApplyPlan> {
+        use sha2::{Digest, Sha256};
+        let src_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let archive_path = archive_dir.path().to_str().unwrap().to_string();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::write(&src_file, locked).unwrap();
+        std::fs::write(archive_dir.path().join("photo.jpg"), on_disk).unwrap();
+
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, &src_path, "source", false);
+        let archive_id = insert_root(&conn, &archive_path, "archive", false);
+        let obj_id = insert_object(&conn, "locked", false);
+        let other = insert_object(&conn, "other", false);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            locked.len() as i64,
+            1704067200,
+        );
+        let at_destination = |object: Option<i64>| {
+            insert_source_with_metadata(&conn, archive_id, "photo.jpg", object, 1000, 1704067200)
+        };
+        match row {
+            Row::None => {}
+            Row::SameObject => {
+                at_destination(Some(obj_id));
+            }
+            Row::OtherObject => {
+                at_destination(Some(other));
+            }
+            Row::NoObject => {
+                at_destination(None);
+            }
+            Row::Tombstone => {
+                let id = at_destination(Some(obj_id));
+                conn.execute("UPDATE sources SET present = 0 WHERE id = ?", [id])
+                    .unwrap();
+            }
+        }
+
+        let hash = format!("{:x}", Sha256::digest(locked));
+        let mut entry = make_lock_entry(
+            src_id,
+            root_id,
+            &src_file.display().to_string(),
+            Some(obj_id),
+            Some(&hash),
+        );
+        entry.size = locked.len() as i64;
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = read(&conn, "{filename}");
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, src_path);
+        root_paths.insert(archive_id, archive_path);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
+        params.resume = true;
+        params.progress = progress;
+        plan_apply(&mut conn, &params)
+    }
+
+    /// **The rule: a resume records a destination only where it has shown the
+    /// file holds the entry's content.** A destination of the right size is
+    /// not that showing. With no row the file is read, and bytes that differ
+    /// from the lock are refused, never registered.
+    ///
+    /// The allowed case sits beside every refusal in the state a real resume
+    /// meets (the same file, the same lock, the same index row), differing only
+    /// in the one thing under test: the bytes. A reading that trusts the size alone
+    /// refuses nothing here, so this fails against it.
+    #[test]
+    fn a_same_size_destination_with_other_content_is_refused() {
+        let locked = vec![7u8; 1000];
+        let other = vec![9u8; 1000];
+        for row in [Row::None, Row::Tombstone, Row::OtherObject, Row::NoObject] {
+            let refused = plan_resume_over(&other, &locked, row, None).unwrap();
+            assert_eq!(refused.resume_content_mismatches.len(), 1);
+            assert!(refused.resume_already_there.is_empty(), "never registered");
+            assert_eq!(refused.already_archived_count, 0, "never counted as there");
+
+            // Allowed: the same state with the lock's own bytes is proven.
+            let proven = plan_resume_over(&locked, &locked, row, None).unwrap();
+            assert!(proven.resume_content_mismatches.is_empty());
+            assert_eq!(proven.resume_already_there.len(), 1);
+            assert_eq!(proven.already_archived_count, 1);
+            assert_eq!(proven.resume_already_there_source_present, 1);
+        }
+    }
+
+    /// A present row with the entry's own object settles the question without
+    /// the disk: the file is not read, so bytes that differ pass unseen. That is
+    /// the table's first row and its limit, named: the index is believed.
+    #[test]
+    fn a_resume_hashes_only_what_no_row_vouches_for() {
+        let locked = vec![7u8; 1000];
+        let other = vec![9u8; 1000];
+        let progress = RecordingPlanProgress::default();
+        let plan = plan_resume_over(&other, &locked, Row::SameObject, Some(&progress)).unwrap();
+        assert_eq!(plan.already_archived_count, 1);
+        assert!(plan.resume_already_there.is_empty(), "nothing to write");
+        assert!(plan.resume_content_mismatches.is_empty());
+        assert!(
+            progress.events.borrow().is_empty(),
+            "no hashing to do, nothing announced"
+        );
+
+        // Where hashing is owed it is announced, per file.
+        let progress = RecordingPlanProgress::default();
+        plan_resume_over(&locked, &locked, Row::None, Some(&progress)).unwrap();
+        assert_eq!(
+            progress.events.borrow().as_slice(),
+            ["start 1", "step 1", "finish"]
+        );
+    }
+
+    /// An empty file has a hash like any other, and is proven by it: the
+    /// contentless law governs identity claims, never an applied transition.
+    #[test]
+    fn an_empty_file_is_proven_at_its_destination() {
+        let plan = plan_resume_over(b"", b"", Row::None, None).unwrap();
+        assert!(plan.resume_content_mismatches.is_empty());
+        assert_eq!(plan.resume_already_there.len(), 1);
+    }
+
+    /// A file that cannot be read cannot be shown to hold anything, and the plan
+    /// says so loudly rather than counting it as there or as different.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_destination_fails_the_plan() {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = vec![7u8; 1000];
+        // The destination is made unreadable after the fixture writes it, so
+        // the fixture itself is inlined here.
+        let archive_dir = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let archive_path = archive_dir.path().to_str().unwrap().to_string();
+        let src_file = src_dir.path().join("photo.jpg");
+        std::fs::write(&src_file, &locked).unwrap();
+        let dest = archive_dir.path().join("photo.jpg");
+        std::fs::write(&dest, &locked).unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A user who can read everything (root) cannot pose the case.
+        if std::fs::File::open(&dest).is_ok() {
+            return;
+        }
+
+        let mut conn = setup_test_db();
+        let root_id = insert_root(&conn, &src_path, "source", false);
+        let archive_id = insert_root(&conn, &archive_path, "archive", false);
+        let obj_id = insert_object(&conn, "locked", false);
+        let src_id = insert_source_with_metadata(
+            &conn,
+            root_id,
+            "photo.jpg",
+            Some(obj_id),
+            1000,
+            1704067200,
+        );
+        let entry = make_lock_entry(
+            src_id,
+            root_id,
+            &src_file.display().to_string(),
+            Some(obj_id),
+            Some("anything"),
+        );
+        let sources: Vec<&LockEntry> = vec![&entry];
+        let pattern = read(&conn, "{filename}");
+        let mut root_paths = HashMap::new();
+        root_paths.insert(root_id, src_path);
+        root_paths.insert(archive_id, archive_path);
+        let mut params = default_params(&sources, &pattern, &root_paths, archive_id);
+        params.resume = true;
+        let err = plan_apply(&mut conn, &params).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("to compare it with the lock"),
+            "{err:#}"
+        );
+
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     // =========================================================================
@@ -2188,6 +2469,7 @@ mod tests {
             resume_already_there_source_present: 0,
             resume_source_lost: vec![],
             resume_size_mismatches: vec![],
+            resume_content_mismatches: vec![],
         }
     }
 

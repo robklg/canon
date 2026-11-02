@@ -669,6 +669,18 @@ const LAWS: &[Law] = &[
         record: "2026-08-05",
     },
     Law {
+        // The one place an origin file is removed after a copy to another
+        // device. The verifier is the proof that fails: the origin must stand
+        // and the copy this call created must go, so the removal can only be
+        // reached past the proof.
+        name: "origin-removal",
+        owner: "core/ops/fs.rs",
+        verifier: "a_failed_proof_keeps_the_origin",
+        reach: Reach::Unit("core"),
+        authority: Authority::Recognised,
+        record: "2026-11-01",
+    },
+    Law {
         name: "path",
         owner: "core/domain/path.rs",
         verifier: "the_containment_probe_is_spelled_only_inside_the_path_law",

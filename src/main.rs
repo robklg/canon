@@ -1637,6 +1637,7 @@ fn run(cli: Cli) -> Result<()> {
                 transfer_mode,
                 yes,
                 resume,
+                handle_interrupts: true,
             };
             archive::run(
                 &mut db,

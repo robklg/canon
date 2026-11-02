@@ -66,9 +66,9 @@ Recording happens in two phases:
 1. **Start**: A "started" record is written after you confirm (or just before execution for commands without confirmation)
 2. **Complete**: The record is updated with the outcome after execution finishes
 
-A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`. A refused `facts convert` or `scan` records nothing.
+A run that a pre-flight check stops before anything is touched records `refused`. One cut short after work began records `interrupted` or `partial`. An apply stopped by its first Ctrl+C records `interrupted`, with nothing done when the checks were still running. A refused `facts convert` or `scan` records nothing.
 
-If Canon is interrupted (Ctrl+C, crash, power loss), the "started" record survives as a durable trace that the operation was attempted. A row left `started` means its outcome was never written. That has three readings: the run was killed or crashed; or it ended and the outcome could not be written down, for example when another canon process held the database locked at that moment; or the row was written by a version of Canon older than the one that settles every ordinary error. `canon trail show` prints the row's version and time, and says the same thing on the row itself.
+If Canon stops without settling the record (a crash, power loss, a second Ctrl+C on an apply, or Ctrl+C in a command that does not stop on the first press, such as `import-facts`), the "started" record survives as a durable trace that the operation was attempted. A row left `started` means its outcome was never written. That has three readings: the run was killed or crashed; or it ended and the outcome could not be written down, for example when another canon process held the database locked at that moment; or the row was written by a version of Canon older than the one that settles every ordinary error. `canon trail show` prints the row's version and time, and says the same thing on the row itself.
 
 ## Records vs. Receipts
 
@@ -121,7 +121,7 @@ id = 3
 - **`posture`** — whether Canon **performed** the change or **observed** one the world made. A scan-detected deletion is `observed`: Canon witnessed a loss, it did not cause one. Every other receipt today is `performed`.
 - **`[meta.locus]`** — the identity of the root the receipt is anchored to, making its placement into data. Locus is the *receipt's* where, not the action's: an exclusion run in a source folder has its `scope` there and its per-item `root`s there, but its locus is the archive ledger root, because that is where the receipt itself lives. **`path`** is the root's canonical path captured at write time — authoritative for a human and for rebuilding an index from disk, and still meaningful after a drive is remounted elsewhere or a receipt is copied off its root. **`id`** is the join key against a live database. Both are always present.
 - **`zone`** — the time zone the decision used for times, the same text as its record ([above](#the-time-zone-a-decision-uses)).
-- **`origin_disposition`** — apply receipts only: `retained` (a copy; the content now lives in two places) or `relocated` (a move; the origin no longer holds the file).
+- **`origin_disposition`** — apply receipts only: `retained` (a copy; the content now lives in two places) or `relocated` (a move; the origin no longer holds the file, except for a file a `--resume` found already at its destination, whose origin may still stand).
 
 **The granularity rule.** Subjects that can span roots always carry their own per-item root identity: apply items keep their `source_root`; exclusion and object entries keep their `root`. The **locus** root is always meta-level. Receipt-level-only identity (no per-item root, as in a deletion receipt) is valid exactly where single-root-ness is guaranteed by construction: a deletion receipt is coalesced to one root, so its items inherit the meta locus.
 

@@ -130,42 +130,48 @@ pub fn canonicalize_maybe_missing(path: &Path) -> Result<String> {
     Ok(result.to_string_lossy().to_string())
 }
 
+/// Write `src`'s bytes to `dest` and hand back the open destination file.
+///
+/// Under `noclobber` the destination is created with `O_EXCL` (fails if it exists);
+/// otherwise it is created or truncated. The file is returned still open because a
+/// late write error is reported on the descriptor that wrote and is dropped at close:
+/// a proof that the data reached storage has to be made on this descriptor.
+fn write_copy(src: &Path, dest: &Path, noclobber: bool) -> Result<File> {
+    let mut src_file =
+        File::open(src).with_context(|| format!("Failed to open source: {}", src.display()))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if noclobber {
+        options.create_new(true); // O_CREAT | O_EXCL — atomic, fails if exists
+    } else {
+        options.create(true).truncate(true);
+    }
+    let dest_file = options.open(dest).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::anyhow!("Destination already exists: {}", dest.display())
+        } else {
+            anyhow::anyhow!("Failed to create {}: {}", dest.display(), e)
+        }
+    })?;
+    let mut writer = std::io::BufWriter::new(dest_file);
+    std::io::copy(&mut src_file, &mut writer)
+        .with_context(|| format!("Failed to copy {} to {}", src.display(), dest.display()))?;
+    writer
+        .into_inner()
+        .map_err(|e| e.into_error())
+        .with_context(|| format!("Failed to flush {}", dest.display()))
+}
+
 /// Copy a file and preserve its metadata (mtime, permissions).
 /// If noclobber is true, uses atomic O_EXCL create to prevent overwriting.
+///
+/// No sync: the destination is closed, then its modification time is set. A move that
+/// removes its origin proves the copy first (`move_file`).
 pub fn copy_file(src: &Path, dest: &Path, noclobber: bool) -> Result<()> {
     let src_meta =
         fs::metadata(src).with_context(|| format!("Failed to read metadata: {}", src.display()))?;
-
-    if noclobber {
-        // Atomic noclobber: create dest with O_EXCL, then copy content manually
-        let mut src_file =
-            File::open(src).with_context(|| format!("Failed to open source: {}", src.display()))?;
-        let dest_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true) // O_CREAT | O_EXCL — atomic, fails if exists
-            .open(dest)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    anyhow::anyhow!("Destination already exists: {}", dest.display())
-                } else {
-                    anyhow::anyhow!("Failed to create {}: {}", dest.display(), e)
-                }
-            })?;
-        let mut writer = std::io::BufWriter::new(dest_file);
-        std::io::copy(&mut src_file, &mut writer)
-            .with_context(|| format!("Failed to copy {} to {}", src.display(), dest.display()))?;
-        use std::io::Write;
-        writer
-            .flush()
-            .with_context(|| format!("Failed to flush {}", dest.display()))?;
-    } else {
-        // Allow overwrite
-        fs::copy(src, dest)
-            .with_context(|| format!("Failed to copy {} to {}", src.display(), dest.display()))?;
-    }
-
-    preserve_metadata(dest, &src_meta)?;
-    Ok(())
+    drop(write_copy(src, dest, noclobber)?);
+    preserve_metadata(dest, &src_meta)
 }
 
 /// Recursively copy a directory tree, preserving each file's metadata
@@ -308,14 +314,130 @@ pub fn move_file(src: &Path, dest: &Path, noclobber: bool) -> Result<MoveOutcome
                     == Some(libc::EXDEV)
             });
             if is_exdev {
-                copy_file(src, dest, noclobber)?;
-                fs::remove_file(src)
-                    .with_context(|| format!("Failed to delete source: {}", src.display()))?;
-                Ok(MoveOutcome::CopiedAndDeleted)
+                move_across_devices(src, dest, noclobber, prove_copy)
             } else {
                 Err(e)
             }
         }
+    }
+}
+
+/// Copy `src` to `dest` on another device, then remove `src` — but only past `prove`.
+///
+/// The origin-removal law: an origin is removed only after its destination is proven.
+/// `prove` receives the descriptor that wrote the copy, so a late write error is seen
+/// where it is reported. The removal is reached only through a successful proof.
+///
+/// When the proof or the removal fails and the origin is left standing, a destination
+/// this call created is removed too (`noclobber` means it did): nothing is lost, and
+/// the entry is plainly pending again. When the origin is already gone, the copy may
+/// be all there is, so it stays. A write that fails before the proof (a full disk)
+/// returns early and leaves its partial file with the origin standing, as a plain copy
+/// does; a resume reports that file by its size.
+fn move_across_devices(
+    src: &Path,
+    dest: &Path,
+    noclobber: bool,
+    prove: impl FnOnce(&File, &Path, &Path, &Metadata) -> Result<()>,
+) -> Result<MoveOutcome> {
+    let before =
+        fs::metadata(src).with_context(|| format!("Failed to read metadata: {}", src.display()))?;
+    let written = write_copy(src, dest, noclobber)?;
+    let proof = prove(&written, src, dest, &before).map_err(|cause| {
+        anyhow::anyhow!(
+            "{} was kept: could not confirm {} before removing it: {:#}",
+            src.display(),
+            dest.display(),
+            cause
+        )
+    });
+    let moved = proof.and_then(|()| {
+        fs::remove_file(src).map_err(|cause| {
+            anyhow::anyhow!(
+                "{} could not be removed: {}. Nothing was moved.",
+                src.display(),
+                cause
+            )
+        })
+    });
+    if let Err(e) = moved {
+        if noclobber && fs::metadata(src).is_ok() {
+            let _ = fs::remove_file(dest);
+        }
+        return Err(e);
+    }
+    Ok(MoveOutcome::CopiedAndDeleted)
+}
+
+/// The proof a cross-device move makes before its origin goes: the copy is written out
+/// to storage, its modification time and permissions are set, its directory entry is synced, its
+/// length equals the origin's, and the origin's length and modification time are what they were
+/// before the copy began. The bytes are not read back.
+fn prove_copy(written: &File, src: &Path, dest: &Path, before: &Metadata) -> Result<()> {
+    sync_to_storage(written)
+        .with_context(|| format!("could not write {} out to storage", dest.display()))?;
+    // The modification time is set only after the data is on its way, never with data unsent.
+    preserve_metadata(dest, before)?;
+    sync_parent_dir(dest)?;
+    let copied = fs::metadata(dest)
+        .with_context(|| format!("Failed to read metadata: {}", dest.display()))?;
+    if copied.len() != before.len() {
+        bail!(
+            "{} is {} bytes, {} is {} bytes",
+            dest.display(),
+            copied.len(),
+            src.display(),
+            before.len()
+        );
+    }
+    let after =
+        fs::metadata(src).with_context(|| format!("Failed to read metadata: {}", src.display()))?;
+    if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
+        bail!("{} changed during the copy", src.display());
+    }
+    Ok(())
+}
+
+/// Write a file's data out to storage: a full sync, and plain `fsync` where the
+/// filesystem refuses the full one (`ENOTSUP`, as an SMB share does for a directory).
+fn sync_to_storage(file: &File) -> std::io::Result<()> {
+    let full = file.sync_all();
+    #[cfg(unix)]
+    if let Err(e) = &full {
+        if e.raw_os_error() == Some(libc::ENOTSUP) {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: the descriptor is open for as long as `file` is borrowed.
+            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+                return Ok(());
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    full
+}
+
+/// Sync the directory that holds `dest`, so the new name survives a power cut.
+/// A filesystem that offers no directory sync (`ENOTSUP` or `EINVAL` from both calls)
+/// is not a failed proof: the file's own sync stands.
+fn sync_parent_dir(dest: &Path) -> Result<()> {
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let dir = File::open(parent)
+        .with_context(|| format!("Failed to open directory: {}", parent.display()))?;
+    match sync_to_storage(&dir) {
+        Ok(()) => Ok(()),
+        #[cfg(unix)]
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(code) if code == libc::ENOTSUP || code == libc::EINVAL
+            ) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("could not sync {}", parent.display())),
     }
 }
 
@@ -671,5 +793,211 @@ mod tests {
             err.to_string().contains("receipt.incomplete")
                 || err.to_string().contains("No such file")
         );
+    }
+
+    // =========================================================================
+    // The origin-removal law: a cross-device move proves its copy first
+    // =========================================================================
+
+    /// A source file and a destination path in one scratch directory.
+    fn move_fixture(content: &[u8]) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        std::fs::write(&src, content).unwrap();
+        let dest = dir.path().join("dest.bin");
+        (dir, src, dest)
+    }
+
+    /// The origin-removal law holds at the cross-device arm, not only at the helper
+    /// the other tests drive. No test reaches that arm (it needs two filesystems),
+    /// so its links are read from this file's production text: the arm hands its copy
+    /// to `prove_copy`; `prove_copy` writes the data out to storage before it sets the
+    /// modification time, and syncs the directory; and the file removes an origin in exactly
+    /// one place, inside `move_across_devices`. An arm that went back to
+    /// copy-then-remove, or passed a proof that always succeeds, or a proof without
+    /// its sync, fails here.
+    ///
+    /// **Blind spots, named:** it matches spellings. An origin removal written without
+    /// `remove_file(` and `src` on one line (a rename into a trash, a removal through
+    /// another name for the path) passes unseen, and so does a call to the proof that
+    /// sits in a comment while the code does something else. The behavioural tests
+    /// drive the helper; this pins the wiring around it.
+    #[test]
+    fn the_cross_device_arm_proves_before_the_one_origin_removal() {
+        let text = include_str!("fs.rs");
+        let production = text.split("\n#[cfg(test)]").next().unwrap();
+
+        let proof = production
+            .split("fn prove_copy(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("prove_copy is in production");
+        let synced = proof.find("sync_to_storage(written)");
+        let dated = proof.find("preserve_metadata(dest, before)");
+        assert!(
+            synced.is_some() && synced < dated,
+            "the data is written out to storage before the modification time is set"
+        );
+        assert!(
+            proof.contains("sync_parent_dir(dest)"),
+            "the directory is synced too"
+        );
+
+        assert_eq!(
+            production
+                .matches("move_across_devices(src, dest, noclobber, prove_copy)")
+                .count(),
+            1,
+            "the cross-device arm must hand its copy to prove_copy"
+        );
+        let removals: Vec<&str> = production
+            .lines()
+            .filter(|l| l.contains("remove_file(") && l.contains("src"))
+            .collect();
+        assert_eq!(removals.len(), 1, "one origin removal, found {removals:?}");
+
+        let helper = production
+            .split("fn move_across_devices(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("move_across_devices is in production");
+        assert!(
+            helper.contains("remove_file(") && helper.contains("src"),
+            "the one origin removal sits inside move_across_devices"
+        );
+    }
+
+    #[test]
+    fn a_failed_proof_keeps_the_origin() {
+        let (_dir, src, dest) = move_fixture(b"the only copy");
+
+        let err =
+            move_across_devices(&src, &dest, true, |_, _, _, _| bail!("sync refused")).unwrap_err();
+
+        assert!(src.exists(), "a failed proof must keep the origin");
+        assert_eq!(std::fs::read(&src).unwrap(), b"the only copy");
+        assert!(
+            !dest.exists(),
+            "the origin stands, so the copy this call created is removed"
+        );
+        let said = err.to_string();
+        assert!(said.contains("was kept"), "{said}");
+        assert!(said.contains("could not confirm"), "{said}");
+        assert!(said.contains("sync refused"), "{said}");
+    }
+
+    #[test]
+    fn a_failed_proof_keeps_the_copy_when_the_origin_is_gone() {
+        let (_dir, src, dest) = move_fixture(b"the only copy");
+
+        let origin = src.clone();
+        let result = move_across_devices(&src, &dest, true, move |_, _, _, _| {
+            // The origin vanishes while the proof runs: the copy may be all there is.
+            std::fs::remove_file(&origin).unwrap();
+            bail!("proof failed after the origin went")
+        });
+
+        assert!(result.is_err());
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the only copy");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_origin_that_cannot_be_removed_leaves_nothing_at_the_destination() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root removes from a read-only directory
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        std::fs::create_dir(&from).unwrap();
+        let src = from.join("src.bin");
+        std::fs::write(&src, b"kept").unwrap();
+        let dest = dir.path().join("dest.bin");
+
+        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = move_across_devices(&src, &dest, true, |_, _, _, _| Ok(()));
+        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(src.exists());
+        assert!(
+            !dest.exists(),
+            "the origin stands, so no copy is left behind"
+        );
+        let said = err.to_string();
+        assert!(said.contains("could not be removed"), "{said}");
+        assert!(said.contains("Nothing was moved"), "{said}");
+    }
+
+    #[test]
+    fn a_proven_copy_removes_the_origin() {
+        use filetime::FileTime;
+
+        let (_dir, src, dest) = move_fixture(b"moves whole");
+        let known = FileTime::from_unix_time(1704067200, 0);
+        filetime::set_file_mtime(&src, known).unwrap();
+
+        let outcome = move_across_devices(&src, &dest, true, prove_copy).unwrap();
+
+        assert_eq!(outcome, MoveOutcome::CopiedAndDeleted);
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"moves whole");
+        let saved = FileTime::from_last_modification_time(&fs::metadata(&dest).unwrap());
+        assert_eq!(
+            saved, known,
+            "the destination holds the origin's modification time"
+        );
+    }
+
+    #[test]
+    fn prove_copy_refuses_a_shorter_destination() {
+        let (_dir, src, dest) = move_fixture(b"0123456789");
+        std::fs::write(&dest, b"01234").unwrap();
+        let before = fs::metadata(&src).unwrap();
+        let written = fs::OpenOptions::new().write(true).open(&dest).unwrap();
+
+        let err = prove_copy(&written, &src, &dest, &before).unwrap_err();
+
+        let said = err.to_string();
+        assert!(said.contains("is 5 bytes"), "{said}");
+        assert!(said.contains("is 10 bytes"), "{said}");
+    }
+
+    #[test]
+    fn prove_copy_refuses_an_origin_whose_save_time_moved() {
+        use filetime::FileTime;
+
+        let (_dir, src, dest) = move_fixture(b"0123456789");
+        std::fs::write(&dest, b"0123456789").unwrap();
+        let before = fs::metadata(&src).unwrap();
+        filetime::set_file_mtime(&src, FileTime::from_unix_time(1704067200, 0)).unwrap();
+        let written = fs::OpenOptions::new().write(true).open(&dest).unwrap();
+
+        let err = prove_copy(&written, &src, &dest, &before).unwrap_err();
+
+        assert!(err.to_string().contains("changed during the copy"));
+    }
+
+    #[test]
+    fn prove_copy_accepts_a_whole_copy_of_an_unchanged_origin() {
+        let (_dir, src, dest) = move_fixture(b"0123456789");
+        std::fs::write(&dest, b"0123456789").unwrap();
+        let before = fs::metadata(&src).unwrap();
+        let written = fs::OpenOptions::new().write(true).open(&dest).unwrap();
+
+        prove_copy(&written, &src, &dest, &before).unwrap();
+    }
+
+    #[test]
+    fn sync_to_storage_accepts_a_file_and_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"x").unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        sync_to_storage(&file).unwrap();
+        sync_parent_dir(&path).unwrap();
     }
 }

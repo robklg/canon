@@ -42,6 +42,8 @@ canon apply manifest.toml --allow cross-archive-duplicates
 
 All modes use noclobber semantics: if a destination file exists, apply aborts with an error.
 
+A `--move` to another volume writes each file out to storage and compares its size with the origin's before it removes the origin, and checks that the origin did not change meanwhile, so on a network volume it costs extra time per file. A file that fails the check keeps its origin, and the error says so.
+
 For `--rename` and `--move`, the confirmation summary shows which source roots will lose files:
 
 ```
@@ -273,10 +275,12 @@ Use `--resume` to continue a previously interrupted apply. This is useful when:
 - Apply was interrupted (Ctrl+C, system crash, disk full)
 - Some files failed to transfer due to errors
 
-Resume mode classifies each destination into one of:
-- **Already archived** - Registered in database, skipped
-- **Resumed** - File exists on disk but not in database, skipped (needs `scan` to register)
-- **To transfer** - Not in database, not on disk, will be copied
+Resume mode sorts each entry by what stands at its destination:
+- **Already there, recorded** - The index holds a present record at the destination for the entry's content. Counted, left alone.
+- **Already there, not recorded** - A file of the lock's size stands there and no such record does. Resume reads the file and compares its hash with the lock's. A match is recorded by this run: the index gets the record, the receipt lists the file, and the extraction ledger counts it. A difference is refused.
+- **To transfer** - Nothing stands there. The file is transferred.
+
+A record that names the entry's content is believed: the file behind it is not read.
 
 ```bash
 # Resume an interrupted apply
@@ -286,14 +290,26 @@ canon apply manifest.toml --resume
 canon apply manifest.toml --resume --dry-run
 ```
 
-If `--resume` reports "resumed" files, run `canon scan` on the affected paths to register them:
+A file of a different size from the lock records (a partial copy from an interrupted transfer, or an edited file) is refused before anything is transferred, and the files are listed. So is a file of the right size with different content, in `--dry-run` too. Both lists appear in one run:
 
-```bash
-# Scan only the destination directory that was being written to
-canon scan /path/to/archive/2024
+```
+Resume failed: 1 destination file doesn't match the lock.
+
+  /Volumes/Archive/2024/img_0042.jpg
+    same size, different content (was the source edited after copying?)
+
+To keep the archive's version:
+  1. leave its source out of the manifest (exclude it or narrow the query)
+  2. canon cluster refresh manifest.toml
+
+To replace it with the source:
+  1. delete the destination file
+  2. canon scan /Volumes/Archive/2024
+  3. canon apply --resume manifest.toml
+Error: Aborting due to destination files that do not match the lock in resume mode
 ```
 
-If `--resume` detects files with size mismatches (partial copies from interrupted transfers), it will error and ask you to delete those files before continuing.
+[`canon cluster status`](cluster.md) lists these files before the apply does.
 
 **Integrity validation:**
 
@@ -341,7 +357,7 @@ before any of them.
 
 3. **Destination path conflicts** - In regular mode (without `--resume`), checks if any destination paths are already occupied (registered in the database or existing on disk). If conflicts are found, apply suggests using `--resume` to skip already-copied files.
 
-4. **Stale destination records** - If the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying.
+4. **Stale destination records** - In regular mode, if the database shows files as present in the archive but they're missing from disk, apply aborts. Run `canon scan <archive>` to update the database before retrying. With `--resume` a stale record does not abort: the file is transferred and the record updated.
 
 5. **Archive conflicts** - Checks if files already exist in the destination archive or other archives. Empty files are exempt: they are [contentless](../../concepts/object.md#empty-files-are-contentless), so an empty file being applied never conflicts with empty files already in the archive.
 
@@ -381,18 +397,21 @@ Pattern variables use fact keys with optional modifiers (see [Pattern Expression
 - `{content.DateTimeOriginal|year}` - EXIF date with modifier
 - `{content.Make}`, `{content.Model}` - Any fact key
 
+**Stopping a run (Ctrl-C):**
+
+The first Ctrl-C stops the run after the current file is done, or before the first file while the checks are still running, and says so at once. The second ends the process at once; that run then writes no receipt. A stopped run records `interrupted`. A resume stopped during its checks records nothing, the files it had found already at their destination included; the next resume finds them again. The command a stopped run prints to finish the work keeps the mode (`--move` stays `--move`).
+
 **Recovering from interrupted apply:**
 
 If apply is interrupted or encounters errors:
 
 1. Fix any reported errors (permissions, disk space, etc.)
-2. Delete any partial files in the archive (files with wrong sizes from interrupted copies)
-3. Re-run with `--resume`:
+2. Re-run with `--resume`. It reports any destination file that does not match the lock; look at those before deleting anything:
    ```bash
    canon apply manifest.toml --resume
    ```
 
-Resume mode's classification and its handling of "resumed" and partial files are described above.
+Resume mode's sorting and its refusals are described above.
 
 If source files changed during apply, refresh the manifest first:
 ```bash
@@ -403,6 +422,6 @@ canon apply manifest.toml
 
 ## Provenance
 
-Every apply is recorded as a [decision](../../concepts/decisions.md), with a receipt listing every file transferred, written under the archive root's `.canon-ledger/` (placement and per-item contents: [Receipts](../../concepts/decisions.md#receipts)). Add `--reason` to record why; when you don't, the manifest's `# === Notes ===` section becomes the reason automatically. The global `--no-receipt` flag skips the receipt file for one invocation.
+Every apply is recorded as a [decision](../../concepts/decisions.md), with a receipt listing every file transferred, and every file a `--resume` found at its destination and recorded, written under the archive root's `.canon-ledger/` (placement and per-item contents: [Receipts](../../concepts/decisions.md#receipts)). Add `--reason` to record why; when you don't, the manifest's `# === Notes ===` section becomes the reason automatically. The global `--no-receipt` flag skips the receipt file for one invocation.
 
 An apply is also indexed by what it drew out of each source root: the [extraction ledger](../../concepts/decisions.md#the-extraction-ledger--the-trails-outbound-direction). At a source location afterwards, [`canon trail`](../query/trail.md) shows what was archived out of that place and whether the originals remain; `canon trail show <id>` gives the full per-root breakdown and the receipt's location on disk.

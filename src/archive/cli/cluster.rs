@@ -4,10 +4,11 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::archive::domain::{
-    parse_manifest_allow, parse_manifest_config, settle_manifest_zone, LockHeaderStanding,
+    parse_manifest_allow, parse_manifest_config, settle_manifest_zone, Act, LockHeaderStanding,
     LockStanding, ManifestConfig, ManifestZone, NextStep, OwedWayBack, RefreshRefusal,
     RefreshRefused,
 };
+use crate::archive::ops::execute::TransferMode;
 use crate::archive::ops::generate::{
     ClusterGenerateParams, ClusterGeneratePlan, ExecuteGenerateParams, ExecuteRefreshParams,
 };
@@ -219,7 +220,10 @@ pub fn generate(
         }
     }
 
-    eprintln!("\nTo apply: {}", super::apply_command(output_path, false));
+    eprintln!(
+        "\nTo apply: {}",
+        super::apply_command(output_path, false, TransferMode::Copy)
+    );
 
     Ok(())
 }
@@ -742,14 +746,14 @@ fn write_next_step(
             if status.at_destination > 0 {
                 let _ = writeln!(
                     handle,
-                    "To complete: {}",
-                    super::apply_command(manifest_path, true)
+                    "To complete: {} ({MODE_IS_THE_USERS})",
+                    super::apply_command(manifest_path, true, TransferMode::Copy)
                 );
             } else {
                 let _ = writeln!(
                     handle,
                     "To apply: {}",
-                    super::apply_command(manifest_path, false)
+                    super::apply_command(manifest_path, false, TransferMode::Copy)
                 );
             }
         }
@@ -967,6 +971,34 @@ fn expansion_failure_lines(status: &status_ops::ManifestStatus) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// What the report's resume lines add to the copy form they print. A report holds no
+/// transfer mode, and the pasted line would copy what is left of a manifest that is
+/// being moved, leaving its origins standing. The mode is the user's to add; it is not
+/// worked out from the last run, because a lock is not tied to a mode.
+const MODE_IS_THE_USERS: &str = "add --move or --rename if you are moving the files";
+
+/// The count line for destinations of the right size that no present row
+/// records the entry's content at.
+///
+/// Stated always: it is a finding. The act that compares them follows only
+/// where `apply` can run — a report never names an act apply turns away — and
+/// it is named here because the next step is withheld while this is found
+/// (`found_nothing_lost_or_wrong`).
+fn unconfirmed_statement(count: usize, apply_runs: bool, manifest_path: &Path) -> String {
+    let found = format!(
+        "{} destinations are the right size, but the index does not record this content there.",
+        format_count(count)
+    );
+    if apply_runs {
+        format!(
+            "{found} `{}` compares them ({MODE_IS_THE_USERS}).",
+            super::apply_command(manifest_path, true, TransferMode::Copy)
+        )
+    } else {
+        found
+    }
 }
 
 /// The report's summary line. A lock placed nowhere gets no counts: every one would be a zero
@@ -1208,7 +1240,9 @@ pub fn status(
         .filter(|e| {
             matches!(
                 e.status,
-                status_ops::EntryStatus::SourceLost | status_ops::EntryStatus::SizeMismatch
+                status_ops::EntryStatus::SourceLost
+                    | status_ops::EntryStatus::SizeMismatch
+                    | status_ops::EntryStatus::Unconfirmed
             )
         })
         .collect();
@@ -1224,11 +1258,11 @@ pub fn status(
         let hdr_db = "DB registered";
         let sep_db = "-------------";
         println!(
-            "  {:<30}  {:<12}  {:<12}  {}",
+            "  {:<30}  {:<12}  {:<13}  {}",
             "Source", "Source file", "Dest file", hdr_db
         );
         println!(
-            "  {:<30}  {:<12}  {:<12}  {}",
+            "  {:<30}  {:<12}  {:<13}  {}",
             "------", "-----------", "---------", sep_db
         );
         for entry in &show_entries {
@@ -1240,6 +1274,7 @@ pub fn status(
             let dest_status = match entry.status {
                 status_ops::EntryStatus::AtDestination => "at dest",
                 status_ops::EntryStatus::SizeMismatch => "WRONG SIZE",
+                status_ops::EntryStatus::Unconfirmed => "NOT CONFIRMED",
                 status_ops::EntryStatus::Pending | status_ops::EntryStatus::SourceLost => {
                     "not at dest"
                 }
@@ -1258,7 +1293,7 @@ pub fn status(
                 entry.source_filename.clone()
             };
             println!(
-                "  {:<30}  {:<12}  {:<12}  {}",
+                "  {:<30}  {:<12}  {:<13}  {}",
                 display_name, source_status, dest_status, db_status
             );
         }
@@ -1296,6 +1331,16 @@ pub fn status(
         println!(
             "         {} with size mismatch at destination.",
             format_count(status.size_mismatch),
+        );
+    }
+    if status.content_unconfirmed > 0 {
+        println!(
+            "         {}",
+            unconfirmed_statement(
+                status.content_unconfirmed,
+                status.standing().can_run(Act::Apply),
+                manifest_path
+            )
         );
     }
 
@@ -1583,6 +1628,7 @@ mod tests {
             pending,
             source_lost,
             size_mismatch: 0,
+            content_unconfirmed: 0,
             source_still_present: 0,
             // Every one of these five is filled below, through the one
             // funnel, so nothing here is read as the shape they end up in.
@@ -1746,7 +1792,7 @@ mod tests {
         );
         assert_eq!(
             next_step(&status_with(1, 1, 0, sound_lock())),
-            "\nTo complete: canon apply --resume m.toml\n"
+            "\nTo complete: canon apply --resume m.toml (add --move or --rename if you are moving the files)\n"
         );
     }
 
@@ -2221,8 +2267,8 @@ mod tests {
                 super::super::rebuild_remedy(path),
                 super::super::empty_selection_remedy(path),
                 super::super::missing_lock_refusal(path),
-                super::super::apply_command(path, false),
-                super::super::apply_command(path, true),
+                super::super::apply_command(path, false, TransferMode::Copy),
+                super::super::apply_command(path, true, TransferMode::Copy),
             ];
             sentences.extend(super::super::scan_or_edit_scope(path, &set_aside));
             sentences.extend(super::super::source_lost_remedy(
@@ -2996,7 +3042,11 @@ mod tests {
         // when the other is closed, so the invitation stands.
         for (pending, at_destination, expected) in [
             (2, 0, "\nTo apply: canon apply m.toml\n"),
-            (2, 1, "\nTo complete: canon apply --resume m.toml\n"),
+            (
+                2,
+                1,
+                "\nTo complete: canon apply --resume m.toml (add --move or --rename if you are moving the files)\n",
+            ),
         ] {
             let mut status = status_with(pending, at_destination, 0, sound_lock());
             scope_door(&mut status);
@@ -3786,6 +3836,28 @@ mod tests {
         );
         status.unplaced = 0;
         assert!(summary_line(&status).contains("source files missing"));
+    }
+
+    /// **Destinations no row records are always stated; the act that compares them follows
+    /// only where `apply` can run.** The report's outermost gate withholds the next step while
+    /// any are found, so this line carries its own act, and a report never names an act
+    /// apply turns away. The allowed case is the same state with apply able to run, in which
+    /// the line names the resume.
+    #[test]
+    fn unconfirmed_destinations_are_stated_and_name_apply_only_where_it_runs() {
+        let manifest = Path::new("/m/trip.toml");
+        let said = unconfirmed_statement(2, true, manifest);
+        assert_eq!(
+            said,
+            "2 destinations are the right size, but the index does not record this content there. \
+             `canon apply --resume /m/trip.toml` compares them \
+             (add --move or --rename if you are moving the files)."
+        );
+        let held_back = unconfirmed_statement(2, false, manifest);
+        assert_eq!(
+            held_back,
+            "2 destinations are the right size, but the index does not record this content there."
+        );
     }
 
     /// **A lock with no time zone still gets its next step, the rebuild**: nothing was found
