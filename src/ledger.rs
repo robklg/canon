@@ -14,15 +14,22 @@ pub fn run_reindex(db: &mut Db, dry_run: bool) -> Result<()> {
     let result = reindex_extractions(db.conn(), &ReindexParams { dry_run })?;
     print!("{}", format_report(&result, dry_run));
 
-    // Nonzero only when nothing at all could be processed — every scanned
-    // decision landed in a skip bucket and nothing was (or would be) indexed.
-    let nothing_processed =
-        result.scanned > 0 && result.indexed.is_empty() && result.already_current.is_empty();
-    if nothing_processed {
+    if nothing_processed(&result) {
         std::process::exit(1);
     }
 
     Ok(())
+}
+
+/// The nonzero exit: decisions were scanned and none was indexed, already
+/// current or skipped — each one landed in a category that could not be
+/// indexed. A skipped decision counts as processed: its roots are gone and
+/// its rows stand, so nothing needed doing.
+fn nothing_processed(result: &ReindexResult) -> bool {
+    result.scanned > 0
+        && result.indexed.is_empty()
+        && result.already_current.is_empty()
+        && result.skipped.is_empty()
 }
 
 fn format_report(result: &ReindexResult, dry_run: bool) -> String {
@@ -48,6 +55,12 @@ fn format_report(result: &ReindexResult, dry_run: bool) -> String {
         "  already current:  {}\n",
         format_count(result.already_current.len())
     ));
+    if !result.skipped.is_empty() {
+        out.push_str(&format!(
+            "  skipped (roots removed or retired):  {}\n",
+            format_count(result.skipped.len())
+        ));
+    }
 
     push_category(&mut out, "no receipt", &result.no_receipt);
     push_category(&mut out, "unreachable", &result.unreachable);
@@ -98,6 +111,7 @@ mod tests {
             malformed: vec![],
             no_rows_built: vec![],
             unknown_source_roots: vec![],
+            skipped: vec![],
         }
     }
 
@@ -131,6 +145,34 @@ mod tests {
         let report = format_report(&result, false);
         assert!(report.contains("partial (unmatched source root):  1"));
         assert!(report.contains("#55  /vol/gone"));
+    }
+
+    #[test]
+    fn report_states_decisions_skipped_with_their_reason() {
+        let mut result = base_result();
+        assert!(!format_report(&result, false).contains("skipped"));
+
+        result.skipped = vec![4];
+        let report = format_report(&result, false);
+        assert!(report.contains("  skipped (roots removed or retired):  1\n"));
+    }
+
+    #[test]
+    fn a_run_whose_decisions_were_all_skipped_exits_zero() {
+        let mut result = base_result();
+        result.indexed.clear();
+        result.already_current.clear();
+        result.no_receipt = vec![(1, "--no-receipt".to_string())];
+        assert!(
+            nothing_processed(&result),
+            "nothing indexed, current or skipped is the nonzero exit"
+        );
+
+        result.skipped = vec![4];
+        assert!(
+            !nothing_processed(&result),
+            "a skipped decision counts as processed"
+        );
     }
 
     #[test]

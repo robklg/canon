@@ -156,10 +156,11 @@ pub fn build_extraction_rows<'a>(
     for ((source_root, origin_dir, dest_dir), (files, bytes)) in groups {
         // Form-tolerantly. On the forward path `source_root` is the root's
         // own stored string and the two agree by construction; on the
-        // backfill path it is text read back off an apply receipt, and a root
-        // removed and re-added from storage handing the other normalization
-        // makes the receipt and the index disagree with no defect anywhere —
-        // which is the case the law exists for. Both paths run this one
+        // backfill path it is text read back off an apply receipt, which is
+        // never trusted to carry the index's byte-form. (A root added later at
+        // a removed root's path is another root: reindex offers it here only
+        // for a decision with no rows of its own, a known gap — the
+        // decision's own rows decide which roots it may match.) Both paths run this one
         // helper, so a backfilled row stays structurally indistinguishable
         // from a forward-recorded one; a root no form matches is still
         // reported as an unknown source root rather than guessed at.
@@ -529,10 +530,10 @@ mod tests {
 
     /// **`ledger reindex` reads text Canon itself wrote, and that is not the
     /// same as text that still matches.** A receipt's `source_root` is the
-    /// root's stored string *as it was at apply time*; a root removed and
-    /// re-added from storage handing the other normalization makes the
-    /// receipt and the index disagree with no defect anywhere — the
-    /// other-drive-other-OS case the law exists for. Attribution therefore
+    /// root's stored string *as it was at apply time*, and the root it is
+    /// matched against may be stored in the other normalization — on
+    /// reindex's arm for a decision with no rows, any root indexed now at
+    /// that path. Attribution therefore
     /// bends the receipt's text and never the root's own bytes, which is what
     /// the row records.
     ///

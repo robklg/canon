@@ -483,6 +483,199 @@ mod tests {
         assert_eq!(rows.len(), 1);
     }
 
+    /// Where this decision's receipt stands on disk.
+    fn receipt_file(conn: &Connection, decision_id: i64) -> std::path::PathBuf {
+        let (root_path, rel): (String, String) = conn
+            .query_row(
+                "SELECT r.path, d.receipt_rel_path FROM decisions d
+                 JOIN roots r ON r.id = d.receipt_root_id WHERE d.id = ?",
+                [decision_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        Path::new(&root_path).join(rel)
+    }
+
+    /// Remove a root from the index as `roots rm` does: its sources, then
+    /// the root. The decision's rows and receipt stay, as they do in production.
+    fn remove_root_row(conn: &Connection, path: &str) -> i64 {
+        let id: i64 = conn
+            .query_row("SELECT id FROM roots WHERE path = ?", [path], |r| r.get(0))
+            .unwrap();
+        conn.execute("DELETE FROM sources WHERE root_id = ?", [id])
+            .unwrap();
+        conn.execute("DELETE FROM roots WHERE id = ?", [id])
+            .unwrap();
+        id
+    }
+
+    /// Reindex the decision after its root has left the index and another
+    /// root was added at `later_path`; returns the decision's rows before and
+    /// after, and the report.
+    fn reindex_after_a_later_root(
+        later_path: impl Fn(&str) -> String,
+    ) -> (
+        Vec<crate::core::domain::extraction::DecisionExtraction>,
+        Vec<crate::core::domain::extraction::DecisionExtraction>,
+        crate::core::ops::ledger::ReindexResult,
+        i64,
+    ) {
+        let (conn, decision_id, _archive_dir, src_dir) = run_real_apply(TransferMode::Copy);
+        let src_path = src_dir.path().to_str().unwrap().to_string();
+        let forward_rows = fetch_rows(&conn, decision_id);
+        let original = remove_root_row(&conn, &src_path);
+        assert!(forward_rows.iter().all(|row| row.root_id == original));
+        let later = insert_root(&conn, &later_path(&src_path), "source", false);
+        assert_ne!(later, original);
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        (
+            forward_rows,
+            fetch_rows(&conn, decision_id),
+            result,
+            decision_id,
+        )
+    }
+
+    #[test]
+    fn reindex_never_gives_a_decision_to_a_root_added_later_at_its_path() {
+        // The decision's files were archived from a root that has left the
+        // index; another root now stands at the same path. The decision is
+        // skipped and its rows keep naming the root its files came from.
+        let (before, after, result, decision_id) = reindex_after_a_later_root(|p| p.to_string());
+        assert_eq!(after, before);
+        assert_eq!(result.skipped, vec![decision_id]);
+        assert!(result.unknown_source_roots.is_empty());
+        assert!(result.no_rows_built.is_empty());
+    }
+
+    #[test]
+    fn reindex_never_gives_a_decision_to_a_root_added_later_above_its_path() {
+        // The same, with the later root one directory up: it contains the
+        // removed root's path, and is still another root. What this pins is
+        // the outcome the docs state — skipped, rows unchanged. That the
+        // later root is never matched is also the matcher's own doing, which
+        // compares a receipt's root by path equality and never by containment.
+        let (before, after, result, decision_id) = reindex_after_a_later_root(|p| {
+            std::path::Path::new(p)
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        });
+        assert_eq!(after, before);
+        assert_eq!(result.skipped, vec![decision_id]);
+    }
+
+    #[test]
+    fn reindex_keeps_the_rows_of_a_root_no_longer_indexed() {
+        // One decision's files were archived from a root still indexed and from
+        // one that has since left the index. A reindex rebuilds the first and
+        // carries the second's rows as they stand: they are its history.
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
+        let forward_rows = fetch_rows(&conn, decision_id);
+        let live = forward_rows[0].clone();
+        let gone = crate::core::domain::extraction::DecisionExtraction {
+            root_id: 99,
+            root_path: "/vol/gone".to_string(),
+            rel_prefix: "g".to_string(),
+            files: 1,
+            bytes: Some(3),
+            ..live.clone()
+        };
+        let mut both = forward_rows.clone();
+        both.push(gone.clone());
+        repo::decision::replace_extractions(&conn, &both).unwrap();
+        let receipt = receipt_file(&conn, decision_id);
+        let mut body = std::fs::read_to_string(&receipt).unwrap();
+        body.push_str(
+            "\n[[items]]\nsource_root = \"/vol/gone\"\nsource_rel_path = \"g/g1.jpg\"\n\
+             destination_rel_path = \"2016/Italy/g1.jpg\"\nsize = 3\n",
+        );
+        std::fs::write(&receipt, body).unwrap();
+
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        let after = fetch_rows(&conn, decision_id);
+        assert!(
+            after.contains(&gone),
+            "the retired root's row stands: {after:?}"
+        );
+        assert!(
+            after.contains(&live),
+            "the live root's row is rebuilt: {after:?}"
+        );
+        assert_eq!(after.len(), 2);
+        assert_eq!(result.already_current, vec![decision_id]);
+        assert!(
+            result.unknown_source_roots.is_empty(),
+            "an item its own rows account for is not reported unmatched"
+        );
+        assert!(
+            result.skipped.is_empty(),
+            "one of its roots is still indexed"
+        );
+    }
+
+    #[test]
+    fn reindex_keeps_the_rows_of_an_indexed_root_the_receipt_does_not_list() {
+        // The decision's rows name two indexed roots; its receipt lists files
+        // from only one. The listed root is rebuilt; the other's row is
+        // carried as it stands, never dropped for being absent from the receipt.
+        let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);
+        let forward_rows = fetch_rows(&conn, decision_id);
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_path = other_dir.path().to_str().unwrap().to_string();
+        let other = insert_root(&conn, &other_path, "source", false);
+        let unlisted = crate::core::domain::extraction::DecisionExtraction {
+            root_id: other,
+            root_path: other_path,
+            rel_prefix: "o".to_string(),
+            files: 1,
+            bytes: Some(3),
+            ..forward_rows[0].clone()
+        };
+        let mut both = forward_rows.clone();
+        both.push(unlisted.clone());
+        repo::decision::replace_extractions(&conn, &both).unwrap();
+
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        let after = fetch_rows(&conn, decision_id);
+        assert!(
+            after.contains(&unlisted),
+            "the unlisted root's row stands: {after:?}"
+        );
+        assert!(
+            after.contains(&forward_rows[0]),
+            "the listed root is rebuilt: {after:?}"
+        );
+        assert_eq!(after.len(), 2);
+        assert_eq!(result.already_current, vec![decision_id]);
+    }
+
+    #[test]
+    fn a_receipt_listing_none_of_its_indexed_roots_is_nothing_to_index() {
+        // The decision's rows name an indexed root, but its receipt lists no
+        // file from it. Nothing is rebuilt and the decision is not skipped —
+        // its root has not been removed — so it is reported with that reason,
+        // its rows unchanged.
+        let (conn, decision_id, _archive_dir, src_dir) = run_real_apply(TransferMode::Copy);
+        let before = fetch_rows(&conn, decision_id);
+        let receipt = receipt_file(&conn, decision_id);
+        let body = std::fs::read_to_string(&receipt).unwrap();
+        let src_path = src_dir.path().to_str().unwrap();
+        std::fs::write(&receipt, body.replace(src_path, "/vol/elsewhere")).unwrap();
+
+        let result = reindex_extractions(&conn, &ReindexParams { dry_run: false }).unwrap();
+        assert!(result.skipped.is_empty(), "its root is still indexed");
+        assert_eq!(
+            result.no_rows_built,
+            vec![(
+                decision_id,
+                "the receipt lists no files from this decision's indexed roots".to_string()
+            )]
+        );
+        assert_eq!(fetch_rows(&conn, decision_id), before);
+    }
+
     #[test]
     fn dry_run_produces_report_without_writing() {
         let (conn, decision_id, _archive_dir, _src_dir) = run_real_apply(TransferMode::Copy);

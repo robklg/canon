@@ -14,14 +14,17 @@
 //! here, not there, because they must tolerate absent fields the writer
 //! types must never gain.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
 
 use crate::core::domain::decision::{Decision, DecisionCommand};
-use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem, OriginDisposition};
+use crate::core::domain::extraction::{
+    build_extraction_rows, DecisionExtraction, ExtractionItem, OriginDisposition,
+};
+use crate::core::domain::path::same_path_any_form;
 use crate::core::domain::Root;
 use crate::core::repo::{self, Connection};
 
@@ -31,19 +34,21 @@ pub struct ReindexParams {
 
 /// Coverage report for one `ledger reindex` run. Every decision examined
 /// lands in exactly one of `no_receipt`/`unreachable`/`malformed`/
-/// `no_rows_built`, or contributes rows and lands in `indexed`/
-/// `already_current` — absence is never silent, and a bucket never claims
-/// work it didn't do.
+/// `no_rows_built`/`skipped`, or contributes rows and lands in
+/// `indexed`/`already_current` — absence is never silent, and a bucket never
+/// claims work it didn't do.
 #[derive(Default)]
 pub struct ReindexResult {
     /// Apply decisions examined.
     pub scanned: usize,
     /// Decisions whose rows were newly built (no prior extraction rows).
     pub indexed: Vec<i64>,
-    /// Total rows upserted (0 in dry-run).
+    /// Rows rebuilt from receipts (0 in dry-run). Rows carried as they stand
+    /// are written back beside them and not counted here.
     pub rows_written: usize,
     /// Decisions that already had extraction rows before this run (still
-    /// upserted, to converge on the same content).
+    /// rebuilt and written back through `replace_extractions`, converging on
+    /// the same content).
     pub already_current: Vec<i64>,
     /// No receipt was ever recorded for this decision — reason string.
     pub no_receipt: Vec<(i64, String)>,
@@ -58,11 +63,17 @@ pub struct ReindexResult {
     /// rather than `indexed`: a decision that produced no row was not
     /// indexed, and must not count as work done for the exit code.
     pub no_rows_built: Vec<(i64, String)>,
-    /// Drawn source-root paths that matched no known root — reported rather
-    /// than silently dropped. A decision with *some* matched roots still
-    /// indexes (partial is honest and reported); one with none lands in
-    /// `no_rows_built` above. (decision_id, root path)
+    /// Drawn source-root paths that matched no root this reindex may rebuild
+    /// for the decision and no removed root the decision's own rows name —
+    /// reported rather than silently dropped. A decision with *some* rebuilt
+    /// roots still indexes (partial is honest and reported); one with none
+    /// lands in `no_rows_built` or `skipped`. (decision_id, root path)
     pub unknown_source_roots: Vec<(i64, String)>,
+    /// Decisions not rebuilt because every root their rows name has been
+    /// removed or retired. Their rows are unchanged: they are the record of
+    /// where the decision's files came from. Counted as processed for the
+    /// exit code — nothing was lost and nothing needed doing.
+    pub skipped: Vec<i64>,
 }
 
 /// Lenient mirror of an apply receipt for receipt-file readers. Every
@@ -219,14 +230,17 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
     let decisions = repo::decision::fetch_by_command(conn, DecisionCommand::Apply.as_str())?;
     let roots = repo::root::fetch_all(conn)?;
 
-    // Which decisions already carry rows, in one query rather than one per
-    // decision — this drives the indexed/already_current split below.
+    // Each decision's own rows, in one query rather than one per decision.
+    // They drive the indexed/already_current split, and they say which roots
+    // the decision's files were archived from: a root number names one root
+    // while that root is in the index. A rebuild may only refresh rows for
+    // those roots; a root added later, at one of their paths or above or
+    // below it, is another root.
     let decision_ids: Vec<i64> = decisions.iter().map(|d| d.id).collect();
-    let had_rows_before: HashSet<i64> =
-        repo::decision::fetch_extractions_by_decisions(conn, &decision_ids)?
-            .into_iter()
-            .map(|row| row.decision_id)
-            .collect();
+    let mut rows_before: HashMap<i64, Vec<DecisionExtraction>> = HashMap::new();
+    for row in repo::decision::fetch_extractions_by_decisions(conn, &decision_ids)? {
+        rows_before.entry(row.decision_id).or_default().push(row);
+    }
 
     let mut result = ReindexResult {
         scanned: decisions.len(),
@@ -273,41 +287,94 @@ pub fn reindex_extractions(conn: &Connection, params: &ReindexParams) -> Result<
             .as_deref()
             .and_then(OriginDisposition::from_str);
 
-        let (rows, unknown_roots) = build_extraction_rows(
+        // Which roots this decision may be rebuilt for. A decision with rows
+        // names its roots, and only those still in the index can be rebuilt.
+        // One with none — recorded before the extraction ledger, or one whose
+        // rows failed to write when it ran — is matched against every root, as
+        // it always was. A known gap: such a decision can still be matched to
+        // a root added later at exactly its path.
+        let before = rows_before.get(&decision.id);
+        let eligible: Vec<Root> = match before {
+            Some(rows) => {
+                let named: HashSet<i64> = rows.iter().map(|r| r.root_id).collect();
+                roots
+                    .iter()
+                    .filter(|r| named.contains(&r.id))
+                    .cloned()
+                    .collect()
+            }
+            None => roots.clone(),
+        };
+
+        let (rebuilt, unknown_roots) = build_extraction_rows(
             &items,
-            &roots,
+            &eligible,
             (destination_root_id, &destination_root_path),
             disposition,
             decision.id,
         );
 
+        // Every existing row whose root was not rebuilt is carried as it
+        // stands: a removed root's rows are its history, and a named root
+        // the receipt no longer lists keeps what the decision recorded for it.
+        let rebuilt_roots: HashSet<i64> = rebuilt.iter().map(|r| r.root_id).collect();
+        let carried: Vec<DecisionExtraction> = before
+            .map(|rows| {
+                rows.iter()
+                    .filter(|r| !rebuilt_roots.contains(&r.root_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
         for unknown in unknown_roots {
-            result.unknown_source_roots.push((decision.id, unknown));
+            // Accounted for: a row this decision carries as it stands names
+            // this path — whatever root stands at that path now. (Only a root
+            // no longer indexed can be that row's: an indexed root the rows
+            // name is eligible, so its path never reaches this loop.)
+            let recorded = carried
+                .iter()
+                .any(|r| same_path_any_form(&unknown, &r.root_path));
+            if !recorded {
+                result.unknown_source_roots.push((decision.id, unknown));
+            }
         }
 
-        // A receipt whose every source root is unknown yields nothing to
-        // write. Reporting that as "indexed (0 rows)" would overstate the
-        // run and mask a universe where no work was possible, so it gets
-        // its own bucket.
-        if rows.is_empty() {
-            result.no_rows_built.push((
-                decision.id,
-                "no drawn source root matched a known root".to_string(),
-            ));
+        // Nothing rebuilt. A decision whose roots have all been removed or
+        // retired is skipped, its rows unchanged. Otherwise there was nothing
+        // to index — reporting that as "indexed (0 rows)" would overstate the
+        // run and mask a universe where no work was possible, so it gets its
+        // own bucket, with the reason.
+        if rebuilt.is_empty() {
+            match before {
+                Some(_) if eligible.is_empty() => result.skipped.push(decision.id),
+                Some(_) => result.no_rows_built.push((
+                    decision.id,
+                    "the receipt lists no files from this decision's indexed roots".to_string(),
+                )),
+                None => result.no_rows_built.push((
+                    decision.id,
+                    "no drawn source root matched a known root".to_string(),
+                )),
+            }
             continue;
         }
 
         if !params.dry_run {
             // Atomic per decision: replacing a legacy coarse row with precise
             // rows is delete-then-insert, and a concurrent `canon trail` must
-            // never read the gap between the two.
+            // never read the gap between the two. The carried rows go back in
+            // with the rebuilt ones, so the writer's per-decision replace never
+            // drops a row this reindex did not rebuild.
+            let mut rows = rebuilt.clone();
+            rows.extend(carried.iter().cloned());
             let tx = conn.unchecked_transaction()?;
             repo::decision::replace_extractions(&tx, &rows)?;
             tx.commit()?;
-            result.rows_written += rows.len();
+            result.rows_written += rebuilt.len();
         }
 
-        if had_rows_before.contains(&decision.id) {
+        if before.is_some() {
             result.already_current.push(decision.id);
         } else {
             result.indexed.push(decision.id);

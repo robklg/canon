@@ -353,7 +353,8 @@ fn migrations() -> Migrations<'static> {
         //    Same columns, same meaning per row (all counted files lie under
         //    the recorded locations); existing rows carry over unchanged as
         //    coarse rows and `ledger reindex` upgrades them where receipts
-        //    exist. SQLite can't alter a PK in place, so: rebuild + rename.
+        //    exist and their roots are still indexed. SQLite can't alter a PK
+        //    in place, so: rebuild + rename.
         M::up(
             "CREATE TABLE decision_extractions_precise (
                 decision_id INTEGER NOT NULL,

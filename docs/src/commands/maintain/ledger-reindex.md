@@ -24,6 +24,14 @@ It changes only the extraction ledger, and the report is the only record of the 
 - **unreachable**: a receipt was recorded, but its root is gone or offline or the file is missing; retried on the next run
 - **malformed**: the receipt fails an integrity check (bad TOML, a decision id that doesn't match); skipped
 
+The extraction ledger records, for each decision, the roots its files were archived from. Reindex
+rebuilds that record only for those roots, and only while they are indexed. A decision whose roots
+have all been removed or retired is counted under **skipped (roots removed or retired)**, and its
+record is unchanged. A root added later is never recorded as the origin of an earlier decision's
+files, whether its path is the removed root's path or a directory above or below it. A decision
+recorded before the extraction ledger existed has no record of its roots, so its receipt is matched
+by path against the roots indexed now.
+
 ```
 $ canon ledger reindex
 Ledger reindex: extraction index
@@ -42,4 +50,4 @@ Unreachable receipts are retried on the next run.
 
 ## Exit status
 
-Exits nonzero only when nothing at all could be processed.
+Exits nonzero only when no decision was indexed, already current or skipped.

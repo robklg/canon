@@ -215,10 +215,9 @@ two consumers were counted. The membership criteria below apply to everything el
     copy the run did not choose reaches this — one a filter left out, or one that arrived after
     the apply — since `cluster generate` refuses duplicates in its selection by default. A coarse
     row whose destination happens to equal a copy's directory reads as precise; an archive copy
-    moved after the apply is placed by no row and reads covered. `ledger reindex` attaches
-    receipt items to whichever root holds their path now, so after a root is re-added it can
-    give an earlier root's archiving to the new one — outside the root-number law, which
-    guards the number, not the attachment.
+    moved after the apply is placed by no row and reads covered. `ledger reindex` gives an
+    earlier root's archiving to a root re-added at its path only for a decision with no rows
+    of its own (`ops::ledger` below).
   - **The remainder projection** (`unresolved_remainder`) is the readiness review's own
     measure of what is left on a root, computed where the archived-from-here evidence is
     *not* on hand. It routes through `classify_present`, so this is **one law with two call
@@ -386,6 +385,22 @@ in unsettled.
   only. Its lenient read types (`ApplyReceiptDoc` and friends, tolerating fields
   pre-vocabulary receipts lack) live here deliberately and must never migrate into
   `ops::receipt`, which stays writer-only.
+
+  **A rebuild never changes which root a row names.** A root number names one root while that
+  root is in the index; a removed root's number is history. So a decision's existing rows say
+  which roots its files were archived from: `reindex_extractions` rebuilds rows only for live roots
+  those rows name, carries every other row as it stands (a removed root's history, or a named root
+  the receipt no longer lists) back through the one per-decision `replace_extractions`, and never
+  matches a receipt item to a root the rows do not name — at the removed root's path or above or
+  below it. A decision whose named roots have all left the index is `skipped`, its rows unchanged.
+  Pins: `reindex_never_gives_a_decision_to_a_root_added_later_at_its_path`,
+  `reindex_keeps_the_rows_of_a_root_no_longer_indexed`. **Where it does not reach**: a decision
+  with no rows at all (recorded before the extraction ledger, or one whose rows failed to write
+  when it ran) is matched against every root in the
+  index, as before, so such a decision can still be matched to a root added later at exactly its
+  path; and a row an earlier reindex already gave to such a root is kept as it stands,
+  indistinguishable from a true one. The rule rests on the root-number law; in an index that gave
+  a number twice before that law, a row naming the reused number names the later root.
 
   Its apply-driving tests do **not** live here: they prove the extraction round-trip law by running a
   real apply, so they name archive's transfer types, and a core test may not name a subsystem
