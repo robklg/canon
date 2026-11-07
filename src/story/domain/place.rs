@@ -11,6 +11,7 @@ use super::locations::LocationAggregate;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::object::ArchiveLocation;
+use crate::core::domain::resolution::FromHereEvidence;
 use crate::core::domain::source::Source;
 use crate::notes::Note;
 
@@ -56,9 +57,10 @@ pub struct StoryInputs<'a> {
     pub absent: &'a [Source],
     /// Object ids among the present rows verified present in the archive.
     pub archived: &'a HashSet<i64>,
-    /// Subset archived *from this root* (extraction-linked, object-grain) —
-    /// the covered/archived standing split's evidence.
-    pub archived_from_here: &'a HashSet<i64>,
+    /// What a standing file's "archived from here" rests on — the
+    /// covered/archived standing split's evidence, the one value the account
+    /// beside the walk reads too (the agreement law).
+    pub from_here: FromHereEvidence<'a>,
     /// Extraction rows whose origin is this root — the archived acts.
     pub extractions: &'a [DecisionExtraction],
     pub decisions: &'a HashMap<i64, DecisionInfo>,
@@ -78,8 +80,8 @@ pub struct StoryInputs<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlaceStanding {
     /// Archived from here, the copy standing in the archive — the
-    /// deliberate side of the covered/archived split (extraction-linked,
-    /// object-grain).
+    /// deliberate side of the covered/archived split: the file the run
+    /// chose, as `FromHereEvidence` reads it.
     pub archived: i64,
     pub covered: i64,
     /// Empty files — contentless: all shape, no content; they claim no

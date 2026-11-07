@@ -11,7 +11,9 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 
-use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::domain::resolution::{
+    build_account, FromHereEvidence, ReceiptOrigins, ResolutionAccount,
+};
 use crate::core::domain::root::Root;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
 use crate::core::repo;
@@ -54,7 +56,7 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
             story.root.path
         );
     }
-    report_over(conn, &story, params)
+    report_over(conn, &story, params, None)
 }
 
 /// The lens over an already-fetched `RootStory`: enrichments + place map +
@@ -63,11 +65,22 @@ pub fn compute_story(conn: &Connection, root_id: i64, params: &StoryParams) -> R
 /// read one world by construction (the one-fetch law). Entry policy (the
 /// archive-role refusal) stays with `compute_story` — the ceremony's target
 /// is already validated by `validate_retire_target`.
+///
+/// `receipts` is what the archiving receipts say file by file, which only
+/// the ceremony holds: `None` reads "archived from here" by the directory
+/// the index records (the live command, a query path), `Some` by the
+/// receipts the book binds beside the telling. Either way one evidence value
+/// feeds both the place map and the account, so their sums agree.
 pub fn report_over(
     conn: &Connection,
     story: &RootStory,
     params: &StoryParams,
+    receipts: Option<&ReceiptOrigins>,
 ) -> Result<StoryReport> {
+    let from_here = match receipts {
+        None => FromHereEvidence::by_directory(&story.from_here_directories),
+        Some(receipts) => FromHereEvidence::by_receipt(&story.from_here_directories, receipts),
+    };
     let notes = fetch_by_roots(conn, &[story.root.id])?;
 
     // Covered-copy locations for the "copies stand in" lines. Empty objects
@@ -99,7 +112,7 @@ pub fn report_over(
             present: &story.present,
             absent: &story.absent,
             archived: &story.archived,
-            archived_from_here: &story.archived_from_here,
+            from_here,
             extractions: &story.extractions,
             decisions: &decisions,
             notes: &notes,
@@ -117,7 +130,7 @@ pub fn report_over(
         &story.present,
         &story.absent,
         &story.archive_copies,
-        &story.archived_from_here,
+        from_here,
         &story.extractions,
         &story.stamp_families,
     );
@@ -372,7 +385,7 @@ mod tests {
         insert_scope(&conn, d, root, "/r", "old");
 
         let fetched = fetch_root_story(&conn, root).unwrap();
-        let via_lens = report_over(&conn, &fetched, &no_dust()).unwrap();
+        let via_lens = report_over(&conn, &fetched, &no_dust(), None).unwrap();
         let via_command = compute_story(&conn, root, &no_dust()).unwrap();
         assert_eq!(
             crate::story::ops::render::story_lines(
@@ -436,8 +449,11 @@ mod tests {
 
         let report = compute_story(&conn, root, &no_dust()).unwrap();
         assert!(report.places.undecided());
-        assert_eq!(report.places.standing.covered, 1);
-        assert_eq!(report.places.covered_where.locations[0].path, "/archive/m");
+        // Its content all lies in `stuff`, so that is where it is shown.
+        let stuff = find_child(&report.places, "stuff");
+        assert!(stuff.undecided());
+        assert_eq!(stuff.standing.covered, 1);
+        assert_eq!(stuff.covered_where.locations[0].path, "/archive/m");
     }
 
     #[test]
@@ -478,18 +494,16 @@ mod tests {
         );
 
         let report = compute_story(&conn, root, &no_dust()).unwrap();
+        let world = find_child(&report.places, "world");
         assert_eq!(
-            report.places.standing.contentless, 1,
+            world.standing.contentless, 1,
             "an empty source is contentless — never covered (the contentless law)"
         );
         assert_eq!(
-            report.places.standing.covered, 0,
+            world.standing.covered, 0,
             "the universal empty object creates no coverage"
         );
-        assert!(
-            report.places.covered_where.is_empty(),
-            "and it claims no locations"
-        );
+        assert!(world.covered_where.is_empty(), "and it claims no locations");
     }
 
     #[test]
@@ -524,7 +538,7 @@ mod tests {
         let report = compute_story(&conn, root, &no_dust()).unwrap();
         assert_eq!(report.account.covered, 1100);
         assert_eq!(
-            report.places.covered_where.locations,
+            find_child(&report.places, "bulk").covered_where.locations,
             vec![crate::story::domain::locations::LocationCount {
                 path: "/archive/media".into(),
                 files: 1100,

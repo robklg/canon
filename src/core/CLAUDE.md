@@ -163,6 +163,7 @@ two consumers were counted. The membership criteria below apply to everything el
 
 - **`domain::resolution`** — `ResolutionAccount`, `StandingBucket`, `AbsentBucket`,
   `classify_present`, `classify_absent`, `build_account`, `unresolved_remainder`,
+  `FromHereEvidence`, `place_from_here`,
   `only_on_suspended`, `ParkedEvidence`, `standing_first`. Shared
   substrate `retire`'s readiness gate, `story`'s place lens and `sweep`'s root-nearness term
   each independently compute over; no subsystem owns it, which is exactly why it is here.
@@ -195,15 +196,38 @@ two consumers were counted. The membership criteria below apply to everything el
     chose. The sweep's live-preferred counterpart choice answers the same law through a different,
     filtering mechanism instead — a losing parked scope forfeits its citation rather
     than sorting behind — so it shares the law, not the function.
+  - **What "archived from here" rests on** (`FromHereEvidence`) — the file an archiving run
+    chose, never every copy of its content. `place_from_here` finds, per archive copy, the
+    rows of its stamping run that placed it (destination *is* the copy's directory: precise;
+    only *contains* it: coarse, a row from before directory precision), and a file matches a
+    precise row at exactly its `rel_prefix`, a coarse one at or under it. Two constructors, one
+    classifier: `by_directory` for the screens (a query path, index only), `by_receipt` for
+    the book (the receipt where one was read, the directory where none was, the account
+    counting that fallback per decision for the book's gap). One value feeds the place walk
+    and the account (the agreement law). Pins: `a_copy_in_a_sibling_directory_of_the_same_run_is_covered`,
+    `a_coarse_row_counts_its_subdirectories_as_chosen`,
+    `the_book_reads_the_receipt_where_one_was_read_and_the_directory_where_none_was`. **Where
+    it does not reach**: the index records a run as (origin directory, destination directory)
+    rows, so on the screens a copy of a chosen file reads archived wherever it stands in *any*
+    origin directory that fed the same destination directory as the chosen file — its own
+    directory always, and every other one whenever the pattern does not mirror the scope
+    (`{filename}`); the receipt names the file, so the book reads such a copy covered. Only a
+    copy the run did not choose reaches this — one a filter left out, or one that arrived after
+    the apply — since `cluster generate` refuses duplicates in its selection by default. A coarse
+    row whose destination happens to equal a copy's directory reads as precise; an archive copy
+    moved after the apply is placed by no row and reads covered. `ledger reindex` attaches
+    receipt items to whichever root holds their path now, so after a root is re-added it can
+    give an earlier root's archiving to the new one — outside the root-number law, which
+    guards the number, not the attachment.
   - **The remainder projection** (`unresolved_remainder`) is the readiness review's own
     measure of what is left on a root, computed where the archived-from-here evidence is
     *not* on hand. It routes through `classify_present`, so this is **one law with two call
     shapes, not two laws**: what "unresolved" means is still spoken exactly once, and the
     contentless law is inherited rather than restated — empties bucket as `Contentless`
     before any identity test, so a root holding only empty files reads zero. Its soundness is
-    one statable fact: `archived_from_here` only ever splits `Archived` from `Covered`, and
-    neither is unresolved, so no value of it can move the count — resting on
-    `archived_from_here ⊆ archived`, which both SQL projections guarantee by construction.
+    one statable fact: the from-here evidence only ever splits `Archived` from `Covered`, and
+    neither is unresolved, so no value of it can move the count — resting on the evidence
+    holding only for objects in `archived`, which both SQL projections guarantee by construction.
     That fact **is** the pin (`archived_from_here_never_moves_the_unresolved_count`), checked
     over every subset of the archived set. Bucket 0 of the sweep's nearness
     scale is exactly `Readiness::NoBlockersFound`, pinned in two halves across the `retire`
@@ -342,6 +366,17 @@ in unsettled.
   the key and joins nothing, so suspension, scope, presence and role can never enter it; a
   key with no facts has no type. `repo::fact::key_census` reads the same row set whole, for the
   conversion.
+  **The root-number law**: *a root's number is never given twice.* A removed root's number lives
+  on in the records that outlive it, and a root that took it would inherit them into its story
+  and a book that is never rewritten. `repo::root::insert_numbered` is the one insert that makes a
+  root (scan's `create` calls it); its number is one above `roots.id`, every column named
+  `root_id` or ending `_root_id`, and the `_meta` mark `repo::root::remember_root_number` writes
+  before `roots`' `remove` deletes the root — the mark is what holds under `recording = "Off"`,
+  where no record names the number. Verifier `a_root_number_is_never_given_twice`; the column
+  list is pinned against the schema by `every_column_naming_a_root_bounds_the_next_number`, and
+  the order by `the_mark_is_written_before_the_root_is_removed`. **Where it does not apply**: an
+  index that already gave a number twice (nothing is repaired), and numbers across two indexes —
+  a number is local to the index that gave it.
 - **`ops::ledger`** — the extraction ledger's maintenance path (`ledger reindex`): rebuilds
   the `decision_extractions` projection from apply receipts already on disk. This is the
   *prove* half of the verb, and it lives with the discipline it proves: the claim that the

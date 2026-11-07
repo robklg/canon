@@ -459,7 +459,7 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         let counts = &mut direct[fid as usize];
         counts.files_present += 1;
         counts.bytes_present += source.size;
-        let bucket = classify_present(source, inputs.archived, inputs.archived_from_here);
+        let bucket = classify_present(source, inputs.archived, inputs.from_here);
         match bucket {
             StandingBucket::Archived | StandingBucket::Covered => {
                 match bucket {
@@ -691,6 +691,61 @@ pub fn build_places(inputs: &StoryInputs<'_>, params: &StoryParams) -> StoryPlac
         };
         for &child in tree.children(fid) {
             stack.push((child, next_ctx));
+        }
+    }
+
+    // ---- an entry is shown where its content is ----
+    // A place that tells nothing of its own — no act, no note, not a care
+    // anchor or a noted node (the root qualifies: it is forced only as the
+    // container) — and whose content all lies under one directory below it
+    // is shown at that directory instead, so content is never shown at a
+    // place it is not in. Only where the attributed content is shown moves;
+    // the sums do not. The entry moves rather than gaining a twin: a place
+    // other than the root is dropped, having nothing left to say, while the
+    // root stays as the container it always is. One pass suffices: the
+    // lowest common directory holds no single deeper directory that holds
+    // all of it.
+    {
+        let resolve = |fid: u32| -> u32 {
+            let mut cur = fid;
+            loop {
+                if emitted.contains(&cur) {
+                    return cur;
+                }
+                cur = tree.parent(cur).expect("root is emitted");
+            }
+        };
+        // A noted node always holds its own note, so `tells` covers it; a
+        // care anchor need not hold any act (its slices can land on emitted
+        // places below it), so it is asked separately.
+        let mut tells: HashSet<u32> = HashSet::new();
+        tells.extend(atoms.iter().map(|(anchor, _)| resolve(*anchor)));
+        tells.extend(note_fids.iter().map(|fid| resolve(*fid)));
+        let mut content_of: HashMap<u32, Vec<u32>> = HashMap::new();
+        for fid in 0..n as u32 {
+            let counts = &direct[fid as usize];
+            if counts.files_present > 0
+                || counts.missing > 0
+                || !direct_locs[fid as usize].is_empty()
+            {
+                content_of.entry(resolve(fid)).or_default().push(fid);
+            }
+        }
+        let mut moved: Vec<(u32, u32)> = Vec::new();
+        for (&place, dirs) in &content_of {
+            if tells.contains(&place) || care_anchors.contains(&place) {
+                continue;
+            }
+            let lowest = lca_all(&tree, dirs);
+            if lowest != place {
+                moved.push((place, lowest));
+            }
+        }
+        for (place, lowest) in moved {
+            if place != 0 {
+                emitted.remove(&place);
+            }
+            emitted.insert(lowest);
         }
     }
 

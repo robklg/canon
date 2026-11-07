@@ -1,11 +1,14 @@
+use crate::core::domain::config::RecordingMode;
+use crate::core::ops::root_story::fetch_root_story;
 use crate::core::repo::db::open_in_memory_for_test;
 use crate::core::repo::insert_test_root;
 use crate::notes::insert;
 use crate::retire::ops::verify::verify_book;
+use crate::story::StoryParams;
 
 use super::fixtures::{
-    compile_to, extraction_from, insert_decision, insert_object, insert_source, inventory_lines,
-    scope, set_decision_extras, set_decision_receipt,
+    begin_with, compile_to, copies_fixture, extraction_from, insert_decision, insert_object,
+    insert_source, inventory_lines, scope, set_decision_extras, set_decision_receipt, CopiesShape,
 };
 
 #[test]
@@ -351,4 +354,185 @@ fn the_books_notes_and_timeline_are_dated_on_the_binders_clock() {
     let timeline = std::fs::read_to_string(dest.join("timeline.md")).unwrap();
     assert!(timeline.contains("2023-12-31"), "{timeline}");
     assert!(!timeline.contains("2024-01-01"), "{timeline}");
+}
+
+// "Archived from here" is the file that was chosen — the book.
+
+const COPIED: CopiesShape = CopiesShape {
+    receipt: true,
+    moved: false,
+    copies: true,
+};
+
+fn meta_of(dir: &std::path::Path) -> toml::Value {
+    toml::from_str(&std::fs::read_to_string(dir.join("meta.toml")).unwrap()).unwrap()
+}
+
+fn int(meta: &toml::Value, table: &str, key: &str) -> i64 {
+    meta[table][key].as_integer().unwrap()
+}
+
+/// Bind the fixture's root through the ceremony, the telling composed over
+/// the ceremony's own story and receipts.
+fn bind_told(fx: &super::fixtures::Copies) -> crate::retire::ops::ceremony::BoundBook {
+    let mut ceremony = begin_with(&fx.conn, fx.root_id, RecordingMode::Full);
+    let draft = ceremony.compose_telling(&fx.conn).unwrap();
+    ceremony
+        .bind(
+            &fx.conn,
+            crate::retire::ops::frame::TellingArtifact {
+                text: draft,
+                hand_edited: false,
+                params: StoryParams::default(),
+            },
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_book_counts_a_copy_of_a_chosen_file_as_preserved() {
+    let fx = copies_fixture(COPIED);
+    let bound = bind_told(&fx);
+    let meta = meta_of(&bound.dir);
+    assert_eq!(int(&meta, "account", "archived_standing"), 5);
+    assert_eq!(
+        int(&meta, "account", "archived_standing"),
+        int(&meta, "counts", "archived_from_here")
+    );
+    assert_eq!(int(&meta, "account", "covered"), 7);
+    assert_eq!(
+        int(&meta, "account", "covered"),
+        int(&meta, "counts", "covered")
+    );
+    let readme = std::fs::read_to_string(bound.dir.join("README.md")).unwrap();
+    assert!(
+        readme.contains("- archived from here, still standing: 5\n"),
+        "{readme}"
+    );
+    assert!(readme.contains("- covered: 7\n"), "{readme}");
+    let told = std::fs::read_to_string(bound.dir.join("story.md")).unwrap();
+    assert!(
+        told.contains("preserved by copies in the archive"),
+        "the copies are told:\n{told}"
+    );
+}
+
+#[test]
+fn the_review_and_the_book_agree_on_copies() {
+    let fx = copies_fixture(COPIED);
+    let story = fetch_root_story(&fx.conn, fx.root_id).unwrap();
+    let review = crate::retire::ops::review::readiness_lens(&story);
+    let bound = bind_told(&fx);
+    let meta = meta_of(&bound.dir);
+    assert_eq!(
+        int(&meta, "account", "archived_standing"),
+        review.account.archived_standing
+    );
+    assert_eq!(int(&meta, "account", "covered"), review.account.covered);
+}
+
+#[test]
+fn the_book_falls_back_to_the_directory_without_a_receipt() {
+    // `Records` mode: no receipt says which file was chosen. The account
+    // reads the directory the index records, as the screens do; the
+    // inventory, which names a destination only from a receipt, keeps its
+    // documented `covered`; the gap says why the two differ, with the count.
+    let fx = copies_fixture(CopiesShape {
+        receipt: false,
+        ..COPIED
+    });
+    let book_dir = tempfile::tempdir().unwrap();
+    let dest = book_dir.path().join("book");
+    let book = compile_to(&fx.conn, fx.root_id, &dest);
+
+    let meta = meta_of(&dest);
+    assert_eq!(int(&meta, "account", "archived_standing"), 5);
+    assert_eq!(int(&meta, "account", "covered"), 7);
+    assert_eq!(int(&meta, "counts", "archived_from_here"), 0);
+    assert_eq!(int(&meta, "counts", "covered"), 12);
+    let chosen: Vec<_> = inventory_lines(&dest)
+        .into_iter()
+        .filter(|line| line["path"].as_str().unwrap().starts_with("photos/"))
+        .collect();
+    assert_eq!(chosen.len(), 5);
+    assert!(chosen.iter().all(|line| line["fate"] == "covered"));
+    assert_eq!(
+        book.gaps,
+        vec![format!(
+            "decision #{}: per-item origin unavailable — no receipt location recorded; 5 files \
+             still standing here are counted as chosen by the directory it drew from, and the \
+             inventory lists them as covered",
+            fx.apply_id
+        )]
+    );
+}
+
+#[test]
+fn the_gap_counts_what_the_fallback_counted() {
+    // A moved apply left nothing standing here for the fallback to count —
+    // a moved file has no row, and its copies elsewhere are covered — so the
+    // gap is today's sentence, with no consequence clause.
+    let fx = copies_fixture(CopiesShape {
+        receipt: false,
+        moved: true,
+        copies: true,
+    });
+    let book_dir = tempfile::tempdir().unwrap();
+    let book = compile_to(&fx.conn, fx.root_id, &book_dir.path().join("book"));
+    assert_eq!(
+        book.gaps,
+        vec![format!(
+            "decision #{}: per-item origin unavailable — no receipt location recorded",
+            fx.apply_id
+        )]
+    );
+
+    // And one standing file reads in the singular.
+    let fx = copies_fixture(CopiesShape {
+        receipt: false,
+        moved: false,
+        copies: false,
+    });
+    fx.conn
+        .execute(
+            "DELETE FROM sources WHERE root_id = ?1 AND rel_path != 'photos/p1.jpg'",
+            [fx.root_id],
+        )
+        .unwrap();
+    let book_dir = tempfile::tempdir().unwrap();
+    let book = compile_to(&fx.conn, fx.root_id, &book_dir.path().join("book"));
+    assert!(
+        book.gaps[0].ends_with(
+            "; 1 file still standing here is counted as chosen by the directory it drew from, \
+             and the inventory lists it as covered"
+        ),
+        "{:?}",
+        book.gaps
+    );
+}
+
+#[test]
+fn the_telling_and_the_inventory_read_one_set_of_receipts() {
+    // The ceremony reads the receipts once: a receipt that goes away
+    // between composing the telling and binding does not make the book's
+    // inventory disagree with the story it binds beside.
+    let fx = copies_fixture(COPIED);
+    let mut ceremony = begin_with(&fx.conn, fx.root_id, RecordingMode::Full);
+    let draft = ceremony.compose_telling(&fx.conn).unwrap();
+    std::fs::remove_dir_all(fx.arch.path().join(".canon-ledger")).unwrap();
+    let bound = ceremony
+        .bind(
+            &fx.conn,
+            crate::retire::ops::frame::TellingArtifact {
+                text: draft,
+                hand_edited: false,
+                params: StoryParams::default(),
+            },
+        )
+        .unwrap();
+    assert!(bound.gaps.is_empty(), "{:?}", bound.gaps);
+    let meta = meta_of(&bound.dir);
+    assert_eq!(int(&meta, "counts", "archived_from_here"), 5);
+    assert_eq!(int(&meta, "account", "archived_standing"), 5);
+    let _ = &fx.src;
 }

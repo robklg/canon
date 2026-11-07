@@ -9,8 +9,9 @@
 //!   established meaning of "archived from here"), what was deleted
 //!   (scan-observed), and what is missing without a recorded deletion.
 //! - **Standing here now** partitions the present rows: archived from here
-//!   (the surviving originals of copy-mode applies — extraction-linked,
-//!   object-grain), covered (copies elsewhere, nobody chose it), excluded,
+//!   (the surviving originals of copy-mode applies — the file the run chose,
+//!   as `FromHereEvidence` reads it), covered (copies elsewhere, nobody chose
+//!   it), excluded,
 //!   contentless (empty files — all shape, no content; stated, never
 //!   blocking), unresolved.
 //!
@@ -61,7 +62,7 @@ mod tests {
     use super::*;
     use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
     use crate::core::domain::fate::DecisionFamily;
-    use crate::core::domain::resolution::{build_account, unresolved_remainder};
+    use crate::core::domain::resolution::{build_account, unresolved_remainder, FromHereEvidence};
     use crate::core::domain::source::Source;
 
     fn source(id: i64, object_id: Option<i64>, excluded: bool, object_excluded: bool) -> Source {
@@ -173,7 +174,7 @@ mod tests {
             &present,
             &absent,
             &copies_of(&[10, 11]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &extractions,
             &families,
         )
@@ -197,7 +198,7 @@ mod tests {
             &present,
             &[],
             &copies_of(&[10, 11]),
-            &archived_set(&[10]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[10])),
             &[],
             &HashMap::new(),
         );
@@ -229,7 +230,7 @@ mod tests {
             &[e1, e2],
             &[],
             &copies_of(&[]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );
@@ -244,7 +245,7 @@ mod tests {
             &[],
             &[],
             &copies_of(&[]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );
@@ -276,7 +277,7 @@ mod tests {
             &present,
             &[],
             &copies_of(&[10]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );
@@ -291,7 +292,7 @@ mod tests {
             &present,
             &[],
             &copies_of(&[]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );
@@ -335,7 +336,7 @@ mod tests {
             &rows,
             &[],
             &copies_of(&[10]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );
@@ -349,7 +350,7 @@ mod tests {
             &rows,
             &[],
             &copies_of(&[10]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );

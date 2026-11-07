@@ -43,7 +43,10 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   absent + Observe-family stamp, the presence-axis rule; `unexplained missing` = absent + any
   other or no stamp, a record-quality fact) and *standing here now* (present rows partitioned
   **excluded > contentless > archived > covered > unresolved**, the archived/covered split resting
-  on extraction-linked evidence). Copies overlap the registers deliberately.
+  on `FromHereEvidence`: the review reads it by directory, the book by receipt). A copy of a chosen
+  file elsewhere on the drive is covered, so the two registers agree on one screen
+  (`a_copy_of_a_chosen_file_is_covered_on_the_screens`); the copies of a moved file still overlap
+  them deliberately.
 - **The covered and archived-from-here lines say what they rest on**: the account's
   `ParkedEvidence` per claim, rendered as `; N only on suspended <roots>`. The review is what a
   user reads before releasing the storage a root sits on, so a claim whose only surviving copies
@@ -95,6 +98,15 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   `source_root` are the other side of a multi-origin apply: skipped, not a gap. The
   **aggregate-only law is scoped to `decision_extractions`** (the index writer) and does not bar a
   sanctioned reader from per-item fields.
+- **The receipts are read once per ceremony** (`collect_origins` → `CollectedOrigins`, held by
+  `RetireCeremony` and filled the first time `compose_telling` or `bind` needs it), so `story.md`,
+  the README, `[account]` and the inventory come from one read
+  (`the_telling_and_the_inventory_read_one_set_of_receipts`). The same read is the book's
+  from-here evidence: the receipt where one was read, the directory where a decision left none.
+  For such a decision the gap is composed after the account and carries the account's own count
+  of standing files the directory fallback held, which the inventory lists as covered — the
+  number that makes `[account]` and `[counts]` add up; with none counted it is the plain
+  sentence (`the_gap_counts_what_the_fallback_counted`).
 - **The fate model consumes the account's classifiers** (`SourceFate` via
   `classify_present`/`classify_absent`) so the inventory and the account cannot drift — the
   agreement law (fates fold to the account's buckets) is a test. Terminal fate words derive
@@ -198,9 +210,15 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   removed) → **pointer written while the decision is still `started`**, so abort-after-bind and
   crash-during-inspection stay findable. Never move the pointer into release.
 - **Collision/convergence is disk-keyed, deliberately**: `plan_bind` reads the standing book's own
-  `meta.toml` identity — same root → replace (same-day re-runs converge; a later-date
-  re-retirement stands beside the earlier book as its own telling, the fleet listing both
-  honestly); different root → numbered sibling; unidentifiable → refuse. **Same root is asked
+  `meta.toml` identity, and only at the one name this run would write — same root number
+  (`identity.root_id`, never given twice in one index: the root-number law) **and** same path →
+  replace (same-day re-runs converge; a later-date re-retirement stands beside the earlier book
+  as its own telling, the fleet listing both honestly); another number, no number (a book bound
+  before books carried one), or another path → numbered sibling; unidentifiable → refuse. No
+  other book on the shelf is read for replacement, because a number is local to one index while
+  the shelf belongs to the archive (`a_book_of_another_root_at_the_same_path_is_never_replaced`).
+  When the book to be replaced records `[story] hand_edited`, the plan says so and the
+  ceremony's before-line adds that the user's edits go with it. **Same path is asked
   form-tolerantly** (`core::domain::path::same_path_any_form`): the book's `identity.path` is
   bytes read back off the shelf and the root path is what the index holds now, so a root removed
   and re-added from storage handing the other normalization would otherwise read as a *different*

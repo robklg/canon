@@ -79,6 +79,11 @@ pub(crate) mod root {
         // Delete sources
         let deleted_sources = conn.execute("DELETE FROM sources WHERE root_id = ?", [root_id])?;
 
+        // Remember the number before the root that holds it goes, so it is
+        // never given again even where no record names it (the root-number
+        // law).
+        crate::core::repo::root::remember_root_number(conn, root_id)?;
+
         // Delete the root
         conn.execute("DELETE FROM roots WHERE id = ?", [root_id])?;
 
@@ -337,6 +342,74 @@ pub(crate) mod root {
 
             let roots = fetch_all(&conn).unwrap();
             assert!(roots.is_empty());
+        }
+
+        // =========================================================================
+        // the root-number law, through the real create statement and `remove`
+        // =========================================================================
+
+        use crate::core::repo::root::insert_numbered;
+
+        fn mark(conn: &RusqliteConnection) -> Option<i64> {
+            conn.query_row(
+                "SELECT value_int FROM _meta WHERE key = 'root_number_high_water'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()
+        }
+
+        #[test]
+        fn a_root_number_is_never_given_twice() {
+            // The newest root is removed while a recorded decision still
+            // names it; the next root must not take its number and with it
+            // that decision.
+            let conn = setup_test_db();
+            let a = insert_numbered(&conn, "/a", "source", None).unwrap();
+            let b = insert_numbered(&conn, "/b", "source", None).unwrap();
+            conn.execute(
+                "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (1, ?, '')",
+                [b],
+            )
+            .unwrap();
+            remove(&conn, b).unwrap();
+            let c = insert_numbered(&conn, "/c", "source", None).unwrap();
+            assert!(c > b, "c = {c}, b = {b}, a = {a}");
+        }
+
+        #[test]
+        fn a_removed_number_stays_taken_with_no_record_naming_it() {
+            // The `recording = "Off"` shape: the removed root leaves no
+            // decision row, so only the mark remembers its number.
+            let conn = setup_test_db();
+            insert_numbered(&conn, "/a", "source", None).unwrap();
+            let b = insert_numbered(&conn, "/b", "source", None).unwrap();
+            remove(&conn, b).unwrap();
+            let c = insert_numbered(&conn, "/c", "source", None).unwrap();
+            assert!(c > b, "c = {c}, b = {b}");
+        }
+
+        #[test]
+        fn the_mark_is_written_before_the_root_is_removed() {
+            // A removal that fails at the root's own delete must already
+            // have left the mark — the order is what keeps it.
+            let conn = setup_test_db();
+            let b = insert_numbered(&conn, "/b", "source", None).unwrap();
+            crate::core::testing::plant_failure(&conn, "DELETE", "roots");
+            assert!(remove(&conn, b).is_err());
+            assert_eq!(mark(&conn), Some(b));
+        }
+
+        #[test]
+        fn a_reused_path_is_a_new_root() {
+            // Allowed case beside the refusals: a path can be added again
+            // after removal — it is the number that is never given twice.
+            let conn = setup_test_db();
+            let first = insert_numbered(&conn, "/drive", "source", None).unwrap();
+            remove(&conn, first).unwrap();
+            let again = insert_numbered(&conn, "/drive", "source", None).unwrap();
+            assert!(again > first);
+            assert_eq!(fetch_all(&conn).unwrap().len(), 1);
         }
     }
 }

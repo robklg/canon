@@ -36,15 +36,83 @@ fn count_retire_decisions(conn: &Connection) -> i64 {
 }
 
 /// A directory that identifies itself as some root's book — just enough
-/// meta.toml for the collision probe.
-fn fake_book(shelf: &std::path::Path, name: &str, root_path: &str) {
+/// meta.toml for the collision probe. `root_id: None` is a book bound before
+/// books carried a number.
+fn fake_book(shelf: &std::path::Path, name: &str, root_path: &str, root_id: Option<i64>) {
     let dir = shelf.join(name);
     std::fs::create_dir_all(&dir).unwrap();
+    let number = root_id
+        .map(|id| format!("root_id = {id}\n"))
+        .unwrap_or_default();
     std::fs::write(
         dir.join("meta.toml"),
-        format!("version = 1\n\n[identity]\npath = \"{root_path}\"\n"),
+        format!("version = 1\n\n[identity]\npath = \"{root_path}\"\n{number}"),
     )
     .unwrap();
+}
+
+/// The name this root's book takes today.
+fn todays_name(story: &crate::core::ops::root_story::RootStory) -> String {
+    book_dir_name(
+        &story.root.path,
+        &format_date(CEREMONY_NOW, &UserZone::utc()),
+    )
+}
+
+#[test]
+fn a_book_of_another_root_at_the_same_path_is_never_replaced() {
+    // Another drive mounted at this path and retired today, under another
+    // number: its book stands, and this one takes the next name.
+    let (conn, _src, arch, root_id) = every_fate_fixture();
+    let story = fetch_root_story(&conn, root_id).unwrap();
+    let shelf = arch.path().join(SHELF_DIR);
+    let name = todays_name(&story);
+    fake_book(&shelf, &name, &story.root.path, Some(root_id + 100));
+
+    let plan = plan_for(&conn, root_id);
+    assert!(!plan.replaces_existing);
+    assert!(!plan.replaced_book_hand_edited);
+    assert_eq!(plan.final_dir, shelf.join(format!("{name}-2")));
+}
+
+#[test]
+fn a_book_without_a_root_number_is_never_replaced() {
+    // A book bound before books carried a number cannot say whose it is
+    // beyond its path, so it is never destroyed on that doubt.
+    let (conn, _src, arch, root_id) = every_fate_fixture();
+    let story = fetch_root_story(&conn, root_id).unwrap();
+    let shelf = arch.path().join(SHELF_DIR);
+    let name = todays_name(&story);
+    fake_book(&shelf, &name, &story.root.path, None);
+
+    let plan = plan_for(&conn, root_id);
+    assert!(!plan.replaces_existing);
+    assert_eq!(plan.final_dir, shelf.join(format!("{name}-2")));
+}
+
+#[test]
+fn the_ceremony_names_edits_that_go_with_the_book() {
+    // A same-day re-run after a declined release: the book it replaces
+    // holds the user's own edits only when its story was edited by hand.
+    for edited in [true, false] {
+        let (conn, _src, _arch, root_id) = every_fate_fixture();
+        let mut first = begin_with(&conn, root_id, RecordingMode::Full);
+        first
+            .bind(
+                &conn,
+                TellingArtifact {
+                    text: "# my own words\n".to_string(),
+                    hand_edited: edited,
+                    params: StoryParams::default(),
+                },
+            )
+            .unwrap();
+        first.abandon(&conn);
+
+        let plan = plan_for(&conn, root_id);
+        assert!(plan.replaces_existing, "edited = {edited}");
+        assert_eq!(plan.replaced_book_hand_edited, edited);
+    }
 }
 
 #[test]
@@ -97,7 +165,7 @@ fn plan_bind_same_root_book_is_a_replacement() {
         &story.root.path,
         &format_date(CEREMONY_NOW, &UserZone::utc()),
     );
-    fake_book(&shelf, &name, &story.root.path);
+    fake_book(&shelf, &name, &story.root.path, Some(root_id));
 
     let plan = plan_for(&conn, root_id);
 
@@ -114,14 +182,19 @@ fn plan_bind_different_root_book_probes_to_a_sibling_name() {
         &story.root.path,
         &format_date(CEREMONY_NOW, &UserZone::utc()),
     );
-    fake_book(&shelf, &name, "/somebody/else");
+    fake_book(&shelf, &name, "/somebody/else", Some(root_id));
 
     let plan = plan_for(&conn, root_id);
     assert!(!plan.replaces_existing);
     assert_eq!(plan.final_dir, shelf.join(format!("{name}-2")));
 
     // A second stranger pushes to -3.
-    fake_book(&shelf, &format!("{name}-2"), "/a/third/party");
+    fake_book(
+        &shelf,
+        &format!("{name}-2"),
+        "/a/third/party",
+        Some(root_id),
+    );
     let plan = plan_for(&conn, root_id);
     assert_eq!(plan.final_dir, shelf.join(format!("{name}-3")));
 }
@@ -153,7 +226,7 @@ fn plan_bind_recognises_a_book_whose_identity_is_written_in_the_other_form() {
     // The standing book names the same place, spelled the other way.
     let other_form = root_path.replace(NFD_DIR, NFC_DIR);
     assert_ne!(other_form, root_path, "the fixture must be two byte-forms");
-    fake_book(&shelf, &name, &other_form);
+    fake_book(&shelf, &name, &other_form, Some(root_id));
 
     let plan = plan_bind(&story, &ledger_config(), CEREMONY_NOW, &UserZone::utc()).unwrap();
     assert!(

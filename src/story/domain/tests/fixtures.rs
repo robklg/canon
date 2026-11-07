@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::DecisionFamily;
 use crate::core::domain::object::{ArchiveCopy, ArchiveLocation};
+use crate::core::domain::resolution::{FromHereDirectory, FromHereEvidence};
 use crate::core::domain::source::Source;
 use crate::notes::Note;
 use crate::story::domain::place::{DecisionInfo, StoryInputs, StoryParams, StoryPlace};
@@ -112,7 +113,7 @@ pub(super) struct Fixture {
     pub(super) absent: Vec<Source>,
     pub(super) archived: HashSet<i64>,
     pub(super) archive_copies: HashMap<i64, Vec<ArchiveCopy>>,
-    pub(super) archived_from_here: HashSet<i64>,
+    pub(super) from_here: HashMap<i64, Vec<FromHereDirectory>>,
     pub(super) extractions: Vec<DecisionExtraction>,
     pub(super) decisions: HashMap<i64, DecisionInfo>,
     pub(super) notes: Vec<Note>,
@@ -127,7 +128,7 @@ impl Fixture {
             absent: vec![],
             archived: HashSet::new(),
             archive_copies: HashMap::new(),
-            archived_from_here: HashSet::new(),
+            from_here: HashMap::new(),
             extractions: vec![],
             decisions: HashMap::new(),
             notes: vec![],
@@ -162,7 +163,7 @@ impl Fixture {
                 present: &self.present,
                 absent: &self.absent,
                 archived: &self.archived,
-                archived_from_here: &self.archived_from_here,
+                from_here: FromHereEvidence::by_directory(&self.from_here),
                 extractions: &self.extractions,
                 decisions: &self.decisions,
                 notes: &self.notes,

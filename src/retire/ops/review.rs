@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::core::domain::config::LedgerConfig;
 use crate::core::domain::decision::{Decision, DecisionCommand};
-use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::domain::resolution::{build_account, FromHereEvidence, ResolutionAccount};
 use crate::core::domain::Root;
 use crate::core::ops::receipt::LedgerRootOutcome;
 use crate::core::ops::root_story::{fetch_root_story, RootStory};
@@ -189,7 +189,7 @@ pub fn readiness_lens(story: &RootStory) -> ReadinessReview {
         &story.present,
         &story.absent,
         &story.archive_copies,
-        &story.archived_from_here,
+        FromHereEvidence::by_directory(&story.from_here_directories),
         &story.extractions,
         &story.stamp_families,
     );

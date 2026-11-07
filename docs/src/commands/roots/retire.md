@@ -35,7 +35,8 @@ Resolution account
     missing, unexplained 12 sources
 
   standing here now      4,210 sources
-    covered              3,980   (content verified present in the archive)
+    archived from here   3,745   (this copy still stands; the archive holds it)
+    covered              235   (content verified present in the archive)
     excluded             195
     unresolved           35      (19 unhashed — listed by name only)
 
@@ -102,8 +103,10 @@ shelf, and the root is untouched. Then:
 Remove the root from the index? Aborting keeps both the root and the book.
 ```
 
-- **Aborting**: the root stays indexed and the book stays on the shelf. A later re-run
-  starts again.
+- **Aborting**: the root stays indexed and the book stays on the shelf. A re-run the same
+  day replaces that book, with any edits you made to it. A re-run on a later day binds a
+  new book beside it; the date in each book's name tells them apart, and the earlier one
+  is yours to remove.
 - **Confirming**: the root's sources, facts and notes are removed in one transaction.
 
 If anything changed on the root since the review, the release stops with root and book
@@ -130,6 +133,9 @@ The retired fleet: 2 books on the shelf (/Volumes/Archive/retired)
 
 Identification is not verification: the listing reads each book's `meta.toml`
 identity and counts, nothing more.
+
+Two roots retired at the same path list with the same path; a comment on the root, or a
+`--reason`, is what tells their books apart.
 
 ## Flags
 

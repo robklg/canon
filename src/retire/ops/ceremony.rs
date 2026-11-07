@@ -20,7 +20,7 @@ use crate::retire::domain::book_dir_name;
 use crate::retire::ops::frame::{self, TellingArtifact};
 use crate::story::StoryParams;
 
-use super::compile::{compile_book, CompileParams};
+use super::compile::{collect_origins, compile_book, CollectedOrigins, CompileParams};
 use super::verify::{count_files, verify_book};
 use super::{ReadinessReview, SHELF_DIR};
 
@@ -42,6 +42,10 @@ pub struct BindPlan {
     /// A same-root book already stands at `final_dir` (a prior
     /// aborted-after-bind run) — this run replaces it with a fresh compile.
     pub replaces_existing: bool,
+    /// The book this run replaces records that its story was edited by hand
+    /// (`[story] hand_edited`), so the user's own words go with it. Only
+    /// ever true together with `replaces_existing`.
+    pub replaced_book_hand_edited: bool,
     /// `false` → first use: the shelf directory and its README are generated.
     pub shelf_exists: bool,
 }
@@ -49,9 +53,12 @@ pub struct BindPlan {
 /// Resolve the shelf and the book's name. Collision handling is keyed on the
 /// standing book's own `meta.toml` identity — deliberately disk-keyed, never
 /// a decision-row lookup, so convergence survives any recording-mode history:
-/// the same root's book is replaced (a re-run converges); a different root's
-/// book pushes this one to a `-2`/`-3`… sibling; a directory that cannot be
-/// identified refuses the ceremony.
+/// a book at the name this run writes that carries this root's number **and**
+/// path is replaced (a same-day re-run converges); any other book — another
+/// root, or one bound before books carried a number — pushes this one to a
+/// `-2`/`-3`… sibling; a directory that cannot be identified refuses the
+/// ceremony. Only the one name the run would write is ever a candidate for
+/// replacement: no other book on the shelf is read for it.
 pub fn plan_bind(
     story: &RootStory,
     config: &LedgerConfig,
@@ -78,7 +85,7 @@ pub fn plan_bind(
     let shelf = PathBuf::from(&ledger_root_path).join(SHELF_DIR);
     let base = book_dir_name(&story.root.path, &format_date(now, zone));
 
-    let mut chosen: Option<(String, bool)> = None;
+    let mut chosen: Option<(String, Option<IdentityProbe>)> = None;
     for attempt in 1u32..=99 {
         let name = if attempt == 1 {
             base.clone()
@@ -87,22 +94,28 @@ pub fn plan_bind(
         };
         let candidate = shelf.join(&name);
         if !candidate.exists() {
-            chosen = Some((name, false));
+            chosen = Some((name, None));
             break;
         }
-        // Form-tolerantly: the text side is what was read back off the
-        // shelf, the index's root path is what never bends. A root removed
-        // and re-added from storage handing the other normalization would
-        // otherwise read as a *different* root and bind a second book beside
-        // the first — one place with two tellings, and nothing anywhere would
-        // say so.
-        let standing_root = read_book_root_path(&candidate)?;
-        if crate::core::domain::path::same_path_any_form(&standing_root, &story.root.path) {
-            chosen = Some((name, true));
+        let standing = read_book_identity(&candidate)?;
+        // The number first: a root's number is never given twice in this
+        // index (the root-number law), so a book carrying another number, or
+        // none, is another root's telling however its path reads. Then the
+        // path, form-tolerantly: the text side is what was read back off the
+        // shelf, the index's root path is what never bends, and a root
+        // re-added from storage handing the other normalization must still
+        // recognise its own book.
+        if standing.identity.root_id == Some(story.root.id)
+            && crate::core::domain::path::same_path_any_form(
+                &standing.identity.path,
+                &story.root.path,
+            )
+        {
+            chosen = Some((name, Some(standing)));
             break;
         }
     }
-    let Some((name, replaces_existing)) = chosen else {
+    let Some((name, replaced)) = chosen else {
         bail!(
             "No free book name beside {} after 99 attempts — the shelf needs attention",
             shelf.join(&base).display()
@@ -115,24 +128,41 @@ pub fn plan_bind(
         shelf_exists: shelf.is_dir(),
         shelf,
         ledger_root_id,
-        replaces_existing,
+        replaces_existing: replaced.is_some(),
+        replaced_book_hand_edited: replaced
+            .and_then(|book| book.story)
+            .and_then(|story| story.hand_edited)
+            .unwrap_or(false),
     })
 }
 
 /// The identity half of a standing book's `meta.toml` — read only to answer
-/// "whose book is this?" during collision planning. Deliberately separate
-/// from `verify_book`'s `MetaDoc`: different question, different tolerance.
+/// "whose book is this?" during collision planning, and whether replacing it
+/// takes the user's own words with it. Deliberately separate from
+/// `verify_book`'s `MetaDoc`: different question, different tolerance — a
+/// book bound before it carried a root number, or before it carried a
+/// telling, still probes.
 #[derive(Deserialize)]
 struct IdentityProbe {
     identity: IdentityProbePath,
+    #[serde(default)]
+    story: Option<StoryProbe>,
 }
 
 #[derive(Deserialize)]
 struct IdentityProbePath {
     path: String,
+    #[serde(default)]
+    root_id: Option<i64>,
 }
 
-fn read_book_root_path(dir: &Path) -> Result<String> {
+#[derive(Deserialize)]
+struct StoryProbe {
+    #[serde(default)]
+    hand_edited: Option<bool>,
+}
+
+fn read_book_identity(dir: &Path) -> Result<IdentityProbe> {
     let refusal = || {
         format!(
             "A directory stands at {} but cannot be identified as a book — Canon will not replace what it cannot identify; move it aside and re-run",
@@ -140,8 +170,7 @@ fn read_book_root_path(dir: &Path) -> Result<String> {
         )
     };
     let raw = std::fs::read_to_string(dir.join("meta.toml")).with_context(refusal)?;
-    let probe: IdentityProbe = toml::from_str(&raw).with_context(refusal)?;
-    Ok(probe.identity.path)
+    toml::from_str(&raw).with_context(refusal)
 }
 
 /// The ceremony's parameters, held for the life of one invocation — the
@@ -177,6 +206,11 @@ pub struct RetireCeremony {
     /// Review-time basis for the release movement's world-moved re-check.
     snapshot_source_count: i64,
     snapshot_max_decision_id: Option<i64>,
+    /// The archiving receipts, read once for this ceremony — filled the first
+    /// time the telling or the bind needs them, so `story.md` and the
+    /// inventory are drawn from one read even if a receipt changes between
+    /// composing and binding.
+    origins: Option<CollectedOrigins>,
     /// Whether the release transaction committed.
     ///
     /// What makes `release`'s failure sentence follow *state* rather than its
@@ -232,8 +266,23 @@ pub fn begin_ceremony(
         read_times_on: params.read_times_on,
         snapshot_source_count: review.snapshot_source_count,
         snapshot_max_decision_id: review.snapshot_max_decision_id,
+        origins: None,
         released: false,
     }
+}
+
+/// The ceremony's one read of the archiving receipts: read the first time
+/// it is needed, the same value every time after.
+fn read_once<'a>(
+    slot: &'a mut Option<CollectedOrigins>,
+    conn: &Connection,
+    story: &RootStory,
+) -> Result<&'a CollectedOrigins> {
+    let origins = match slot.take() {
+        Some(origins) => origins,
+        None => collect_origins(conn, story)?,
+    };
+    Ok(slot.insert(origins))
 }
 
 /// The placed, verified book — what the bind movement hands the interface
@@ -251,11 +300,15 @@ pub struct BoundBook {
 impl RetireCeremony {
     /// Compose the reference-voiced telling over the ceremony's own story —
     /// one fetch: the gate, the book, and the telling read the same world
-    /// by construction. The interface offers this draft to the user's
-    /// editor before binding; the finalized text comes back through `bind`.
-    pub fn compose_telling(&self, conn: &Connection) -> Result<String> {
+    /// by construction — and the ceremony's own read of the receipts, the
+    /// one the inventory binds from. The interface offers this draft to the
+    /// user's editor before binding; the finalized text comes back through
+    /// `bind`.
+    pub fn compose_telling(&mut self, conn: &Connection) -> Result<String> {
         let params = StoryParams::default();
-        let report = crate::story::report_over(conn, &self.story, &params)?;
+        let origins = read_once(&mut self.origins, conn, &self.story)?;
+        let report =
+            crate::story::report_over(conn, &self.story, &params, Some(&origins.receipts))?;
         // Where the chosen content lives now: the recorded destinations,
         // aggregated the same way every "where" line is.
         let dirs: Vec<(&str, i64)> = self
@@ -332,6 +385,7 @@ impl RetireCeremony {
             })?;
         }
 
+        let origins = read_once(&mut self.origins, conn, &self.story)?;
         let compiled = compile_book(
             conn,
             &self.story,
@@ -343,6 +397,7 @@ impl RetireCeremony {
                 dest_dir: self.plan.temp_dir.clone(),
                 ceremony_decision_id: self.recorder.decision_id(),
                 telling: Some(telling),
+                origins,
             },
         )?;
         verify_book(&self.plan.temp_dir).with_context(|| {

@@ -177,6 +177,7 @@ pub(super) fn compile_on(
     zone: UserZone,
 ) -> CompiledBook {
     let story = fetch_root_story(conn, root_id).unwrap();
+    let origins = crate::retire::ops::compile::collect_origins(conn, &story).unwrap();
     compile_book(
         conn,
         &story,
@@ -188,6 +189,7 @@ pub(super) fn compile_on(
             dest_dir: dest.to_path_buf(),
             ceremony_decision_id: None,
             telling: Some(test_telling()),
+            origins: &origins,
         },
     )
     .unwrap()
@@ -199,6 +201,127 @@ pub(super) fn inventory_lines(dir: &Path) -> Vec<serde_json::Value> {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect()
+}
+
+/// The drive the copies lifecycle reproduces: `photos/` holds five files an
+/// apply chose into the archive's `photos/`, and seven copies of them stand
+/// in `backup/` (five) and `docs/` (two) — content in the archive that
+/// nobody chose from there.
+pub(super) struct Copies {
+    pub(super) conn: Connection,
+    pub(super) src: tempfile::TempDir,
+    pub(super) arch: tempfile::TempDir,
+    pub(super) root_id: i64,
+    pub(super) apply_id: i64,
+}
+
+/// What the copies fixture varies.
+#[derive(Clone, Copy)]
+pub(super) struct CopiesShape {
+    /// The apply left a receipt on disk (`Full`), or none (`Records`).
+    pub(super) receipt: bool,
+    /// The apply moved the chosen files (no origin row stands) instead of
+    /// copying them.
+    pub(super) moved: bool,
+    /// The seven copies stand on the drive.
+    pub(super) copies: bool,
+}
+
+/// Build [`Copies`]: the archive side is what an apply leaves — its copies
+/// stamped with the apply's id, its extraction rows aggregated by the real
+/// `build_extraction_rows`, and, with `receipt`, its receipt in the archive's
+/// ledger naming each chosen file.
+pub(super) fn copies_fixture(shape: CopiesShape) -> Copies {
+    use crate::core::domain::extraction::{build_extraction_rows, ExtractionItem};
+
+    let conn = open_in_memory_for_test();
+    let src = tempfile::tempdir().unwrap();
+    let arch = tempfile::tempdir().unwrap();
+    let src_path = src.path().to_str().unwrap().to_string();
+    let arch_path = arch.path().to_str().unwrap().to_string();
+    let root_id = insert_test_root(&conn, &src_path, "source", false);
+    let archive_id = insert_test_root(&conn, &arch_path, "archive", false);
+    let apply_id = insert_decision(&conn, "apply", 200);
+
+    let chosen: Vec<String> = (1..=5).map(|n| format!("photos/p{n}.jpg")).collect();
+    let mut objects = Vec::new();
+    for (n, rel) in chosen.iter().enumerate() {
+        let object = insert_object(&conn, &format!("photo{n}"));
+        objects.push(object);
+        insert_source(
+            &conn,
+            archive_id,
+            rel,
+            Some(object),
+            true,
+            false,
+            Some(apply_id),
+        );
+        if !shape.moved {
+            insert_source(&conn, root_id, rel, Some(object), true, false, None);
+        }
+    }
+    if shape.copies {
+        for (n, object) in objects.iter().enumerate() {
+            let rel = format!("backup/p{}.jpg", n + 1);
+            insert_source(&conn, root_id, &rel, Some(*object), true, false, None);
+        }
+        for (n, object) in objects.iter().take(2).enumerate() {
+            let rel = format!("docs/p{}.jpg", n + 1);
+            insert_source(&conn, root_id, &rel, Some(*object), true, false, None);
+        }
+    }
+
+    let items: Vec<ExtractionItem> = chosen
+        .iter()
+        .map(|rel| ExtractionItem {
+            source_root: &src_path,
+            source_rel_path: rel,
+            destination_rel_path: rel,
+            size: 1000,
+        })
+        .collect();
+    let disposition = if shape.moved {
+        OriginDisposition::Relocated
+    } else {
+        OriginDisposition::Retained
+    };
+    let roots = repo::root::fetch_all(&conn).unwrap();
+    let (rows, unknown) = build_extraction_rows(
+        &items,
+        &roots,
+        (Some(archive_id), &arch_path),
+        Some(disposition),
+        apply_id,
+    );
+    assert!(unknown.is_empty());
+    repo::decision::replace_extractions(&conn, &rows).unwrap();
+
+    if shape.receipt {
+        let receipt_rel = format!(".canon-ledger/{apply_id:06}-apply.toml");
+        std::fs::create_dir_all(arch.path().join(".canon-ledger")).unwrap();
+        let mut body = format!(
+            "[meta]\ndecision_id = {apply_id}\norigin_disposition = \"{}\"\n\n\
+             [meta.locus]\npath = \"{arch_path}\"\nid = {archive_id}\n",
+            disposition.as_str()
+        );
+        for (n, rel) in chosen.iter().enumerate() {
+            body.push_str(&format!(
+                "\n[[items]]\nsource_root = \"{src_path}\"\nsource_rel_path = \"{rel}\"\n\
+                 destination_rel_path = \"{rel}\"\nsize = 1000\nhash = \"sha256:photo{n}\"\n"
+            ));
+        }
+        std::fs::write(arch.path().join(&receipt_rel), body).unwrap();
+        set_decision_receipt(&conn, apply_id, archive_id, &receipt_rel);
+    }
+
+    Copies {
+        conn,
+        src,
+        arch,
+        root_id,
+        apply_id,
+    }
 }
 
 /// A root exercising every fate at once: covered-enriched (archived from

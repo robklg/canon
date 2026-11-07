@@ -9,10 +9,10 @@
 //! build filter, the classifier reordering — exactly one assertion here
 //! names it.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::archive::{plan_generate, ClusterGenerateParams};
-use crate::core::domain::resolution::{classify_present, StandingBucket};
+use crate::core::domain::resolution::{classify_present, FromHereEvidence, StandingBucket};
 use crate::core::domain::time::zone::UserZone;
 use crate::core::repo;
 use crate::core::testing::*;
@@ -143,11 +143,19 @@ fn the_classifier_reads_the_empty_source_as_contentless() {
         .find(|s| s.rel_path == "folder/data.bin")
         .unwrap();
     assert_eq!(
-        classify_present(empty, &archived, &HashSet::new()),
+        classify_present(
+            empty,
+            &archived,
+            FromHereEvidence::by_directory(&HashMap::new())
+        ),
         StandingBucket::Contentless
     );
     assert_eq!(
-        classify_present(data, &archived, &HashSet::new()),
+        classify_present(
+            data,
+            &archived,
+            FromHereEvidence::by_directory(&HashMap::new())
+        ),
         StandingBucket::Covered
     );
 }

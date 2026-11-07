@@ -6,7 +6,7 @@ use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::fate::{fate_transition, DecisionFamily, FateAspect};
 use crate::core::domain::object::ArchiveLocation;
 use crate::core::domain::resolution::{
-    classify_absent, classify_present, AbsentBucket, StandingBucket,
+    classify_absent, classify_present, AbsentBucket, FromHereEvidence, StandingBucket,
 };
 use crate::core::domain::source::Source;
 
@@ -181,9 +181,11 @@ pub struct ApplyOrigin {
 pub struct FateContext<'a> {
     /// Object ids verified present in the archive.
     pub archived: &'a HashSet<i64>,
-    /// Subset archived *from this root* (extraction-linked, object-grain) —
-    /// the standing split's evidence.
-    pub archived_from_here: &'a HashSet<i64>,
+    /// What a standing file's "archived from here" rests on — the receipt
+    /// where one was read, the directory where none was (the account's own
+    /// evidence, so the inventory and the account read one value). The fate
+    /// arms below still name a destination only from a receipt origin.
+    pub from_here: FromHereEvidence<'a>,
     /// `decision_id` → family, for the absent rows' stamps.
     pub stamp_families: &'a HashMap<i64, DecisionFamily>,
     /// `decision_id` → recorded reason (entries only where a reason exists).
@@ -227,7 +229,7 @@ pub fn build_book_entries(
         // recorded transition.
         let mut decision = source.decision_id;
         let origin = ctx.origins.get(source.rel_path.as_str());
-        let fate = match classify_present(source, ctx.archived, ctx.archived_from_here) {
+        let fate = match classify_present(source, ctx.archived, ctx.from_here) {
             StandingBucket::Excluded => SourceFate::Excluded {
                 reason: stamp_reason(source, ctx),
                 archive_locations: locations_for(source, ctx),
@@ -480,7 +482,7 @@ mod tests {
     #[derive(Default)]
     struct Ctx {
         archived: HashSet<i64>,
-        archived_from_here: HashSet<i64>,
+        from_here: HashMap<i64, Vec<crate::core::domain::resolution::FromHereDirectory>>,
         families: HashMap<i64, DecisionFamily>,
         reasons: HashMap<i64, String>,
         hashes: HashMap<i64, String>,
@@ -508,7 +510,7 @@ mod tests {
         fn context(&self) -> FateContext<'_> {
             FateContext {
                 archived: &self.archived,
-                archived_from_here: &self.archived_from_here,
+                from_here: FromHereEvidence::by_directory(&self.from_here),
                 stamp_families: &self.families,
                 stamp_reasons: &self.reasons,
                 object_hashes: &self.hashes,
@@ -844,7 +846,7 @@ mod tests {
             &present,
             &absent,
             &copies_of(&[10, 11]),
-            &archived_set(&[]),
+            FromHereEvidence::by_directory(&crate::core::testing::from_here_anywhere(&[])),
             &[],
             &families,
         );

@@ -24,7 +24,10 @@ disagree about a root (`report_over_is_compute_story_minus_the_fetch`).
 
 **Query path: DB projections only.** `collect_origins` (receipt reads) is the bind-time compile's
 sanctioned recovery and stays out of bounds here — the Provenance Consumption Readiness ADR's rule
-that a query path reads the index, never the durable records.
+that a query path reads the index, never the durable records. `report_over` takes the receipts as
+a parameter instead: `compute_story` passes none and reads "archived from here" by the directory
+the index records; the ceremony passes its own read, so the bound telling says what the book's
+account says. Either way one `FromHereEvidence` feeds `build_places` and `build_account`.
 
 **Slices, never scope claims.** Acts attribute per (decision, directory): archived acts at
 extraction rows' origin dirs, stamp acts at stamped sources' dirs (tombstone dirs included — the
@@ -47,6 +50,15 @@ merged node's descendants keep walking against the same context. `StoryParams` n
 constants; recalibration changes constants, never code paths. Two guardrails on the defaults: 0.20
 tolerance eats a worked root's honest pockets, and the 5 MB dust-bytes floor is what protects small
 photo pockets.
+
+**An entry is shown where its content is.** After the walk and before attribution, a place that
+tells nothing of its own — no act and no note lands there, and it is not a care anchor (the root
+qualifies: it is forced only as the container) — and whose content all lies under one directory
+below it is replaced by that directory, the lowest common one; a place other than the root is
+dropped, so the entry moves rather than gaining an empty twin. Only where content is shown
+changes, never the sums, so both readings name the same places
+(`content_below_one_directory_is_named_there`, `a_care_anchor_never_moves`). A place with files
+of its own, or content across sibling directories, never moves.
 
 **Excluded is never a question, in standing or in acts** — the emission rule behind every
 divergence axis. Standing divergence compares proportions within the question population only

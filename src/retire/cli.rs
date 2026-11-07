@@ -253,6 +253,9 @@ pub fn retire(
                 "A book for this root already stands at {} and will be replaced by this fresh compile.",
                 plan.final_dir.display()
             );
+            if plan.replaced_book_hand_edited {
+                println!("Your edits to it go with it.");
+            }
         }
         if config.recording == RecordingMode::Off {
             println!(
@@ -286,7 +289,7 @@ pub fn retire(
     // The story as it will bind — composed over the ceremony's own fetch,
     // offered once to the user's editor (the manifest precedent: composed
     // declaration, human refinement, then binding).
-    let telling = match prepare_telling(&ceremony_state, conn, yes) {
+    let telling = match prepare_telling(&mut ceremony_state, conn, yes) {
         Ok(telling) => telling,
         Err(e) => {
             for warning in ceremony_state.interrupt(conn, &format!("{e:#}")) {
@@ -395,7 +398,7 @@ pub fn retire(
 /// binds the composed draft (Ctrl-C remains the escape — an interrupted
 /// ceremony is findable).
 fn prepare_telling(
-    ceremony_state: &super::ops::RetireCeremony,
+    ceremony_state: &mut super::ops::RetireCeremony,
     conn: &rusqlite::Connection,
     yes: bool,
 ) -> Result<super::ops::frame::TellingArtifact> {

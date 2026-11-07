@@ -37,6 +37,7 @@ use rusqlite::OptionalExtension;
 
 use super::db::Connection;
 use crate::core::domain::object::{ArchiveCopy, ArchiveLocation, Object};
+use crate::core::domain::resolution::FromHereCandidate;
 
 /// Batch size for SQL IN clauses (consistent with other repos).
 const BATCH_SIZE: usize = 1000;
@@ -228,13 +229,14 @@ pub fn batch_check_archived(
         .collect())
 }
 
-/// Which of these objects were archived *from* the given root: an archive
-/// copy of the object stands ([`archive_copy_sql`]) stamped by a decision
-/// whose extraction rows draw from `origin_root_id`. Object-grain,
-/// like coverage itself — the standing split's evidence. DB projections
-/// only: apply stamps the destination rows (never the origin root's), so the
-/// archive side carries the apply id and the extraction ledger names its
-/// origin — no receipt is read.
+/// The evidence that these objects were archived *from* the given root: each
+/// archive copy of an object that stands ([`archive_copy_sql`]) stamped by a
+/// decision whose extraction rows draw from `origin_root_id`, beside each of
+/// that decision's rows from this root, and where the copy stands. DB
+/// projections only: apply stamps the destination rows (never the origin
+/// root's), so the archive side carries the apply id and the extraction
+/// ledger names its origin — no receipt is read. No path is compared here:
+/// which row placed which copy is `domain::resolution::place_from_here`'s.
 ///
 /// **Important**: Callers must filter out sources with object_id=None before
 /// calling this function. Only valid object IDs should be passed.
@@ -242,22 +244,20 @@ pub fn batch_check_archived_from_root(
     conn: &Connection,
     object_ids: &[i64],
     origin_root_id: i64,
-) -> Result<HashSet<i64>> {
-    if object_ids.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let mut result = HashSet::new();
+) -> Result<Vec<FromHereCandidate>> {
+    let mut result = Vec::new();
 
     for chunk in object_ids.chunks(BATCH_SIZE) {
         let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
         let sql = format!(
-            "SELECT DISTINCT s.object_id
+            "SELECT DISTINCT s.object_id, de.decision_id, de.rel_prefix, de.destination_path,
+                    r.path, s.rel_path
              FROM sources s
              JOIN roots r ON s.root_id = r.id
              JOIN decision_extractions de ON de.decision_id = s.decision_id
              WHERE {} AND de.root_id = ?
-               AND s.object_id IN ({})",
+               AND s.object_id IN ({})
+             ORDER BY s.object_id, de.decision_id, r.path, s.rel_path, de.rel_prefix",
             archive_copy_sql(),
             placeholders.join(",")
         );
@@ -266,11 +266,18 @@ pub fn batch_check_archived_from_root(
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            row.get::<_, i64>(0)
+            Ok(FromHereCandidate {
+                object_id: row.get(0)?,
+                decision_id: row.get(1)?,
+                rel_prefix: row.get(2)?,
+                destination_path: row.get(3)?,
+                copy_root_path: row.get(4)?,
+                copy_rel_path: row.get(5)?,
+            })
         })?;
 
         for row in rows {
-            result.insert(row?);
+            result.push(row?);
         }
     }
 
@@ -820,6 +827,22 @@ mod tests {
             origin_id,
         )
         .unwrap();
+        // Each row carries what the domain matches on: the run's origin and
+        // destination directories, and where the stamped copy stands.
+        let row = result.iter().find(|c| c.object_id == from_here).unwrap();
+        assert_eq!(
+            (
+                row.decision_id,
+                row.rel_prefix.as_str(),
+                row.destination_path.as_str()
+            ),
+            (41, "", "/archive/x")
+        );
+        assert_eq!(
+            (row.copy_root_path.as_str(), row.copy_rel_path.as_str()),
+            ("/archive", "a.jpg")
+        );
+        let result: HashSet<i64> = result.iter().map(|c| c.object_id).collect();
         assert!(result.contains(&from_here));
         assert!(
             !result.contains(&from_elsewhere),

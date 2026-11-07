@@ -15,6 +15,7 @@ use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::DecisionExtraction;
 use crate::core::domain::fate::{decision_family, DecisionFamily};
 use crate::core::domain::object::ArchiveCopy;
+use crate::core::domain::resolution::{place_from_here, FromHereDirectory};
 use crate::core::domain::root::Root;
 use crate::core::domain::source::Source;
 use crate::core::repo;
@@ -41,11 +42,15 @@ pub struct RootStory {
     /// the key set of `archive_copies`, derived here rather than asked for
     /// again, for the membership questions that need no standing.
     pub archived: HashSet<i64>,
-    /// Subset archived *from this root*: an archive copy stands stamped by a
-    /// decision whose extraction rows draw from here (object-grain, DB
-    /// projections only — apply stamps the destination rows, so the archive
-    /// side carries the apply id and the ledger names its origin).
-    pub archived_from_here: HashSet<i64>,
+    /// Per object among `archived`, the directories the index records an
+    /// archiving run drawing from this root as choosing it from: an archive
+    /// copy stands stamped by a decision whose extraction rows draw from here
+    /// (DB projections only — apply stamps the destination rows, so the
+    /// archive side carries the apply id and the ledger names its origin),
+    /// placed by that run's row for the copy's own directory. What
+    /// `FromHereEvidence` reads: which *file* was chosen is the directories'
+    /// to say, never the object's alone.
+    pub from_here_directories: HashMap<i64, Vec<FromHereDirectory>>,
     /// Extraction rows whose origin is this root.
     pub extractions: Vec<DecisionExtraction>,
     pub scope_rows: Vec<DecisionScopeRow>,
@@ -82,8 +87,11 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
     let present_object_ids: Vec<i64> = present.iter().filter_map(|s| s.object_id).collect();
     let archive_copies = repo::object::batch_archive_copies(conn, &present_object_ids, None)?;
     let archived: HashSet<i64> = archive_copies.keys().copied().collect();
-    let archived_from_here =
-        repo::object::batch_check_archived_from_root(conn, &present_object_ids, root_id)?;
+    let from_here_directories = place_from_here(&repo::object::batch_check_archived_from_root(
+        conn,
+        &present_object_ids,
+        root_id,
+    )?);
 
     let extractions = repo::decision::fetch_extractions_by_origin_root(conn, root_id)?;
     let scope_rows = repo::decision::fetch_scope_rows_by_roots(conn, &[root_id])?;
@@ -115,7 +123,7 @@ pub fn fetch_root_story(conn: &Connection, root_id: i64) -> Result<RootStory> {
         absent,
         archive_copies,
         archived,
-        archived_from_here,
+        from_here_directories,
         extractions,
         scope_rows,
         decisions,

@@ -61,6 +61,67 @@ pub fn fetch_all(conn: &Connection) -> Result<Vec<Root>> {
     Ok(roots)
 }
 
+/// The next root number: one above every number this index has given.
+///
+/// The root-number law — *a root's number is never reused* — spoken once. A
+/// removed root's number lives on in the records that outlive it (scopes,
+/// extraction rows on both ends, receipt pointers), and a root that takes it
+/// inherits that history into its story and its book, which is never
+/// rewritten. So the next number is bounded by every column that names a
+/// root, and by the mark [`remember_root_number`] leaves at removal for the
+/// case where no record names it (`recording = "Off"`). The columns are the
+/// ones named `root_id` or ending `_root_id`, pinned by
+/// `every_column_naming_a_root_bounds_the_next_number`.
+///
+/// A scalar expression, so it runs inside the one `INSERT` that creates the
+/// root ([`insert_numbered`]) and concurrent creators serialise on the write
+/// lock.
+///
+/// Where it does not apply: an index that already gave a number twice (it
+/// repairs nothing), and numbers across two indexes (a number is local to one).
+const NEXT_ROOT_NUMBER_SQL: &str = "1 + MAX(
+    COALESCE((SELECT MAX(id) FROM roots), 0),
+    COALESCE((SELECT MAX(root_id) FROM sources), 0),
+    COALESCE((SELECT MAX(root_id) FROM notes), 0),
+    COALESCE((SELECT MAX(root_id) FROM decision_scopes), 0),
+    COALESCE((SELECT MAX(root_id) FROM decision_extractions), 0),
+    COALESCE((SELECT MAX(destination_root_id) FROM decision_extractions), 0),
+    COALESCE((SELECT MAX(receipt_root_id) FROM decisions), 0),
+    COALESCE((SELECT value_int FROM _meta WHERE key = 'root_number_high_water'), 0)
+)";
+
+/// Insert a root under the next number ([`NEXT_ROOT_NUMBER_SQL`]) and return
+/// that number. One statement: the number is chosen and taken in the same
+/// write, and `path UNIQUE` still refuses a second root at a path.
+pub fn insert_numbered(
+    conn: &Connection,
+    path: &str,
+    role: &str,
+    comment: Option<&str>,
+) -> Result<i64> {
+    conn.execute(
+        &format!(
+            "INSERT INTO roots (id, path, role, comment) SELECT ({NEXT_ROOT_NUMBER_SQL}), ?, ?, ?"
+        ),
+        rusqlite::params![path, role, comment],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Remember that `root_id` was given, before the root that holds it is removed.
+///
+/// The mark only ever rises. Written before the delete, in whatever
+/// transaction the caller holds: a removal that fails after the mark leaves a
+/// mark above a live root, which is harmless; the other order could lose it.
+pub fn remember_root_number(conn: &Connection, root_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO _meta (key, value_int) VALUES ('root_number_high_water', ?)
+         ON CONFLICT(key) DO UPDATE SET value_int = MAX(value_int, excluded.value_int)",
+        [root_id],
+    )?;
+    Ok(())
+}
+
 /// Insert a root for testing purposes.
 ///
 /// This function is only available in test builds. It provides a simple way
@@ -177,5 +238,100 @@ mod tests {
 
         assert_eq!(active_sources.len(), 1);
         assert_eq!(active_sources[0].path, "/photos");
+    }
+
+    // =========================================================================
+    // the root-number law
+    // =========================================================================
+
+    #[test]
+    fn a_fresh_index_gives_number_one() {
+        let conn = setup_test_db();
+        assert_eq!(insert_numbered(&conn, "/a", "source", None).unwrap(), 1);
+        assert_eq!(insert_numbered(&conn, "/b", "source", None).unwrap(), 2);
+    }
+
+    #[test]
+    fn every_column_naming_a_root_bounds_the_next_number() {
+        // Derived from the claim, not the fragment: every column the schema
+        // has that is named `root_id` or ends `_root_id`, plus `roots.id`,
+        // is a record a removed root's number can survive in. Each must
+        // bound the next number, or a number it holds can be given again.
+        let conn = setup_test_db();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let mut naming: Vec<(String, String)> = vec![("roots".into(), "id".into())];
+        for table in &tables {
+            let columns: Vec<String> = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |row| row.get(1))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            for column in columns {
+                if column == "root_id" || column.ends_with("_root_id") {
+                    naming.push((table.clone(), column));
+                }
+            }
+        }
+        assert!(naming.len() >= 7, "the schema scan found {naming:?}");
+        for (table, column) in &naming {
+            let needle = format!("SELECT MAX({column}) FROM {table})");
+            assert!(
+                NEXT_ROOT_NUMBER_SQL.contains(&needle),
+                "{table}.{column} names a root but does not bound the next number"
+            );
+        }
+        assert!(NEXT_ROOT_NUMBER_SQL.contains("root_number_high_water"));
+    }
+
+    #[test]
+    fn each_record_naming_a_number_keeps_it_taken() {
+        // The behavioural half of the column pin: a number held only by one
+        // kind of record is still never given again. `sources` and `notes`
+        // reference `roots(id)`, so neither can name a removed root here;
+        // the column pin keeps them in the bound regardless.
+        let records = [
+            "INSERT INTO decision_scopes (decision_id, root_id, rel_prefix) VALUES (1, 7, '')",
+            "INSERT INTO decision_extractions (decision_id, root_id, root_path, rel_prefix, files,
+                                               destination_path)
+             VALUES (1, 7, '/gone', '', 1, '/x')",
+            "INSERT INTO decision_extractions (decision_id, root_id, root_path, rel_prefix, files,
+                                               destination_root_id, destination_path)
+             VALUES (1, 1, '/gone', '', 1, 7, '/x')",
+            "INSERT INTO decisions (command, command_line, canon_version, created_at, receipt_root_id)
+             VALUES ('apply', 'x', '0', 0, 7)",
+            "INSERT INTO _meta (key, value_int) VALUES ('root_number_high_water', 7)",
+        ];
+        for record in records {
+            let conn = setup_test_db();
+            conn.execute(record, []).unwrap();
+            assert_eq!(
+                insert_numbered(&conn, "/next", "source", None).unwrap(),
+                8,
+                "after: {record}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mark_only_rises() {
+        let conn = setup_test_db();
+        remember_root_number(&conn, 5).unwrap();
+        remember_root_number(&conn, 3).unwrap();
+        let mark: i64 = conn
+            .query_row(
+                "SELECT value_int FROM _meta WHERE key = 'root_number_high_water'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mark, 5);
     }
 }

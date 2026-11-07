@@ -710,6 +710,7 @@ mod tests {
             covered_only_parked: crate::core::domain::resolution::ParkedEvidence::default(),
             archived_standing_only_parked: crate::core::domain::resolution::ParkedEvidence::default(
             ),
+            archived_standing_by_directory: Default::default(),
         }
     }
 

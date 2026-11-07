@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::core::domain::extraction::{DecisionExtraction, OriginDisposition};
 use crate::core::domain::fate::DecisionFamily;
-use crate::core::domain::resolution::build_account;
+use crate::core::domain::resolution::{build_account, FromHereEvidence};
 use crate::story::domain::place::{PlaceStanding, StoryParams, StoryPlace};
 
 use super::fixtures::{
@@ -121,8 +121,12 @@ fn covered_where_divergence_splits_the_minecraft_case() {
     fx.covered(4, "home/photos/b.jpg", &["/archive/media/b.jpg"]);
     let root = fx.build(&no_dust());
     // `home` blends both stories; its children diverge and surface as
-    // pockets — children of the root place, not of an unemitted `home`.
-    assert_eq!(child_paths(&root), vec!["home/minecraft", "home/photos"]);
+    // pockets — children of the root place, not of an unemitted `home`. The
+    // minecraft entry's content all lies in `world1`, so it is shown there.
+    assert_eq!(
+        child_paths(&root),
+        vec!["home/minecraft/world1", "home/photos"]
+    );
     let minecraft = &root.children[0];
     assert!(minecraft.undecided());
     assert_eq!(minecraft.standing.covered, 2);
@@ -193,8 +197,9 @@ fn a_note_forces_a_place() {
         "beautiful pictures, still need a home",
     ));
     let root = fx.build(&no_dust());
-    assert_eq!(child_paths(&root), vec!["b"]);
-    let b = &root.children[0];
+    // `a` is shown too: the root's own content all lies there.
+    assert_eq!(child_paths(&root), vec!["a", "b"]);
+    let b = &root.children[1];
     assert_eq!(b.notes.len(), 1);
     assert_eq!(b.notes[0].text, "beautiful pictures, still need a home");
     assert_eq!(b.standing.covered, 1);
@@ -857,9 +862,10 @@ fn missing_without_a_stamp_is_standing_not_an_act() {
     let mut fx = Fixture::new();
     fx.absent.push(src(1, "lost/x.jpg", None));
     let root = fx.build(&no_dust());
-    assert!(root.children.is_empty());
-    assert!(root.undecided());
-    assert_eq!(root.standing.missing_unexplained, 1);
+    assert_eq!(child_paths(&root), vec!["lost"]);
+    let lost = &root.children[0];
+    assert!(root.undecided() && lost.undecided());
+    assert_eq!(lost.standing.missing_unexplained, 1);
 }
 
 #[test]
@@ -876,7 +882,8 @@ fn copies_count_per_location_never_per_item() {
         ],
     );
     let root = fx.build(&no_dust());
-    let paths: Vec<(&str, i64)> = root
+    assert_eq!(child_paths(&root), vec!["m"]);
+    let paths: Vec<(&str, i64)> = root.children[0]
         .covered_where
         .locations
         .iter()
@@ -900,6 +907,16 @@ fn agreement_law_place_sums_fold_to_the_account() {
     fx.absent.push(src(22, "lost/w.jpg", None));
     fx.extractions
         .push(extraction(42, "a", 5, "/archive/media"));
+    // One of the covered files is the one decision 42 chose: the place walk
+    // and the account must read that from one evidence value.
+    fx.from_here.insert(
+        1001,
+        vec![crate::core::domain::resolution::FromHereDirectory {
+            decision_id: 42,
+            rel_prefix: "a".to_string(),
+            precise: true,
+        }],
+    );
     fx.decisions
         .insert(57, dinfo(DecisionFamily::Exclude, 100, None));
     fx.decisions
@@ -932,9 +949,13 @@ fn agreement_law_place_sums_fold_to_the_account() {
         &fx.present,
         &fx.absent,
         &fx.archive_copies,
-        &fx.archived_from_here,
+        FromHereEvidence::by_directory(&fx.from_here),
         &fx.extractions,
         &stamp_families,
+    );
+    assert_eq!(
+        account.archived_standing, 1,
+        "the Archived arm is exercised"
     );
     assert_eq!(sum.archived, account.archived_standing);
     assert_eq!(sum.covered, account.covered);
@@ -993,9 +1014,11 @@ fn each_covered_location_speaks_for_its_own_copies() {
         ],
     );
 
-    // One branch, so the whole story is the root place.
+    // One branch, so the whole story is one place: `italy`, where it is.
     let root = fx.build(&no_dust());
-    let marked: Vec<&str> = root
+    assert_eq!(child_paths(&root), vec!["italy"]);
+    let italy = &root.children[0];
+    let marked: Vec<&str> = italy
         .covered_where
         .locations
         .iter()
@@ -1006,6 +1029,91 @@ fn each_covered_location_speaks_for_its_own_copies() {
         marked,
         vec!["/archive/parked"],
         "each location speaks for its own copies: {:?}",
-        root.covered_where
+        italy.covered_where
     );
+}
+
+// An entry is shown where its content is.
+
+#[test]
+fn content_below_one_directory_is_named_there() {
+    // Copies in `backup/2019` and `backup/2020` beside an acted `photos`:
+    // the root itself holds none of them, so the entry is `backup`, across
+    // its two folders — never `(root)`, a place the content is not in.
+    let mut fx = Fixture::new();
+    fx.covered(1, "photos/a.jpg", &["/archive/photos/a.jpg"]);
+    fx.extractions
+        .push(extraction(42, "photos", 1, "/archive/photos"));
+    fx.decisions
+        .insert(42, dinfo(DecisionFamily::Archive, 100, Some("the trip")));
+    fx.covered(2, "backup/2019/a.jpg", &["/archive/photos/a.jpg"]);
+    fx.covered(3, "backup/2020/b.jpg", &["/archive/photos/b.jpg"]);
+    let root = fx.build(&no_dust());
+    assert_eq!(child_paths(&root), vec!["backup", "photos"]);
+    let backup = &root.children[0];
+    assert_eq!(backup.folder_breadth, 2);
+    assert_eq!(backup.standing.covered, 2);
+    assert_eq!(
+        root.standing,
+        PlaceStanding::default(),
+        "the sums move, not grow"
+    );
+}
+
+#[test]
+fn sibling_directories_stay_at_their_shared_parent() {
+    // Content spread over two siblings is shown at their parent, as before.
+    let mut fx = Fixture::new();
+    fx.covered(1, "a/x.jpg", &["/archive/media/x.jpg"]);
+    fx.covered(2, "b/y.jpg", &["/archive/media/y.jpg"]);
+    let root = fx.build(&no_dust());
+    assert!(root.children.is_empty());
+    assert_eq!(root.folder_breadth, 2);
+}
+
+#[test]
+fn a_noted_place_never_moves() {
+    // A note forces its place; content below it stays told there.
+    let mut fx = Fixture::new();
+    fx.covered(1, "n/sub/x.jpg", &["/archive/media/x.jpg"]);
+    fx.covered(2, "n/sub/y.jpg", &["/archive/media/y.jpg"]);
+    fx.notes
+        .push(super::fixtures::note_at(7, "n", "look again"));
+    let root = fx.build(&no_dust());
+    assert_eq!(child_paths(&root), vec!["n"]);
+    assert_eq!(root.children[0].standing.covered, 2);
+}
+
+#[test]
+fn a_place_with_its_own_files_never_moves() {
+    let mut fx = Fixture::new();
+    fx.covered(1, "p/x.jpg", &["/archive/media/x.jpg"]);
+    fx.covered(2, "p/sub/y.jpg", &["/archive/media/y.jpg"]);
+    let root = fx.build(&no_dust());
+    assert_eq!(child_paths(&root), vec!["p"]);
+    assert_eq!(root.children[0].folder_breadth, 2);
+}
+
+#[test]
+fn a_care_anchor_never_moves() {
+    // A reasoned exclusion over `a/x` and `a/y` anchors at `a`. Notes force
+    // both slices out, so `a` holds no act of its own — only covered content
+    // in `a/z`. The anchor still stands where the care was expressed, and
+    // that content is told there.
+    let mut fx = Fixture::new();
+    fx.present.push(excluded_src(1, "a/x/f.exe", None, 57));
+    fx.present.push(excluded_src(2, "a/y/g.exe", None, 57));
+    fx.decisions
+        .insert(57, dinfo(DecisionFamily::Exclude, 100, Some("installers")));
+    fx.notes.push(super::fixtures::note_at(7, "a/x", "x"));
+    fx.notes.push(super::fixtures::note_at(8, "a/y", "y"));
+    // Enough of it that `a/z` does not split from `a` on its own.
+    for i in 0..20 {
+        fx.covered(10 + i, &format!("a/z/h{i}.jpg"), &["/archive/media/h.jpg"]);
+    }
+    let root = fx.build(&no_dust());
+    assert_eq!(child_paths(&root), vec!["a"]);
+    let a = &root.children[0];
+    assert_eq!(a.standing.covered, 20);
+    assert_eq!(child_paths(a), vec!["a/x", "a/y"]);
 }

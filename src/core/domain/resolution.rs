@@ -8,8 +8,9 @@
 //!   established meaning of "archived from here"), what was deleted
 //!   (scan-observed), and what is missing without a recorded deletion.
 //! - **Standing here now** partitions the present rows: archived from here
-//!   (the surviving originals of copy-mode applies — extraction-linked,
-//!   object-grain), covered (copies elsewhere, nobody chose it), excluded,
+//!   (the surviving originals of copy-mode applies — the file the run chose,
+//!   by the evidence `FromHereEvidence` carries), covered (copies elsewhere,
+//!   nobody chose it), excluded,
 //!   contentless (empty files — all shape, no content; stated, never
 //!   blocking), unresolved.
 //!
@@ -22,7 +23,7 @@
 //! book-compile fate model stay in `retire/domain.rs` — only one subsystem
 //! consumes those.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::extraction::{DecisionExtraction, OriginDisposition};
 use super::fate::DecisionFamily;
@@ -79,6 +80,13 @@ pub struct ResolutionAccount {
     /// line names the roots **its own** claim rests on — a union would let
     /// the covered line name a root only the custody claim stands behind.
     pub archived_standing_only_parked: ParkedEvidence,
+    /// Of `archived_standing`, the files held only through the directory
+    /// fallback, per decision: a decision whose receipt was not read, the
+    /// file named by no receipt (`FromHereEvidence::directory_only_decisions`).
+    /// Empty wherever the evidence is the directory itself (the screens). A
+    /// file two such decisions hold counts under each, so each decision's
+    /// count is true of that decision.
+    pub archived_standing_by_directory: BTreeMap<i64, i64>,
 }
 
 impl ResolutionAccount {
@@ -108,8 +116,8 @@ impl ResolutionAccount {
 /// deliberate act wins mixed evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandingBucket {
-    /// Archived from here and the copy still stands in the archive —
-    /// extraction-linked, object-grain (`batch_check_archived_from_root`).
+    /// Archived from here and the copy still stands in the archive — the
+    /// file the run chose, as `FromHereEvidence` reads it.
     Archived,
     Covered,
     Excluded,
@@ -127,10 +135,213 @@ pub enum AbsentBucket {
     Unexplained,
 }
 
+/// One archive copy of an object that an archiving run drawing from this
+/// root stamped, beside one extraction row of that run — the raw evidence
+/// the from-here query returns (`repo::object::batch_check_archived_from_root`).
+/// Matching rows to copies is [`place_from_here`]'s, never the SQL's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FromHereCandidate {
+    pub object_id: i64,
+    pub decision_id: i64,
+    /// The row's origin directory under this root.
+    pub rel_prefix: String,
+    /// The row's recorded destination directory (absolute).
+    pub destination_path: String,
+    /// Where the stamped copy stands: its root's path and its own `rel_path`.
+    pub copy_root_path: String,
+    pub copy_rel_path: String,
+}
+
+/// A directory an archiving run chose a file's content from, as the index
+/// records it — `precise` when the row's destination is the very directory
+/// the archive copy stands in, coarse when it only contains it (a row
+/// recorded before directory precision).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FromHereDirectory {
+    pub decision_id: i64,
+    pub rel_prefix: String,
+    pub precise: bool,
+}
+
+/// Which recorded rows placed each archive copy, per object.
+///
+/// For each copy, the rows of its stamping run whose destination **is** the
+/// copy's directory are precise placements of it; failing those, the rows
+/// whose destination **contains** the copy's directory are coarse ones. A
+/// copy no row places — moved within the archive after the apply — adds
+/// nothing, which reads covered: the safe direction. The copy's directory is
+/// spelled the way the row's destination was built (`join_under_root` over
+/// `parent_dir`), so a precise match is equality of two values one rule made.
+pub fn place_from_here(candidates: &[FromHereCandidate]) -> HashMap<i64, Vec<FromHereDirectory>> {
+    use super::extraction::parent_dir;
+    use super::path::{join_under_root, path_is_under};
+
+    // One copy stamped by one run: (object, copy root, copy path, decision).
+    let mut copies: HashMap<(i64, &str, &str, i64), Vec<&FromHereCandidate>> = HashMap::new();
+    for c in candidates {
+        copies
+            .entry((
+                c.object_id,
+                c.copy_root_path.as_str(),
+                c.copy_rel_path.as_str(),
+                c.decision_id,
+            ))
+            .or_default()
+            .push(c);
+    }
+
+    let mut placed: HashMap<i64, Vec<FromHereDirectory>> = HashMap::new();
+    for ((object_id, root_path, rel_path, decision_id), rows) in copies {
+        let copy_dir = join_under_root(root_path, parent_dir(rel_path));
+        let precise: Vec<&&FromHereCandidate> = rows
+            .iter()
+            .filter(|row| row.destination_path == copy_dir)
+            .collect();
+        let (matching, is_precise) = if precise.is_empty() {
+            (
+                rows.iter()
+                    .filter(|row| path_is_under(&copy_dir, &row.destination_path))
+                    .collect(),
+                false,
+            )
+        } else {
+            (precise, true)
+        };
+        if matching.is_empty() {
+            continue;
+        }
+        let entries = placed.entry(object_id).or_default();
+        for row in matching {
+            let entry = FromHereDirectory {
+                decision_id,
+                rel_prefix: row.rel_prefix.clone(),
+                precise: is_precise,
+            };
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+    }
+    for entries in placed.values_mut() {
+        entries.sort_by(|a, b| {
+            (a.decision_id, &a.rel_prefix, a.precise).cmp(&(
+                b.decision_id,
+                &b.rel_prefix,
+                b.precise,
+            ))
+        });
+    }
+    placed
+}
+
+/// What the archiving receipts say, file by file: the paths they name as
+/// chosen from this root, and the decisions whose receipt was read.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReceiptOrigins {
+    pub paths: HashSet<String>,
+    pub read_decisions: HashSet<i64>,
+}
+
+/// What a standing file's "archived from here" rests on: an archiving run
+/// that drew from this root and stamped a present archive copy of the file's
+/// content — narrowed to the file the run chose.
+///
+/// One classifier, two evidence constructors: the screens read the index
+/// (`by_directory` — the directory the index records for the run), the book
+/// reads the receipts (`by_receipt` — the receipt where one was read, the
+/// directory where none was). They differ only in evidence, so they cannot
+/// drift. Whatever the evidence, a file whose content has no from-here entry
+/// is never held, which keeps `Archived ⊆ archived`.
+#[derive(Clone, Copy)]
+pub struct FromHereEvidence<'a> {
+    directories: &'a HashMap<i64, Vec<FromHereDirectory>>,
+    receipts: Option<&'a ReceiptOrigins>,
+}
+
+impl<'a> FromHereEvidence<'a> {
+    /// The screens: the directory the index records for the run.
+    pub fn by_directory(directories: &'a HashMap<i64, Vec<FromHereDirectory>>) -> Self {
+        Self {
+            directories,
+            receipts: None,
+        }
+    }
+
+    /// The book: the receipt where one was read, the directory where none was.
+    pub fn by_receipt(
+        directories: &'a HashMap<i64, Vec<FromHereDirectory>>,
+        receipts: &'a ReceiptOrigins,
+    ) -> Self {
+        Self {
+            directories,
+            receipts: Some(receipts),
+        }
+    }
+
+    /// Whether this standing file is the one an archiving run chose.
+    pub fn holds(&self, source: &Source) -> bool {
+        let Some(entries) = self.entries(source) else {
+            return false;
+        };
+        match self.receipts {
+            None => entries.iter().any(|entry| matches_directory(entry, source)),
+            Some(receipts) => {
+                receipts.paths.contains(&source.rel_path)
+                    || entries.iter().any(|entry| {
+                        !receipts.read_decisions.contains(&entry.decision_id)
+                            && matches_directory(entry, source)
+                    })
+            }
+        }
+    }
+
+    /// The decisions that hold this file **only** through the directory
+    /// fallback — no receipt of theirs was read and no receipt names the
+    /// file — ascending. Empty on the screens, where the directory is the
+    /// evidence rather than a fallback. What the book's gap for each such
+    /// decision counts.
+    pub fn directory_only_decisions(&self, source: &Source) -> Vec<i64> {
+        let (Some(receipts), Some(entries)) = (self.receipts, self.entries(source)) else {
+            return Vec::new();
+        };
+        if receipts.paths.contains(&source.rel_path) {
+            return Vec::new();
+        }
+        let mut ids: Vec<i64> = entries
+            .iter()
+            .filter(|entry| {
+                !receipts.read_decisions.contains(&entry.decision_id)
+                    && matches_directory(entry, source)
+            })
+            .map(|entry| entry.decision_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    fn entries(&self, source: &Source) -> Option<&'a Vec<FromHereDirectory>> {
+        source
+            .object_id
+            .and_then(|id| self.directories.get(&id))
+            .filter(|entries| !entries.is_empty())
+    }
+}
+
+/// A precise row names the file's own directory; a coarse one names a
+/// directory the file is at or under.
+fn matches_directory(entry: &FromHereDirectory, source: &Source) -> bool {
+    if entry.precise {
+        super::extraction::parent_dir(&source.rel_path) == entry.rel_prefix
+    } else {
+        super::path::path_is_under(&source.rel_path, &entry.rel_prefix)
+    }
+}
+
 pub fn classify_present(
     source: &Source,
     archived: &HashSet<i64>,
-    archived_from_here: &HashSet<i64>,
+    from_here: FromHereEvidence,
 ) -> StandingBucket {
     if source.is_excluded() {
         return StandingBucket::Excluded;
@@ -139,7 +350,7 @@ pub fn classify_present(
         return StandingBucket::Contentless;
     }
     match source.object_id {
-        Some(object_id) if archived_from_here.contains(&object_id) => StandingBucket::Archived,
+        Some(_) if from_here.holds(source) => StandingBucket::Archived,
         Some(object_id) if archived.contains(&object_id) => StandingBucket::Covered,
         Some(_) => StandingBucket::Unresolved { unhashed: false },
         None => StandingBucket::Unresolved { unhashed: true },
@@ -152,27 +363,27 @@ pub fn classify_present(
 ///
 /// Routing through `classify_present` is what makes this **one law with two
 /// call shapes**, not a second spelling of "unresolved". It is sound because
-/// `archived_from_here` only ever splits `Archived` from `Covered`, and
+/// the from-here evidence only ever splits `Archived` from `Covered`, and
 /// neither of those is unresolved — so any value of it leaves this count
-/// alone. The two sets are built so that `archived_from_here` is a subset of
-/// `archived` (both SQL projections demand a present, non-empty archive-role
-/// copy; the from-here half only adds the extraction join), which is the
-/// premise that argument rests on. Pinned by
+/// alone. The evidence holds only for objects with a from-here entry, and
+/// those are a subset of `archived` (both SQL projections demand a present,
+/// non-empty archive-role copy; the from-here half only adds the extraction
+/// join), which is the premise that argument rests on. Pinned by
 /// `archived_from_here_never_moves_the_unresolved_count`.
 ///
 /// The contentless law is inherited rather than restated: `classify_present`
 /// buckets an empty source as `Contentless` before any identity test, so a
 /// root holding only empty files reads zero here.
 pub fn unresolved_remainder(present: &[&Source], archived: &HashSet<i64>) -> i64 {
-    // No archived-from-here evidence in hand. Passing the empty set reads
+    // No archived-from-here evidence in hand. Passing empty evidence reads
     // every such row as `Covered` instead of `Archived` — a distinction this
     // count cannot see, which is exactly the pinned fact above.
-    let none: HashSet<i64> = HashSet::new();
+    let none: HashMap<i64, Vec<FromHereDirectory>> = HashMap::new();
     present
         .iter()
         .filter(|source| {
             matches!(
-                classify_present(source, archived, &none),
+                classify_present(source, archived, FromHereEvidence::by_directory(&none)),
                 StandingBucket::Unresolved { .. }
             )
         })
@@ -329,15 +540,15 @@ pub fn classify_absent(family: Option<DecisionFamily>) -> AbsentBucket {
     }
 }
 
-/// Build the account from the two presence classes, the archive membership
-/// sets (all archive copies; the extraction-linked archived-from-here
-/// subset), the root's origin extraction rows, and the absent rows' stamp
-/// families (`decision_id` → family).
+/// Build the account from the two presence classes, the archive copies, the
+/// evidence a standing file's "archived from here" rests on, the root's
+/// origin extraction rows, and the absent rows' stamp families
+/// (`decision_id` → family).
 pub fn build_account(
     present: &[Source],
     absent: &[Source],
     archive_copies: &HashMap<i64, Vec<ArchiveCopy>>,
-    archived_from_here: &HashSet<i64>,
+    from_here: FromHereEvidence,
     extractions: &[DecisionExtraction],
     stamp_families: &HashMap<i64, DecisionFamily>,
 ) -> ResolutionAccount {
@@ -360,9 +571,15 @@ pub fn build_account(
     };
 
     for source in present {
-        match classify_present(source, &archived, archived_from_here) {
+        match classify_present(source, &archived, from_here) {
             StandingBucket::Archived => {
                 account.archived_standing += 1;
+                for decision_id in from_here.directory_only_decisions(source) {
+                    *account
+                        .archived_standing_by_directory
+                        .entry(decision_id)
+                        .or_insert(0) += 1;
+                }
                 account
                     .archived_standing_only_parked
                     .observe(copies_of(source));
@@ -491,6 +708,12 @@ mod tests {
         ids.iter().copied().collect()
     }
 
+    use crate::core::testing::from_here_anywhere;
+
+    fn by_dir(map: &HashMap<i64, Vec<FromHereDirectory>>) -> FromHereEvidence<'_> {
+        FromHereEvidence::by_directory(map)
+    }
+
     /// Archive copies of these objects, every one on a root whose door
     /// stands open — the ordinary shape, and the one that leaves both
     /// only-parked counts at zero.
@@ -538,7 +761,7 @@ mod tests {
             &present,
             &absent,
             &copies_of(&[10, 11]),
-            &archived_set(&[]),
+            by_dir(&from_here_anywhere(&[])),
             &extractions,
             &families,
         )
@@ -550,7 +773,7 @@ mod tests {
     fn present_source_excluded_beats_archived_object() {
         let s = source(1, Some(10), true, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[10]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Excluded
         );
     }
@@ -559,7 +782,7 @@ mod tests {
     fn present_object_excluded_beats_archived_object() {
         let s = source(1, Some(10), false, true);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[10]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Excluded
         );
     }
@@ -568,7 +791,7 @@ mod tests {
     fn present_hashed_in_archive_is_covered() {
         let s = source(1, Some(10), false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[10]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Covered
         );
     }
@@ -577,7 +800,7 @@ mod tests {
     fn present_hashed_uncovered_is_unresolved() {
         let s = source(1, Some(10), false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Unresolved { unhashed: false }
         );
     }
@@ -586,7 +809,7 @@ mod tests {
     fn present_unhashed_is_unresolved_unhashed() {
         let s = source(1, None, false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Unresolved { unhashed: true }
         );
     }
@@ -595,7 +818,7 @@ mod tests {
     fn present_unhashed_but_excluded_is_excluded() {
         let s = source(1, None, true, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Excluded
         );
     }
@@ -608,7 +831,7 @@ mod tests {
         let mut s = source(1, Some(10), false, false);
         s.size = 0;
         assert_eq!(
-            classify_present(&s, &archived_set(&[10]), &archived_set(&[10])),
+            classify_present(&s, &archived_set(&[10]), by_dir(&from_here_anywhere(&[10]))),
             StandingBucket::Contentless,
             "identity evidence about no-content is vacuous"
         );
@@ -621,7 +844,7 @@ mod tests {
         let mut s = source(1, None, false, false);
         s.size = 0;
         assert_eq!(
-            classify_present(&s, &archived_set(&[]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Contentless
         );
     }
@@ -632,7 +855,7 @@ mod tests {
         let mut s = source(1, Some(10), true, false);
         s.size = 0;
         assert_eq!(
-            classify_present(&s, &archived_set(&[10]), &archived_set(&[])),
+            classify_present(&s, &archived_set(&[10]), by_dir(&from_here_anywhere(&[]))),
             StandingBucket::Excluded
         );
     }
@@ -643,7 +866,7 @@ mod tests {
         // from here and standing in the archive reads Archived, not Covered.
         let s = source(1, Some(10), false, false);
         assert_eq!(
-            classify_present(&s, &archived_set(&[10]), &archived_set(&[10])),
+            classify_present(&s, &archived_set(&[10]), by_dir(&from_here_anywhere(&[10]))),
             StandingBucket::Archived
         );
     }
@@ -671,24 +894,25 @@ mod tests {
         assert_eq!(baseline, 2, "the corpus must have something left to lose");
 
         for mask in 0..(1u32 << archived_ids.len()) {
-            let from_here: HashSet<i64> = archived_ids
+            let chosen: Vec<i64> = archived_ids
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| mask & (1 << i) != 0)
                 .map(|(_, &id)| id)
                 .collect();
+            let from_here = from_here_anywhere(&chosen);
             let counted = refs
                 .iter()
                 .filter(|s| {
                     matches!(
-                        classify_present(s, &archived, &from_here),
+                        classify_present(s, &archived, by_dir(&from_here)),
                         StandingBucket::Unresolved { .. }
                     )
                 })
                 .count() as i64;
             assert_eq!(
                 counted, baseline,
-                "archived_from_here {from_here:?} moved the unresolved count"
+                "archived from here {chosen:?} moved the unresolved count"
             );
         }
     }
@@ -720,7 +944,7 @@ mod tests {
             &present,
             &[],
             &copies_of(&[10, 11, 12, 13]),
-            &archived_set(&[11]),
+            by_dir(&from_here_anywhere(&[11])),
             &[],
             &HashMap::new(),
         );
@@ -729,6 +953,211 @@ mod tests {
             "the account must exercise the Archived arm the remainder cannot see"
         );
         assert_eq!(unresolved_remainder(&refs, &archived), account.unresolved);
+    }
+
+    // FromHereEvidence — "archived from here" is the file the run chose
+
+    /// A standing file at `rel` holding object `object_id`.
+    fn file(id: i64, rel: &str, object_id: i64) -> Source {
+        let mut s = source(id, Some(object_id), false, false);
+        s.rel_path = rel.to_string();
+        s
+    }
+
+    /// The from-here query's row: one copy of `object_id` at
+    /// `/archive/<copy_rel>`, stamped by `decision`, beside one of that run's
+    /// rows (`origin` → `destination`).
+    fn candidate(
+        object_id: i64,
+        decision: i64,
+        origin: &str,
+        destination: &str,
+        copy_rel: &str,
+    ) -> FromHereCandidate {
+        FromHereCandidate {
+            object_id,
+            decision_id: decision,
+            rel_prefix: origin.to_string(),
+            destination_path: destination.to_string(),
+            copy_root_path: "/archive".to_string(),
+            copy_rel_path: copy_rel.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_chosen_file_is_archived_from_here_and_its_copy_elsewhere_is_covered() {
+        // `photos/a.jpg` was chosen into `/archive/photos`; its copy in
+        // `backup/` holds the same content but nobody chose it.
+        let placed = place_from_here(&[candidate(
+            10,
+            5,
+            "photos",
+            "/archive/photos",
+            "photos/a.jpg",
+        )]);
+        let evidence = FromHereEvidence::by_directory(&placed);
+        let archived = archived_set(&[10]);
+        assert_eq!(
+            classify_present(&file(1, "photos/a.jpg", 10), &archived, evidence),
+            StandingBucket::Archived
+        );
+        assert_eq!(
+            classify_present(&file(2, "backup/a.jpg", 10), &archived, evidence),
+            StandingBucket::Covered
+        );
+    }
+
+    #[test]
+    fn a_copy_in_a_subdirectory_of_a_chosen_directory_is_covered() {
+        // A precise row names the chosen file's own directory, exactly.
+        let placed = place_from_here(&[candidate(
+            10,
+            5,
+            "photos",
+            "/archive/photos",
+            "photos/a.jpg",
+        )]);
+        let evidence = FromHereEvidence::by_directory(&placed);
+        assert_eq!(
+            classify_present(
+                &file(2, "photos/old/a.jpg", 10),
+                &archived_set(&[10]),
+                evidence
+            ),
+            StandingBucket::Covered
+        );
+    }
+
+    #[test]
+    fn a_copy_in_a_sibling_directory_of_the_same_run_is_covered() {
+        // One run chose `photos/2019/a.jpg` and `photos/2020/b.jpg`. The copy
+        // of `a` in `photos/2020` is matched against the row that placed
+        // `a`'s archive copy, not against every directory the run drew from.
+        let placed = place_from_here(&[
+            candidate(10, 5, "photos/2019", "/archive/2019", "2019/a.jpg"),
+            candidate(10, 5, "photos/2020", "/archive/2020", "2019/a.jpg"),
+            candidate(11, 5, "photos/2019", "/archive/2019", "2020/b.jpg"),
+            candidate(11, 5, "photos/2020", "/archive/2020", "2020/b.jpg"),
+        ]);
+        let evidence = FromHereEvidence::by_directory(&placed);
+        let archived = archived_set(&[10, 11]);
+        assert_eq!(
+            classify_present(&file(1, "photos/2019/a.jpg", 10), &archived, evidence),
+            StandingBucket::Archived
+        );
+        assert_eq!(
+            classify_present(&file(2, "photos/2020/b.jpg", 11), &archived, evidence),
+            StandingBucket::Archived
+        );
+        assert_eq!(
+            classify_present(&file(3, "photos/2020/a.jpg", 10), &archived, evidence),
+            StandingBucket::Covered
+        );
+    }
+
+    #[test]
+    fn a_coarse_row_counts_its_subdirectories_as_chosen() {
+        // A row recorded before directory precision holds a common prefix on
+        // both ends. Its files in subdirectories read archived from here, so
+        // *standing here now* agrees with *the story so far*.
+        let placed = place_from_here(&[
+            candidate(10, 5, "photos", "/archive", "2019/a.jpg"),
+            candidate(11, 5, "photos", "/archive", "2020/b.jpg"),
+        ]);
+        assert!(placed[&10].iter().all(|entry| !entry.precise));
+        let present = [
+            file(1, "photos/2019/a.jpg", 10),
+            file(2, "photos/2020/b.jpg", 11),
+        ];
+        let mut row = extraction(2, Some(200), Some(OriginDisposition::Retained));
+        row.rel_prefix = "photos".to_string();
+        let account = build_account(
+            &present,
+            &[],
+            &copies_of(&[10, 11]),
+            FromHereEvidence::by_directory(&placed),
+            &[row],
+            &HashMap::new(),
+        );
+        assert_eq!(account.archived_standing, account.archived_files);
+        assert_eq!(account.covered, 0);
+    }
+
+    #[test]
+    fn a_copy_no_row_places_adds_nothing() {
+        // Moved within the archive after the apply: no row's destination is
+        // or contains its directory — covered, the safe direction.
+        let placed = place_from_here(&[candidate(
+            10,
+            5,
+            "photos",
+            "/archive/photos",
+            "elsewhere/a.jpg",
+        )]);
+        assert!(placed.is_empty());
+    }
+
+    #[test]
+    fn the_book_reads_the_receipt_where_one_was_read_and_the_directory_where_none_was() {
+        // Decision 5 left a receipt naming `photos/a.jpg`; decision 6 left
+        // none and drew from `docs`. A same-directory copy of `a` is told
+        // apart by the receipt; decision 6's files are held by directory and
+        // counted as its fallback.
+        let placed = place_from_here(&[
+            candidate(10, 5, "photos", "/archive/photos", "photos/a.jpg"),
+            candidate(11, 6, "docs", "/archive/docs", "docs/d.txt"),
+        ]);
+        let receipts = ReceiptOrigins {
+            paths: HashSet::from(["photos/a.jpg".to_string()]),
+            read_decisions: HashSet::from([5]),
+        };
+        let book = FromHereEvidence::by_receipt(&placed, &receipts);
+        let screens = FromHereEvidence::by_directory(&placed);
+        let chosen = file(1, "photos/a.jpg", 10);
+        let beside = file(2, "photos/a (1).jpg", 10);
+        let by_dir = file(3, "docs/d.txt", 11);
+
+        assert!(book.holds(&chosen) && screens.holds(&chosen));
+        assert!(
+            !book.holds(&beside),
+            "the receipt names the chosen file only"
+        );
+        assert!(
+            screens.holds(&beside),
+            "the screens' named gap: one directory"
+        );
+        assert!(book.holds(&by_dir));
+        assert_eq!(book.directory_only_decisions(&by_dir), vec![6]);
+        assert!(book.directory_only_decisions(&chosen).is_empty());
+        assert!(screens.directory_only_decisions(&by_dir).is_empty());
+
+        let account = build_account(
+            &[chosen, beside, by_dir],
+            &[],
+            &copies_of(&[10, 11]),
+            book,
+            &[],
+            &HashMap::new(),
+        );
+        assert_eq!(account.archived_standing, 2);
+        assert_eq!(account.covered, 1);
+        assert_eq!(
+            account.archived_standing_by_directory,
+            BTreeMap::from([(6, 1)])
+        );
+    }
+
+    #[test]
+    fn a_path_the_receipt_names_holds_only_where_its_content_was_archived_from_here() {
+        // `Archived ⊆ archived`: a receipt naming the path is not enough when
+        // the file's content now has no from-here entry (it changed since).
+        let placed: HashMap<i64, Vec<FromHereDirectory>> = HashMap::new();
+        let receipts = ReceiptOrigins {
+            paths: HashSet::from(["photos/a.jpg".to_string()]),
+            read_decisions: HashSet::from([5]),
+        };
+        let book = FromHereEvidence::by_receipt(&placed, &receipts);
+        assert!(!book.holds(&file(1, "photos/a.jpg", 99)));
     }
 
     // classify_absent — Deleted iff Observe
@@ -800,7 +1229,7 @@ mod tests {
             &[],
             &[],
             &copies_of(&[]),
-            &archived_set(&[]),
+            by_dir(&from_here_anywhere(&[])),
             &extractions,
             &HashMap::new(),
         );
@@ -819,7 +1248,7 @@ mod tests {
             &[],
             &[],
             &copies_of(&[]),
-            &archived_set(&[]),
+            by_dir(&from_here_anywhere(&[])),
             &extractions,
             &HashMap::new(),
         );
@@ -930,7 +1359,7 @@ mod tests {
             &present,
             &[],
             &copies,
-            &archived_set(&[12]),
+            by_dir(&from_here_anywhere(&[12])),
             &[],
             &HashMap::new(),
         );
@@ -962,7 +1391,7 @@ mod tests {
             &present,
             &[],
             &copies,
-            &archived_set(&[]),
+            by_dir(&from_here_anywhere(&[])),
             &[],
             &HashMap::new(),
         );

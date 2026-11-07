@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::core::domain::decision::Decision;
 use crate::core::domain::extraction::OriginDisposition;
 use crate::core::domain::format::format_size;
-use crate::core::domain::resolution::{build_account, ResolutionAccount};
+use crate::core::domain::resolution::{
+    build_account, FromHereEvidence, ReceiptOrigins, ResolutionAccount,
+};
 use crate::core::domain::{format_count, Root};
 use crate::core::ops::ledger::{read_apply_receipt, ReceiptRead};
 use crate::core::ops::root_story::RootStory;
@@ -28,7 +30,7 @@ use super::{iso_utc, strip_hash_prefix};
 use crate::core::domain::format::format_date;
 use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
 
-pub struct CompileParams {
+pub struct CompileParams<'a> {
     /// The user's `--reason`, bound onto the identity page.
     pub reason: Option<String>,
     /// Compile timestamp (unix seconds), stamped as `compiled_at`.
@@ -53,6 +55,10 @@ pub struct CompileParams {
     /// one (its `bind` takes the artifact as a required parameter); `None`
     /// keeps the direct compile testable and matches pre-telling books.
     pub telling: Option<super::frame::TellingArtifact>,
+    /// The archiving receipts as read once for this ceremony — the same read
+    /// the telling was composed over, so `story.md` and the inventory cannot
+    /// disagree about which file was chosen.
+    pub origins: &'a CollectedOrigins,
 }
 
 #[derive(Debug)]
@@ -117,7 +123,8 @@ pub fn compile_book(
         .collect();
     let archive_locations = repo::object::batch_find_archive_paths(conn, &object_ids)?;
 
-    let origins = collect_origins(conn, story, &mut gaps)?;
+    let origins = params.origins;
+    let from_here = FromHereEvidence::by_receipt(&story.from_here_directories, &origins.receipts);
 
     let stamp_reasons: HashMap<i64, String> = story
         .decisions
@@ -127,12 +134,12 @@ pub fn compile_book(
 
     let ctx = FateContext {
         archived: &story.archived,
-        archived_from_here: &story.archived_from_here,
+        from_here,
         stamp_families: &story.stamp_families,
         stamp_reasons: &stamp_reasons,
         object_hashes: &object_hashes,
         archive_locations: &archive_locations,
-        origins: &origins,
+        origins: &origins.origins,
     };
     let entries = build_book_entries(&story.present, &story.absent, &ctx);
 
@@ -140,10 +147,21 @@ pub fn compile_book(
         &story.present,
         &story.absent,
         &story.archive_copies,
-        &story.archived_from_here,
+        from_here,
         &story.extractions,
         &story.stamp_families,
     );
+    // The receipt gaps, composed now that the account has counted what the
+    // directory fallback held for each decision — in decision order, before
+    // the gather's gap, as they always stood.
+    gaps.extend(origins.unread.iter().map(|unread| {
+        let counted = account
+            .archived_standing_by_directory
+            .get(&unread.decision_id)
+            .copied()
+            .unwrap_or(0);
+        unread_receipt_gap(unread, counted)
+    }));
     let posture = derive_posture(
         story.root.is_suspended(),
         story.reachable,
@@ -194,17 +212,59 @@ pub fn compile_book(
     })
 }
 
+/// What one ceremony read off the archiving receipts: the per-path origin
+/// claims the inventory is built from, the file-by-file evidence the
+/// telling, the README and the account read "archived from here" by, and the
+/// decisions whose receipt could not be read.
+pub struct CollectedOrigins {
+    pub(super) origins: HashMap<String, ApplyOrigin>,
+    pub(super) receipts: ReceiptOrigins,
+    /// Ascending by decision.
+    pub(super) unread: Vec<UnreadReceipt>,
+}
+
+/// An archiving decision whose receipt was not read, and why — a gap the
+/// compile states once it knows what the directory fallback counted.
+pub(super) struct UnreadReceipt {
+    pub(super) decision_id: i64,
+    pub(super) cause: String,
+}
+
+/// The one composer of a missing, unreachable or malformed receipt's gap.
+/// The consequence is stated only where there is one: when the directory
+/// fallback counted standing files for the decision, the README's account
+/// holds them as chosen while the inventory, which names a destination only
+/// from a receipt, lists them as covered — the count is what lets a reader
+/// make the two add up. A moved file left no row and a copied file whose
+/// original is gone is not standing, so neither is counted or named.
+fn unread_receipt_gap(unread: &UnreadReceipt, counted: i64) -> String {
+    let base = format!(
+        "decision #{}: per-item origin unavailable — {}",
+        unread.decision_id, unread.cause
+    );
+    match counted {
+        0 => base,
+        1 => format!(
+            "{base}; 1 file still standing here is counted as chosen by the directory it drew \
+             from, and the inventory lists it as covered"
+        ),
+        n => format!(
+            "{base}; {} files still standing here are counted as chosen by the directory it \
+             drew from, and the inventory lists them as covered",
+            format_count(n)
+        ),
+    }
+}
+
 /// Read the apply receipts of every decision that drew from this root and
 /// collect their per-item origin claims. Ascending decision order, so a
 /// later apply's claim on a path wins. Items naming another source root are
 /// the other side of a multi-origin apply — skipped, not a gap. Unreadable
 /// receipts are gaps: per-item origin degrades (covered + directory-level
 /// extraction context), recorded, never guessed.
-fn collect_origins(
-    conn: &Connection,
-    story: &RootStory,
-    gaps: &mut Vec<String>,
-) -> Result<HashMap<String, ApplyOrigin>> {
+///
+/// Read once per ceremony: the telling and the compile take the same value.
+pub(super) fn collect_origins(conn: &Connection, story: &RootStory) -> Result<CollectedOrigins> {
     let apply_ids: HashSet<i64> = story.extractions.iter().map(|r| r.decision_id).collect();
     let mut applies: Vec<&Decision> = story
         .decisions
@@ -214,31 +274,26 @@ fn collect_origins(
     applies.sort_by_key(|d| d.id);
 
     let mut origins: HashMap<String, ApplyOrigin> = HashMap::new();
+    let mut receipts = ReceiptOrigins::default();
+    let mut unread: Vec<UnreadReceipt> = Vec::new();
     for decision in applies {
-        let read = match read_apply_receipt(decision, &story.roots) {
-            ReceiptRead::Ok(read) => read,
-            ReceiptRead::NoReceipt { reason } => {
-                gaps.push(format!(
-                    "decision #{}: per-item origin unavailable — {reason}",
-                    decision.id
-                ));
-                continue;
-            }
-            ReceiptRead::Unreachable { reason } => {
-                gaps.push(format!(
-                    "decision #{}: per-item origin unavailable — receipt unreachable: {reason}",
-                    decision.id
-                ));
-                continue;
-            }
-            ReceiptRead::Malformed { reason } => {
-                gaps.push(format!(
-                    "decision #{}: per-item origin unavailable — receipt malformed: {reason}",
-                    decision.id
-                ));
+        let cause = match read_apply_receipt(decision, &story.roots) {
+            ReceiptRead::Ok(read) => Ok(read),
+            ReceiptRead::NoReceipt { reason } => Err(reason),
+            ReceiptRead::Unreachable { reason } => Err(format!("receipt unreachable: {reason}")),
+            ReceiptRead::Malformed { reason } => Err(format!("receipt malformed: {reason}")),
+        };
+        let read = match cause {
+            Ok(read) => read,
+            Err(cause) => {
+                unread.push(UnreadReceipt {
+                    decision_id: decision.id,
+                    cause,
+                });
                 continue;
             }
         };
+        receipts.read_decisions.insert(decision.id);
 
         let base = match &read.doc.meta.locus {
             Some(locus) => locus.path.clone(),
@@ -254,6 +309,7 @@ fn collect_origins(
             if item.source_root != story.root.path {
                 continue;
             }
+            receipts.paths.insert(item.source_rel_path.clone());
             let destination = if item.destination_rel_path.is_empty() {
                 base.clone()
             } else {
@@ -292,7 +348,11 @@ fn collect_origins(
         }
     }
 
-    Ok(origins)
+    Ok(CollectedOrigins {
+        origins,
+        receipts,
+        unread,
+    })
 }
 
 /// One `inventory.jsonl` line. Dates are ISO-8601 UTC and hashes carry
@@ -541,6 +601,10 @@ struct BookMeta<'a> {
 #[derive(Serialize)]
 struct MetaIdentity<'a> {
     path: &'a str,
+    /// The root's number in the index that bound the book — what lets a
+    /// same-day re-run of this root, and only that, replace the book from the
+    /// shelf alone (additive within format v1; `verify_book` does not read it).
+    root_id: i64,
     role: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     comment: Option<&'a str>,
@@ -656,6 +720,7 @@ fn write_meta(
         zone: params.read_times_on.as_str(),
         identity: MetaIdentity {
             path: &story.root.path,
+            root_id: story.root.id,
             role: &story.root.role,
             comment: story.root.comment.as_deref(),
             suspended: story.root.is_suspended(),

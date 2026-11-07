@@ -191,8 +191,10 @@ pub fn build_extraction_rows<'a>(
 
 /// The containing directory of a relative item path — `""` for a top-level
 /// file. Unlike a common-prefix collapse, this is exact: the file is *in*
-/// this directory.
-fn parent_dir(rel_path: &str) -> &str {
+/// this directory. Also how the from-here evidence names a file's directory
+/// (`domain::resolution`), so a row and the file it is matched to are cut by
+/// one rule.
+pub(crate) fn parent_dir(rel_path: &str) -> &str {
     rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 

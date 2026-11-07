@@ -1954,11 +1954,9 @@ pub(crate) mod root {
         role: &str,
         comment: Option<&str>,
     ) -> Result<Root> {
-        conn.execute(
-            "INSERT INTO roots (path, role, comment) VALUES (?, ?, ?)",
-            rusqlite::params![path, role, comment],
-        )?;
-        let id = conn.last_insert_rowid();
+        // The number is one above every number this index has given (the
+        // root-number law), chosen inside the insert itself.
+        let id = crate::core::repo::root::insert_numbered(conn, path, role, comment)?;
 
         // Fetch the complete Root to ensure consistency with database state.
         // This follows the archive repository's insert_destination() pattern.

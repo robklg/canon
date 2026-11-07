@@ -237,6 +237,7 @@ fn a_book_without_a_story_claim_still_verifies() {
     let book_dir = tempfile::tempdir().unwrap();
     let dest = book_dir.path().join("book");
     let story = fetch_root_story(&conn, root_id).unwrap();
+    let origins = crate::retire::ops::compile::collect_origins(&conn, &story).unwrap();
     compile_book(
         &conn,
         &story,
@@ -248,6 +249,7 @@ fn a_book_without_a_story_claim_still_verifies() {
             dest_dir: dest.clone(),
             ceremony_decision_id: None,
             telling: None,
+            origins: &origins,
         },
     )
     .unwrap();
@@ -255,6 +257,22 @@ fn a_book_without_a_story_claim_still_verifies() {
     let meta = std::fs::read_to_string(dest.join("meta.toml")).unwrap();
     assert!(!meta.contains("[story]"));
     verify_book(&dest).unwrap();
+}
+
+#[test]
+fn the_book_records_its_roots_number_and_verifies_without_it() {
+    // The number is what lets the shelf alone tell a same-day re-run of this
+    // root from another drive; a book bound before it existed still verifies.
+    let (conn, _src, _arch, root_id) = every_fate_fixture();
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    let bound = ceremony.bind(&conn, test_telling()).unwrap();
+    let meta_path = bound.dir.join("meta.toml");
+    let meta = std::fs::read_to_string(&meta_path).unwrap();
+    let line = format!("root_id = {root_id}\n");
+    assert!(meta.contains(&line), "{meta}");
+
+    std::fs::write(&meta_path, meta.replace(&line, "")).unwrap();
+    verify_book(&bound.dir).unwrap();
 }
 
 #[test]
@@ -288,7 +306,7 @@ fn the_telling_reads_the_ceremony_snapshot() {
     // ceremony fetched at review time — a concurrent write after `begin`
     // must not leak into the story the user confirms and binds.
     let (conn, _src, _arch, root_id) = every_fate_fixture();
-    let ceremony = begin_with(&conn, root_id, RecordingMode::Full);
+    let mut ceremony = begin_with(&conn, root_id, RecordingMode::Full);
 
     insert_source(&conn, root_id, "late/arrival.jpg", None, true, false, None);
 
@@ -365,6 +383,7 @@ fn existing_compile_target_is_an_explicit_collision() {
     let dest = book_dir.path().join("book");
     std::fs::create_dir(&dest).unwrap();
     let story = fetch_root_story(&conn, root_id).unwrap();
+    let origins = crate::retire::ops::compile::collect_origins(&conn, &story).unwrap();
     let err = compile_book(
         &conn,
         &story,
@@ -376,6 +395,7 @@ fn existing_compile_target_is_an_explicit_collision() {
             dest_dir: dest,
             ceremony_decision_id: None,
             telling: None,
+            origins: &origins,
         },
     )
     .unwrap_err();

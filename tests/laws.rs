@@ -964,6 +964,17 @@ const LAWS: &[Law] = &[
         authority: Authority::Recognised,
         record: "2026-10-25",
     },
+    Law {
+        // A root's number is never given twice: the next number is one above
+        // every column naming a root and the mark a removal leaves, so a new
+        // root never inherits a removed root's records into its story or book.
+        name: "root-number",
+        owner: "core/repo/root.rs",
+        verifier: "a_root_number_is_never_given_twice",
+        reach: Reach::Unit("core"),
+        authority: Authority::Recognised,
+        record: "2026-11-04",
+    },
 ];
 
 /// Names the matcher reads out of the prose that resolve to no row, each with

@@ -458,7 +458,7 @@ fn the_review_and_the_story_share_the_account_count() {
 
     let story = fetch_root_story(&conn, root_id).unwrap();
     let review = crate::retire::ops::review::readiness_lens(&story);
-    let report = crate::story::report_over(&conn, &story, &Default::default()).unwrap();
+    let report = crate::story::report_over(&conn, &story, &Default::default(), None).unwrap();
 
     assert_eq!(review.account.covered, 1);
     assert_eq!(review.account.covered_only_parked.count, 1);
@@ -470,4 +470,54 @@ fn the_review_and_the_story_share_the_account_count() {
         review.account.covered_only_parked.segment(&review.roots),
         Some("1 only on suspended /arc-parked".to_string())
     );
+}
+
+// "Archived from here" is the file that was chosen — the screens.
+
+const COPIED_WITH_RECEIPT: super::fixtures::CopiesShape = super::fixtures::CopiesShape {
+    receipt: true,
+    moved: false,
+    copies: true,
+};
+
+#[test]
+fn a_copy_of_a_chosen_file_is_covered_on_the_screens() {
+    // The reproduced drive: five files chosen from `photos/`, seven copies
+    // of them in `backup/` and `docs/`. The review and `canon roots story`
+    // count the five as archived from here and the seven as covered, so
+    // *standing here now* agrees with *the story so far* on one screen.
+    let fx = super::fixtures::copies_fixture(COPIED_WITH_RECEIPT);
+    let story = crate::core::ops::root_story::fetch_root_story(&fx.conn, fx.root_id).unwrap();
+
+    let review = crate::retire::ops::review::readiness_lens(&story);
+    assert_eq!(review.account.archived_files, 5);
+    assert_eq!(review.account.archived_standing, 5);
+    assert_eq!(review.account.covered, 7);
+
+    let report = crate::story::report_over(&fx.conn, &story, &Default::default(), None).unwrap();
+    assert_eq!(report.account, review.account);
+    fn fold(place: &crate::story::StoryPlace, sum: &mut (i64, i64)) {
+        sum.0 += place.standing.archived;
+        sum.1 += place.standing.covered;
+        for child in &place.children {
+            fold(child, sum);
+        }
+    }
+    let mut sum = (0, 0);
+    fold(&report.places, &mut sum);
+    assert_eq!(sum, (5, 7), "the place map reads the same evidence");
+}
+
+#[test]
+fn a_root_with_no_copies_reads_as_before() {
+    // The allowed case beside the narrowing: with nothing but the chosen
+    // files standing, every one of them is archived from here.
+    let fx = super::fixtures::copies_fixture(super::fixtures::CopiesShape {
+        copies: false,
+        ..COPIED_WITH_RECEIPT
+    });
+    let story = crate::core::ops::root_story::fetch_root_story(&fx.conn, fx.root_id).unwrap();
+    let review = crate::retire::ops::review::readiness_lens(&story);
+    assert_eq!(review.account.archived_standing, 5);
+    assert_eq!(review.account.covered, 0);
 }

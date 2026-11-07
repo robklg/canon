@@ -27,6 +27,28 @@ pub fn plant_failure(conn: &Connection, event: &str, table: &str) {
     .unwrap();
 }
 
+/// From-here evidence for these objects that holds wherever their files
+/// stand: one coarse placement at the root, as a run recorded before
+/// directory precision leaves. For tests about the classification's other
+/// arms, where which file was chosen is not the question.
+pub fn from_here_anywhere(
+    object_ids: &[i64],
+) -> std::collections::HashMap<i64, Vec<crate::core::domain::resolution::FromHereDirectory>> {
+    object_ids
+        .iter()
+        .map(|&id| {
+            (
+                id,
+                vec![crate::core::domain::resolution::FromHereDirectory {
+                    decision_id: 1,
+                    rel_prefix: String::new(),
+                    precise: false,
+                }],
+            )
+        })
+        .collect()
+}
+
 pub fn insert_root(conn: &Connection, path: &str, role: &str, suspended: bool) -> i64 {
     conn.execute(
         "INSERT INTO roots (path, role, suspended) VALUES (?, ?, ?)",
