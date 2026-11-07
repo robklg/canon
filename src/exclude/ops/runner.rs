@@ -25,13 +25,24 @@ pub(super) struct ExclusionRun {
 
 /// The summary an exclusion records: its head line, the receipt gap's reason joined onto it
 /// where there is one — the one place that join is spelled — then the plan's note lines
-/// under it (`SelectionNotes::under`). The head and the gap stay the first line, which the trail narrates;
-/// the notes qualify the count, below it.
-pub(super) fn recorded_summary(head: &str, gap: Option<&str>, notes: &SelectionNotes) -> String {
-    match gap {
+/// under it (`SelectionNotes::under`), then `after_notes` where the plan has a line of its own
+/// (`exclude duplicates`' empty files). The head and the gap stay the first line, which the
+/// trail narrates; the notes qualify the count, directly below it.
+pub(super) fn recorded_summary(
+    head: &str,
+    gap: Option<&str>,
+    notes: &SelectionNotes,
+    after_notes: Option<&str>,
+) -> String {
+    let mut summary = match gap {
         Some(reason) => notes.under(&format!("{head} — {reason}")),
         None => notes.under(head),
+    };
+    if let Some(line) = after_notes {
+        summary.push('\n');
+        summary.push_str(line);
     }
+    summary
 }
 
 /// Run an exclusion execution transactionally. Opens a transaction, performs the
@@ -61,6 +72,7 @@ pub(super) fn run_exclusion<T, F>(
     counts: DecisionCounts,
     head: &str,
     notes: &SelectionNotes,
+    after_notes: Option<&str>,
     mutate: F,
 ) -> Result<ExclusionRun>
 where
@@ -69,7 +81,7 @@ where
 {
     // A run that records nothing has no row to explain, so it states no gap.
     let gap = destination.gap.as_deref().filter(|_| has_items);
-    let summary = recorded_summary(head, gap, notes);
+    let summary = recorded_summary(head, gap, notes, after_notes);
     let summary = summary.as_str();
 
     let tx = conn.transaction()?;

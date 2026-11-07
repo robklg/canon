@@ -98,6 +98,7 @@ fn run_exclusion_rolls_back_on_error() {
         counts_all(1),
         "test",
         &SelectionNotes::none(NoteUnit::Sources),
+        None,
         |tx, decision_id| {
             // Flip the source inside the transaction, then fail.
             exclude_repo::source::set_excluded(tx, id, true, decision_id)?;

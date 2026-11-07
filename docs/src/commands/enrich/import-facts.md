@@ -23,8 +23,6 @@ Each line is a JSON object:
 | `basis_rev` | Revision from the worklist for staleness check (required) |
 | `facts` | Object mapping fact keys to values |
 
-A record is skipped if the file changed since the worklist was generated.
-
 ## Fact Namespacing
 
 A name is stored under `content.`: `mime` becomes `content.mime` ([Reading a Key's Name](../../concepts/facts.md#reading-a-keys-name)).

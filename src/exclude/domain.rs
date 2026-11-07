@@ -41,6 +41,9 @@ pub struct ExcludableDuplicatesResult {
     pub skipped_not_covered: usize,
     /// Count of sources skipped because multiple copies exist in prefer path (ambiguous)
     pub skipped_multiple: usize,
+    /// Count of empty sources outside the prefer path, set aside: a duplicate is an identity
+    /// claim, and every empty file shares the one empty content (the contentless law)
+    pub skipped_empty: usize,
 }
 
 /// Determine which sources should be excluded based on duplicate detection.
@@ -61,6 +64,7 @@ pub struct ExcludableDuplicatesResult {
 /// # Algorithm
 ///
 /// For each source in scope:
+/// 0. Skip if empty (contentless): under prefer_prefix it counts as in prefer, else as empty
 /// 1. Skip if no object_id (unhashed file)
 /// 2. Skip if source is already under prefer_prefix
 /// 3. Find all duplicates (sources with same object_id) that are:
@@ -78,6 +82,17 @@ pub fn find_excludable_duplicates(
     let mut result = ExcludableDuplicatesResult::default();
 
     for source in scope_sources {
+        // Empty files first, before the hash test (an unhashed empty file is empty, never
+        // unhashed). One under the prefer path was never a candidate, and counts as such.
+        if source.is_contentless() {
+            if path_is_under(&source.path(), prefer_prefix) {
+                result.skipped_in_prefer += 1;
+            } else {
+                result.skipped_empty += 1;
+            }
+            continue;
+        }
+
         // Skip sources without object_id (unhashed)
         let Some(object_id) = source.object_id else {
             result.skipped_no_hash += 1;
@@ -176,6 +191,47 @@ mod tests {
 
         assert!(result.to_exclude.is_empty());
         assert_eq!(result.skipped_no_hash, 1);
+    }
+
+    /// An empty file is never excluded as a duplicate: every empty file shares the one empty
+    /// content. Counted as empty before the hash test (the unhashed one too), and as already in
+    /// `--prefer` where it stands there. The non-empty pair is the allowed case.
+    #[test]
+    fn find_excludable_skips_empty_files() {
+        let empty = |id, root: &str, rel: &str, object_id| {
+            let mut s = make_source(id, root, rel, object_id, false, false);
+            s.size = 0;
+            s
+        };
+        let scope = vec![
+            empty(1, "/source", "a.txt", Some(10)),
+            empty(2, "/source", "b.txt", None),
+            empty(3, "/archive", "c.txt", Some(10)),
+            make_source(4, "/source", "d.jpg", Some(20), false, false),
+        ];
+        let mut by_object = HashMap::new();
+        by_object.insert(
+            10,
+            vec![
+                scope[0].clone(),
+                empty(5, "/archive", "a.txt", Some(10)),
+                scope[2].clone(),
+            ],
+        );
+        by_object.insert(
+            20,
+            vec![
+                scope[3].clone(),
+                make_source(6, "/archive", "d.jpg", Some(20), false, false),
+            ],
+        );
+
+        let result = find_excludable_duplicates(&scope, &by_object, "/archive");
+
+        assert_eq!(result.to_exclude, vec![4]);
+        assert_eq!(result.skipped_empty, 2);
+        assert_eq!(result.skipped_no_hash, 0);
+        assert_eq!(result.skipped_in_prefer, 1);
     }
 
     #[test]

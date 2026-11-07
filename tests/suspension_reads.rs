@@ -154,6 +154,15 @@ const LICENSED: &[(&str, &str, usize)] = &[
     //     lexical matcher can only see as `.suspended(` on its two call
     //     sites.
     ("trail/domain/composition.rs", ".suspended", 2),
+    // --- The closed door projected into SQL, at a whole-index act over rows: the stale and
+    //     excluded prunes' two reach fragments (`source_in_reach!`, `content_in_reach!`), each
+    //     spelled once and built into the one condition a prune's count and its delete both
+    //     run. A prune selects nothing through `select_sources` and holds no `Root` to ask, so
+    //     the typed vocabulary has no seat here; fetching the whole index to decide per row in
+    //     the domain would split the preview's query from the act's. Three reads: the source
+    //     side's parked holder, the content side's parked holder and its open one. No sentence
+    //     with a way back is composed from them — the prunes state nothing about the door.
+    ("facts/repo.rs", ".suspended", 3),
 ];
 
 /// Where a raw read is legitimately outside `core` — see `LICENSED`'s own

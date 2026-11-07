@@ -471,6 +471,9 @@ pub fn exclude_duplicates(
             println!("Nothing to exclude.");
         }
         print_notes(&plan.notes);
+        if let Some(line) = plan.empty_line() {
+            println!("{line}");
+        }
         return Ok(());
     }
 
@@ -488,6 +491,12 @@ pub fn exclude_duplicates(
             "  Skipped (multiple copies in --prefer): {}",
             plan.skipped_multiple
         );
+        if plan.skipped_empty > 0 {
+            eprintln!(
+                "  Skipped (empty, no content to match): {}",
+                plan.skipped_empty
+            );
+        }
         if plan.skipped_in_prefer > 0 {
             eprintln!(
                 "  Skipped (already in --prefer): {}",
@@ -523,6 +532,12 @@ pub fn exclude_duplicates(
                 eprintln!(
                     "  Skipped {} (multiple copies in --prefer)",
                     plan.skipped_multiple
+                );
+            }
+            if plan.skipped_empty > 0 {
+                eprintln!(
+                    "  Skipped {} (empty, no content to match)",
+                    plan.skipped_empty
                 );
             }
         }

@@ -13,8 +13,8 @@ inline in each command flow.
 Sealed behind a barrel of the ten command entry points — `set`, `set_by_id`, `set_by_path`,
 `clear`, `exclude_duplicates`, `set_object_by_hash`, `set_object_by_file`, `set_objects_by_filter`,
 `clear_object`, `list_objects` — plus `SetOptions` and `ClearOptions`, all consumed by `main.rs`;
-and three law-surface riders, `plan_set_objects`, `ExcludeSetObjectsParams` and
-`check_set_object_by_file`, which no production code calls — the contentless-law canary
+and five law-surface riders, `plan_set_objects`, `ExcludeSetObjectsParams`,
+`check_set_object_by_file`, `plan_duplicates` and `ExcludeDuplicatesParams`, which no production code calls — the contentless-law canary
 (`contentless_law_tests.rs`) reaches them through the barrel, re-exported with
 `#[allow(unused_imports)]`. Every other boundary — `domain`, `repo`, `ops`, `cli`, and `ops`'s six
 strata — is private or `pub(super)` at most, visible only within `exclude/`.
@@ -63,7 +63,12 @@ strata — is private or `pub(super)` at most, visible only within `exclude/`.
 - **The object-exclusion guards are contentless-law sites**: `plan_set_objects`'s counted
   set-aside and `check_set_object_by_file`'s refusal toward `--hash`. Both route through
   `Source::is_contentless()` — identity-keyed exclusion would otherwise dismiss every empty file in
-  the universe via the one object they all share.
+  the universe via the one object they all share. **`exclude duplicates` is one too**
+  (`domain.rs::find_excludable_duplicates`): a duplicate is an identity claim, so an empty file is
+  set aside before the hash test — counted as `skipped_empty`, or as already in `--prefer` where it
+  stands there — and the count is stated on every path the plan ends on, its executed summary
+  included, through one sentence (`ExcludeDuplicatesPlan::empty_line`) placed after the plan's
+  notes, which qualify the head's count.
 - **`check_*` outside the transaction, `execute_*` inside** — the ceremony needs the check's output
   to compose its prompt, so the single-target TOCTOU window is accepted; one short transaction per
   invocation, and no lock held across a prompt.
@@ -85,7 +90,7 @@ strata — is private or `pub(super)` at most, visible only within `exclude/`.
   the role half only — the `root_path, rel_path` tail is what can drift unseen.
 
 **Decisions pinned by a guard test** — each row is a claim this subsystem makes, and the test that
-fails if it stops holding (all under `exclude/ops/tests/`):
+fails if it stops holding (in `exclude/ops/tests/`, `domain.rs`):
 
 **Behind a door: counted where a claim would otherwise be false, and re-checked once more inside
 the transaction.** **Object exclusion** reaches every source sharing the object, parked ones
@@ -144,4 +149,5 @@ user earned. The filter-driven arms take the door at the front door instead, wit
 | `plan_clear` finds source-level-excluded rows only | `test_plan_clear_returns_source_level_only` |
 | Contentless set-aside in `plan_set_objects` | `test_plan_set_objects_skips_empty` |
 | Contentless refusal in `check_set_object_by_file` | `test_check_object_by_file_empty` |
+| Contentless set-aside in `exclude duplicates`, stated in the summary | `find_excludable_skips_empty_files`, `the_duplicates_summary_states_the_empty_files_it_skipped` |
 | Sort order `role DESC, root_path, rel_path` | `test_plan_set_objects_source_sort_order` |

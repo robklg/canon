@@ -39,6 +39,13 @@ struct InputEntry {
     source_id: i64,
     path: String,
     basis_rev: i64,
+    /// The size and modification time the index held for the file at its last scan, which the
+    /// worklist copies. A later `canonargs` in a chain reads the earlier one's output, which
+    /// carries neither.
+    #[serde(default)]
+    size: Option<i64>,
+    #[serde(default)]
+    mtime: Option<i64>,
     // Optional fields from enriched input (for chaining), passed on as written
     #[serde(default)]
     facts: HashMap<String, Box<RawValue>>,
@@ -73,33 +80,146 @@ fn main() -> Result<()> {
 
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut stdout_handle = stdout.lock();
+    run(
+        stdin.lock(),
+        &mut stdout.lock(),
+        &mut io::stderr(),
+        &cli.command,
+        &mode,
+    )
+}
 
-    for line in stdin.lock().lines() {
+/// Process every entry of `input`: facts to `out`, one warning per skipped entry to `err`, and,
+/// when anything was skipped, one closing line on `err` counting the skips by cause.
+fn run(
+    input: impl BufRead,
+    out: &mut impl Write,
+    err: &mut impl Write,
+    command: &[String],
+    mode: &OutputMode,
+) -> Result<()> {
+    let mut tally = Tally::default();
+
+    for line in input.lines() {
         let line = line.context("Failed to read line from stdin")?;
         if line.trim().is_empty() {
             continue;
         }
+        tally.entries += 1;
 
         let entry: InputEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("Warning: Failed to parse input entry: {}", e);
+                writeln!(err, "Warning: Failed to parse input entry: {}", e)?;
+                tally.other += 1;
                 continue;
             }
         };
 
-        match process_entry(&entry, &cli.command, &mode) {
+        match process_entry(&entry, command, mode) {
             Ok(output) => {
                 let json = serde_json::to_string(&output)?;
-                writeln!(stdout_handle, "{}", json)?;
+                writeln!(out, "{}", json)?;
             }
-            Err(e) => {
-                eprintln!("Warning: {}: {}", entry.path, e);
+            Err(skipped) => {
+                writeln!(err, "Warning: {}: {}", entry.path, skipped)?;
+                tally.count(&skipped);
             }
         }
     }
 
+    if let Some(line) = tally.closing_line() {
+        writeln!(err, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Why an entry produced no facts.
+#[derive(Debug)]
+enum Skipped {
+    /// Nothing stands at the entry's path: its storage is away, or the file moved or went.
+    NoFile,
+    /// The file's size or modification time differs from what the last scan recorded.
+    Changed,
+    /// Anything else: an unreadable file, a failed command, output that held no fact.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Skipped::NoFile => write!(f, "no file at this path"),
+            Skipped::Changed => write!(
+                f,
+                "the file changed after the last scan (its size or modification time differs); \
+                 scan it, then make the worklist again"
+            ),
+            Skipped::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The entries read and the ones skipped, by cause.
+#[derive(Default)]
+struct Tally {
+    entries: usize,
+    no_file: usize,
+    changed: usize,
+    other: usize,
+}
+
+impl Tally {
+    fn count(&mut self, skipped: &Skipped) {
+        match skipped {
+            Skipped::NoFile => self.no_file += 1,
+            Skipped::Changed => self.changed += 1,
+            Skipped::Other(_) => self.other += 1,
+        }
+    }
+
+    /// `Skipped N of M entries: A with no file, B changed after the last scan, C other (see the
+    /// warnings above)`, a zero part left out; none when nothing was skipped.
+    fn closing_line(&self) -> Option<String> {
+        let skipped = self.no_file + self.changed + self.other;
+        if skipped == 0 {
+            return None;
+        }
+        let parts: Vec<String> = [
+            (self.no_file, "with no file"),
+            (self.changed, "changed after the last scan"),
+            (self.other, "other"),
+        ]
+        .into_iter()
+        .filter(|&(n, _)| n > 0)
+        .map(|(n, words)| format!("{n} {words}"))
+        .collect();
+        Some(format!(
+            "Skipped {skipped} of {} entries: {} (see the warnings above)",
+            self.entries,
+            parts.join(", ")
+        ))
+    }
+}
+
+/// The file at the entry's path, checked before the tool runs, so no value is read from a file
+/// that is not the one the index describes. The read does not follow a link: only regular files
+/// become sources, so a path that is now a link is not the file the scan saw. Where the entry
+/// carries the last scan's size and modification time (a worklist entry), both must match.
+fn check_file(entry: &InputEntry) -> Result<(), Skipped> {
+    let metadata = match std::fs::symlink_metadata(&entry.path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Skipped::NoFile),
+        Err(e) => return Err(Skipped::Other(anyhow::anyhow!("cannot read the file: {e}"))),
+    };
+    #[cfg(unix)]
+    if let (Some(size), Some(mtime)) = (entry.size, entry.mtime) {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.size() as i64 != size || metadata.mtime() != mtime {
+            return Err(Skipped::Changed);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = metadata;
     Ok(())
 }
 
@@ -113,6 +233,15 @@ enum OutputMode {
 }
 
 fn process_entry(
+    entry: &InputEntry,
+    command_template: &[String],
+    mode: &OutputMode,
+) -> Result<FactOutput, Skipped> {
+    check_file(entry)?;
+    run_command(entry, command_template, mode).map_err(Skipped::Other)
+}
+
+fn run_command(
     entry: &InputEntry,
     command_template: &[String],
     mode: &OutputMode,
@@ -296,9 +425,13 @@ mod tests {
     /// A fact from an earlier stage reaches the output byte for byte.
     #[test]
     fn a_number_passed_through_a_chain_is_unchanged() {
-        let entry: InputEntry = serde_json::from_str(
-            r#"{"source_id":1,"path":"a.jpg","basis_rev":0,"facts":{"content.A":1.10,"content.B":1e5,"content.C":-0,"content.D":123456789012345678901}}"#,
-        )
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jpg");
+        std::fs::write(&file, b"x").unwrap();
+        let entry: InputEntry = serde_json::from_str(&format!(
+            r#"{{"source_id":1,"path":{},"basis_rev":0,"facts":{{"content.A":1.10,"content.B":1e5,"content.C":-0,"content.D":123456789012345678901}}}}"#,
+            serde_json::to_string(file.to_str().unwrap()).unwrap()
+        ))
         .unwrap();
         let output = process_entry(
             &entry,
@@ -332,5 +465,156 @@ mod tests {
         assert_eq!(facts["B"].get(), "-0");
         assert_eq!(facts["C"].get(), "123456789012345678901");
         assert!(parse_output("[1]", &OutputMode::Json).is_err());
+    }
+
+    fn single_fact() -> OutputMode {
+        OutputMode::SingleFact {
+            key: "content.E".to_string(),
+            type_hint: None,
+        }
+    }
+
+    /// A worklist entry for `path`, carrying the size and modification time given.
+    fn entry_line(path: &std::path::Path, size: Option<i64>, mtime: Option<i64>) -> String {
+        let mut line = serde_json::json!({
+            "source_id": 1,
+            "path": path.to_str().unwrap(),
+            "root_id": 1,
+            "basis_rev": 0,
+        });
+        if let (Some(size), Some(mtime)) = (size, mtime) {
+            line["size"] = size.into();
+            line["mtime"] = mtime.into();
+        }
+        line.to_string()
+    }
+
+    fn entry_at(path: &std::path::Path, size: Option<i64>, mtime: Option<i64>) -> InputEntry {
+        serde_json::from_str(&entry_line(path, size, mtime)).unwrap()
+    }
+
+    /// The size and modification time a scan would record for the file.
+    fn scanned(path: &std::path::Path) -> (i64, i64) {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).unwrap();
+        (m.size() as i64, m.mtime())
+    }
+
+    /// The defect it names: a tool that exits 0 and prints text for a missing file, its text
+    /// stored as a value. The command here would succeed, and must never run.
+    #[test]
+    fn an_absent_file_is_skipped_before_the_command_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}; echo x", marker.display()),
+        ];
+        let absent = dir.path().join("gone.jpg");
+        for entry in [
+            entry_at(&absent, Some(1), Some(1)),
+            entry_at(&absent, None, None),
+        ] {
+            let Err(skipped) = process_entry(&entry, &command, &single_fact()) else {
+                panic!("the entry ran");
+            };
+            assert!(matches!(skipped, Skipped::NoFile), "{skipped}");
+            assert_eq!(skipped.to_string(), "no file at this path");
+        }
+        assert!(!marker.exists(), "the command ran for an absent file");
+    }
+
+    /// The defect it names: a value read from a file other than the one the last scan saw.
+    #[test]
+    fn a_file_whose_size_or_time_differs_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jpg");
+        std::fs::write(&file, b"abc").unwrap();
+        let (size, mtime) = scanned(&file);
+        let command = vec!["echo".to_string(), "x".to_string()];
+        for (size, mtime) in [(size + 1, mtime), (size, mtime + 1)] {
+            let entry = entry_at(&file, Some(size), Some(mtime));
+            let Err(skipped) = process_entry(&entry, &command, &single_fact()) else {
+                panic!("the entry ran");
+            };
+            assert!(matches!(skipped, Skipped::Changed), "{skipped}");
+        }
+    }
+
+    /// The allowed case, set up as a worklist entry is: size and time as a scan records them.
+    #[test]
+    fn a_file_matching_its_entry_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jpg");
+        std::fs::write(&file, b"abc").unwrap();
+        let (size, mtime) = scanned(&file);
+        let entry = entry_at(&file, Some(size), Some(mtime));
+        let output = process_entry(
+            &entry,
+            &["echo".to_string(), "x".to_string()],
+            &single_fact(),
+        )
+        .unwrap();
+        assert_eq!(output.facts["content.E"].get(), r#""x""#);
+    }
+
+    /// A later stage in a chain carries no size or time: an existing file runs, an absent one is
+    /// skipped.
+    #[test]
+    fn a_chained_entry_checks_existence_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jpg");
+        std::fs::write(&file, b"abc").unwrap();
+        let command = vec!["echo".to_string(), "x".to_string()];
+        assert!(process_entry(&entry_at(&file, None, None), &command, &single_fact()).is_ok());
+        let absent = dir.path().join("gone.jpg");
+        assert!(matches!(
+            process_entry(&entry_at(&absent, None, None), &command, &single_fact()),
+            Err(Skipped::NoFile)
+        ));
+    }
+
+    /// The closing line counts every skipped entry by cause, a zero part left out; a run that
+    /// skipped nothing has none (the allowed case).
+    #[test]
+    fn the_closing_line_counts_every_skipped_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("a.jpg");
+        std::fs::write(&good, b"abc").unwrap();
+        let (size, mtime) = scanned(&good);
+        let command = vec!["echo".to_string(), "x".to_string()];
+        let drive = |lines: Vec<String>| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            run(
+                lines.join("\n").as_bytes(),
+                &mut out,
+                &mut err,
+                &command,
+                &single_fact(),
+            )
+            .unwrap();
+            (
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        };
+
+        let (out, err) = drive(vec![
+            entry_line(&dir.path().join("gone.jpg"), Some(1), Some(1)),
+            "not json".to_string(),
+            entry_line(&good, Some(size), Some(mtime)),
+            entry_line(&good, Some(size + 1), Some(mtime)),
+        ]);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        assert_eq!(
+            err.lines().last().unwrap(),
+            "Skipped 3 of 4 entries: 1 with no file, 1 changed after the last scan, 1 other \
+             (see the warnings above)"
+        );
+
+        let (out, err) = drive(vec![entry_line(&good, Some(size), Some(mtime))]);
+        assert_eq!(out.lines().count(), 1);
+        assert_eq!(err, "", "nothing skipped, nothing said");
     }
 }

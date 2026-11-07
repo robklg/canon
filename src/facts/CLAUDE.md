@@ -110,9 +110,16 @@ which the contentless-law canary reads. `cli.rs` declares `pub(super) mod import
 `convert` the same way, and `ops.rs` declares `report`/`maintain`/`import`/`convert` the same way, so nothing below the front door is reachable
 from outside it. No repo-tier item is on the barrel: nothing else reaches facts.
 
-**The prunes consult no door.** `prune-stale`, `prune-orphaned-objects` and `prune-excluded-facts`
-read no `Door`, `RootLookup` or `ParkedRoot`, by design: pruning is index maintenance over rows
-that are already absent or excluded, never an act on content, and a source no longer present is
-no longer part of its root whether that root is parked or not. A prune that stopped at a closed
-door would keep dead rows alive for a root the user has set aside.
+**The stale and excluded prunes stop at a closed door; the orphan prune needs none.** They
+leave every fact on a source present on a suspended root, and on content only such sources hold;
+the facts of sources that are gone, and of content an open root or no present source holds,
+still go (the register's *Suspension*: parked means no acts, a deleted file holds nothing).
+`prune-orphaned-objects` touches only gone sources and content no present source holds, so it
+reads no door. The reach is two private SQL fragments in `repo.rs` (`source_in_reach!`,
+`content_in_reach!`), built into one condition per prune that its count and its delete both run,
+so the preview is the act. Nothing is printed about what the door kept: a wide act ignores
+parked content silently. The excluded prune also keeps `expr::CONTENT_HASH`, the content's
+identity, so `hashed?` and `hash?` agree; it is never stored on a source, so only the content side
+guards it. Pins: `the_prunes_leave_what_a_closed_door_holds`,
+`the_excluded_prune_keeps_the_content_hash`.
 

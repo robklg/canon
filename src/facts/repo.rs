@@ -8,6 +8,7 @@ use rusqlite::OptionalExtension;
 use crate::core::domain::fact::{FactType, FactValue};
 use crate::core::repo::db::{populate_temp_sources, Connection};
 use crate::core::repo::fact::{fact_value_at, fact_value_params, FACT_VALUE_COLUMNS};
+use crate::expr::CONTENT_HASH;
 use crate::facts::domain::ContentFactOnSource;
 
 /// Upsert a fact (insert or update on conflict).
@@ -396,78 +397,93 @@ pub fn delete_by_criteria(
 }
 
 // ============================================================================
-// Stale fact pruning (for `canon facts prune --stale`)
+// The prunes' reach (for `canon prune --stale-facts` and `--excluded-facts`)
 // ============================================================================
+//
+// Each prune's condition is spelled once, as a WHERE over the un-aliased `facts` table, and
+// both its count and its delete run that one spelling, so a preview cannot state a number the
+// act does not delete. The two reach fragments are the closed door projected onto fact rows:
+// parked means no acts, and a file that is gone holds nothing.
 
-/// Count stale facts stored on sources, where observed_basis_rev != current basis_rev.
-///
-/// A fact is considered stale when its `observed_basis_rev` (the file's basis_rev
-/// at the time the fact was recorded) doesn't match the source's current `basis_rev`.
-/// This indicates the file has changed since the fact was observed.
-///
-/// Only facts stored on a source with non-null observed_basis_rev are considered.
-/// Facts stored on an object don't have basis_rev tracking.
+/// A fact stored on a source is in reach unless that source is present on a suspended root.
+/// A source that is gone holds nothing, so its rows may still go.
+macro_rules! source_in_reach {
+    () => {
+        "NOT EXISTS (
+            SELECT 1 FROM sources ps JOIN roots pr ON pr.id = ps.root_id
+            WHERE ps.id = facts.entity_id AND ps.present = 1 AND pr.suspended = 1)"
+    };
+}
+
+/// A fact stored on content is in reach unless only suspended roots hold that content: some
+/// present source holds it there, and no present source on an open root does. Content that no
+/// present source holds belongs to no place, and may still go.
+macro_rules! content_in_reach {
+    () => {
+        "(NOT EXISTS (
+            SELECT 1 FROM sources ps JOIN roots pr ON pr.id = ps.root_id
+            WHERE ps.object_id = facts.entity_id AND ps.present = 1 AND pr.suspended = 1)
+          OR EXISTS (
+            SELECT 1 FROM sources ps JOIN roots pr ON pr.id = ps.root_id
+            WHERE ps.object_id = facts.entity_id AND ps.present = 1 AND pr.suspended = 0))"
+    };
+}
+
+/// A stale fact: stored on a source, observed at a revision the source no longer has. A fact
+/// whose source row is gone compares against NULL and stays.
+const STALE_FACTS: &str = concat!(
+    "entity_type = 'source'
+     AND observed_basis_rev IS NOT NULL
+     AND observed_basis_rev != (SELECT basis_rev FROM sources WHERE id = facts.entity_id)
+     AND ",
+    source_in_reach!()
+);
+
+/// A fact stored on an excluded source.
+const EXCLUDED_SOURCE_FACTS: &str = concat!(
+    "entity_type = 'source'
+     AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)
+     AND ",
+    source_in_reach!()
+);
+
+/// A fact stored on excluded content, the content hash aside (`?1`, bound to
+/// `expr::CONTENT_HASH`): the hash is the content's identity, never a fact about it to prune.
+const EXCLUDED_CONTENT_FACTS: &str = concat!(
+    "entity_type = 'object'
+     AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)
+     AND key != ?1
+     AND ",
+    content_in_reach!()
+);
+
+/// Count stale facts in reach (`STALE_FACTS`).
 pub fn count_stale(conn: &Connection) -> Result<i64> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM facts f
-         JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
-         WHERE f.observed_basis_rev IS NOT NULL
-           AND f.observed_basis_rev != s.basis_rev",
+        &format!("SELECT COUNT(*) FROM facts WHERE {STALE_FACTS}"),
         [],
         |row| row.get(0),
     )?;
     Ok(count)
 }
 
-/// Delete stale facts stored on sources, where observed_basis_rev != current basis_rev.
-///
-/// Returns the number of facts deleted.
-///
-/// See `count_stale()` for the definition of staleness.
+/// Delete stale facts in reach (`STALE_FACTS`), returning how many were deleted.
 pub fn delete_stale(conn: &Connection) -> Result<usize> {
-    // The DELETE uses a subquery to find stale entity_ids, then verifies
-    // each fact individually to avoid race conditions with concurrent updates.
-    let deleted = conn.execute(
-        "DELETE FROM facts
-         WHERE entity_type = 'source'
-           AND entity_id IN (
-               SELECT f.entity_id FROM facts f
-               JOIN sources s ON f.entity_type = 'source' AND f.entity_id = s.id
-               WHERE f.observed_basis_rev IS NOT NULL
-                 AND f.observed_basis_rev != s.basis_rev
-           )
-           AND observed_basis_rev IS NOT NULL
-           AND observed_basis_rev != (
-               SELECT basis_rev FROM sources WHERE id = facts.entity_id
-           )",
-        [],
-    )?;
+    let deleted = conn.execute(&format!("DELETE FROM facts WHERE {STALE_FACTS}"), [])?;
     Ok(deleted)
 }
 
-// ============================================================================
-// Excluded entity fact pruning (for `canon facts prune --excluded-facts`)
-// ============================================================================
-
-/// Count facts for excluded entities.
+/// Count facts of excluded entities in reach.
 ///
-/// # Arguments
-/// * `conn` - Database connection
-/// * `scope` - Which facts to count: "source", "object", or "all"
-///
-/// # Returns
-/// Tuple of (stored_on_source_count, stored_on_content_count).
-/// If scope is "source", stored_on_content_count will be 0.
-/// If scope is "object", stored_on_source_count will be 0.
+/// `scope` is "source", "object" or "all"; returns (stored on sources, stored on content),
+/// the side outside the scope as 0.
 pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
     let count_sources = scope == "all" || scope == "source";
     let count_objects = scope == "all" || scope == "object";
 
     let stored_on_source_count: i64 = if count_sources {
         conn.query_row(
-            "SELECT COUNT(*) FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
+            &format!("SELECT COUNT(*) FROM facts WHERE {EXCLUDED_SOURCE_FACTS}"),
             [],
             |row| row.get(0),
         )?
@@ -477,10 +493,8 @@ pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
 
     let stored_on_content_count: i64 = if count_objects {
         conn.query_row(
-            "SELECT COUNT(*) FROM facts
-             WHERE entity_type = 'object'
-               AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
-            [],
+            &format!("SELECT COUNT(*) FROM facts WHERE {EXCLUDED_CONTENT_FACTS}"),
+            [CONTENT_HASH],
             |row| row.get(0),
         )?
     } else {
@@ -490,23 +504,17 @@ pub fn count_excluded(conn: &Connection, scope: &str) -> Result<(i64, i64)> {
     Ok((stored_on_source_count, stored_on_content_count))
 }
 
-/// Delete facts for excluded entities.
+/// Delete facts of excluded entities in reach.
 ///
-/// # Arguments
-/// * `conn` - Database connection
-/// * `scope` - Which facts to delete: "source", "object", or "all"
-///
-/// # Returns
-/// Tuple of (source_facts_deleted, object_facts_deleted).
+/// `scope` is "source", "object" or "all"; returns (source facts deleted, content facts
+/// deleted).
 pub fn delete_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)> {
     let delete_sources = scope == "all" || scope == "source";
     let delete_objects = scope == "all" || scope == "object";
 
     let source_facts_deleted = if delete_sources {
         conn.execute(
-            "DELETE FROM facts
-             WHERE entity_type = 'source'
-               AND entity_id IN (SELECT id FROM sources WHERE excluded = 1)",
+            &format!("DELETE FROM facts WHERE {EXCLUDED_SOURCE_FACTS}"),
             [],
         )?
     } else {
@@ -515,10 +523,8 @@ pub fn delete_excluded(conn: &Connection, scope: &str) -> Result<(usize, usize)>
 
     let object_facts_deleted = if delete_objects {
         conn.execute(
-            "DELETE FROM facts
-             WHERE entity_type = 'object'
-               AND entity_id IN (SELECT id FROM objects WHERE excluded = 1)",
-            [],
+            &format!("DELETE FROM facts WHERE {EXCLUDED_CONTENT_FACTS}"),
+            [CONTENT_HASH],
         )?
     } else {
         0
@@ -1551,5 +1557,138 @@ mod tests {
             )
             .unwrap();
         assert_eq!(value, "Canon");
+    }
+
+    // =========================================================================
+    // The prunes' reach: the closed door and the content hash
+    // =========================================================================
+
+    fn door_root(conn: &Connection, id: i64, path: &str, suspended: bool) {
+        conn.execute(
+            "INSERT INTO roots (id, path, suspended) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, path, suspended],
+        )
+        .unwrap();
+    }
+
+    /// A source with the fields the prunes read: presence, exclusion, revision, content.
+    fn door_source(
+        conn: &Connection,
+        id: i64,
+        root_id: i64,
+        present: bool,
+        excluded: bool,
+        object_id: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO sources (id, root_id, rel_path, present, excluded, object_id, basis_rev,
+                                  size, mtime, partial_hash, scanned_at, last_seen_at, device, inode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, 10, 0, '', 0, 0, 0, 0)",
+            rusqlite::params![id, root_id, format!("f{id}"), present, excluded, object_id],
+        )
+        .unwrap();
+    }
+
+    fn facts_on(conn: &Connection, entity_type: &str, id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE entity_type = ?1 AND entity_id = ?2",
+            rusqlite::params![entity_type, id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The prunes leave every fact a present file on a suspended root holds, and the facts of
+    /// content only such files hold; the facts of files that are gone, and of content an open
+    /// root holds or no present file holds, still go. The defect it names: a prune that deletes
+    /// behind a door the user closed. Each prune's count is what its delete deletes.
+    #[test]
+    fn the_prunes_leave_what_a_closed_door_holds() {
+        let conn = setup_test_db();
+        door_root(&conn, 1, "/open", false);
+        door_root(&conn, 2, "/parked", true);
+
+        // Stale facts (observed at revision 1, the source now at 2) on every kind of source.
+        // id: (root, present) — 11 open present, 12 open gone, 21 parked present, 22 parked gone.
+        for (id, root, present) in [(11, 1, true), (12, 1, false), (21, 2, true), (22, 2, false)] {
+            door_source(&conn, id, root, present, false, None);
+            insert_fact_with_basis_rev(&conn, id, "content.Make", "Canon", Some(1));
+        }
+        // Excluded sources with a fact observed at their current revision (never stale), the
+        // same four kinds.
+        for (id, root, present) in [(31, 1, true), (32, 1, false), (41, 2, true), (42, 2, false)] {
+            door_source(&conn, id, root, present, true, None);
+            insert_fact_with_basis_rev(&conn, id, "content.Make", "Nikon", Some(2));
+        }
+        // Excluded content held on the open root only (101), on both (102), on the parked
+        // root only (103), and by no present file (104: its one holder is gone).
+        for (obj, hash) in [(101, "h1"), (102, "h2"), (103, "h3"), (104, "h4")] {
+            insert_excluded_object(&conn, obj, hash);
+            insert_fact_text(&conn, "object", obj, "content.Make", "Leica");
+        }
+        door_source(&conn, 51, 1, true, false, Some(101));
+        door_source(&conn, 52, 1, true, false, Some(102));
+        door_source(&conn, 53, 2, true, false, Some(102));
+        door_source(&conn, 54, 2, true, false, Some(103));
+        door_source(&conn, 55, 1, false, false, Some(104));
+
+        let stale = count_stale(&conn).unwrap();
+        assert_eq!(
+            stale, 3,
+            "the parked present source's stale fact is out of reach"
+        );
+        assert_eq!(delete_stale(&conn).unwrap() as i64, stale);
+        for (id, kept) in [(11, 0), (12, 0), (21, 1), (22, 0)] {
+            assert_eq!(
+                facts_on(&conn, "source", id),
+                kept,
+                "stale fact on source {id}"
+            );
+        }
+
+        let (on_sources, on_content) = count_excluded(&conn, "all").unwrap();
+        assert_eq!((on_sources, on_content), (3, 3));
+        let (deleted_sources, deleted_content) = delete_excluded(&conn, "all").unwrap();
+        assert_eq!(
+            (deleted_sources as i64, deleted_content as i64),
+            (on_sources, on_content)
+        );
+        for (id, kept) in [(31, 0), (32, 0), (41, 1), (42, 0)] {
+            assert_eq!(
+                facts_on(&conn, "source", id),
+                kept,
+                "fact on excluded source {id}"
+            );
+        }
+        for (obj, kept) in [(101, 0), (102, 0), (103, 1), (104, 0)] {
+            assert_eq!(
+                facts_on(&conn, "object", obj),
+                kept,
+                "fact on excluded content {obj}"
+            );
+        }
+    }
+
+    /// The excluded prune keeps the content hash, so the content stays identified. The defect
+    /// it names: a prune that deletes the hash, so `hashed?` and `hash?` disagree.
+    #[test]
+    fn the_excluded_prune_keeps_the_content_hash() {
+        let conn = setup_test_db();
+        door_root(&conn, 1, "/open", false);
+        insert_excluded_object(&conn, 1, "h1");
+        door_source(&conn, 1, 1, true, false, Some(1));
+        insert_fact_text(&conn, "object", 1, CONTENT_HASH, "h1");
+        insert_fact_text(&conn, "object", 1, "content.Make", "Canon");
+
+        assert_eq!(count_excluded(&conn, "object").unwrap(), (0, 1));
+        assert_eq!(delete_excluded(&conn, "object").unwrap(), (0, 1));
+        let left: Vec<String> = conn
+            .prepare("SELECT key FROM facts WHERE entity_type = 'object' AND entity_id = 1")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(left, vec![CONTENT_HASH.to_string()]);
     }
 }

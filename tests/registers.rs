@@ -45,12 +45,12 @@ struct Ceiling {
 const CEILINGS: &[Ceiling] = &[
     Ceiling {
         path: "CLAUDE.md",
-        words: 12851,
+        words: 12885,
         verifiers: 9,
     },
     Ceiling {
         path: "src/archive/CLAUDE.md",
-        words: 8215,
+        words: 8251,
         verifiers: 43,
     },
     Ceiling {
@@ -70,8 +70,8 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/exclude/CLAUDE.md",
-        words: 1586,
-        verifiers: 14,
+        words: 1669,
+        verifiers: 16,
     },
     Ceiling {
         path: "src/expr/CLAUDE.md",
@@ -80,8 +80,8 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "src/facts/CLAUDE.md",
-        words: 1366,
-        verifiers: 3,
+        words: 1442,
+        verifiers: 5,
     },
     Ceiling {
         path: "src/ls/CLAUDE.md",

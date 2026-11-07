@@ -84,7 +84,7 @@ pub fn execute_set(
     let has_items = !plan.items.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
     let head = format!("Excluded {} {noun}", format_count(count));
-    let summary = recorded_summary(&head, None, &plan.notes);
+    let summary = recorded_summary(&head, None, &plan.notes, None);
 
     let run = run_exclusion(
         conn,
@@ -94,6 +94,7 @@ pub fn execute_set(
         counts_all(count),
         &head,
         &plan.notes,
+        None,
         |tx, decision_id| {
             refuse_if_a_door_closed(tx, plan.items.iter().map(|i| i.root.as_str()))?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, true, decision_id)?;
@@ -144,7 +145,7 @@ pub fn execute_clear(
     let has_items = !plan.items.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
     let head = format!("Cleared exclusions for {} {noun}", format_count(count));
-    let summary = recorded_summary(&head, None, &plan.notes);
+    let summary = recorded_summary(&head, None, &plan.notes, None);
 
     let run = run_exclusion(
         conn,
@@ -154,6 +155,7 @@ pub fn execute_clear(
         counts_all(count),
         &head,
         &plan.notes,
+        None,
         |tx, decision_id| {
             refuse_if_a_door_closed(tx, plan.items.iter().map(|i| i.root.as_str()))?;
             exclude_repo::source::batch_set_excluded(tx, &source_ids, false, decision_id)?;
@@ -204,7 +206,8 @@ pub fn execute_duplicates(
     let has_items = !plan.groups.is_empty();
     let noun = if count == 1 { "source" } else { "sources" };
     let head = format!("Excluded {} {noun}", format_count(count));
-    let summary = recorded_summary(&head, None, &plan.notes);
+    let empty_line = plan.empty_line();
+    let summary = recorded_summary(&head, None, &plan.notes, empty_line.as_deref());
 
     let run = run_exclusion(
         conn,
@@ -214,6 +217,7 @@ pub fn execute_duplicates(
         counts_all(count),
         &head,
         &plan.notes,
+        empty_line.as_deref(),
         |tx, decision_id| {
             refuse_if_a_door_closed(
                 tx,
@@ -274,7 +278,7 @@ pub fn execute_set_objects(
         plan.holders.in_source_roots,
         plan.holders.in_archives
     );
-    let summary = recorded_summary(&head, None, &plan.notes);
+    let summary = recorded_summary(&head, None, &plan.notes, None);
 
     let run = run_exclusion(
         conn,
@@ -284,6 +288,7 @@ pub fn execute_set_objects(
         counts_all(count),
         &head,
         &plan.notes,
+        None,
         |tx, decision_id| {
             // Capture each object's stamp-set before stamping: the receipt must
             // list exactly the sources the stamp touches, with pre-stamp

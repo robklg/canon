@@ -67,6 +67,7 @@ Decision trail: /path/to/photos — /path/to/photos suspended · canon roots uns
 | [`trail`](../query/trail.md), [`roots story`](story.md), `note`, `roots retire --dry-run` | Work as usual, and say the root is suspended |
 | [`import-facts`](../enrich/import-facts.md) | Sets aside the records naming a suspended source and counts them in its summary |
 | `exclude set-object`, [`facts delete --on object`](../maintain/facts-delete.md) | Reach every copy of the content, and state how many are on suspended roots |
+| [`prune`](../maintain/prune.md) | Skips suspended roots |
 
 ## Removing Roots
 

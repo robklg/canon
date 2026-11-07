@@ -116,6 +116,7 @@ fn test_execute_duplicates_marks_excluded() {
         skipped_in_prefer: 0,
         skipped_not_covered: 0,
         skipped_multiple: 0,
+        skipped_empty: 0,
     };
 
     execute_duplicates(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
@@ -144,10 +145,60 @@ fn test_execute_duplicates_returns_count() {
         skipped_in_prefer: 0,
         skipped_not_covered: 0,
         skipped_multiple: 0,
+        skipped_empty: 0,
     };
 
     let result = execute_duplicates(&mut conn, &plan, &ReceiptDestination::none(), None).unwrap();
     assert_eq!(result.count, 1);
+}
+
+/// The executed summary states the empty files the plan set aside, in the same bytes the
+/// nothing-path prints, so a `--yes` run and a one-source run (no confirmation) state them too.
+/// A plan that set none aside has no such line (the allowed case).
+#[test]
+fn the_duplicates_summary_states_the_empty_files_it_skipped() {
+    let mut conn = setup_test_db();
+    let root = insert_root(&conn, "/source", "source", false);
+    let id1 = insert_source(&conn, root, "a.jpg", None);
+    let plan = |skipped_empty| ExcludeDuplicatesPlan {
+        notes: SelectionNotes::none(NoteUnit::Sources),
+        groups: vec![DuplicateGroupData {
+            hash: "sha256:dup".to_string(),
+            kept: vec![],
+            excluded: vec![item(id1, "/source", "a.jpg")],
+        }],
+        group_count: 1,
+        prefer_prefix: "/archive".to_string(),
+        scope_count: 3,
+        skipped_no_hash: 0,
+        skipped_in_prefer: 0,
+        skipped_not_covered: 0,
+        skipped_multiple: 0,
+        skipped_empty,
+    };
+
+    let with_empty = plan(2);
+    let result =
+        execute_duplicates(&mut conn, &with_empty, &ReceiptDestination::none(), None).unwrap();
+    let lines: Vec<&str> = result.summary.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "Excluded 1 source",
+            "  2 empty files skipped (no content to match)"
+        ]
+    );
+    assert_eq!(Some(lines[1].to_string()), with_empty.empty_line());
+
+    assert_eq!(
+        plan(1).empty_line().as_deref(),
+        Some("  1 empty file skipped (no content to match)")
+    );
+
+    let none = plan(0);
+    assert_eq!(none.empty_line(), None);
+    let result = execute_duplicates(&mut conn, &none, &ReceiptDestination::none(), None).unwrap();
+    assert_eq!(result.summary, "Excluded 1 source");
 }
 
 // =========================================================================

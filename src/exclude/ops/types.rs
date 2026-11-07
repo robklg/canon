@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use crate::core::domain::format_count;
 use crate::core::domain::object::{Holders, Object};
 use crate::core::domain::scope::ScopeMatch;
 use crate::core::domain::source::Source;
@@ -183,12 +184,31 @@ pub struct ExcludeDuplicatesPlan {
     pub skipped_not_covered: usize,
     /// Sources skipped because multiple copies exist in prefer path.
     pub skipped_multiple: usize,
+    /// Empty sources outside the prefer path, set aside: with no content, there is nothing to
+    /// match a copy by (the contentless law).
+    pub skipped_empty: usize,
     /// The plan's lines about its selection: how many of what it acts on have no value for a
     /// negated key, and which stored times a comparison could not place.
     pub notes: SelectionNotes,
 }
 
 impl ExcludeDuplicatesPlan {
+    /// The empty files this plan set aside, as one line: printed after "Nothing to exclude."
+    /// and recorded in the executed summary, so the record says what the screen said.
+    pub fn empty_line(&self) -> Option<String> {
+        (self.skipped_empty > 0).then(|| {
+            let files = if self.skipped_empty == 1 {
+                "file"
+            } else {
+                "files"
+            };
+            format!(
+                "  {} empty {files} skipped (no content to match)",
+                format_count(self.skipped_empty as i64)
+            )
+        })
+    }
+
     /// The excluded sources across all groups (the duplicates being marked).
     pub fn source_ids(&self) -> Vec<i64> {
         self.groups

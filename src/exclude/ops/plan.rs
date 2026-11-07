@@ -188,6 +188,7 @@ pub fn plan_duplicates(
             skipped_in_prefer: 0,
             skipped_not_covered: 0,
             skipped_multiple: 0,
+            skipped_empty: 0,
             notes: SelectionNotes::of(selection.marks.as_ref(), &[], NoteUnit::Sources),
         });
     }
@@ -195,10 +196,12 @@ pub fn plan_duplicates(
     // Build lookup map for source objects
     let source_map: HashMap<i64, &Source> = selection.sources.iter().map(|s| (s.id, s)).collect();
 
-    // Collect unique object_ids for duplicate lookup
+    // Collect unique object_ids for duplicate lookup. An empty source is set aside before any
+    // identity test, so its object (the one every empty file shares) is never fetched.
     let object_ids: Vec<i64> = selection
         .sources
         .iter()
+        .filter(|s| !s.is_contentless())
         .filter_map(|s| s.object_id)
         .collect::<HashSet<_>>()
         .into_iter()
@@ -289,6 +292,7 @@ pub fn plan_duplicates(
         skipped_in_prefer: result.skipped_in_prefer,
         skipped_not_covered: result.skipped_not_covered,
         skipped_multiple: result.skipped_multiple,
+        skipped_empty: result.skipped_empty,
         notes,
     })
 }

@@ -544,7 +544,10 @@ the report invited the one command that refuses, in four separate ways.
   the tests that stayed there use them too.
 - **The contentless law applies to apply's archive conflicts and to cluster's skip set**, via the
   archived-ness SQL — empty files travel with their folders rather than being skipped as "already
-  archived", so a verbatim folder copy stays faithful. It does **not** apply to apply's
+  archived", so a verbatim folder copy stays faithful. It applies to **generate's duplicate gate**
+  too (`find_source_duplicates`, through `is_contentless_size`): a duplicate is an identity claim,
+  so empty files never form a group and never refuse the run; they stay ordinary lock entries,
+  nothing set aside. It does **not** apply to apply's
   path-collision checks (existence, not identity). See the law's block in the top-level CLAUDE.md.
 - **`ops/receipt.rs` exists to hold apply's two receipt document shapes** — a seventh stratum for
   two structs, because neither alternative works: `domain.rs` is illegal for them (`ApplyReceipt`

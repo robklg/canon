@@ -137,6 +137,7 @@ pub fn execute_set_source(
         counts_all(1),
         &summary,
         &SelectionNotes::none(NoteUnit::Sources),
+        None,
         |tx, decision_id| {
             exclude_repo::source::set_excluded(tx, item.source_id, true, decision_id)?;
             Ok(
@@ -279,6 +280,7 @@ pub fn execute_set_object(
         counts_all(1),
         &summary,
         &SelectionNotes::none(NoteUnit::Sources),
+        None,
         |tx, decision_id| {
             // Capture the stamp-set before stamping (pre-stamp provenance links).
             let stamp_set = match (decision, decision_id) {
@@ -371,6 +373,7 @@ pub fn execute_clear_object(
         counts_all(1),
         &summary,
         &SelectionNotes::none(NoteUnit::Sources),
+        None,
         |tx, decision_id| {
             // Capture the stamp-set before stamping (pre-stamp provenance links).
             let stamp_set = match (decision, decision_id) {

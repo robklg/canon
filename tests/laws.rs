@@ -557,7 +557,12 @@ const LAWS: &[Law] = &[
         // commands to the whole universe; the sibling doors — `RootLookup` at
         // the root spec, and `PrefixOutcome::Parked` at the manifest — project
         // the same fact from their own inputs, and all three carry the same
-        // `ParkedRoot` payload rather than re-deriving one.
+        // `ParkedRoot` payload rather than re-deriving one. A fourth projection
+        // carries none: the stale and excluded prunes' row-level SQL
+        // (`facts/repo.rs`, `source_in_reach!`/`content_in_reach!`), which decides
+        // which fact rows a whole-index act may delete and states nothing. It is
+        // licensed by name in `tests/suspension_reads.rs` and pinned by
+        // `the_prunes_leave_what_a_closed_door_holds`.
         name: "closed door",
         owner: "core/ops/scope.rs",
         verifier: "a_parked_cwd_is_never_global",

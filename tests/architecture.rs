@@ -4099,6 +4099,8 @@ mod source {
                 "plan_set_objects",
                 "ExcludeSetObjectsParams",
                 "check_set_object_by_file",
+                "plan_duplicates",
+                "ExcludeDuplicatesParams",
             ],
         ),
         // The two command entry points main.rs dispatches, plus the

@@ -16,12 +16,12 @@ pub use cli::{
     set_object_by_file, set_object_by_hash, set_objects_by_filter, ClearOptions, SetOptions,
 };
 
-// These three have no production caller — the contentless-law canary
+// These five have no production caller — the contentless-law canary
 // (contentless_law_tests.rs) is the only consumer, reaching them
 // through the barrel like trail.rs/survey.rs's own test-only re-exports.
 #[allow(unused_imports)]
-pub use ops::plan::plan_set_objects;
+pub use ops::plan::{plan_duplicates, plan_set_objects};
 #[allow(unused_imports)]
 pub use ops::single::check_set_object_by_file;
 #[allow(unused_imports)]
-pub use ops::types::ExcludeSetObjectsParams;
+pub use ops::types::{ExcludeDuplicatesParams, ExcludeSetObjectsParams};

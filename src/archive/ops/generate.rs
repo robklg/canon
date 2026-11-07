@@ -21,7 +21,7 @@ use crate::core::domain::include::IncludeSet;
 use crate::core::domain::path::path_strip_prefix;
 use crate::core::domain::root::Root;
 use crate::core::domain::scope::{DecisionScope, ScopeMatch, ScopeResolution};
-use crate::core::domain::source::Source;
+use crate::core::domain::source::{is_contentless_size, Source};
 use crate::core::domain::time::now_epoch_secs;
 use crate::core::domain::time::value::Precision;
 use crate::core::domain::time::zone::{RecordedZone, UserZone};
@@ -706,6 +706,11 @@ fn find_source_duplicates(entries: &[LockEntry]) -> Vec<(i64, Vec<i64>)> {
     let mut object_map: HashMap<i64, Vec<i64>> = HashMap::new();
 
     for entry in entries {
+        // A duplicate is an identity claim, and every empty file shares the one empty content
+        // (the contentless law): empty files travel with their directory, never grouped.
+        if is_contentless_size(entry.size) {
+            continue;
+        }
         if let Some(object_id) = entry.object_id {
             object_map.entry(object_id).or_default().push(entry.id);
         }

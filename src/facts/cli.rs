@@ -647,7 +647,7 @@ pub fn prune_stale(
     let plan = plan_prune_stale(conn)?;
 
     if plan.stale_count == 0 {
-        println!("No stale facts found.");
+        println!("No stale facts to prune.");
         return Ok(());
     }
 
@@ -751,9 +751,9 @@ pub fn prune_excluded_facts(
         println!(
             "{}",
             match (prune_sources, prune_objects) {
-                (true, true) => "No facts stored on excluded sources or content.",
-                (true, false) => "No facts stored on excluded sources.",
-                (false, _) => "No facts stored on excluded content.",
+                (true, true) => "No facts to prune on excluded sources or content.",
+                (true, false) => "No facts to prune on excluded sources.",
+                (false, _) => "No facts to prune on excluded content.",
             }
         );
         return Ok(());

@@ -194,6 +194,82 @@ fn cluster_generate_carries_empty_files_instead_of_skipping_them() {
 }
 
 #[test]
+fn cluster_generate_never_reads_empty_files_as_duplicates() {
+    // A duplicate is an identity claim, and every empty file shares the one empty content:
+    // two empty files in a directory travel with it, never refuse the run as duplicates.
+    let conn = setup_test_db();
+    let root = insert_root(&conn, "/r", "source", false);
+    let empty = insert_object(&conn, "emptyhash", false);
+    let data = insert_object(&conn, "datahash", false);
+    insert_source_with_size(&conn, root, "dir/a.log", Some(empty), 0);
+    insert_source_with_size(&conn, root, "dir/b.log", Some(empty), 0);
+    insert_source_with_size(&conn, root, "dir/c.bin", Some(data), 100);
+    let params = ClusterGenerateParams {
+        scopes: vec![],
+        filters: crate::expr::BoundFilters::none(),
+        allow_archived: false,
+        allow_duplicates: false,
+        clock: UserZone::utc(),
+    };
+    let mut conn = conn;
+    let plan = plan_generate(&mut conn, &params).expect("empty files are no duplicates");
+    let planned: Vec<&str> = plan.lock_entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        planned.iter().any(|p| p.ends_with("a.log"))
+            && planned.iter().any(|p| p.ends_with("b.log")),
+        "both empty files are in the lock: {planned:?}"
+    );
+
+    // The refusal stays for real duplicates, in the same state.
+    insert_source_with_size(&conn, root, "dir/d.bin", Some(data), 100);
+    assert!(
+        plan_generate(&mut conn, &params).is_err(),
+        "two copies of the same content still refuse"
+    );
+}
+
+#[test]
+fn exclude_duplicates_sets_the_empty_files_aside() {
+    // An empty file is never excluded as a duplicate of another empty file: there is no
+    // content to match a copy by. Counted as empty before the hash test, so the unhashed empty
+    // file is empty too, never "no hash"; the empty copies under --prefer were never candidates.
+    let conn = setup_test_db();
+    let scope = insert_root(&conn, "/r", "source", false);
+    let keep = insert_root(&conn, "/keep", "source", false);
+    let empty = insert_object(&conn, "emptyhash", false);
+    let data = insert_object(&conn, "datahash", false);
+    insert_source_with_size(&conn, scope, "a.log", Some(empty), 0);
+    insert_source_with_size(&conn, scope, "u.log", None, 0);
+    let dup = insert_source_with_size(&conn, scope, "c.bin", Some(data), 100);
+    insert_source_with_size(&conn, keep, "a.log", Some(empty), 0);
+    insert_source_with_size(&conn, keep, "c.bin", Some(data), 100);
+    let mut conn = conn;
+    let plan = crate::exclude::plan_duplicates(
+        &mut conn,
+        &crate::exclude::ExcludeDuplicatesParams {
+            scopes: vec![],
+            filters: crate::expr::BoundFilters::none(),
+            prefer_prefix: "/keep".to_string(),
+            clock: UserZone::utc(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plan.source_ids(),
+        vec![dup],
+        "only the non-empty duplicate is excluded"
+    );
+    assert_eq!(
+        plan.skipped_empty, 2,
+        "both empty files outside --prefer are counted"
+    );
+    assert_eq!(
+        plan.skipped_no_hash, 0,
+        "the unhashed empty file is counted as empty"
+    );
+}
+
+#[test]
 fn set_object_planning_sets_the_empty_file_aside() {
     // Identity-keyed exclusion over a selection: the empty file's object is
     // the one every empty file shares, so excluding it would dismiss every
