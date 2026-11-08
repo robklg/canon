@@ -64,40 +64,40 @@ machine stream was asked for (`-0` with a machine-rendering detail view) the wor
 **stderr**, leaving stdout empty and the exit code carrying the refusal.
 
 **Role is read regardless of suspension** — a suspended archive root gets the same statement any
-archive root gets. What a closed door permits is suspension's own question, and this seam does
+archive root gets. What a suspended root permits is suspension's own question, and this seam does
 not consult it. `resolve_scope`'s explicit-path arm re-derives `auto_include_archived` through
 the same `partition_prefixes_by_role`, one derivation across the two; its CWD-defaulting arm
-reads role from the containing root it resolved, which now finds parked roots too.
+reads role from the containing root it resolved, which now finds suspended roots too.
 
-**The door precedes the frame.** A scope wholly behind a closed door is answered by the spine's
+**Suspension precedes the frame.** A scope wholly on a suspended root is answered by the spine's
 statement in `main.rs`, before survey runs — the sentence is universal, while `ArchiveScope`'s
 is survey's own and points at `trail`/`ls`. `machine_shaped_stdout` is survey's one derivation of
 which channel its scope statement belongs on, asked by the front door rather than re-derived
 there.
 
-## The outward side, and the door
+## The outward side, and suspension
 
-**The outward side reads every root, whatever the standing of its door.** `is_active()` survives
+**The outward side reads every root, suspended or not.** `is_active()` survives
 on the **selection** side alone (`ops/compute.rs`, the selection and its hidden-excluded count):
 what you survey is what you can see. The four outward reads — the object index, the `--other`
 location object set, the per-location totals, the affinity complementary set — carry no such
-filter, because they answer *where else does this content live?* and a copy behind a door the
-user closed is still a copy. Testifying is the one thing a closed door does not stop; custody
-stands, and parking never un-archives.
+filter, because they answer *where else does this content live?* and a copy on a root the
+user suspended is still a copy. Counting as evidence is the one thing suspension does not stop; custody
+stands, and suspension never un-archives.
 
 The filter used to apply on both sides, and inverted survey's own answer: the same content read
 `0 unique` while a neighbouring root was live and `3 unique`, `No related locations found.` once
-it was parked — the world's answer changed by an act that changes only attention. Pinned from
+it was suspended — the world's answer changed by an act that changes only attention. Pinned from
 both sides (`survey_counts_parked_evidence_on_the_outward_side`,
 `the_selection_side_still_sets_parked_sources_aside`).
 
-**Every cited place says whether reaching it means opening a door**, all-or-nothing:
+**Every cited place says whether reaching it means unsuspending a root**, all-or-nothing:
 `LocationResult.suspended` is true when every source *in the population survey already fetched for
 the place* (`at_location` — non-excluded, non-contentless, hashed, role-appropriate for the mode in
-force; not literally every source Canon knows there) stands on a parked root. One copy on an open
-root and nothing needs opening, so a mark would raise a question the place does not pose. Read
+force; not literally every source Canon knows there) stands on a suspended root. One copy on an unsuspended
+root and nothing needs unsuspending, so a mark would raise a question the place does not pose. Read
 **from what stands at the place**, not from a discovered scope's root, which is what lets a
-`--other` location answer the same way a discovered one does. A discovered location lies in one
+`--other` location be marked as a discovered one is. A discovered location lies in one
 root, so the *every* and *any* readings coincide there; a `--other` location is a path the user
 chose and can contain several roots, which is where the two readings part and the rule earns its
 keep (`an_other_location_spanning_two_standings_is_unmarked`).
@@ -114,7 +114,7 @@ place never leads, even carrying the stronger relation
 only key the lists share.** Below it each sorts on its own measure — the breakdown on archive-side
 sources at the location, its detail view on selection-side sources archived there — so the two can
 legitimately disagree about which live place leads. What they may not disagree about is whether a
-place is marked, or whether a parked one leads at all. A list's first line is its headline, and
+place is marked, or whether a suspended one leads at all. A list's first line is its headline, and
 testimony is *stated, never headlined*. This is a conformance to **stated-never-headlined**, not
 a rule of survey's own: that law binds Canon-wide and already bound survey, so realising it here
 is delivery of a grant, not a new one. The sweep picks one citation and survey ranks many, so the
@@ -124,16 +124,16 @@ owned at `core::domain::resolution::standing_first`, and each surface carries it
 so a fifth list cannot restate it differently. `--other` keeps the
 user's own order; the marker still states each place.
 
-**A parked `--archive` is answered and marked, never refused** — the frame's label carries
-`(suspended)`; it was refused only while the index hid those copies. A parked **`--other`** is
+**A suspended `--archive` is answered and marked, never refused** — the frame's label carries
+`(suspended)`; it was refused only while the index hid those copies. A suspended **`--other`** is
 still refused by the spine's location gate: `--other` names a place to ask *about*, and a scope
-on a closed root is refused, made aware of, and left untouched.
+on a suspended root is refused, made aware of, and left untouched.
 
 ## The contentless law's index site
 
 **`ObjectIndex::build()` (`domain/object_index.rs`) refuses contentless sources** — the law's
 enforcement point in the index. Its **population** is the caller's and widened here (every root,
-open door or closed); its **predicate** is the law's and unchanged, which is why the canary stays
+suspended or not); its **predicate** is the law's and unchanged, which is why the canary stays
 green. A computation reading through the index inherits the refusal;
 one reading `all_sources` or `selection` directly past it must re-apply the predicate itself,
 and five do (`ops/compute.rs`): selection identity (`sel_object_ids`), the `--other` location

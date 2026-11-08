@@ -26,7 +26,7 @@ production seeds notes through notes' own cli and ops. It carries
 `#[allow(unused_imports)]` for exactly that reason: nothing in this crate's non-test code
 calls it through the barrel.
 
-**The two note modes take different permits at a closed door.** Adding or clearing a note is a
+**The two note modes take different permits on a suspended root.** Adding or clearing a note is a
 write inside the closet and meets the closed default: `resolve_single_scope` refuses through
 `scope::open_door` with the `Refused` verb, on stderr, exit 1 — replacing a bail that named a
 false cause ("not inside a known root" for a directory one root plainly contains). Viewing is

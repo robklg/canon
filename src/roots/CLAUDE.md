@@ -37,19 +37,19 @@ for that reason, the same treatment `exclude.rs`/`trail.rs` give their test-only
     report, only a summary.
   - `set_comment` and `list` record no decision at all — annotation and reads aren't content-fate
     transitions.
-- **`rm` and `comment` take opposite permits at a closed door.** Removing a root is an act and
-  meets the closed default — rejected by name with the way back, because the door is exactly what
-  protects what is inside from destruction. A comment is the label on the door, not a hand inside
-  it (root-grain metadata, never content standing), so it stays permitted and reaches the root
+- **`rm` and `comment` take opposite permits on a suspended root.** Removing a root is an act, so
+  it is refused — rejected by name with the way back, because suspension is exactly what
+  protects what is inside from destruction. A comment is a label on the root, not an act on its
+  content (root-grain metadata, never content standing), so it stays permitted and reaches the root
   through `parse_root_spec_any`. Both used to answer `No root for path` about a root that plainly
   exists; that sentence is now reserved for a root that genuinely is not there
   (`parse_root_spec_by_path_names_a_parked_root_not_an_absence`).
 
-- **The suspend family takes `--reason`, under the flag's existing meaning.** Closing a door is a
+- **The suspend family takes `--reason`, under the flag's existing meaning.** Suspending a root is a
   recorded act like any other, and the registry gives the thought that goes with it a home here:
-  "why did I park this" belongs to the act of parking, and the trail is where it answers. Both
-  halves take it, for symmetry and because reopening has a why too; empty is no reason, as
-  everywhere else. This is also what makes the closed default hold for `note -m` at a parked
+  "why did I suspend this" belongs to the act of suspending, and the trail is where it answers. Both
+  halves take it, for symmetry and because unsuspending has a why too; empty is no reason, as
+  everywhere else. This is also what makes the refusal hold for `note -m` at a suspended
   place — the thought has somewhere to go.
 - **The suspend family's no-op protocol is a substring contract across the ops boundary.**
   `execute_suspend`/`execute_unsuspend` `bail!` on already-in-state, and the cli string-matches

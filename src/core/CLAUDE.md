@@ -23,7 +23,7 @@ subsystem that re-derives a claim core already makes has made a second claim, an
 mechanics for one claim are a safety defect waiting to disagree with themselves. Every
 boundary question here resolves against this law first.
 
-**The warrant-limit pairing.** Every warrant ships with the law of what it does *not* say; a
+**The warrant-limit pairing.** Every warrant ships with the law of what it does not say; a
 warrant without its limit is a false-claim generator. Wherever the spine states a claim
 mechanic, the mechanic's limit is stated and enforced beside it — the pairing, not the
 positive half alone, is what gets reviewed when either changes.
@@ -41,7 +41,7 @@ positive half alone, is what gets reviewed when either changes.
 ### It names — `domain::{source, root, object, fact}`
 
 `Source`, `Root`, `RootSpec`, `Object`, `ArchiveCopy`/`ArchiveLocation`, `Holders` (content's
-present copies by role and door, empty files apart),
+present copies by role and suspension, empty files apart),
 `FactEntry`/`FactType`/`FactValue`/`Stored`/`SourceFacts`, and the predicates
 that read them (`is_excluded`, `is_contentless`/`is_contentless_size`, `matches_scope`,
 `find_containing_root`, `FactEntry::is_on_source`), and `KeyTypes`, the types a key's facts hold.
@@ -56,10 +56,10 @@ fixture needing a controlled timestamp — and `zone::UserZone::machine`, the on
 machine's time zone.
 
 **Time is one noun, read one way.** `domain::time` holds `TimeValue` — an instant, an instant
-with its recorded offset, or a clock reading, each at the precision it was written at, never
+with its recorded offset, or a local time, each at the precision it was written at, never
 padded — and `FactValue::Time` carries it. Its owners:
-- **The frame rule** (`TimeValue::on_clock`): every time reads on the user's clock — an instant
-  through the zone, a clock reading as written, never a clock reading turned into an instant;
+- **The frame rule** (`TimeValue::on_clock`): every time is read in the user's time zone — an instant
+  through the zone, a local time as written, never a local time turned into an instant;
   `printed` is the one form shown, `iso_text` the stored form written out. Verifier
   `a_printed_value_typed_back_selects_exactly_what_prints_the_same` (in the facility, where a
   typed time is compared); the span is pinned here through both clock-change hours. It gives
@@ -69,8 +69,8 @@ padded — and `FactValue::Time` carries it. Its owners:
   coarser than the typed period is in none of `<`, `=`, `>`, and a fraction is a point one
   nanosecond long. Beside the table, `spans` is its third side: a value whose period holds a
   comparison's boundary strictly inside it, on neither side — what an acting command counts
-  (`spans_is_the_third_side_of_the_period_table`). It reads only spans, so nothing converts a clock reading to an instant. A
-  time of day (`reading::read_time_of_day`) is a clock reading on `REFERENCE_DAY`, so the one
+  (`spans_is_the_third_side_of_the_period_table`). It reads only spans, so nothing converts a local time to an instant. A
+  time of day (`reading::read_time_of_day`) is a local time on `REFERENCE_DAY`, so the one
   table compares it too. `clock_secs_as_if_utc` counts a reading as if UTC
   for storage's encoding (its inverse is `repo::fact`'s read) and a speed path's bounds,
   never a comparison or a selection.
@@ -100,7 +100,7 @@ records, never the machine's.
 
 **A stored time is `value_time` plus four `time_*` columns** (form, offset, fraction,
 precision), read and written only through `repo::fact`'s conversion pair (`fact_value_params`,
-`fact_value_at`): `value_time` alone is no epoch second for a clock reading. An unreadable time,
+`fact_value_at`): `value_time` alone is no epoch second for a local time. An unreadable time,
 `Stored::Unreadable`, is kept only on the content.
 
 **A number is one noun, read and written one way** (`domain::number`): `read_number` is the
@@ -135,7 +135,7 @@ beside each fit-to-column cut.
 archive-side copy, its path where a path is wanted, and **the standing of its root beside it**.
 Carried as data rather than looked up per surface — a surface asking the roots table again is
 the re-detection the closed door's rule forbids. `domain::root::only_on_suspended_segment` is
-the one spelling of the sentence that says so, capped at three named roots like the door
+the one spelling of the sentence that says so, capped at three named roots like the suspension
 statement, and carrying **no way back**: it qualifies a claim rather than blocking one.
 
 `domain::root` also carries the **closed door's vocabulary**: `ParkedRoot` (constructible only
@@ -171,22 +171,22 @@ two consumers were counted. The membership criteria below apply to everything el
   model stay in `retire/domain.rs`: one consumer, so they do not qualify.
   - **What a claim rests on** (`only_on_suspended`, `ParkedEvidence`) — whether the archive
     copies grounding a claim stand **solely** behind closed doors. Both halves are load-bearing:
-    non-empty, since no copies is no claim; and *every*, since one copy on an open root means
-    nothing needs opening. Reached through `ParkedEvidence::observe`, the one accumulation site,
+    non-empty, since no copies is no claim; and *every*, since one copy on an unsuspended root means
+    nothing needs unsuspending. Reached through `ParkedEvidence::observe`, the one accumulation site,
     which the account and coverage both call — so the law is consulted once and not re-spelled
     beside each counter. `ParkedEvidence` pairs the count with the roots it rests on **as one
     value**, so a line cannot name roots its own claim does not stand behind — the account
     carries one per claim rather than pooling them, and `build_account` takes the copies map
     rather than a set of ids, a set being unable to say where the evidence stands. A statement,
     never a refusal: no verb, no way back.
-  - **The stated-never-headlined law** (`standing_first`) — a place behind a closed door never
+  - **The stated-never-headlined law** (`standing_first`) — a place on a suspended root never
     leads a list of places to go. `standing_first` itself only orders. A capped consumer owes the
     "still appears" half itself, starting with membership: selecting which entries earn a cap slot
-    by weight, never standing, so a closed door cannot decide membership, is unconditional —
+    by weight, never standing, so suspension cannot decide membership, is unconditional —
     every named consumer does this regardless of what it does next. What differs is what a
     consumer owes *after* selection: a voicing that may carry no bind-time claim at all never
     calls this function on the selected survivors (story's covered-where line, feeding a book
-    that is never rewritten and so cannot tolerate even an order derived from today's doors); a
+    that is never rewritten and so cannot tolerate even an order derived from today's suspensions); a
     voicing that may state order calls this function to reorder only those survivors, gated at
     the render layer rather than inside selection (story's own Judgment voicing, the same
     aggregate's other reader); a live, recomputed view instead sorts standing-first and counts
@@ -194,7 +194,7 @@ two consumers were counted. The membership criteria below apply to everything el
     it can fall out of a cap (survey's four location lists, the trail composition card's
     origins). See the function's own doc for the worked split and which each named consumer
     chose. The sweep's live-preferred counterpart choice answers the same law through a different,
-    filtering mechanism instead — a losing parked scope forfeits its citation rather
+    filtering mechanism instead — a losing suspended scope forfeits its citation rather
     than sorting behind — so it shares the law, not the function.
   - **What "archived from here" rests on** (`FromHereEvidence`) — the file an archiving run
     chose, never every copy of its content. `place_from_here` finds, per archive copy, the
@@ -220,7 +220,7 @@ two consumers were counted. The membership criteria below apply to everything el
     of its own (`ops::ledger` below).
   - **The remainder projection** (`unresolved_remainder`) is the readiness review's own
     measure of what is left on a root, computed where the archived-from-here evidence is
-    *not* on hand. It routes through `classify_present`, so this is **one law with two call
+    not on hand. It routes through `classify_present`, so this is **one law with two call
     shapes, not two laws**: what "unresolved" means is still spoken exactly once, and the
     contentless law is inherited rather than restated — empties bucket as `Contentless`
     before any identity test, so a root holding only empty files reads zero. Its soundness is
@@ -402,7 +402,7 @@ in unsettled.
   indistinguishable from a true one. The rule rests on the root-number law; in an index that gave
   a number twice before that law, a row naming the reused number names the later root.
 
-  Its apply-driving tests do **not** live here: they prove the extraction round-trip law by running a
+  Its apply-driving tests do not live here: they prove the extraction round-trip law by running a
   real apply, so they name archive's transfer types, and a core test may not name a subsystem
   any more than core code may. They live in `archive/ops/receipt.rs`. If a future core test
   wants a subsystem, the answer is the same one: it is not a core test.
@@ -438,7 +438,7 @@ so a client that stopped sending its deferred close on an open would lose the ti
 green. A move's full sync settles the update, so it has no such step; where that sync falls back to
 plain `fsync`, the server's update can overwrite the time set after it.
 
-Apply's two preflight helpers deliberately do *not* live here: they answer a planning question
+Apply's two preflight helpers deliberately do not live here: they answer a planning question
 only apply asks, and sit with it in `archive/ops/plan.rs`.
 
 ### It reads the world for the tellers — `ops::root_story`, `domain::folder_tree`
@@ -450,9 +450,9 @@ everything here exists to be narrated by someone else.
   root's complete world-state. `retire`'s readiness review and book compile, and `story`'s
   place lens, are all lenses over one fetch — the gate, the book, and the story review can
   never drift apart because they all read this.
-- **`domain::folder_tree`** — `FolderTree`, interned folder-tree topology. The entry
+- **`domain::folder_tree`** — `FolderTree`, interned directory-tree topology. The entry
   criteria's own seed example: the sweep's containment walk and `story`'s signature walk share
-  only this skeleton — consumers hold their own payloads in side-vectors by folder id, and
+  only this skeleton — consumers hold their own payloads in side-vectors by directory id, and
   each walk's emission rules stay independent. "Looks shared" would have pulled a walk's logic
   in too; only the topology qualifies.
 
@@ -465,12 +465,12 @@ effect; a verb that did nothing records nothing), and **transition** (the effect
 in registered vocabulary).
 
 `ops::scope` is the one scope-resolution pipeline — CWD defaulting, `--global`, root
-membership, source existence, the door. It is here because every scope-taking command resolves
+membership, source existence, suspension. It is here because every scope-taking command resolves
 through it, and because it is the fallback half of `domain::path`'s pure resolution: same
 function names in both, the pure half returning `None` where this one reaches the filesystem.
 It owns the three laws that live at that boundary.
 
-The **closed door**: *whether a place is behind a door the user closed is derived once, here,
+The **closed door**: *whether a place is on a root the user suspended is derived once, here,
 as data — never re-detected from `current_dir()` or from an `is_active()` filter applied to a
 root the caller was already handed resolved.* Owner `resolve_scope`'s `Door` outcome (`Open` a
 `ResolvedScope`, `Closed` a `ClosedDoor` naming the parked places); verifier
@@ -483,9 +483,9 @@ class it is declaring. Two sibling doors project the same fact from their own in
 and `PrefixOutcome::Parked` at the manifest door, which `resolve_recorded_scope` emits and
 `ScopeResolution::parked()` carries. All three carry the same `ParkedRoot` payload rather than
 each re-deriving one, which is what lets a consumer state a door without a second lookup.
-**Precedence in the partition**: root membership (the harder failure) > the door > source
-existence — a parked path is stated as parked whether or not it has sources, because the closed
-door is *why* it has nothing to say.
+**Precedence in the partition**: root membership (the harder failure) > suspension > source
+existence — a suspended path is stated as suspended whether or not it has sources, because
+suspension is *why* it has nothing to say.
 `ClosedDoor::read_here` is the one conversion a **remembering** consumer makes; the pause it
 carries (`ResolvedScope::pause`) and the set-aside register beside it (`parked`) are opposite
 dispositions of one fact and must not be merged. **Where it does not apply**: a directory
@@ -500,7 +500,7 @@ the invocation; `validate_sources_exist` survives beside it as the abort spellin
 caller list *is* the carve-out list — `refuse_parked_locations` is its door-shaped companion,
 covering those callers and, additionally, `exclude`'s two single-file arms, which resolve their
 own path and never reach the partition. Those two are not carve-outs; they are single-target
-acts, refused by the closed default rather than by load-bearing-ness. Two roads, one verb, which
+acts, refused by the suspended-root default rather than by load-bearing-ness. Two roads, one verb, which
 is why the verb is not a parameter. The parked partition is the policy's **third
 cause**, carried on `ResolvedScope::parked` beside the sourceless `set_aside`: same position,
 same channels, same terminal rule, and the same "never becomes a `DecisionScope`" pin
@@ -558,7 +558,7 @@ path over `find_containing_root`, database-free, first match wins, carrying the 
 as `RootedPath.path` so the next comparison cannot undo the match; `domain::path::resolve_path`
 and `domain::scope::attribute_prefix` are its readings for text that names something already
 recorded, and `domain::path::resolve_containing_root_as_written` its reading for text that names
-somewhere content is *going* — the root bends to be found, the folder below it is being created
+somewhere content is *going* — the root bends to be found, the directory below it is being created
 and keeps the bytes the caller typed. None of the three spells any of it themselves. Carrying a
 healed remainder back out as a whole path is the law's last step and has its own owner,
 `domain::path::join_under_root`, read by `domain::extraction::join_prefix` and
@@ -588,8 +588,8 @@ those two stages, never after: a prefix on a closed root comes back `Parked` whe
 index knows sources under it, which is the argument door's own precedence (root membership >
 the door > source existence) at the second door, and which is why a closed root's remainder is
 never asked about at all (`a_parked_recorded_prefix_is_parked_not_set_aside`). What each
-command does about a parked prefix is its permit class: `cluster refresh` refuses on it,
-`cluster status` states it, and — like the argument door's own parked register — it never
+command does about a suspended prefix is its permit class: `cluster refresh` refuses on it,
+`cluster status` states it, and — like the argument door's own suspended register — it never
 becomes a `DecisionScope`.
 
 The type is **infallible on purpose** and stays so: it classifies into six registers —
@@ -606,7 +606,7 @@ question this type exists to answer once.
 
 **What `scopes()` excludes is the behavioural half of the law.** A confirmed prefix reaches the
 vantage, the lock header, the decision record **and the selection**; a set-aside, unrooted or
-parked one reaches none of them. The selection belongs in that list rather than beside it:
+suspended one reaches none of them. The selection belongs in that list rather than beside it:
 `selection()` is the same register, spelled as absolute paths, because a run that selects from
 a line it has told the user measures nothing gathers content it must then refuse one file at a
 time. An unrooted prefix can be an *ancestor* of a known root — `path_is_under` matches it
@@ -625,7 +625,7 @@ refuses nothing: `cluster refresh` raises it through the same `no_sources_known`
 argument door uses, and `cluster status` consults it before naming a refresh, a report that
 named one it turns away being the defect the second reader was found as
 (`the_terminal_rule_fires_only_where_something_was_set_aside`). An **all-unrooted** scope is
-deliberately not the rule's case, and neither is a **parked** one — the door is its own refusal
+deliberately not the rule's case, and neither is a **suspended** one — suspension is its own refusal
 with its own way back, so which of the two a caller states where both hold is the caller's
 precedence, not the predicate's. Both readers being in one subsystem today does not make this a
 subsystem's predicate: it is the argument door's own rule at the second door, and its two
@@ -633,7 +633,7 @@ siblings live in `core::ops::scope`.
 
 **`measured_from()` is the register the vantage folds**, and the one place the grain is read.
 Every confirmed prefix contributes exactly one `DirectoryLocation`; a set-aside, unrooted or
-parked one contributes nothing, the same absence that keeps it out of `scopes()`. A
+suspended one contributes nothing, the same absence that keeps it out of `scopes()`. A
 **directory** scope contributes itself; an **item** scope contributes the directory containing it, which is what
 *the deepest directory containing every scope* already says about a file rather than a second
 rule. `containing_location` defaults an absent parent to the root, so a root-level item and a
@@ -668,7 +668,7 @@ branch is a row standing at the root's own remainder, which the schema permits).
 `repo::source::present_source_exists_at_path` answers it. Asking about the path itself rather
 than about what lies below it is what closes the shapes a `below`-reading rule cannot answer
 without choosing — **a path with a past can hold a row at it and rows beneath it at once, on a
-current index, with no staleness at all**. A folder replaced by a file of the same name and
+current index, with no staleness at all**. A directory replaced by a file of the same name and
 rescanned by name leaves both standing (the file-grain scan infers no absence, `src/scan/CLAUDE.md`).
 
 **That is a structural guarantee, not a better guess** — and the step that carries it is the

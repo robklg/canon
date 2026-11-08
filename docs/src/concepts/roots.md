@@ -32,7 +32,7 @@ Commands that read the index work with the storage detached. `scan` and `apply` 
 
 ## Suspended roots
 
-Suspending a root closes the door on it: it is out of view and not acted on until you unsuspend it. It says nothing about whether the storage is attached.
+Suspending a root takes it out of view, and Canon does nothing on it until you unsuspend it. It says nothing about whether the storage is attached.
 
 - **Standing**: unchanged. Its sources stay indexed.
 - **Reports**: a report on a suspended place lists nothing and says it is suspended. A report across all roots leaves the root out.

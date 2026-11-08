@@ -89,7 +89,7 @@ gate; and binaries already shipped, which parse before they gate — the orderin
 backward, only forward.
 
 **`ManifestMeta.scope: Vec<String>`** — every path the generation was scoped to, held as a list
-because that is what it is. `de_scope` is the **only** place the field is read, and it accepts
+because that is what it is. `de_scope` is the only place the field is read, and it accepts
 **one** form: a list. A version 1 manifest wrote its scopes joined into a single string, and that
 form is **refused by name**, not reconstructed: splitting it apart is a guess about where files
 land, a directory name may carry the separator itself, and a reconstruction turns a working
@@ -123,7 +123,7 @@ there): apply *selects nothing and carries out a lock already built*, placement 
 to read one out of — its *absence* is the detection, and `ops/manifest.rs::read_lock_file` tries the
 first line as a header and reads it as an entry when that fails. The two shapes cannot be confused:
 a header has no `id`, an entry no `lock_version`. `LockHeader.scope: Vec<LockScope>` is deliberately
-**not** a serialized `DecisionScope` — that type's guarantee is that constructing one requires a
+not a serialized `DecisionScope` — that type's guarantee is that constructing one requires a
 matching root, and deserializing into it would put arbitrary file text through the back door; apply
 converts via `DecisionScope::new`, leaving the domain type with one constructor. `LockEntry`'s
 `scope_rel_path` is the opposite case to a fact snapshot: facts can be looked up fresh, and this
@@ -173,7 +173,7 @@ selection.
 
 **And no reader decides for itself which root owns a prefix.** The recorded list is *text a user can
 edit*, arriving in whatever form and state they left it — retyped in another normalization, naming a
-folder since moved, naming a root since removed. Generate, refresh and status all resolve it through
+directory since moved, naming a root since removed. Generate, refresh and status all resolve it through
 the one `core::ops::scope::resolve_recorded_scope`, which heals a prefix in both halves (root and
 below-root remainder) through the same lookup the command line uses, and partitions what is left. A
 reader that matches roots privately and byte-exactly drops an unmatched prefix in its own silence.
@@ -187,7 +187,7 @@ The dispositions differ by what each command is about to do, and none of them is
   writes the resolved form back: a confirmed prefix comes back in the byte-form the index stores,
   so **a refresh repairs an accent mismatch in the manifest text itself**; a set-aside or unrooted
   one is preserved verbatim, because there is nothing to heal it to and dropping it would silently
-  narrow the user's own file. A refresh whose scope kept **nothing** refuses, naming every set-aside
+  narrow the user's own file. A refresh whose scope kept nothing refuses, naming every set-aside
   line — the boundary policy's terminal rule. An all-unrooted scope is deliberately not that case: a
   refresh is the way back from a manifest naming a root that is gone.
 - **`cluster generate` has nothing left to state.** Its prefixes arrive from
@@ -216,52 +216,52 @@ A manifest can reach behind a door the user closed in **three** ways, each belon
 different act: its **recorded scope** can name a closed root (`ScopeResolution::parked`, the
 manifest door's own arm), its **lock** can hold entries whose sources stand on one, and its
 **destination** can be one. A manifest with no scope at all still holds entries gathered before a
-root was closed.
+root was suspended.
 
-**Which act meets which door turns on one distinction: a naming versus a record.** A recorded
+**Which act each suspension stops turns on one distinction: a naming versus a record.** A recorded
 scope is a *naming* — a durable declaration of what collection is being assembled — so a line of
-it standing on a closed root refuses the act that reads it. A lock entry is a *record*: a snapshot
+it standing on a suspended root refuses the act that reads it. A lock entry is a *record*: a snapshot
 of where a source stood when the selection was last made. A refresh is asking again, so it
-re-selects from the open world (which already leaves parked roots out) and rebuilds the lock
-without them — an act ignoring parked content, silently. The lock is refused where it would be
+re-selects from unsuspended roots (which already leaves suspended roots out) and rebuilds the lock
+without them — an act ignoring suspended content, silently. The lock is refused where it would be
 **carried across**, which is `apply`.
 
 **One computation, two readers.** `ops::status::parked_lock_entries` answers "how many of this
 lock's entries stand behind each closed door", and `apply` and `cluster status` both read it — a
 report inviting an apply that apply itself turns away is exactly the drift this closes. It asks
-the **index**, never the entry's own recorded `root_id`: the door is a question about where a
+the **index**, never the entry's own recorded `root_id`: suspension is a question about where a
 source stands now, and a lock is a snapshot of where it stood.
 
 - **`cluster refresh` refuses on its recorded scope and on nothing else**, before the selection and
   before anything is written, stating that the manifest and its lock are unchanged. **Whole**,
-  including a parked line standing beside live ones: the argument door's set-aside does not
+  including a suspended root's line beside live ones: the argument door's set-aside does not
   conjugate here, because an argument is a one-off invocation while a scope is a declaration, so a
   lock rebuilt from half of one is a wrong artifact that reads as whole. The guard stays above the
   selection; the census compares the lock's bytes across a refused refresh
   (`a_refresh_through_a_parked_root_leaves_the_lock_standing`).
-- **`cluster status` states** every door it reaches **in the conditional, naming the act each one
+- **`cluster status` states** every suspended root it reaches **in the conditional, naming the act each one
   turns away** (`apply would be rejected`, `cluster refresh would be rejected`). A report performs nothing,
   so `set aside` and `rejected` are both false of it, and a reader whose next step has just been
   withheld needs the act that is blocked. A root reached more than one way is stated **once**, with
   both acts in the verb and `<what>` by precedence place > destination > origin — the dedupe is
   honest only because the verb carries what it drops (`cli/cluster.rs::manifest_door_lines`).
-- **A step is withheld exactly where that step's own act meets a door**, and **the two acts meet
-  different doors**: `apply` transfers from the lock's entries into the destination and reads no
+- **A step is withheld exactly where that step's own act meets a suspended root**, and **the two acts meet
+  different ones**: `apply` transfers from the lock's entries into the destination and reads no
   recorded scope, while `cluster refresh` re-queries from that scope and is stopped by neither a
-  parked entry nor a parked destination. Both are rows of the decision table below, so the
+  suspended entry nor a suspended destination. Both are rows of the decision table below, so the
   interface never re-tests the causes
   (`a_step_is_withheld_exactly_where_its_own_act_meets_the_door`). One qualification: `apply` asks
-  its origin door on the entries `--root` left it, while the report asks over all of them, so a
+  about suspended origins on the entries `--root` left it, while the report asks over all of them, so a
   *narrowed* apply can run where the report offered nothing.
 - **A next step is offered where it is the act that brings an apply within reach**; otherwise the
-  cause that withheld it owes the way back, and only a **door** discharges that by itself — its
-  line carries `canon roots unsuspend`. Parked entries with an open scope and destination are that case
-  — a rebuild leaves them out and the apply runs. A parked destination is not, whatever else is
-  closed: no rebuild changes where the files are going, and printing one under a
-  parked-destination line reads as if a refresh addressed it. Narrower than the bullet above,
+  cause that withheld it owes the way back, and only a **suspension** discharges that by itself — its
+  line carries `canon roots unsuspend`. Suspended entries with an unsuspended scope and destination are that case
+  — a rebuild leaves them out and the apply runs. A suspended destination is not, whatever else is
+  suspended: no rebuild changes where the files are going, and printing one under a
+  suspended-destination line reads as if a refresh addressed it. Narrower than the bullet above,
   deliberately — **and it reaches only what the report knows, never what a query will match**. A
-  parked destination is a structural fact. What a rebuild would *select* is not: a refresh
-  re-queries the open world, so a lock standing wholly behind doors may rebuild into an applicable
+  suspended destination is a structural fact. What a rebuild would *select* is not: a refresh
+  re-queries unsuspended roots, so a lock wholly on suspended roots may rebuild into an applicable
   one or into nothing, and a predicate over the lock answers the wrong way in both directions.
   Where the answer needs the selection this report does not run, it names the act that runs and
   lets the refresh state its own outcome
@@ -276,9 +276,9 @@ source stands now, and a lock is a snapshot of where it stood.
   (the path, `here`, `N paths`) or a **role** in the act (`destination`, `origin of N sources`). A
   scope line is a place; the origin end and the destination are roles. Composed in `scope.rs`
   (`place_reach`, `origin_reach`, `DESTINATION_REACH`), so refusal and report use the same words.
-- **A refresh through a parked *destination* is not refused**, and neither is an **apply** whose
-  recorded scope names a closed root while its entries stand elsewhere — the deliberate edges of
-  the rule above, and `cluster status` states every such door whatever it withholds.
+- **A refresh through a suspended *destination* is not refused**, and neither is an **apply** whose
+  recorded scope names a suspended root while its entries stand elsewhere — the deliberate edges of
+  the rule above, and `cluster status` states every such suspended root whatever it withholds.
 - **`cluster generate` reads no `parked()` register**, and needs none: its prefixes arrive from
   `core::ops::scope::resolve_scope`, which refuses a wholly parked scope and sets a parked path
   aside before this command is called, so the register is empty by construction.
@@ -309,8 +309,8 @@ inside `cluster status`'s next-step hint, listing four causes where `apply` refu
 the report invited the one command that refuses, in four separate ways.
 
 - **Each row stops exactly one act**, and which one is the enum's own doc table: the lock's
-  states (absent, hash, header and its zone), the pattern's, and the two ends' doors stop `apply`;
-  the recorded scope's door, the source-existence policy's terminal rule and the manifest's zone
+  states (absent, hash, header and its zone), the pattern's, and the two ends' suspended roots stop `apply`;
+  the recorded scope's suspensions, the source-existence policy's terminal rule and the manifest's zone
   (a line this machine cannot read, or no line on a machine whose zone cannot be written down)
   and a query line that cannot run stop `cluster refresh` — read through the refresh's own
   `settle_manifest_zone` and `ops/manifest.rs::parse_recorded_query`, which binds the query as
@@ -326,9 +326,9 @@ the report invited the one command that refuses, in four separate ways.
   minted, lost its last caller to the richer question below, and came out rather than standing as a
   second spelling of it.
 - **The refusal answers with its cause, because the causes leave the reader differently
-  placed.** `refresh_refused_by` names the door, the terminal rule, the manifest's zone or the query, in
+  placed.** `refresh_refused_by` names the suspension, the terminal rule, the manifest's zone or the query, in
   the order `cluster refresh` states them in, and its `None` is exactly `can_run(Act::Refresh)`
-  (`the_refresh_refusal_agrees_with_the_predicate`). A door, zone or query line announces itself
+  (`the_refresh_refusal_agrees_with_the_predicate`). A suspension, zone or query line announces itself
   with its way back; a scope that kept nothing as `no sources known at <p> — skipped`, naming no
   act — so a remedy falling silent at the first leaves the reader holding something and at the
   second nothing.
@@ -338,10 +338,10 @@ the report invited the one command that refuses, in four separate ways.
   at once, one line taking both steps. It comes last, after the other causes' own ways back, so
   the lines read as steps — at the terminal rule's exit too, where the scan-or-edit pair stands
   under `no sources known`. Where that rule turns the refresh away first (`refresh_refused_by`; a
-  door outranks it), status names the query's way back after the scope's two answers
+  suspension outranks it), status names the query's way back after the scope's two answers
   (`scope_kept_nothing_way_back`), never in the query's block, where the empty scope turns it away. **A refused refresh leaves as `RefreshRefused`** (`domain.rs`, built from its causes so its text
   and its answer cannot disagree), from
-  the parked-scope exit and the zone/query exit: `Error:` stands in its text before the first cause
+  the suspended-scope exit and the zone/query exit: `Error:` stands in its text before the first cause
   Canon cannot read — a zone line always, the query block where a cause in it is not an answer —
   never before an answer, and `main` prints it as it stands, on stdout where it is an answer. Why:
   a joined string cannot tell `main` which. The "no sources known" exit stays a raised error, as at
@@ -402,7 +402,7 @@ the report invited the one command that refuses, in four separate ways.
   and there are exactly four
   (`a_command_is_spelled_with_a_path_only_where_it_is_quoted`, matched both directions). `source_lost_remedy` takes a
   `RefreshStanding` and asks *would a refresh run, and if not, why* — the refusals are kept
-  apart because only some state their own way back in the line that announces them (a door; a zone
+  apart because only some state their own way back in the line that announces them (a suspension; a zone
   or query line, in the refresh's words); a scope
   that kept nothing is announced with no act at all, so that arm names the same pair `cluster
   refresh` itself prints when it refuses for the same reason
@@ -412,8 +412,8 @@ the report invited the one command that refuses, in four separate ways.
   turned away is answered by the refresh, which states its own outcome and the acts for it.
   `rebuild_remedy` asks nothing: all three of its callers are apply's, all `Unasked` by
   construction.
-  **`scan_or_edit_scope` offers two acts, not one**: a set-aside path is a folder Canon has no
-  sources under, and nothing on disk tells an unscanned folder from a wrong one — so the scan
+  **`scan_or_edit_scope` offers two acts, not one**: a set-aside path is a directory Canon has no
+  sources under, and nothing on disk tells an unscanned directory from a wrong one — so the scan
   leads, naming the very paths the report has just skipped, and the scope edit follows
   (`a_scope_that_kept_nothing_is_offered_the_scan_before_the_edit`). At `cluster status` the pair
   is led by a sentence binding it to the skipped line, and lead and pair together are one answer,
@@ -434,7 +434,7 @@ the report invited the one command that refuses, in four separate ways.
   `--force`.
 - **A withheld step still answers.** Where no act brings an apply within reach, the reader holds a
   cause and no act — honest only where the cause was announced with its own way back, which a
-  closed door is and the others are not. Which sentence each owes is the table's, not the
+  suspension is and the others are not. Which sentence each owes is the table's, not the
   report's: `owed_way_back` ranks the causes once, a scope that kept nothing outranking a pattern
   that cannot expand because it is *why* the pattern has nothing to measure from, and the report
   matches its four answers with no rest arm
@@ -456,7 +456,7 @@ the report invited the one command that refuses, in four separate ways.
   is met after it. The table's rule for the **pattern row** is a conjunction: a rebuild clears an
   unexpandable pattern only where the pattern needs a scope the lock lacks *and* the recorded
   scope confirms something to measure from; the lock's own rows (no header, no zone, a zone not
-  known here, hash mismatch, a lost lock) and parked origins are cleared by a rebuild as before.
+  known here, hash mismatch, a lost lock) and suspended origins are cleared by a rebuild as before.
   A pattern failing for a fact is cleared by no rebuild, and a lock's age is stated on the
   `Lock:` line in the words `apply`'s refusal will use (`a_locks_age_is_stated_on_its_own_line`)
   — a raised obstacle the step does not answer is never left unspoken.
@@ -543,11 +543,11 @@ the report invited the one command that refuses, in four separate ways.
   shared source repository; the three test fixtures are **duplicated** rather than shared, because
   the tests that stayed there use them too.
 - **The contentless law applies to apply's archive conflicts and to cluster's skip set**, via the
-  archived-ness SQL — empty files travel with their folders rather than being skipped as "already
-  archived", so a verbatim folder copy stays faithful. It applies to **generate's duplicate gate**
+  archived-ness SQL — empty files travel with their directories rather than being skipped as "already
+  archived", so a verbatim directory copy stays faithful. It applies to **generate's duplicate gate**
   too (`find_source_duplicates`, through `is_contentless_size`): a duplicate is an identity claim,
   so empty files never form a group and never refuse the run; they stay ordinary lock entries,
-  nothing set aside. It does **not** apply to apply's
+  nothing set aside. It does not apply to apply's
   path-collision checks (existence, not identity). See the law's block in the top-level CLAUDE.md.
 - **`ops/receipt.rs` exists to hold apply's two receipt document shapes** — a seventh stratum for
   two structs, because neither alternative works: `domain.rs` is illegal for them (`ApplyReceipt`
@@ -635,7 +635,7 @@ the report invited the one command that refuses, in four separate ways.
 - **An apply reports three per-source disk sweeps, and the boundary between the last two is
   load-bearing** — planning's existence/readability sweep (`ops/plan.rs`, silent in resume mode),
   then execute's readability sweep and its lock-agreement sweep, which stat and read every source's
-  head. Each is a round-trip per source, which is what the reporting is for. The last two are **not**
+  head. Each is a round-trip per source, which is what the reporting is for. The last two are not
   to be fused into one pass, however tempting the single count is: the readability sweep exists to
   refuse an unreadable source *before* any content is read, and fusing them would make that refusal
   cost a full head-read pass on a network volume — error precedence would survive, cost precedence

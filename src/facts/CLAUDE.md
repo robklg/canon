@@ -83,17 +83,17 @@ it reads. A run that stops early, on a broken input or a batch that cannot be wr
 explicitly rather than leaving it to the armed recorder behind it, because there — and nowhere else in this subsystem — the counts, the touched roots and
 the error text are all in hand. The scopes are the load-bearing part: `record_scopes` otherwise
 runs only after the loop, so a run that died mid-stream would leave a scope-less row, absent
-from a scoped `trail` view — invisible from the folder being enriched.
+from a scoped `trail` view — invisible from the directory being enriched.
 
 **The two commands keep separate cli files.** They share no helper, type or call — "parse,
 dispatch, display" is a property every cli file has, not a bond between these two. Their
 entry points are `run` and `import_run`, because one barrel cannot carry two `run`s.
 
-**The import takes the closed default per record, not per run.** A record naming a source behind
-a door the user closed is set aside and counted (`RecordSkip::Suspended`, stated in the
-summary), never written and never fatal: refusing the whole batch over one parked root would break
+**The import refuses suspended roots per record, not per run.** A record naming a source on
+a root the user suspended is set aside and counted (`RecordSkip::Suspended`, stated in the
+summary), never written and never fatal: refusing the whole batch over one suspended root would break
 an import that is otherwise entirely legitimate, while writing the facts would be a write inside
-the closet. The check stands ahead of the object link and the fact promotion, so the parked root
+the closet. The check stands ahead of the object link and the fact promotion, so the suspended root
 is not touched at all — and ahead of `touched_roots`, so a set-aside record never puts its root in
 the decision's scope.
 
@@ -110,15 +110,15 @@ which the contentless-law canary reads. `cli.rs` declares `pub(super) mod import
 `convert` the same way, and `ops.rs` declares `report`/`maintain`/`import`/`convert` the same way, so nothing below the front door is reachable
 from outside it. No repo-tier item is on the barrel: nothing else reaches facts.
 
-**The stale and excluded prunes stop at a closed door; the orphan prune needs none.** They
+**The stale and excluded prunes stop at suspended roots; the orphan prune needs no check.** They
 leave every fact on a source present on a suspended root, and on content only such sources hold;
-the facts of sources that are gone, and of content an open root or no present source holds,
-still go (the register's *Suspension*: parked means no acts, a deleted file holds nothing).
+the facts of sources that are gone, and of content an unsuspended root or no present source holds,
+still go (the register's *Suspension*: suspended means no acts, a deleted file holds nothing).
 `prune-orphaned-objects` touches only gone sources and content no present source holds, so it
-reads no door. The reach is two private SQL fragments in `repo.rs` (`source_in_reach!`,
+needs no check. The reach is two private SQL fragments in `repo.rs` (`source_in_reach!`,
 `content_in_reach!`), built into one condition per prune that its count and its delete both run,
-so the preview is the act. Nothing is printed about what the door kept: a wide act ignores
-parked content silently. The excluded prune also keeps `expr::CONTENT_HASH`, the content's
+so the preview is the act. Nothing is printed about what suspension kept: a wide act ignores
+suspended content silently. The excluded prune also keeps `expr::CONTENT_HASH`, the content's
 identity, so `hashed?` and `hash?` agree; it is never stored on a source, so only the content side
 guards it. Pins: `the_prunes_leave_what_a_closed_door_holds`,
 `the_excluded_prune_keeps_the_content_hash`.

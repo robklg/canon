@@ -127,7 +127,7 @@ anything is selected — never a silent false that `NOT` turns into every row. O
 reads a `facts` report's `--key`, `--group-by` and `--where` the same way. A text with a problem
 the reader met never runs, though what of it could be read is bound, so its causes are named too
 (`a_filter_with_a_reading_problem_never_runs`). A key's type is read
-from all its rows (`core::repo::fact::key_types`), so parking, scope and presence never move it.
+from all its rows (`core::repo::fact::key_types`), so suspension, scope and presence never move it.
 **Text is text**: against a text or path key, a bare value that reads as a number, a time or a time
 of day is refused, and quoted it is text — what it reads as, never how it looks (`input_type`);
 against a number or time key, a quoted value means the same as a bare one. A typed number is read
@@ -330,7 +330,7 @@ what it can warrant; the remedy belongs to whoever holds both facts.
 after a move, so the alternative to refusing is inventing one — and a refusal naming a remedy
 that cannot work is one step short of that.
 
-Where it does **not** apply: `scope.rel_path` is pattern-only and never reaches a filter — a
+Where it does not apply: `scope.rel_path` is pattern-only and never reaches a filter — a
 `--where` clause has no access to a manifest's scope, which is why `SCOPE_REL_PATH` is a plain
 const rather than a `Key`. The facility itself never reads the manifest or the
 lock; the consumer hands it the measured value.
@@ -438,7 +438,7 @@ changed in between, and the line would disagree with the act. The lines are comp
 since the decision record, the receipt and the manifest carry them — the key as typed, the period
 through the printing rule, no line at zero — and joined under a count by `SelectionNotes::under`. Verifier `the_notes_count_what_the_selection_decided`.
 
-Where it does **not** apply: a command that does not act never asks (`notes: false`) — `ls`,
+Where it does not apply: a command that does not act never asks (`notes: false`) — `ls`,
 `facts`, `coverage`, `worklist`, `compare`, `survey`, and `cluster status`, which selects
 nothing; nor single-target exclusion, which no filter selects. A bare `NOT key?` gives no line,
 since it already selects exactly what has no value.
@@ -458,7 +458,7 @@ Pinned by `one_source_one_value_in_filter_report_pattern_and_worklist`, which as
 surfaces, an empty file among its sources; `cluster generate`'s facts comment by its own
 `the_coverage_comment_reads_one_value_per_source`.
 
-A content row Canon cannot read still decides, so the source has no value. Where it does **not**
+A content row Canon cannot read still decides, so the source has no value. Where it does not
 apply: a key's type (`core::repo::fact::key_types` reads every row); a
 computed key, never read from the facts table.
 
@@ -487,7 +487,7 @@ reads its printed form, so `|time|lowercase|year` reads text and has no value.
 `Placement::used_an_instant`), and the chain answers it at the step that reads
 (`apply_chain`'s `Chained`): an instant compared or printed with no transform, a time modifier
 given an instant or text that reads as one — after an accessor or another modifier too — and a
-typed time with an offset; never a clock reading or a number. Pinned by
+typed time with an offset; never a local time or a number. Pinned by
 `the_instant_rule_reads_only_what_reads_a_clock`; a facility answer, with no roster row.
 
 ## Mechanics

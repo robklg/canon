@@ -92,7 +92,7 @@ strata — is private or `pub(super)` at most, visible only within `exclude/`.
 **Decisions pinned by a guard test** — each row is a claim this subsystem makes, and the test that
 fails if it stops holding (in `exclude/ops/tests/`, `domain.rs`):
 
-**Behind a door: counted where a claim would otherwise be false, and re-checked once more inside
+**Suspended content: counted where a claim would otherwise be false, and re-checked once more inside
 the transaction.** **Object exclusion** reaches every source sharing the object, parked ones
 included: the stamp-set is the receipt-set, so filtering a sharer would break that law —
 `ObjectSourceInfo.is_suspended` and the plan's `Holders` (core's count) carry the fact out
@@ -102,17 +102,17 @@ on the preview path and the executing one alike, with the plan's notes (`expr::S
 below it. It is a share of that number and reads as one only beside it; a `--yes` user is the one who most needs it, and a preview they may have skipped
 is no place to keep it. That count is owed because it is a fact about **what the act does** — the
 judgment is about the content everywhere, and it lands on copies standing in a place the user
-closed.
+suspended.
 
 **Nothing else here counts** (both halves, and the position above, on the built binary:
 `object_exclusion_states_how_far_behind_a_door_it_reaches`, which is a census row rather than a
 sibling of the rows above — the claim is about what a user sees). A wide
-`set`/`clear`/`set-object` states no population behind the
-doors it never entered: suspending is the conscious act of taking content out of scope, an act
-ignores parked content silently, and a run whose own statement is already true owes no standing
-footer about the rooms it did not search. A scoped run met the door at the boundary and was
+`set`/`clear`/`set-object` states no population on
+suspended roots it never entered: suspending is the conscious act of taking content out of scope, an act
+ignores suspended content silently, and a run whose own statement is already true owes no standing
+footer about the rooms it did not search. A scoped run met the suspension at the boundary and was
 refused or told; a wide one narrowed nothing. `set-object` asking about content that stands only
-behind a door therefore answers a plain "No objects to exclude." — the act, silent.
+on suspended roots therefore answers a plain "No objects to exclude." — the act, silent.
 
 Finally, `refuse_if_a_door_closed` is the backstop for a
 root closed between the plan and the execute: asked of the plan's own root paths inside the
@@ -120,7 +120,7 @@ transaction, so the refusal rolls back the `started` row with it. It does not co
 exclusion (which proceeds by design) or the single-target arms (whose check-outside window this
 subsystem accepts by name).
 
-**The three arms outside `resolve_scope` meet the door themselves.** `set_by_path`,
+**The three arms outside `resolve_scope` check suspension themselves.** `set_by_path`,
 `set_object_by_file` and `exclude duplicates` resolve their own paths, so the boundary's
 partition never sees them; each calls `core::ops::scope::refuse_parked_locations` right after
 resolution and before the existence gate. `duplicates`' scope and prefer paths are members of the

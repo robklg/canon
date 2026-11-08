@@ -17,7 +17,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
 
 - **The lens separation law**: `compute_structural` produces lens-free findings (relations,
   containment, gain/residual, `nature`); `reduction_lens` is a separate pure derivation (ordering,
-  counterpart standing, hub and sibling-parent grouping, the reciprocal collapse, the closed-door
+  counterpart standing, hub and sibling-parent grouping, the reciprocal collapse, the suspended-root
   partition). Never rank inside the engine, never classify in the interface — that is what leaves a
   future lens a second function over the same `StructuralSweep` rather than a rewrite. Code
   vocabulary: "structural computation" and "lens derivation". The half a spelling check can
@@ -106,7 +106,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
 ### The parent entry
 
 - **One situation, one slot.** Findings whose subjects are siblings under one parent take one slot
-  headlined by that parent, carrying them as members: ten month folders each mirroring their own
+  headlined by that parent, carrying them as members: ten month directories each mirroring their own
   counterpart are one situation told ten ways. **The parent is an entry, never a finding** — nothing
   is emitted for it and no containment is computed for it, so no ancestor-descendant pair of
   findings comes into existence and the disjointness invariant is untouched by construction rather
@@ -127,7 +127,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   same rows `compute_structural` is given): present, non-excluded, non-contentless — excluded
   content is resolution rather than overlap and a contentless source resolves with its place, so
   counting either would measure numerator and denominator over two populations. **A lens input,
-  never an engine output**: per-folder subtree sums returned from the structural computation would
+  never an engine output**: per-directory subtree sums returned from the structural computation would
   put a ranking input inside a computation the lens separation law calls lens-free
   (`the_coverage_denominator_counts_only_comparison_participating_rows`). Neither it nor
   `RootNearness` issues a second query.
@@ -147,7 +147,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   trade still pays and a configurable depth would invite a value the evidence says is always wrong
   (`grouping_never_recurses_past_the_immediate_parent`). A finding that *is* its root's top has no
   parent; a root's own top **is** an eligible parent, and no `(whole root)` marker is manufactured
-  for such a headline — that marker is derived from the folder tree, never read off an empty prefix.
+  for such a headline — that marker is derived from the directory tree, never read off an empty prefix.
 - **A parent entry on an archive root hands off through a member's source counterpart**, because a
   survey scope must hold source content (`SurveyExit::FrameRefused` refuses the rest) and a line
   that fails is worse than none. Sibling findings on an archive root can clear the gate; the line
@@ -211,7 +211,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   `debug_assert`ed at the one site params are consumed
   (`a_root_entry_can_never_form_outside_the_regime_that_states_it`): a root entry states its
   remainder *unconditionally*, so one qualifying from outside the regime would state a term that did
-  **not** order it.
+  not order it.
 - **A hub states it too, naming the member root that set its term.** `HubEntry.nearness_root` carries
   that root (a `Location` with empty `rel_prefix`, the shape `RootEntry.root` uses), chosen
   deterministically — lowest bucket, root path tie-break — and the hub's ordering key reads that same
@@ -257,29 +257,29 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   surface's existing ones: `counterpart_line`'s `archived`/`present` for a pair, the scattered
   qualifier's archived-location count for coverage (`member_standing`).
 - **`StructuralFinding.subject_is_root_top` is derived** in `domain/structural/assembly.rs` from the
-  folder tree (the top is the one node with no parent), beside `subject_is_archive` and for the same
+  directory tree (the top is the one node with no parent), beside `subject_is_archive` and for the same
   reason: the interface must never infer root-ness from an empty path prefix. `(whole root)`
   composes with `(in the archive)`, and an archive root's top gets both markers and no retirement
   handoff (`the_whole_root_marker_is_derived_not_inferred`).
 
-### The closed door
+### Suspended roots
 
 - **Computed always, ranked never.** A suspended root is never dropped from the universe — a live
-  folder duplicated entirely inside a parked one would then read as unique — but reading a parked
-  place *for resolution* is none of the four things suspension permits (opening, seeing,
-  remembering, testifying), so a view sets the root aside by default. Inclusion is an **ops**
+  directory duplicated entirely inside a suspended one would then read as unique — but reading a suspended
+  place *for resolution* is none of the four things suspension permits (unsuspending it, saying it is suspended,
+  reading its record, counting its copies as evidence), so a view sets the root aside by default. Inclusion is an **ops**
   question and unchanged; which places earn a slot is a **board** question and belongs to the lens.
   Two axes, partitioned in `reduction_lens` before grouping:
-  - *Places standing on a parked root* (`StructuralFinding.subject_suspended` — the field's only
+  - *Places standing on a suspended root* (`StructuralFinding.subject_suspended` — the field's only
     consumer).
   - *Places whose evidence stands on one* — **the parked-evidence sink**, owned by
     `parked_evidence_root` in `domain/lens.rs`, the one function answering both "does this place
     leave the board?" and "which root explains it?" so the two cannot disagree. It reads
-    `FindingNature::Verify`, the structural statement *this place's evidence sits behind a closed
-    door*. Archive or source behind the door makes no difference — the trigger is the door, not what
-    stands behind it. A hub leaves whole: every member sharing a parked counterpart sinks, so the
+    `FindingNature::Verify`, the structural statement *this place's evidence sits on a suspended
+    root*. Archive or source on that root makes no difference — the trigger is the suspension, not what
+    stands on it. A hub leaves whole: every member sharing a suspended counterpart sinks, so the
     hub never forms.
-- **Subject first**, so a place parked on both sides is counted once, on the root it stands on, and
+- **Subject first**, so a place suspended on both sides is counted once, on the root it stands on, and
   each place lands in exactly one `SuspendedRootTally` and one cause within it — which is what
   licenses the *counts* and licenses nothing about bytes: place-disjointness does not make two
   places' bytes distinct, and the two causes on one root are the same content seen from opposite
@@ -289,7 +289,7 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
 - **Where it does not apply**: the universe and every quantity computed over it (gain, residual,
   containment, archive coverage); scattered (`Coverage`) findings, which are neither sunk nor
   demoted and instead state `suspended_locations` beside the archived count; and context relations,
-  which may name a parked place — stated, never headlined
+  which may name a suspended place — stated, never headlined
   (`a_suspended_root_stays_in_the_universe_but_leaves_the_board`).
 - **Suspension decides which place is cited as evidence, never what the evidence says.** The
   counterpart choice in `domain/structural/localization.rs` prefers a scope the user can look at:
@@ -300,12 +300,12 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   and nothing computed over every location from `raw`; the cited scope is tracked **by index, not by
   position-in-sort**, and context relations are every scope except it
   (`a_live_scope_wins_the_counterpart_choice_over_a_suspended_one`).
-- **Suspension is about attention, never about mount state.** A parked root is not a disconnected
-  drive, and custody stands — suspending never un-archives. What the closed door withdraws is the
+- **Suspension is about attention, never about mount state.** A suspended root is not a disconnected
+  drive, and custody stands — suspending never un-archives. What suspension withdraws is the
   board's willingness to *invite* an action, not the truth of the claim, and no wording on this
   surface may conflate the two.
 - **No in-entry furniture for the two demoting axes.** With both axes in force no *shown subject or
-  counterpart* can have a parked root on either side, so `counterpart_line` and `print_hub` carry no
+  counterpart* can have a suspended root on either side, so `counterpart_line` and `print_hub` carry no
   suspended branch and `HubEntry` no `counterpart_suspended` field. Suspension is stated on the
   footer's own lines and, for scattered evidence, as a location count. **A context relation is
   different** — it is neither sunk nor demoted (see above), so it is the one shown-entry shape that
@@ -319,16 +319,16 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   (`SUSPENDED_ROOTS_NAMED_CAP`) the lines collapse to a count with the suspended-root listing as the
   way back, summing each cause across roots and never merging the two. They print **first**, because
   they explain a board that changed without the user acting on it, and they print under `--all`,
-  because `--all` reveals what the floors and the cap hid, never a door the user closed. The way
+  because `--all` reveals what the floors and the cap hid, never a root the user suspended. The way
   back is `canon roots unsuspend` and only that: a sweep-local flag partially undoing
   `roots suspend` would be a second control for one meaning. "Not ranked", never "hidden" or
   "removed" — suspension changes position, never existence. **The way back's spelling is no
   longer the footer's own** — `suspended_lines` builds it through `core::domain::root::WayBack`,
-  the one construction the closed door and the unplaceable-receipt hint also speak through, so
+  the one construction the suspended-root refusal and the unplaceable-receipt hint also speak through, so
   the round-trip pin proves one command rather than three lookalikes. The footer's grammar and
   its third verb stay here; only the tail moved.
 - **Known imprecision, stated rather than papered over**: `SweepStats.below_floor_subjects` counts
-  every below-floor subject including parked ones, so `--all` reveals fewer entries than that count
+  every below-floor subject including suspended ones, so `--all` reveals fewer entries than that count
   offers. The suspended lines cannot close the gap and must not be described as doing so — the two
   numbers never appear on one screen (below-floor findings are unassembled by default and so never
   reach the tally, and the below-floor line is suppressed under `--all`), and reporting them apart
@@ -354,14 +354,14 @@ most. The sweep never calls `survey::domain::object_index`; it groups objects it
   deny that folder-level redundancy exists **only when nothing was withheld from the board**. Where
   suspension set places aside it says "outside the suspended roots"; where the cap emptied it
   (`--limit 0`) it names the limit, and the cap precedes suspension because it is the proximate,
-  in-place-reversible cause. The floors are deliberately **not** in that list — "worth attention" is
+  in-place-reversible cause. The floors are deliberately not in that list — "worth attention" is
   scoped to *above the floors* by the sentence itself, so a below-floor-only board may still deny,
   and under `--all` the floors lift unseen, leaving the claim weaker than warranted but never false.
   A footer contradicting the headline one line later is not a repair for a false headline
   (`an_emptied_board_never_claims_there_is_no_redundancy`).
 - **The board's order is total, and `entry_order` is where it is spoken**: ranking key, then place,
   then **entry kind** (the axes' own claiming precedence). The last term exists because two entries
-  can reach the same key *and* the same place — a run headlined at the folder a hub's members point
+  can reach the same key *and* the same place — a run headlined at the directory a hub's members point
   into — while within one kind a path is unique by construction; without it `sort_by`'s stability
   decides, leaving the answer resting on a property of the construction loops that nothing states
   and any reordering would silently break. The comparator is named rather than inlined because the

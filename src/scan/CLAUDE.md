@@ -44,7 +44,7 @@ truth** (`ops::pipeline::check_old_path`) asks whether the nominated file still 
 path — one still standing is a hardlink companion, and the check short-circuits before the law is
 consulted at all, so the precedence is a shape rather than a convention held by call order
 (`domain::a_present_twin_is_never_a_move_donor`: the twin corroborates perfectly and must still be
-refused). It also confirms **which storage answered**: a `NotFound` is absence only when the root
+refused). It also confirms **which storage was read**: a `NotFound` is absence only when the root
 directory's current device equals the row's stored device, because a mountpoint with nothing
 behind it is a readable, empty directory under which everything reads as gone
 (`pipeline::a_root_whose_storage_is_not_mounted_never_claims_a_move`). That comparison is
@@ -63,8 +63,8 @@ a new path, which is the truthful reading.
 lookup key (a remount renumbers it wholesale, so a device-qualified lookup goes blind exactly when
 the whole library looks new); it survives as mount-presence evidence in the disk-truth check and as
 a pairing tiebreak it could never have decided alone, and it disqualifies nothing. A suspended root
-is the user's own closed door: its rows may testify, but relocating one out is an act the closed
-default refuses (`pipeline::a_suspended_roots_row_is_never_relocated`, with an unsuspended control
+is the user's own choice: its rows may testify, but relocating one out is an act suspension
+refuses (`pipeline::a_suspended_roots_row_is_never_relocated`, with an unsuspended control
 that does move).
 
 **Pairing is deterministic, never iteration order.** `domain::resolve_moves` sorts observations by
@@ -120,7 +120,7 @@ sets `present=0` + `last_seen_at`, stamps `decision_id`, and — when receipts a
 captures each deleted source **before the flip** into a source-local deletion receipt at
 `<source_root>/.canon-ledger/{id:06}-scan.toml` (`pipeline::scan_root_captures_deletion_before_flip`),
 so the stamp-set is the receipt-set. `--missing` (`ops::pipeline::mark_missing_path`) marks a
-wholly-deleted folder the same way — same stamp, same receipt path — and refuses a suspended root
+wholly-deleted directory the same way — same stamp, same receipt path — and refuses a suspended root
 (`pipeline::mark_missing_path_refuses_a_suspended_root`): `--missing` is reached through the
 canonicalize-failure arm, exactly where a suspended root's path lands, so it does not inherit the
 walk path's refusal.
@@ -178,18 +178,18 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   `scan_root`'s hot loop. What `observe_file` *lacks* is the point: no `expected_ids` fetch, no
   `find_missing`, no mount-stability gate, no `capture_deletions`. The interface picks the sibling
   from one fact on the target — whether the canonicalized path is a directory.
-- **The door is asked about once, before the recorder opens a row.** `cli::run` walks the
+- **Suspension is asked about once, before the recorder opens a row.** `cli::run` walks the
   resolved scan paths against `core::ops::scope::parked_root_of` ahead of
   `DecisionRecorder::start`, so a scan aimed behind a closed door is refused by name with the
   way back and leaves *nothing* behind — not even the `started` row that would read as a scan
   killed mid-walk. Both arms arrive there: a walk canonicalizes its path, and `--missing` —
-  whose whole premise is that the folder is gone — resolves lexically against the known roots,
+  whose whole premise is that the directory is gone — resolves lexically against the known roots,
   which is the same list the decision's scope was built from. The walk loop holds no check of its
   own, because a second spelling of one rule is free to drift from the sentence the first one
   speaks (`cli::a_scan_at_a_parked_root_is_refused_before_any_row_is_written`).
-  **`--all` never reaches the door**: it selects the active roots up front, so a parked root is
+  **`--all` never reaches a suspended root**: it selects the active roots up front, so a suspended root is
   simply not among what it was asked to scan, and there is nothing to refuse. That is a
-  different question from naming a place behind a door, and it is unchanged.
+  different question from naming a place on a suspended root, and it is unchanged.
 - **Every per-path refusal precedes the recorder.** `ops::pipeline::resolve_scan_target` settles
   each path into a typed `ScanTarget` before `DecisionRecorder::start`, so a refused scan walks
   nothing and writes no row, and a row reading `interrupted` means a run that really started
@@ -245,7 +245,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   inserts and no transaction at all** (`repo::source::count_unhashed`'s staging), because this
   stratum opens none and a temp table is private to its connection — there is no observer a
   half-filled one could mislead, and SQLite does not fsync the temp database, so the per-row loop
-  costs no durability round-trip. The shared `populate_temp_sources` was deliberately **not**
+  costs no durability round-trip. The shared `populate_temp_sources` was deliberately not
   widened to `&Connection`: it has one consumer, and core entry wants two.
 - **`partial_hash` is computed outside the transaction** (`reconcile_file`, before
   `persist_file`/`flush_unchanged` open theirs) — filesystem I/O on NAS/network storage must
@@ -267,7 +267,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   | A move **into** a named path is followed under the same three gates — pairing runs over a set of one through `resolve_moves`, and `persist_resolution` still re-checks the claim inside its own transaction | `pipeline::a_move_into_a_named_file_path_is_followed` |
   | The hash gate is asked at file grain exactly as it is asked in the walk. Without it a modified file loses its `object_id` to the `Modified` arm and the refreshed lock drops it as unhashed — a re-observation would strip the identity it was run to restore | `cli::a_named_file_is_hashed_like_any_other_observation` (end to end, over the `Modified` arm) |
   | The `--missing` hint is offered **only where the act would be both accepted and sound** (acceptance: the bullet above). Soundness asks the rows the act would flip whether the storage that recorded them is the storage answering **at the root** now — `recorded_storage_answers`, the move check's own spelling. **Existence is not that evidence**: a mountpoint with nothing behind it answers yes and reads as though everything under it vanished, which is where obeying the hint receipts a deletion of untouched content. The bar is positive evidence — at least one row, none disagreeing, an unknown device counting as disagreement. Anchored at the root, so a row on storage mounted *inside* its root never agrees: a withheld pointer, never a wrong one | `pipeline::the_missing_hint_is_withheld_where_asserting_would_be_wrong` (root top, mountpoint shell, no root, suspended root, absent storage, unknown storage, nothing indexed — each with its permitting control). It sits with the decision in `ops`, not at the interface the sentence is printed from: the fixture states storages a scan cannot reach, and a battery written at the interface would need the database spoken to from there |
-  | A root is a folder: `--add` and `--candidates` refuse a file argument naming both it and the directory to use instead, and a file outside every root is refused the same way. A root whose own path is a file is **skipped with a warning, never fatal, and before its scope is recorded** — a per-path fact must not end a run over several paths, nor leave a claim behind it | `cli::a_file_shaped_root_is_skipped_not_fatal` |
+  | A root is a directory: `--add` and `--candidates` refuse a file argument naming both it and the directory to use instead, and a file outside every root is refused the same way. A root whose own path is a file is **skipped with a warning, never fatal, and before its scope is recorded** — a per-path fact must not end a run over several paths, nor leave a claim behind it | `cli::a_file_shaped_root_is_skipped_not_fatal` |
   | **Every error inside the wrapped body** completes its own decision row as `interrupted` with the error as summary — the fallible work between `start()` and the summary runs inside one closure with a single failure exit, because a dangling `started` row misreads as a scan killed mid-walk. What sits **outside** the closure stays out: the `unexpected_hash_changes` bail and `run_analyze()` both fire *after* `complete(Completed)`, and routing either through the interrupted exit would double-complete a finished decision | `cli::a_scan_that_errors_after_start_completes_its_decision_as_interrupted` |
   | **The summary prints last**, after the row settles and its warnings drain: a closed pipe ends the process at that line, so stdout must not run ahead of a deletion's receipt or of the warning that a receipt failed | `process::a_closed_pipe_leaves_a_scans_record_whole` |
   | Mount-stability skip is **counted**, reaching the durable summary | `pipeline::scan_root_unstable_mount_records_no_deletion` |
@@ -285,7 +285,7 @@ select list, and the no-join shape exists so the ordinary zero-error path stays 
   leaves them equal and it passes. Never count it toward a rung's expected failure set.
   And a change that adds a **new route to an existing verdict** can silently mask any guard that
   asserts only the verdict — the tests to re-read after such a change are exactly the ones whose
-  expected outcome did *not* change. Repair by re-seeding the fixture so the test reaches the arm
+  expected outcome did not change. Repair by re-seeding the fixture so the test reaches the arm
   it names — never by renaming the test to match the accident.
 
 - **The two-file guard shape is complete only when the path really has two files.** A counter's

@@ -72,51 +72,51 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   re-spelled with the healed form too, so a healed place keeps its position in the order it was
   named in. **The gate runs at both doors**: a
   place reached by standing in it is the same place as one named on the command line, or a bare
-  `canon trail` in a storyless folder renders its *parent's* decisions under that folder's heading.
+  `canon trail` in a storyless directory renders its *parent's* decisions under that directory's heading.
   A root's own top is exempt at both doors alike — the boundary policy's "root-level paths are
   always kept" spoken once more rather than re-derived — and disjoint from the retired-root CWD
   block beside it, which answers for a CWD under **no live root**. The `trail show` hint fires only
   on the no-evidence statement, for an all-digits single argument
-  (`domain::place::looks_like_decision_id`), a real folder named `191` having had evidence and never
+  (`domain::place::looks_like_decision_id`), a real directory named `191` having had evidence and never
   reached it. Exit non-zero via `TrailExit::PlaceUnknown` when every asked-about place is unknown,
   no `Error:` prefix, stdout left clean. Guard: `an_ancestor_scope_is_never_history_evidence`.
-- **The time lens reads a period on the user's clock** (`domain::timeline::TimeLens`).
+- **The time lens reads a period in the user's time zone** (`domain::timeline::TimeLens`).
   `parse_when` reads `today`, `yesterday` and weekday names, and the rest through core's list
   of spellings. The lens reads the period once into a `ClockSpan` (the label, in `cli.rs`, again
-  by the same rule); `selects` reads each row's time on the clock and asks the span, so the
+  by the same rule); `selects` reads each row's time in that zone and asks the span, so the
   repeated hour selects both its moments, and the count of decisions with no recorded place follows
   the same span (`unscoped_times_in` returns times, never a count). `fetch_window` is a speed path wider than
   any offset, never deciding a row. A day covered in part is headed by its part (`day_part`).
   Pin: `the_time_lens_selects_both_moments_of_the_repeated_hour`.
 **Crossings conventions** (`domain/crossings.rs`, `ops/crossings.rs`, `render::print_crossings`) — the counterpart door, the trail's fourth axis beside place, time and one decision:
 
-- **A closed door is remembering, and the gate is conjugated behind it.** `open_scope` matches
+- **A suspended root is read, and the gate is conjugated on it.** `open_scope` matches
   `Door::Closed` and reads at the parked places (`ClosedDoor::read_here`), carrying the pause on
   the resolution so the header states it **once, independent of the cap** and of whether the
   `roots_suspend` row happens to be in view (`trail_header`, pinned by
   `the_pause_is_stated_independent_of_the_cap`), and **every** door is named, because a scope can
-  reach places on several closed roots. **Remembering has no set-aside register.** A door the ask
+  reach places on several closed roots. **Reading has no set-aside register.** A door the ask
   *named* is a place to read, not a place to skip, so `open_scope` moves the boundary's `parked`
   partition onto the reading side — its paths into the gate, taking the same root-top exemption
   every other prefix takes. Present-tense views keep the two registers apart because for them
-  setting aside *is* the answer; leaving them apart here made the same place answer differently
+  setting aside *is* the answer; leaving them apart here gave the same place different results
   depending on what was named beside it. The trail therefore prints no set-aside line at all, and
-  the pause names only the doors a surviving prefix actually lies behind — a header offering a way
-  back through a door none of the rendered rows stand behind points at nothing.
-  **The gate runs behind a door, never skipped**:
-  it reads sources, notes, extractions and decisions, none of which a door hides, so it answers
-  correctly there — and a place behind a door that Canon has never heard of must still be said to
+  the pause names only the suspended roots a surviving prefix actually lies on — a header offering
+  to unsuspend a root none of the rendered rows stand on points at nothing.
+  **The gate runs on suspended roots, never skipped**:
+  it reads sources, notes, extractions and decisions, none of which suspension hides, so it answers
+  correctly there — and a place on a suspended root that Canon has never heard of must still be said to
   be unknown rather than rendered as a plausible empty view under a header claiming paths are
   relative to it. What the door changes is the *statement*: `no_history_line` names the door
   beside the absence, so the reader is never left wondering whether the pause is what hid the
   place (`an_unknown_place_behind_a_door_names_the_door`). The observation comes first and
-  unchanged and the door follows it: substituting the door for the cause would offer a way back
-  that leads nowhere, since unsuspending reveals nothing about a path Canon never heard of. A parked prefix is gated exactly the
+  unchanged and the suspension follows it: substituting the suspension for the cause would offer a way back
+  that leads nowhere, since unsuspending reveals nothing about a path Canon never heard of. A suspended prefix is gated exactly the
   way a CWD-defaulted one is — both arrive ungated, for different reasons — with a root's own top
-  exempt at every door alike. **`crossings` has no suspended arm**: re-detecting the door from
-  `current_dir()` and refusing would make the same place answer differently named and stood in,
-  against this subsystem's own rule. The boundary hands back the parked root's own scope, so there
-  *is* a boundary to measure against; `boundless_refusal` has two causes and neither is a door.
+  exempt at every door alike. **`crossings` has no suspended arm**: re-detecting the suspension from
+  `current_dir()` and refusing would give the same place different results named and stood in,
+  against this subsystem's own rule. The boundary hands back the suspended root's own scope, so there
+  *is* a boundary to measure against; `boundless_refusal` has two causes and neither is a suspension.
 
 - **The view is the boundary, and a global view borrows the named counterpart.** A crossing is a
   row that crosses the view's boundary; a global view has none of its own, so membership-by-view
@@ -138,9 +138,9 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   `a_global_view_borrows_the_named_counterpart_as_its_boundary`.
 - **Membership is `placement_in_view` on both ends, never `scopes_touch`** — the two-claims placement law, at
   the boundary test (via `classify_row`) and at both narrowing filters alike. A counterpart named at
-  a deep path is exactly the ancestor shape that manufactures arrivals at sibling folders. Matching
+  a deep path is exactly the ancestor shape that manufactures arrivals at sibling directories. Matching
   is on write-time snapshot paths, so a removed — or removed-and-re-added — counterpart root keeps
-  its link; `core::repo::decision::fetch_extractions_by_origin_root` is **not** the reuse here,
+  its link; `core::repo::decision::fetch_extractions_by_origin_root` is not the reuse here,
   because it keys on `root_id` and goes silent on precisely the removed and retired counterparts
   this door exists for.
 - **`crossing_verdict` is total, and the two non-crossings are distinguishable.**
@@ -152,8 +152,8 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
 - **The outbound counterpart key is derived, not the ledger's leaf**
   (`domain/grouping.rs::group_destinations`, consumed by `ops::crossings::display_keys` and by
   `ops::compute::build_extraction_rollup`). The ledger records a placement at `(origin dir,
-  destination dir)`, so a pattern that fans one apply across a folder per day makes the leaf a place
-  nobody named and the bare outbound view answers *which places?* with a list of date folders. The
+  destination dir)`, so a pattern that fans one apply across a directory per day makes the leaf a place
+  nobody named and the bare outbound view answers *which places?* with a list of date directories. The
   inbound side keys on the origin **root** path — the grain the card attributes at — and needs no
   such rule. The derivation is budget-bounded refinement over the component tree of the distinct
   leaves in view: start at their deepest common ancestor, **force-refine** past every live root
@@ -163,7 +163,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   Two properties hold **by construction** and are read off the rendered line: the keys form an
   **antichain**, so a path never reads as containing rows its own entry excludes; and the groups
   **partition** the leaves, so the sum over entries is the section total. A grouped entry states its
-  folder count past one; a single-leaf entry states none, the path above it being the place. Four
+  directory count past one; a single-leaf entry states none, the path above it being the place. Four
   recorded residues, none of them defects: the budget bounds the greedy pass only, so an archive
   whose destinations sit one component below its root has no directory between root and leaf to key
   on; leaves under no live floor may group to their own deepest common ancestor, rather than
@@ -265,7 +265,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   is what was named, not which flag named it. The live case is a counterpart that is known but is no
   delivery's endpoint, such as a retired book's own directory inside the archive root. Two
   neighbouring cases this must not swallow: a nested counterpart *with* rows still reaches
-  `NothingCrossed::Rearranged` with its counts, and `--origin` at an indexed folder never applied
+  `NothingCrossed::Rearranged` with its counts, and `--origin` at an indexed directory never applied
   from still answers "nothing crossed" — honest and informative there, the same evidence arm, and
   narrowing it is not this rule's business. Guard:
   `a_no_crossing_answer_names_the_counterpart_it_was_asked_about`.
@@ -356,7 +356,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   not fixed here** — it belongs to its own change.
 
 - **`render::origin_marker` is the one spelling of what an origin's line says about its root** —
-  the book wins over `(root removed)`, which wins over `(suspended)`, and a live open root gets
+  the book wins over `(root removed)`, which wins over `(suspended)`, and a live unsuspended root gets
   none. Three surfaces render it: `drew_from_lines`, the card's origin lines, and `crossings`'
   counterparts; without one spelling they drift, one door pointing at the book while its
   neighbour, naming the same root, says only `(root removed)`. **Only a present-tense line takes
@@ -402,12 +402,12 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   **bidirectionally** via `scopes_touch`; an **observed placement** (an extraction row's
   origin/destination locations — "my files lie under here") matches **descendant-or-equal only** via
   `placement_in_view`. Never match a placement with `scopes_touch`: its ancestor branch is how a
-  common-prefix destination manufactures arrivals at sibling folders. Prefix matching is domain
+  common-prefix destination manufactures arrivals at sibling directories. Prefix matching is domain
   logic — repo fetches scope rows by `root_id` only.
 - **The view-match is computed once in the operations layer and carried; no surface re-derives which
   scope matched.** The join that decides *whether* a decision surfaces is the same join that says
   *which of its places* brought it here, and discarding it makes every surface guess again — which
-  is how a 31-prefix scan came to be labelled in a leaf folder by its **first recorded prefix**, a
+  is how a 31-prefix scan came to be labelled in a leaf directory by its **first recorded prefix**, a
   place with nothing to do with the view. Owner: `ops::compute::build_scope_matches` →
   `domain::placement::ScopeMatch`, carried on `TrailResult.scope_matches` as a **side map**, never a
   mutation of `Decision.scope`, since the durable display column is what `--jsonl` serialises.
@@ -428,12 +428,12 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   held open for alignment and the `~` keeps marking the voice.
 
 - **Places render in three descending frames** (`render::relativize`): view-relative when the view
-  has one prefix (`.` = the viewed folder), then **root-relative** measured from
+  has one prefix (`.` = the viewed directory), then **root-relative** measured from
   `TrailResult.view_root` — the single root containing every prefix, derived in ops via
   `find_containing_root` because `ResolvedScope` carries prefixes but no root — then absolute, where
   no shared frame exists. A root-relative cell carries a leading `/`, and the legend naming the root
   prints **only when the listing actually contains one**: state the convention where the output uses
-  it, say nothing where every place sits at or below the viewed folder. Whether it does is decided
+  it, say nothing where every place sits at or below the viewed directory. Whether it does is decided
   by rendering the cells a second time with no root and comparing — asked of the one function that
   makes the choice, never sniffed back out of a string that no longer records which arm produced
   it.
@@ -517,14 +517,14 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   decisions behind it, not their ids — except a count of exactly one, which names its decision (the
   singleton rule above) — with the date range retained. The ids may leave because the acts behind
   them are reachable: the timeline holds them directly above for the transitioned section, the
-  origin door for the origins section. `MultiOrigin` is deliberately **not** relabelled — it names
+  origin door for the origins section. `MultiOrigin` is deliberately not relabelled — it names
   no root, and making it parallel would mean coining a wording for a line nothing asked about.
   **Origin lines order standing-first** (`core::domain::resolution::standing_first`, the
-  **stated-never-headlined** law), then files descending, then the tie-break above — a parked
-  origin never leads the card on weight alone. `MultiOrigin` names no root and so has no door to
-  answer for, reading as open for this key. **The cap (`CARD_ORIGIN_CAP`) can still put a parked
+  **stated-never-headlined** law), then files descending, then the tie-break above — a suspended
+  origin never leads the card on weight alone. `MultiOrigin` names no root and so has no suspension to
+  answer for, reading as unsuspended for this key. **The cap (`CARD_ORIGIN_CAP`) can still put a suspended
   origin past the fold** — the ordering does not promise visibility on its own, only that a shown
-  origin is never out-ranked by a closed door — but the card's remainder line counts every
+  origin is never out-ranked by a suspended one — but the card's remainder line counts every
   omission unconditionally ("… and N more origins"), so the pause is still stated, never silent;
   it reads live each run, so an unsuspended root's origin simply reappears above the fold on the
   next read rather than staying misfiled in a frozen record.
@@ -539,7 +539,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
 - **Bucket classification is via `decision_family()` on each present source's `decision_id` stamp**,
   the same derivation the trail rollups use. Archive → an origin line, with origin multiplicity
   counted over **distinct origin roots, never raw rows**, since directory precision gives one apply
-  several rows per root and a single-drive delivery fanning across folders is one origin: a single
+  several rows per root and a single-drive delivery fanning across directories is one origin: a single
   root merges into a `FromRoot` line per origin root across decisions; several roots take their own
   `MultiOrigin` line, one per decision. Observe → the `indexed_here` bucket. Every other family → a
   `TransitionedLine::Standing` labeled with the registered transition word (`fate_transition`) or,
@@ -564,7 +564,7 @@ Show/pointer family, the composition card and its whole vocabulary, the two-clai
   applies the same rule. `compute_composition` returns `None` for a global scope, an
   empty-of-present-sources scope, or a no-story scope.
 - **A place is not its own origin.** Before the origin-count match, an Archive-family stamp whose
-  rows **all** classify `Rearrangement` (via `domain::placement::classify_row`, hence `build_card`
+  rows all classify `Rearrangement` (via `domain::placement::classify_row`, hence `build_card`
   taking `prefixes`) becomes a `TransitionedLine::Standing { label: "rearranged" }` instead of an
   origin line. Otherwise the card answers `from /archive` while standing at `/archive`, a non-answer
   in the line that should hold the answer, because extraction rows group by the *source root of the

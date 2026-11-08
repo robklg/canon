@@ -50,7 +50,7 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
 - **The covered and archived-from-here lines say what they rest on**: the account's
   `ParkedEvidence` per claim, rendered as `; N only on suspended <roots>`. The review is what a
   user reads before releasing the storage a root sits on, so a claim whose only surviving copies
-  stand behind a door they closed is exactly what they need before saying yes. Each line names
+  stand on a root they suspended is exactly what they need before saying yes. Each line names
   the roots **its own** claim rests on, never the union — the evidence is carried per claim for
   that reason. Stated, never a way back: this qualifies the verdict, it does not gate it
   (`the_review_and_the_story_share_the_account_count`).
@@ -74,17 +74,17 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   user's own closed door and carries out as a `DoorRefused` instead, undecorated.
   `plan_bind` speaks the same two causes as the backstop for a root parked between gate and bind,
   and the parked sentence is spelled once for both doors (`ops::parked_shelf_refusal`).
-- **Retirement opens the door first, and the two permits split at `--dry-run`.** A parked
+- **Retirement checks suspension first, and the two permits split at `--dry-run`.** A suspended
   *target* is refused before any bind, by name and with the way back, and records nothing — the
-  ceremony is an act, and the door is exactly what protects what is behind it. **On a real run the subject's own
+  ceremony is an act, not allowed on suspended roots. **On a real run the subject's own
   door is asked before the shelf's**, and before the review is printed: the user named *this*
   root, so this root's door is the answer to what they asked and its way back is the one that
   unblocks them — with both closed, hearing only about the archive answers a question nobody asked
   (`retire_dry_run_reads_a_parked_root_and_a_real_run_refuses`). Under `--dry-run` neither is a
   refusal and the order is the reading's: review, then the pause, then the shelf. The review is
-  **remembering**, so `--dry-run` reads at a parked root and closes with the verbless pause line
-  in place of the `To retire anyway:` hint, which is withheld because it names an act the door
-  turns away. The shelf's own absence is stated there too rather than raised: a rehearsal that
+  **a read**, so `--dry-run` reads at a suspended root and closes with the verbless pause line
+  in place of the `To retire anyway:` hint, which is withheld because it names an act suspension
+  refuses. The shelf's own absence is stated there too rather than raised: a rehearsal that
   stops on the act's preconditions denies the one thing a rehearsal is for. Only the *unreachable*
   root still retires on faith — surfaced, never refused; suspension is no longer coupled to it.
 
@@ -116,7 +116,7 @@ interface (`canon roots retire`/`retired`). Sealed behind a barrel of `retire`, 
   of its owner and refuses those words as quoted literals anywhere in Canon's production code —
   reach `Canon`, since the trail states the same rule for receipt words over the same owner: a
   literal that is currently correct reads identically to a derivation at run time, so only a
-  spelling check sees it. It does **not** reach the standings beside them, which have no
+  spelling check sees it. It does not reach the standings beside them, which have no
   derivation to come from.
   `ArchivedFromHere` carries `Option<OriginDisposition>` (pre-vocabulary receipts omit
   moved/copied rather than guess; reader-facing words via `disposition_word`).

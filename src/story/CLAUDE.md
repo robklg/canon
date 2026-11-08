@@ -92,16 +92,16 @@ the scatter is what nobody chose. **Two wordings at the interface, never mixed**
 destination (the user chose it); `copies stand in` =
 observed coverage (nobody chose it).
 
-**A where-line says which of its places is behind a closed door**: `LocationCount.suspended`,
-true when every copy the entry accounts for stands on a parked root. The mark belongs to the
+**A where-line says which of its places is on a suspended root**: `LocationCount.suspended`,
+true when every copy the entry accounts for stands on a suspended root. The mark belongs to the
 **entry**, not the line — a line naming two places marks only the one that needs a door opened
 (`a_covered_place_carries_the_standing_of_the_archive_it_cites`,
 `each_covered_location_speaks_for_its_own_copies`, and
 `a_where_line_marks_only_the_entries_behind_a_door` at the render). Aggregation merges
-directories, so the flag rides the walk as a parked-file sum against the total rather than being
+directories, so the flag rides the walk as a suspended-file sum against the total rather than being
 read off any one directory. **A merged entry can span roots of different standing** — the walk
 splits at the first branching node, which may sit *above* two archive roots, so one entry can
-account for copies on a live root and a parked one at once. It is unmarked there, and that case
+account for copies on a live root and a suspended one at once. It is unmarked there, and that case
 is reachable and pinned (`a_merged_entry_spanning_two_standings_is_unmarked`), not hypothetical. The closing totals qualify the covered and
 archived-from-here counts the same way, from the account's own `ParkedEvidence`, so the story and
 the readiness review cannot name different roots for one fact.
@@ -130,7 +130,7 @@ excluded standing renders `(no recorded decision)` — exclusion is always delib
 
 **`FolderTree` is not here**: it lives in `core/domain/folder_tree.rs`, shared substrate with
 consumers beyond story (see `src/core/CLAUDE.md`). Topology only; consumers hold payloads in
-side-vectors by folder id. The three boundary walks — survey's `discover_scopes`, the sweep's
+side-vectors by directory id. The three boundary walks — survey's `discover_scopes`, the sweep's
 containment walk, the story's signature walk — stay separate on purpose: the emission rules *are*
 the features, and only the skeleton is shared.
 

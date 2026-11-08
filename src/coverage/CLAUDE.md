@@ -37,26 +37,26 @@ beside the command instead of in a `render.rs` of their own.
 
 **An exclusivity claim needs the whole archive world.** The `only on suspended` segment is
 computed only when no `--archive` frame is given (`frame_can_answer_exclusivity`): under a frame
-the copies in hand are that one archive's, so "every copy is parked" is true by construction
-whenever its door is closed, and the sentence would be false of a world where the content also
+the copies in hand are that one archive's, so "every copy is suspended" is true by construction
+whenever that archive is suspended, and the sentence would be false of a world where the content also
 stands in a live archive the frame cannot see. Suppressed rather than qualified, because the
 honest version of it under a frame is a second question ("of what stands here, how much has no
-live copy anywhere") and a different query. The header still marks the archive, so the door is
+live copy anywhere") and a different query. The header still marks the archive, so the suspension is
 never unsaid (`a_single_archive_frame_makes_no_exclusivity_claim`).
 
-**A parked `--archive` is answered and marked, not refused.** `resolve_archive_root` returns an
+**A suspended `--archive` is answered and marked, not refused.** `resolve_archive_root` returns an
 `ArchiveTarget` carrying the `ParkedRoot` when the door is closed, and the header label wears
 `(suspended)`. The projection behind the count does not filter those copies out, so there is an
 answer to give, and the standing beside the id is what lets the view say what it rests on.
 
 **The archived line says what it rests on.** `CoverageStats.archived_only_parked` is a
 `ParkedEvidence`: how many of the archived sources have **every** archive copy behind a closed
-door, and which roots those are. It is a qualifier, never a deduction — parking never
+door, and which roots those are. It is a qualifier, never a deduction — suspension never
 un-archives, and the count above it does not move. Suppressed at zero, because "0 only on
 suspended roots" is a sentence about a situation that is not happening
 (`coverage_counts_only_parked_beside_archived`, `a_wholly_open_archive_says_nothing_about_doors`).
 It is a **nudge, not a warning**: no verb, no way back — this is a wide view stating what it
-found, not an act meeting a door. `--compact` gains no column: a machine row's columns are a
-contract, and a new one is furniture no consumer asked for. It does state a parked `--archive`,
+found, not a refused act. `--compact` gains no column: a machine row's columns are a
+contract, and a new one is furniture no consumer asked for. It does state a suspended `--archive`,
 on **stderr** — the boundary policy's channel rule for a machine-shaped stdout, since the compact
 renderers carry no header for the marker to ride.
