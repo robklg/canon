@@ -1,6 +1,6 @@
 [package]
 name = "canonargs"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run commands for each worklist entry and emit facts for canon import"
 documentation = "https://robklg.github.io/canon/"
 repository = "https://github.com/robklg/canon"
