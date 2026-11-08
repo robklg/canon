@@ -147,6 +147,11 @@ pub struct ScanStats {
     /// or a copy could meaningfully take, so they are skipped for the same
     /// reason and stated for the same reason.
     pub special_skipped: u64,
+    /// Files the walk saw whose names are not valid UTF-8. Canon stores paths
+    /// as text, so such a file cannot be indexed; it is skipped and stated
+    /// rather than stopping the scan, for the same reason as the two counts
+    /// above.
+    pub names_not_utf8: u64,
     /// Files the hash pass read because the row carried no content identity,
     /// not because anything about them changed — standing debt this scan paid
     /// off. A root indexed once with `--no-hash` pays its whole backlog on the
@@ -202,6 +207,7 @@ impl ScanStats {
             lookup_failures,
             symlinks_skipped,
             special_skipped,
+            names_not_utf8,
             hash_backlog: _,
         } = root;
 
@@ -220,6 +226,7 @@ impl ScanStats {
         self.lookup_failures += lookup_failures;
         self.symlinks_skipped += symlinks_skipped;
         self.special_skipped += special_skipped;
+        self.names_not_utf8 += names_not_utf8;
     }
 
     /// Carry the hash pass's answer into the totals.
@@ -317,6 +324,13 @@ impl ScanStats {
             (0, special) => summary.push_str(&format!(", skipped {special} special files")),
             (links, special) => summary.push_str(&format!(
                 ", skipped {links} symlinks, {special} special files"
+            )),
+        }
+        match self.names_not_utf8 {
+            0 => {}
+            1 => summary.push_str(", skipped 1 file whose name is not valid UTF-8"),
+            n => summary.push_str(&format!(
+                ", skipped {n} files whose names are not valid UTF-8"
             )),
         }
         if self.hashed > 0 {
@@ -640,6 +654,7 @@ mod tests {
             hash_backlog: 13,
             symlinks_skipped: 14,
             special_skipped: 15,
+            names_not_utf8: 17,
             unhashed_unreadable: 400,
         };
 
@@ -667,6 +682,7 @@ mod tests {
             hash_backlog,
             symlinks_skipped,
             special_skipped,
+            names_not_utf8,
             unhashed_unreadable,
         } = total;
 
@@ -689,9 +705,10 @@ mod tests {
                 walk_errors,
                 lookup_failures,
                 symlinks_skipped,
-                special_skipped
+                special_skipped,
+                names_not_utf8
             ],
-            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20, 32, 28, 30]
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 22, 24, 20, 32, 28, 30, 34]
         );
         // Set once from the hash pass after every root — what it did, how much
         // of that was debt, and what it left standing — never folded per root.
@@ -968,6 +985,25 @@ mod tests {
         let quiet = ScanStats::default().compose_summary();
         assert!(!quiet.contains("symlink"));
         assert!(!quiet.contains("special"));
+        assert!(!quiet.contains("UTF-8"));
+
+        // A name Canon cannot store is said too, with the count's own grammar.
+        let one_name = ScanStats {
+            scanned: 10,
+            names_not_utf8: 1,
+            ..Default::default()
+        };
+        assert!(one_name
+            .compose_summary()
+            .contains(", skipped 1 file whose name is not valid UTF-8"));
+        let names = ScanStats {
+            scanned: 10,
+            names_not_utf8: 3,
+            ..Default::default()
+        };
+        assert!(names
+            .compose_summary()
+            .contains(", skipped 3 files whose names are not valid UTF-8"));
     }
 
     #[test]

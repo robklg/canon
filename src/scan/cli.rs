@@ -298,7 +298,12 @@ pub fn run(
                 scan_root(
                     conn,
                     root_id,
-                    root_path.to_str().context("Root path is not valid UTF-8")?,
+                    root_path.to_str().with_context(|| {
+                        format!(
+                            "The root path {} is not valid UTF-8, so Canon cannot store it",
+                            root_path.display()
+                        )
+                    })?,
                     scan_prefix.as_deref(),
                     walker,
                     &scan_options,
@@ -316,7 +321,12 @@ pub fn run(
                 observe_file(
                     conn,
                     root_id,
-                    root_path.to_str().context("Root path is not valid UTF-8")?,
+                    root_path.to_str().with_context(|| {
+                        format!(
+                            "The root path {} is not valid UTF-8, so Canon cannot store it",
+                            root_path.display()
+                        )
+                    })?,
                     rel,
                     &canonical,
                     &scan_options,
@@ -445,7 +455,12 @@ fn create_root(
     role: &str,
     comment: Option<&str>,
 ) -> Result<crate::core::domain::root::Root> {
-    let path_str = path.to_str().context("Path is not valid UTF-8")?;
+    let path_str = path.to_str().with_context(|| {
+        format!(
+            "The path {} is not valid UTF-8, so Canon cannot store it",
+            path.display()
+        )
+    })?;
     crate::scan::repo::root::create(conn, path_str, role, comment)
 }
 

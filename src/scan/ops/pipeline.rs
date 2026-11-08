@@ -144,7 +144,19 @@ pub fn scan_root(
             .strip_prefix(root_path)
             .context("Failed to strip root prefix")?;
 
-        let rel_path_str = rel_path.to_str().context("Path is not valid UTF-8")?;
+        // Paths are stored as text, and a Linux file name can be any bytes:
+        // one written in an older encoding cannot be stored. Skipped, named
+        // and counted like any other path the scan cannot take, so one such
+        // name never stops the walk. Missing detection stays sound: a name
+        // that cannot be stored never had a row to lose.
+        let Some(rel_path_str) = rel_path.to_str() else {
+            progress.on_process_error(
+                &full_path.display().to_string(),
+                "the name is not valid UTF-8, so Canon cannot index it",
+            );
+            stats.names_not_utf8 += 1;
+            continue;
+        };
 
         let metadata = match fs::metadata(full_path) {
             Ok(m) => m,
@@ -4517,6 +4529,47 @@ mod tests {
         let second = scan_pass(&conn, root_id, &dir, Some(2)).stats;
         assert_eq!(second.symlinks_skipped, 2);
         assert_eq!(counts(&second), (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    // Only Linux file systems accept a name that is not valid UTF-8; macOS
+    // refuses to create one, so the case cannot arise there.
+    #[cfg(target_os = "linux")]
+    fn a_name_that_is_not_utf8_is_skipped_and_the_walk_goes_on() {
+        // A Linux name can be any bytes, and one written in an older encoding
+        // cannot be stored as text. One such name must not stop the scan: the
+        // file is skipped, counted and named, every other file is indexed, and
+        // deletion is still detected, because a name that cannot be stored
+        // never had a row to lose.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let conn = repo::open_in_memory_for_test();
+        let temp = TempDir::new().unwrap();
+        let (root_id, dir) = root_at(&conn, temp.path(), "photos");
+        write_at(&dir, "before.jpg", "before");
+        write_at(&dir, "gone.jpg", "gone");
+        std::fs::write(dir.join(OsStr::from_bytes(b"caf\xe9.jpg")), "latin-1").unwrap();
+        let bad_dir = dir.join(OsStr::from_bytes(b"d\xe9cembre"));
+        std::fs::create_dir(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("inside.jpg"), "inside").unwrap();
+        write_at(&dir, "zz-after.jpg", "after");
+
+        let first = scan_pass(&conn, root_id, &dir, Some(1)).stats;
+        assert_eq!(
+            first.names_not_utf8, 2,
+            "the file and the file under the directory"
+        );
+        assert_eq!(first.new, 3);
+        assert!(row(&conn, root_id, "before.jpg").is_some());
+        assert!(row(&conn, root_id, "zz-after.jpg").is_some());
+
+        std::fs::remove_file(dir.join("gone.jpg")).unwrap();
+        let second = scan_pass(&conn, root_id, &dir, Some(2)).stats;
+        assert_eq!(second.names_not_utf8, 2);
+        assert_eq!(second.missing, 1, "deletion is still detected");
+        assert_eq!(second.walk_errors, 0);
+        assert_eq!(second.missing_detection_skipped, 0);
     }
 
     #[test]

@@ -609,7 +609,12 @@ pub fn check_not_filesystem_root(new_path: &Path) -> Result<()> {
 /// allowed (handled elsewhere as a no-op or error). This is a pure
 /// predicate — no I/O.
 pub fn check_no_overlap(roots: &[Root], new_path: &Path) -> Result<()> {
-    let new_path_str = new_path.to_str().context("Path is not valid UTF-8")?;
+    let new_path_str = new_path.to_str().with_context(|| {
+        format!(
+            "The path {} is not valid UTF-8, so Canon cannot store it",
+            new_path.display()
+        )
+    })?;
 
     for root in roots {
         if root.path == new_path_str {
