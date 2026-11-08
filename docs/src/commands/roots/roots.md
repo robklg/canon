@@ -45,7 +45,7 @@ ID   ROLE        FILES  LAST SCAN         PATH
 
 ## Suspending Roots
 
-See [Suspended roots](../../concepts/roots.md#suspended-roots) for what suspension is. A suspended root is hidden from `canon roots` (use `--suspended` to list only suspended roots) and skipped by `scan --all`. When `canon roots <path>` finds only suspended roots, it lists each one as suspended:
+See [Suspended roots](../../concepts/roots.md#suspended-roots) for what suspension is. A suspended root is hidden from `canon roots` (use `--suspended` to list only suspended roots) and skipped by `scan --all`. When `canon roots` finds only suspended roots, it lists each one as suspended:
 
 ```
 /path/to/photos suspended · canon roots unsuspend path:/path/to/photos

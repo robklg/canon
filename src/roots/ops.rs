@@ -14,21 +14,23 @@ use crate::roots::repo as roots_repo;
 // roots list: what an empty listing names
 // =============================================================================
 
-/// The suspended roots a listing at `scope` names when it would otherwise
-/// list nothing: every suspended root at, under or above the path — none
-/// when any open root matches, since that listing has rows of its own and
-/// leaves suspended roots out as every listing does.
+/// The suspended roots a listing names when it would otherwise list
+/// nothing: with a path, every suspended root at, under or above it; with
+/// none, every suspended root. None when any open root matches, since that
+/// listing has rows of its own and leaves suspended roots out as every
+/// listing does.
 pub fn suspended_roots_to_name(
     roots: &[crate::core::domain::Root],
-    scope: &str,
+    scope: Option<&str>,
 ) -> Vec<crate::core::domain::root::ParkedRoot> {
+    let matches = |r: &crate::core::domain::Root| scope.is_none_or(|s| r.matches_scope(s));
     let (open, _suspended) = crate::core::domain::root::open_roots(roots);
-    if open.iter().any(|r| r.matches_scope(scope)) {
+    if open.iter().any(|r| matches(r)) {
         return Vec::new();
     }
     roots
         .iter()
-        .filter(|r| r.matches_scope(scope))
+        .filter(|r| matches(r))
         .filter_map(crate::core::domain::Root::parked)
         .collect()
 }
@@ -361,7 +363,7 @@ mod tests {
         repo::root::fetch_all(&conn).unwrap()
     }
 
-    fn named(roots: &[crate::core::domain::Root], scope: &str) -> Vec<String> {
+    fn named(roots: &[crate::core::domain::Root], scope: Option<&str>) -> Vec<String> {
         suspended_roots_to_name(roots, scope)
             .into_iter()
             .map(|p| p.root_path)
@@ -373,9 +375,9 @@ mod tests {
     #[test]
     fn a_path_with_only_suspended_roots_names_them() {
         let roots = fleet(&[("/shelf/a", true), ("/shelf/b", true), ("/other", false)]);
-        assert_eq!(named(&roots, "/shelf/a"), ["/shelf/a"]);
-        assert_eq!(named(&roots, "/shelf/a/2011"), ["/shelf/a"]);
-        assert_eq!(named(&roots, "/shelf"), ["/shelf/a", "/shelf/b"]);
+        assert_eq!(named(&roots, Some("/shelf/a")), ["/shelf/a"]);
+        assert_eq!(named(&roots, Some("/shelf/a/2011")), ["/shelf/a"]);
+        assert_eq!(named(&roots, Some("/shelf")), ["/shelf/a", "/shelf/b"]);
     }
 
     /// **The allowed cases**: where an open root matches, the listing shows
@@ -384,20 +386,37 @@ mod tests {
     #[test]
     fn an_open_root_or_no_root_names_nothing() {
         let roots = fleet(&[("/shelf/a", true), ("/shelf/b", false)]);
-        assert!(named(&roots, "/shelf").is_empty());
-        assert!(named(&roots, "/elsewhere").is_empty());
+        assert!(named(&roots, Some("/shelf")).is_empty());
+        assert!(named(&roots, Some("/elsewhere")).is_empty());
         assert!(
-            named(&roots, "/shelf/ab").is_empty(),
+            named(&roots, Some("/shelf/ab")).is_empty(),
             "/shelf/ab is not under /shelf/a"
         );
     }
 
-    /// **The empty listing under a path asks which suspended roots to name,
-    /// and prints each** — an anti-drift check over `list`'s source, since
-    /// the listing writes to stdout. The decision itself is
-    /// `a_path_with_only_suspended_roots_names_them`.
+    /// **With no path, a fleet of suspended roots names every one**, never
+    /// "no roots registered"; one open root leaves the listing to show it.
     #[test]
-    fn an_empty_listing_under_a_path_names_its_suspended_roots() {
+    fn no_path_and_only_suspended_roots_names_them_all() {
+        let roots = fleet(&[("/a", true), ("/b", true)]);
+        assert_eq!(named(&roots, None), ["/a", "/b"]);
+        let roots = fleet(&[("/a", true), ("/b", false)]);
+        assert!(named(&roots, None).is_empty());
+        assert!(
+            named(&[], None).is_empty(),
+            "no roots: the empty sentence stays"
+        );
+    }
+
+    /// **An empty listing asks which suspended roots to name, and prints
+    /// each; under `--suspended` it says none is suspended, naming the path
+    /// only when one was given** — an anti-drift check over `list`'s source,
+    /// since the listing writes to stdout. Which roots are named is decided
+    /// by `suspended_roots_to_name`, pinned by
+    /// `a_path_with_only_suspended_roots_names_them` and
+    /// `no_path_and_only_suspended_roots_names_them_all`.
+    #[test]
+    fn an_empty_listing_names_its_suspended_roots() {
         let body = include_str!("cli.rs");
         let start = body.find("    if filtered_roots.is_empty() {").unwrap();
         #[expect(clippy::string_slice, reason = "a `find` position")]
@@ -407,8 +426,13 @@ mod tests {
             + start;
         #[expect(clippy::string_slice, reason = "between two `find` positions")]
         let region = &body[start..end];
-        assert!(region.contains("if let Some(scope) = &scope_str"));
-        assert!(region.contains("suspended_roots_to_name(&all_roots, scope)"));
+        assert!(region.contains("if suspended_only {"));
+        assert!(region.contains(
+            "if scope_str.is_some() {\n                \
+             println!(\"No suspended roots at or beneath this path.\");\n            \
+             } else {\n                println!(\"No suspended roots.\");"
+        ));
+        assert!(region.contains("suspended_roots_to_name(&all_roots, scope_str.as_deref())"));
         assert!(region.contains("pause_line()"));
         assert!(region.contains("return Ok(());"));
     }
