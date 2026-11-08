@@ -1,9 +1,14 @@
-# Docs Style
+# Style
 
-The style guide for the user docs (`docs/src`), for anyone writing or reviewing
-pages of the book.
+The style guide for every sentence a user reads: Canon's printed output (messages,
+hints, warnings, help text) and the user docs (`docs/src`), for anyone writing or
+reviewing them.
 
-The book is a reference: structure, tables, and sample outputs carry the weight,
+User-facing text says what a user needs to use the program and can't see by using
+it. A detail belongs only if knowing it changes what they do or what they can rely
+on.
+
+The docs are a reference: structure, tables, and sample outputs carry the weight,
 and the prose stays plain. A separate user guide is planned; warmth belongs there.
 
 ## Page tiers
@@ -40,10 +45,15 @@ and the prose stays plain. A separate user guide is planned; warmth belongs ther
    any it can't avoid must be verified against the source before landing.
 8. **General shapes.** No drive-shaped or photo-shaped wording where the feature is
    general; examples represent the general case.
-9. **Em dashes** stay out of running prose. They are fine in tables, lists, and
-   literal output, separating a term from its definition.
+9. **Em dashes** stay out of running prose in the docs. They are fine in tables,
+   lists, and literal output, separating a term from its definition.
 10. **Today's product only.** No promises about where Canon is heading; the docs
     describe what exists.
 11. **Full clauses, not compressed ones.** No elliptical phrases such as "read as in X"
     or "as per X": say what is shared, as in "follows the same rules as X". Never use
     "read" to mean parsed or interpreted.
+12. **Write a changed sentence again**, from what the user needs, as if it were the
+    first version. A fix makes details feel important to whoever just worked on it:
+    the edge case that was fixed, or behaviour that shows as soon as the command
+    runs, like a table sorted by date. The user hasn't seen the fix, and a clause
+    added to the old sentence tends to record it.

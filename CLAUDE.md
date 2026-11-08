@@ -239,7 +239,7 @@ The load-bearing rules. Violating them causes subtle bugs that the test suite is
 
 ## Conventions & Patterns
 
-**User docs register** — anything written into `docs/src` follows the charter in `docs/STYLE.md` (page tiers, register criteria). Read it before writing or editing doc pages.
+**Wording** — read `docs/STYLE.md` before writing a sentence a user reads, in printed output or `docs/src`.
 
 **The Standard Pattern** (domain → repo → ops → interface):
 ```rust
