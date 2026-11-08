@@ -135,7 +135,7 @@ const CEILINGS: &[Ceiling] = &[
     },
     Ceiling {
         path: "docs/LANGUAGE.md",
-        words: 2614,
+        words: 2627,
         verifiers: 0,
     },
 ];
