@@ -54,7 +54,16 @@ pub fn list(db: &Db, scope: Option<&Path>, suspended_only: bool) -> Result<()> {
         .collect();
 
     if filtered_roots.is_empty() {
-        if scope.is_some() {
+        if let Some(scope) = &scope_str {
+            // Only suspended roots stand at, under or above the path: say
+            // each is suspended rather than that there is no root.
+            let named = crate::roots::ops::suspended_roots_to_name(&all_roots, scope);
+            if !named.is_empty() {
+                for root in &named {
+                    println!("{}", root.pause_line());
+                }
+                return Ok(());
+            }
             println!("No roots at or beneath this path.");
         } else {
             println!("No roots registered. Use `canon scan --add --role <source|archive> <path>` to add one.");

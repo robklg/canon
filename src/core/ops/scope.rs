@@ -928,7 +928,7 @@ pub fn parked_root_of(path: &str, roots: &[Root]) -> Option<ParkedRoot> {
 /// door.
 ///
 /// **The companion of [`validate_sources_exist`], covering its callers and
-/// two more.** Those callers are the carve-outs from the boundary's
+/// three more.** Those callers are the carve-outs from the boundary's
 /// proceed-and-state policy: a location so load-bearing that setting it aside
 /// would change the question rather than narrow it — `compare`'s two sides,
 /// `exclude duplicates`' scope and prefer paths, `survey --other`'s
@@ -936,13 +936,14 @@ pub fn parked_root_of(path: &str, roots: &[Root]) -> Option<ParkedRoot> {
 /// one, so the whole ask is refused, naming the door and the way back rather
 /// than answering about a smaller world.
 ///
-/// The two extra callers are `exclude`'s single-file arms (`set_by_path`,
-/// `set_object_by_file`), which resolve their own path and never reach the
-/// boundary's partition at all. They are **not** carve-outs — nothing about
-/// them is a comparand — but they are single-target acts, and a single-target
-/// act behind a door is refused for the plainer reason that the closed
-/// default refuses every act. Two roads to one verb, which is why the verb is
-/// not a parameter.
+/// The three extra callers are `exclude`'s single-target arms: the two
+/// single-file arms (`set_by_path`, `set_object_by_file`), which resolve
+/// their own path, and `set_by_id`, which takes a source id and asks about
+/// that source's path. None of them reaches the boundary's partition. They
+/// are **not** carve-outs — nothing about them is a comparand — but they are
+/// single-target acts, and a single-target act on a suspended root is refused
+/// for the plainer reason that no act is done on a suspended root. Two roads
+/// to one verb, which is why the verb is not a parameter.
 ///
 /// Asked **before** the existence gate: a parked path is stated as parked
 /// whether or not it has sources, the door being the reason.

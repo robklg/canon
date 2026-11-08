@@ -407,8 +407,27 @@ fn test_list_excluded_objects_returns_entries() {
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].object_id, obj);
-    assert_eq!(entries[0].hash_prefix, "list_excl_hash_v");
+    assert_eq!(entries[0].hash, "list_excl_hash_val");
     assert_eq!(entries[0].source_count, 1);
+}
+
+/// **What `list-objects` prints, `clear-object` takes**: the listed hash,
+/// given back exactly, finds the object it names.
+#[test]
+fn a_listed_hash_is_accepted_by_clear_object() {
+    let conn = setup_test_db();
+    let root = insert_root(&conn, "/photos", "source", false);
+    let hash = "2c8b08da5ce60398a1b2c3d4e5f60718293a4b5c6d7e8f9011223344556677ab";
+    let obj = insert_object(&conn, hash, true);
+    insert_source(&conn, root, "photo.jpg", Some(obj));
+
+    let listed = list_excluded_objects(&conn).unwrap();
+    let ObjectClearCheck::Ready { object_id, .. } =
+        check_clear_object(&conn, &listed[0].hash).unwrap()
+    else {
+        panic!("expected Ready");
+    };
+    assert_eq!(object_id, obj);
 }
 
 #[test]
@@ -566,8 +585,4 @@ fn a_hash_prefix_is_cut_between_characters() {
         panic!("expected Ready");
     };
     assert_eq!(hash_prefix, excluded_prefix);
-
-    let listed = list_excluded_objects(&conn).unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].hash_prefix, excluded_prefix);
 }

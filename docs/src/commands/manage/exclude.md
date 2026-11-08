@@ -64,7 +64,7 @@ canon exclude set-object /scope --where 'content.mime=application/octet-stream' 
 # Exclude by hash directly (excluding empty content requires this explicit form)
 canon exclude set-object --hash <content-hash> --yes
 
-# Restore a content-level exclusion (the full hash; list-objects prints its first 16 characters)
+# Restore a content-level exclusion (the full hash, as list-objects prints it)
 canon exclude clear-object <content-hash>
 
 # List content-level exclusions

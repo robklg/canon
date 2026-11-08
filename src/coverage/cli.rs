@@ -162,7 +162,7 @@ fn print_compact_line<W: std::io::Write>(
     stats: &CoverageStats,
     show_legend: bool,
 ) -> std::io::Result<()> {
-    let sources = stats.included_sources();
+    let sources = stats.total_sources;
     let hashed_pct = stats.hashed_pct();
     let archived_pct = stats.archived_pct();
 
@@ -216,10 +216,11 @@ fn display_scoped_stats(stats: &CoverageStats, scope: &ResolvedScope, archive: O
         return;
     }
 
-    // Always show included sources as total (excluded are filtered out conceptually)
+    // Every source the selection put in view: excluded ones only under
+    // `--include excluded`.
     println!(
         "  Total sources:   {:>8}",
-        format_count(stats.included_sources())
+        format_count(stats.total_sources)
     );
     println!(
         "  Hashed:          {:>8} ({:.1}%)",
@@ -295,7 +296,7 @@ fn display_per_root_stats(
         if writeln!(
             handle,
             "  Total sources:   {:>8}",
-            format_count(stats.included_sources())
+            format_count(stats.total_sources)
         )
         .is_err()
         {
@@ -371,7 +372,7 @@ fn display_per_root_stats(
     let _ = writeln!(
         handle,
         "  Total sources:   {:>8}",
-        format_count(overall.included_sources())
+        format_count(overall.total_sources)
     );
     let _ = writeln!(
         handle,

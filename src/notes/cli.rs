@@ -134,7 +134,11 @@ pub fn run(
     }
 
     if recursive {
-        let scope = resolve_single_scope(conn, path, false)?;
+        // Listing notes is reading: on a suspended root it lists them and
+        // says the root is suspended.
+        let Some(scope) = resolve_single_scope_optional(conn, path)? else {
+            anyhow::bail!(NOT_INSIDE_A_ROOT);
+        };
         if by_scope {
             let result = notes_ops::list_locations_recursive(conn, &scope, limit)?;
             print_spatial(&result, false);
@@ -161,6 +165,11 @@ pub fn run(
     Ok(())
 }
 
+/// What a mode that needs one place says when it was given none: no path,
+/// and the working directory is under no root.
+const NOT_INSIDE_A_ROOT: &str =
+    "Not inside a known root. Specify a path or cd into a scanned directory.";
+
 /// Resolve a single scope using the shared resolve_scope() infrastructure.
 /// Validates path is under a known root and warns on non-existent paths.
 fn resolve_single_scope(
@@ -181,7 +190,7 @@ fn resolve_single_scope(
     );
 
     if resolved.is_global() {
-        anyhow::bail!("Not inside a known root. Specify a path or cd into a scanned directory.");
+        anyhow::bail!(NOT_INSIDE_A_ROOT);
     }
 
     // Note operates on a single scope
@@ -192,8 +201,10 @@ fn resolve_single_scope(
     notes_ops::resolve_note_scope(&resolved.prefixes[0], &all_roots)
 }
 
-/// Like resolve_single_scope but returns None when CWD is not under a root
-/// (instead of erroring). Used by view mode for global fallback.
+/// The resolver for the two reading modes, view and the `-r` listing: like
+/// resolve_single_scope, but it reads at a place on a suspended root instead
+/// of refusing, and returns None when CWD is not under a root (view mode
+/// falls back to the global listing; `-r` refuses).
 fn resolve_single_scope_optional(
     conn: &repo::Connection,
     path: Option<&Path>,
@@ -461,5 +472,58 @@ mod tests {
             region.contains("open_door("),
             "and it meets the door through the one interface helper"
         );
+    }
+
+    /// **`note -r` at a named place on a suspended root reads there** — the
+    /// reading resolver keeps an explicit path, not only the working
+    /// directory, and the suspended root travels with it to be stated.
+    #[test]
+    fn a_note_listing_at_a_named_suspended_place_reads_there() {
+        let conn = setup_test_db();
+        let root_id = insert_root(&conn, "/photos", "source", true);
+        insert_source(&conn, root_id, "2011/file.jpg", None);
+        let roots = crate::core::repo::root::fetch_all(&conn).unwrap();
+        let named = Path::new("/photos/2011");
+
+        let scope = resolve_single_scope_optional(&conn, Some(named))
+            .unwrap()
+            .expect("a named place on a suspended root is read, not refused");
+        assert_eq!(scope.root_id, root_id);
+        assert_eq!(scope.rel_path, "2011");
+
+        let resolved =
+            crate::core::ops::scope::resolve_scope(&conn, &[named.to_path_buf()], false, &roots)
+                .unwrap();
+        let crate::core::ops::scope::Door::Closed(suspended) = resolved else {
+            panic!("the root is suspended");
+        };
+        assert!(
+            !suspended.read_here().pause.is_empty(),
+            "and the suspended root is stated"
+        );
+    }
+
+    /// **Which resolver each mode reads through** — an anti-drift check over
+    /// the source, since a refusal exits the process and no test can call
+    /// it. The `-r` listing reads, through the same resolver as view mode;
+    /// adding and clearing keep the refusing one. The reading behaviour
+    /// itself is `a_note_listing_at_a_named_suspended_place_reads_there`.
+    #[test]
+    fn the_note_listing_reads_and_the_writes_refuse() {
+        let body = include_str!("cli.rs");
+        let region = |from: &str, to: &str| -> String {
+            let start = body.find(from).unwrap();
+            #[expect(clippy::string_slice, reason = "a `find` position")]
+            let end = body[start..].find(to).unwrap() + start;
+            #[expect(clippy::string_slice, reason = "between two `find` positions")]
+            body[start..end].to_string()
+        };
+        let listing = region("\n    if recursive {", "\n    }\n");
+        assert!(listing.contains("resolve_single_scope_optional("));
+        assert!(!listing.contains("resolve_single_scope("));
+        let add = region("if let Some(text) = message {", "\n    }\n");
+        assert!(add.contains("resolve_single_scope("));
+        let clear = region("\n    if clear {", "\n        if recursive {");
+        assert!(clear.contains("resolve_single_scope("));
     }
 }

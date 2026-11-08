@@ -11,6 +11,29 @@ use crate::notes::count_subtree_notes;
 use crate::roots::repo as roots_repo;
 
 // =============================================================================
+// roots list: what an empty listing names
+// =============================================================================
+
+/// The suspended roots a listing at `scope` names when it would otherwise
+/// list nothing: every suspended root at, under or above the path — none
+/// when any open root matches, since that listing has rows of its own and
+/// leaves suspended roots out as every listing does.
+pub fn suspended_roots_to_name(
+    roots: &[crate::core::domain::Root],
+    scope: &str,
+) -> Vec<crate::core::domain::root::ParkedRoot> {
+    let (open, _suspended) = crate::core::domain::root::open_roots(roots);
+    if open.iter().any(|r| r.matches_scope(scope)) {
+        return Vec::new();
+    }
+    roots
+        .iter()
+        .filter(|r| r.matches_scope(scope))
+        .filter_map(crate::core::domain::Root::parked)
+        .collect()
+}
+
+// =============================================================================
 // roots rm: plan/execute
 // =============================================================================
 
@@ -329,6 +352,66 @@ mod tests {
     use super::*;
     use crate::core::domain::time::zone::{ReadTimesOn, UserZone};
     use crate::core::repo::db::open_in_memory_for_test;
+
+    fn fleet(roots: &[(&str, bool)]) -> Vec<crate::core::domain::Root> {
+        let conn = setup_test_db();
+        for (path, suspended) in roots {
+            insert_root(&conn, path, "source", *suspended);
+        }
+        repo::root::fetch_all(&conn).unwrap()
+    }
+
+    fn named(roots: &[crate::core::domain::Root], scope: &str) -> Vec<String> {
+        suspended_roots_to_name(roots, scope)
+            .into_iter()
+            .map(|p| p.root_path)
+            .collect()
+    }
+
+    /// **A path where only suspended roots stand names them**, never "no
+    /// roots" — at the root, inside it, or above suspended roots only.
+    #[test]
+    fn a_path_with_only_suspended_roots_names_them() {
+        let roots = fleet(&[("/shelf/a", true), ("/shelf/b", true), ("/other", false)]);
+        assert_eq!(named(&roots, "/shelf/a"), ["/shelf/a"]);
+        assert_eq!(named(&roots, "/shelf/a/2011"), ["/shelf/a"]);
+        assert_eq!(named(&roots, "/shelf"), ["/shelf/a", "/shelf/b"]);
+    }
+
+    /// **The allowed cases**: where an open root matches, the listing shows
+    /// it and names no suspended root; where no root matches at all, nothing
+    /// is named and the empty sentence stays.
+    #[test]
+    fn an_open_root_or_no_root_names_nothing() {
+        let roots = fleet(&[("/shelf/a", true), ("/shelf/b", false)]);
+        assert!(named(&roots, "/shelf").is_empty());
+        assert!(named(&roots, "/elsewhere").is_empty());
+        assert!(
+            named(&roots, "/shelf/ab").is_empty(),
+            "/shelf/ab is not under /shelf/a"
+        );
+    }
+
+    /// **The empty listing under a path asks which suspended roots to name,
+    /// and prints each** — an anti-drift check over `list`'s source, since
+    /// the listing writes to stdout. The decision itself is
+    /// `a_path_with_only_suspended_roots_names_them`.
+    #[test]
+    fn an_empty_listing_under_a_path_names_its_suspended_roots() {
+        let body = include_str!("cli.rs");
+        let start = body.find("    if filtered_roots.is_empty() {").unwrap();
+        #[expect(clippy::string_slice, reason = "a `find` position")]
+        let end = body[start..]
+            .find("No roots at or beneath this path.")
+            .unwrap()
+            + start;
+        #[expect(clippy::string_slice, reason = "between two `find` positions")]
+        let region = &body[start..end];
+        assert!(region.contains("if let Some(scope) = &scope_str"));
+        assert!(region.contains("suspended_roots_to_name(&all_roots, scope)"));
+        assert!(region.contains("pause_line()"));
+        assert!(region.contains("return Ok(());"));
+    }
 
     fn setup_test_db() -> Connection {
         open_in_memory_for_test()

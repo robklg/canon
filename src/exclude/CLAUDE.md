@@ -120,16 +120,16 @@ transaction, so the refusal rolls back the `started` row with it. It does not co
 exclusion (which proceeds by design) or the single-target arms (whose check-outside window this
 subsystem accepts by name).
 
-**The three arms outside `resolve_scope` check suspension themselves.** `set_by_path`,
-`set_object_by_file` and `exclude duplicates` resolve their own paths, so the boundary's
-partition never sees them; each calls `core::ops::scope::refuse_parked_locations` right after
-resolution and before the existence gate. `duplicates`' scope and prefer paths are members of the
+**The four arms outside `resolve_scope` check suspension themselves.** `set_by_path`,
+`set_object_by_file`, `set_by_id` and `exclude duplicates` never reach the boundary's partition;
+each calls `core::ops::scope::refuse_parked_locations` before its existence gate or dry run.
+`duplicates`' scope and prefer paths are members of the
 same `validate_sources_exist` carve-out list `compare` belongs to — a location the question rests
 on — and repairing one member of a closed list while leaving another is exactly the drift that
-list exists to prevent. The two single-file arms reach `refuse_parked_locations` for a plainer
-reason: they are single-target acts, and the closed default refuses every act.
+list exists to prevent. The three single-target arms reach it for a plainer reason: no act is
+done on a suspended root.
 
-**Those same two arms then heal their path** through
+**The two single-file arms then heal their path** through
 `core::ops::scope::stored_form_with_sources` — the source-existence gate's own spelling of the
 form-tolerance law's remainder half — because a named file is about to be matched against the
 index byte-for-byte and root containment alone never sees a remainder stored in the other form.

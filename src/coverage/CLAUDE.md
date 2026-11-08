@@ -21,8 +21,8 @@ Identity claims about empty content are vacuous, so coverage can say nothing abo
 source in either direction: it is neither covered nor owed. Every count here answers to the
 contentless law, whose cross-tree conventions are in the top-level CLAUDE.md.
 
-**Exclusion is checked through the domain predicate**, `Source::is_excluded()`, which tests both
-source-level and object-level exclusion. Never re-derive that test from a column.
+**Coverage counts every source it is handed**: the selection decides whether an excluded source
+is in view, so nothing here tests exclusion again.
 
 **Archived-ness comes from the repository, never from paths.** `batch_archive_copies` is the
 documented SQL projection of the law: it requires `size > 0` on the archive side, and it returns

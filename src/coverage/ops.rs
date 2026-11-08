@@ -24,10 +24,9 @@ pub struct CoverageStats {
     pub root_path: Option<String>,
     pub root_role: Option<String>,
     pub total_sources: i64,
-    pub excluded_sources: i64,
     pub hashed_sources: i64,
     pub archived_sources: i64,
-    /// Hashed, non-excluded, empty — contentless: coverage can say nothing
+    /// Hashed and empty — contentless: coverage can say nothing
     /// about them (the contentless law), so they leave both the archivable
     /// denominator and the unarchived remainder.
     pub contentless_sources: i64,
@@ -64,17 +63,12 @@ impl CoverageStats {
             root_path: None,
             root_role: None,
             total_sources: 0,
-            excluded_sources: 0,
             hashed_sources: 0,
             archived_sources: 0,
             contentless_sources: 0,
             archived_only_parked: ParkedEvidence::default(),
             archive_roots: Vec::new(),
         }
-    }
-
-    pub fn included_sources(&self) -> i64 {
-        self.total_sources - self.excluded_sources
     }
 
     /// Hashed sources coverage can speak about at all — the archivable
@@ -85,11 +79,10 @@ impl CoverageStats {
     }
 
     pub fn hashed_pct(&self) -> f64 {
-        let included = self.included_sources();
-        if included == 0 {
+        if self.total_sources == 0 {
             0.0
         } else {
-            (self.hashed_sources as f64 / included as f64) * 100.0
+            (self.hashed_sources as f64 / self.total_sources as f64) * 100.0
         }
     }
 
@@ -157,7 +150,10 @@ pub fn resolve_archive_root(
 }
 
 /// Compute coverage statistics from source references.
-/// Uses `is_excluded()` which checks BOTH source-level and object-level exclusion.
+///
+/// Every source handed in is counted: the selection has already decided
+/// which sources are in view, excluded ones included only under
+/// `--include excluded`, so exclusion is not decided again here.
 pub fn compute_stats(
     conn: &mut Connection,
     sources: &[&Source],
@@ -168,14 +164,7 @@ pub fn compute_stats(
 
     stats.total_sources = sources.len() as i64;
 
-    // Excluded sources — uses is_excluded() which checks BOTH source and object level
-    stats.excluded_sources = sources.iter().filter(|s| s.is_excluded()).count() as i64;
-
-    // Hashed sources (have object_id AND not excluded)
-    let hashed_sources: Vec<&&Source> = sources
-        .iter()
-        .filter(|s| s.object_id.is_some() && !s.is_excluded())
-        .collect();
+    let hashed_sources: Vec<&&Source> = sources.iter().filter(|s| s.object_id.is_some()).collect();
     stats.hashed_sources = hashed_sources.len() as i64;
     stats.contentless_sources = hashed_sources.iter().filter(|s| s.is_contentless()).count() as i64;
 
@@ -285,7 +274,6 @@ pub fn compute_per_root(
         stats.root_role = Some(root.role.clone());
 
         overall.total_sources += stats.total_sources;
-        overall.excluded_sources += stats.excluded_sources;
         overall.hashed_sources += stats.hashed_sources;
         overall.archived_sources += stats.archived_sources;
         overall.contentless_sources += stats.contentless_sources;
@@ -457,26 +445,98 @@ mod tests {
         assert_eq!(stats.archived_sources, 0);
     }
 
-    #[test]
-    fn coverage_stats_excludes_excluded() {
-        let mut conn = setup_test_db();
+    /// One source in view, one excluded at source level, one whose content
+    /// is excluded; each hashed, each with an archive copy.
+    fn fixture_with_excluded() -> Connection {
+        let conn = setup_test_db();
         let root = insert_root(&conn, "/photos", "source", false);
-        let obj = insert_object(&conn, "hash1", false);
-
-        insert_source(&conn, root, "included.jpg", Some(obj));
+        let archive = insert_root(&conn, "/archive", "archive", false);
+        let kept = insert_object(&conn, "kept", false);
+        let dismissed = insert_object(&conn, "dismissed", false);
+        let content_dismissed = insert_object(&conn, "contentdismissed", true);
 
         use crate::core::testing::insert_source_excluded;
-        let excl_obj = insert_object(&conn, "hash2", false);
-        insert_source_excluded(&conn, root, "excluded.jpg", Some(excl_obj));
+        insert_source(&conn, root, "kept.jpg", Some(kept));
+        insert_source_excluded(&conn, root, "dismissed.jpg", Some(dismissed));
+        insert_source(&conn, root, "content.jpg", Some(content_dismissed));
+        for (name, obj) in [("a", kept), ("b", dismissed), ("c", content_dismissed)] {
+            insert_source(&conn, archive, name, Some(obj));
+        }
+        conn
+    }
 
-        let sources = repo::source::batch_fetch_by_roots(&conn, &[root]).unwrap();
-        let refs: Vec<&Source> = sources.iter().collect();
-        let roots = repo::root::fetch_all(&conn).unwrap();
-        let stats = compute_stats(&mut conn, &refs, None, &roots).unwrap();
+    fn include_excluded(on: bool) -> IncludeSet {
+        IncludeSet {
+            excluded: on,
+            archived: false,
+        }
+    }
 
-        assert_eq!(stats.total_sources, 2);
-        assert_eq!(stats.excluded_sources, 1);
-        assert_eq!(stats.hashed_sources, 1); // excluded sources don't count as hashed
+    /// **The selection decides what is in view, and coverage counts what it
+    /// is handed.** Without the flag the excluded sources are out of every
+    /// figure — the state every caller is in by default.
+    #[test]
+    fn coverage_without_the_flag_counts_no_excluded_source() {
+        let mut conn = fixture_with_excluded();
+        let scopes = [ScopeMatch::UnderDirectory("/photos".to_string())];
+        let (stats, _, excluded_count) = compute_scoped(
+            &mut conn,
+            &scopes,
+            &BoundFilters::none(),
+            None,
+            &include_excluded(false),
+            &UserZone::utc(),
+        )
+        .unwrap();
+        assert_eq!(excluded_count, 2, "the selection hid both");
+        assert_eq!(stats.total_sources, 1);
+        assert_eq!(stats.hashed_sources, 1);
+        assert_eq!(stats.archived_sources, 1);
+
+        let (_, overall, _, _) = compute_per_root(
+            &mut conn,
+            &BoundFilters::none(),
+            None,
+            &include_excluded(false),
+            &UserZone::utc(),
+        )
+        .unwrap();
+        assert_eq!(overall.total_sources, 1);
+        assert_eq!(overall.hashed_sources, 1);
+    }
+
+    /// **`--include excluded` changes the figures**: excluded sources, at
+    /// either level, count like any other, in both modes.
+    #[test]
+    fn coverage_with_include_excluded_counts_the_excluded_sources() {
+        let mut conn = fixture_with_excluded();
+        let scopes = [ScopeMatch::UnderDirectory("/photos".to_string())];
+        let (stats, _, _) = compute_scoped(
+            &mut conn,
+            &scopes,
+            &BoundFilters::none(),
+            None,
+            &include_excluded(true),
+            &UserZone::utc(),
+        )
+        .unwrap();
+        assert_eq!(stats.total_sources, 3);
+        assert_eq!(stats.hashed_sources, 3);
+        assert_eq!(stats.archived_sources, 3);
+        assert_eq!(stats.hashed_pct(), 100.0);
+
+        let (per_root, overall, _, _) = compute_per_root(
+            &mut conn,
+            &BoundFilters::none(),
+            None,
+            &include_excluded(true),
+            &UserZone::utc(),
+        )
+        .unwrap();
+        assert_eq!(per_root.len(), 1);
+        assert_eq!(overall.total_sources, 3);
+        assert_eq!(overall.hashed_sources, 3);
+        assert_eq!(overall.archived_sources, 3);
     }
 
     // ========================================================================

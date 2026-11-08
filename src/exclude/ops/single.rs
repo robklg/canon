@@ -61,7 +61,8 @@ pub enum ObjectClearCheck {
 /// Entry in the excluded objects list.
 pub struct ExcludedObjectEntry {
     pub object_id: i64,
-    pub hash_prefix: String,
+    /// The whole hash: the exact text `exclude clear-object` takes.
+    pub hash: String,
     pub source_count: usize,
 }
 
@@ -444,14 +445,13 @@ pub fn list_excluded_objects(conn: &Connection) -> Result<Vec<ExcludedObjectEntr
     Ok(excluded
         .iter()
         .map(|object| {
-            let hash_prefix = first_chars(&object.hash_value, 16);
             let source_count = sources_by_object
                 .get(&object.id)
                 .map(|sources| sources.len())
                 .unwrap_or(0);
             ExcludedObjectEntry {
                 object_id: object.id,
-                hash_prefix,
+                hash: object.hash_value.clone(),
                 source_count,
             }
         })

@@ -305,6 +305,10 @@ pub fn set_by_id(
             println!("Source already excluded: {path}");
         }
         SourceExclusionCheck::Ready { item } => {
+            // A source on a suspended root is not acted on, a dry run
+            // included: refused by name before the plan is shown.
+            let roots = crate::core::repo::root::fetch_all(conn)?;
+            crate::core::ops::scope::refuse_parked_locations(&[item.path()], &roots)?;
             if options.dry_run {
                 println!("Would exclude source (id: {}):", item.source_id);
                 println!("  {}", item.path());
@@ -959,8 +963,8 @@ pub fn list_objects(db: &Db) -> Result<()> {
     println!("Excluded objects ({}):", entries.len());
     for entry in &entries {
         println!(
-            "  {}... (id: {}, {} sources)",
-            entry.hash_prefix, entry.object_id, entry.source_count
+            "  {} (id: {}, {} sources)",
+            entry.hash, entry.object_id, entry.source_count
         );
     }
 
@@ -1122,6 +1126,63 @@ mod tests {
             is_source_excluded(db.conn(), source_id),
             "Source should be excluded after set_by_id"
         );
+        assert_eq!(decision_count(db.conn()), 1, "the act is recorded");
+    }
+
+    fn decision_count(conn: &RusqliteConnection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// **`exclude set --id` on a suspended root is refused, and writes
+    /// nothing** — no exclusion, no decision row, no receipt. The archive
+    /// root is a real directory, so a receipt would land on disk if one were
+    /// written. The allowed case beside it is
+    /// `test_set_by_id_excludes_source`, the same call on a root that is not
+    /// suspended.
+    #[test]
+    fn set_by_id_on_a_suspended_root_is_refused_and_writes_nothing() {
+        let archive = tempfile::tempdir().unwrap();
+        for dry_run in [false, true] {
+            let mut db = make_test_db();
+            let conn = db.conn();
+            let root = insert_root(conn, "/photos", "source", true);
+            insert_root(conn, archive.path().to_str().unwrap(), "archive", false);
+            let source_id = insert_source(conn, root, "photo.jpg", None, true, false);
+
+            let options = SetOptions {
+                dry_run,
+                verbose: false,
+                yes: true,
+            };
+            let result = crate::core::domain::time::zone::with_test_zone(
+                crate::core::domain::time::zone::UserZone::utc(),
+                || {
+                    set_by_id(
+                        &mut db,
+                        source_id,
+                        &options,
+                        "test",
+                        &LedgerConfig::default(),
+                        false,
+                        None,
+                    )
+                },
+            );
+
+            let err = result.expect_err("a source on a suspended root is not acted on");
+            assert!(
+                err.downcast_ref::<crate::core::domain::root::DoorRefused>()
+                    .is_some(),
+                "refused by name, not an error: {err}"
+            );
+            assert!(!is_source_excluded(db.conn(), source_id));
+            assert_eq!(decision_count(db.conn()), 0, "dry_run={dry_run}");
+            assert!(
+                !archive.path().join(".canon-ledger").exists(),
+                "no receipt is written"
+            );
+        }
     }
 
     // =========================================================================

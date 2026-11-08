@@ -497,10 +497,10 @@ layer.
 The **scope-boundary honesty policy**: the source-existence gate returns a `ScopePartition`,
 not a verdict, so a sourceless path among several is set aside and stated rather than aborting
 the invocation; `validate_sources_exist` survives beside it as the abort spelling, and its
-caller list *is* the carve-out list — `refuse_parked_locations` is its door-shaped companion,
-covering those callers and, additionally, `exclude`'s two single-file arms, which resolve their
-own path and never reach the partition. Those two are not carve-outs; they are single-target
-acts, refused by the suspended-root default rather than by load-bearing-ness. Two roads, one verb, which
+caller list *is* the carve-out list — `refuse_parked_locations` is its companion for suspended
+roots, covering those callers and, additionally, `exclude`'s three single-target arms, which
+never reach the partition. Those three are not carve-outs; they are refused because no act is
+done on a suspended root, not because a question rests on them. Two roads, one verb, which
 is why the verb is not a parameter. The parked partition is the policy's **third
 cause**, carried on `ResolvedScope::parked` beside the sourceless `set_aside`: same position,
 same channels, same terminal rule, and the same "never becomes a `DecisionScope`" pin
