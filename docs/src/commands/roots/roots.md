@@ -71,7 +71,7 @@ Decision trail: /path/to/photos — /path/to/photos suspended · canon roots uns
 
 ## Removing Roots
 
-Removing a root removes its sources, facts, and notes from the database, and deletes no files on disk. If you re-add a removed root, you'll need to re-enrich it. A root added again after removal is a new root, and its story starts empty. The earlier root's decisions stay in the trail: `canon trail --global --all` or a date view shows them. See [what survives removal](../../concepts/retirement.md#what-survives-what).
+Removing a root removes its sources, facts, and notes from the database, and deletes no files on disk. Adding the path again makes a new root: its story starts empty, and its sources need enriching again. The earlier root's decisions stay in the trail, shown by `canon trail --global --all` or a date view, but not by naming the path. See [what survives removal](../../concepts/retirement.md#what-survives-what).
 
 Removal is recorded as a [decision](../../concepts/decisions.md); add `--reason` to say why the root is going.
 

@@ -104,7 +104,7 @@ Remove the root from the index? Aborting keeps both the root and the book.
 ```
 
 - **Aborting**: the root stays indexed and the book stays on the shelf. A re-run the same
-  day replaces that book, with any edits you made to it. A re-run on a later day binds a
+  day replaces that book, and any edits you made to it are lost. A re-run on a later day binds a
   new book beside it; the date in each book's name tells them apart, and the earlier one
   is yours to remove.
 - **Confirming**: the root's sources, facts and notes are removed in one transaction.
@@ -134,8 +134,8 @@ The retired fleet: 2 books on the shelf (/Volumes/Archive/retired)
 Identification is not verification: the listing reads each book's `meta.toml`
 identity and counts, nothing more.
 
-Two roots retired at the same path list with the same path; a comment on the root, or a
-`--reason`, is what tells their books apart.
+The books of two roots retired from the same path show the same path. To tell them apart,
+give each root a comment, or each retirement a `--reason`.
 
 ## Flags
 

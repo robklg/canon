@@ -83,7 +83,9 @@ Only some directories get a line. The rest merge into the nearest listed place, 
 - **It differs from its surroundings**: in standings, actions or covered-copy locations
 - **It has a note**
 - **It has an action you gave a reason**
-- **It holds all the content of an entry above it**: the entry is shown where its content is.
+
+A place with no files, action or note of its own, whose content all lies in one directory
+below it, is shown at that directory instead.
 
 ## The gate
 

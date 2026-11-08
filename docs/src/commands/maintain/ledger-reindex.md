@@ -18,19 +18,14 @@ It changes only the extraction ledger, and the report is the only record of the 
 
 ## What it does
 
-`reindex` reads the receipt of every `apply` decision and aggregates its items into extraction rows the way a live `apply` does. A decision it cannot index is reported under one of these labels:
+`reindex` reads the receipt of every `apply` decision and aggregates its items into extraction rows the way a live `apply` does. It rebuilds a decision's rows only for the roots the decision archived from that are still indexed, so a root added later is never recorded as the origin of an earlier decision's files, even at the same path. The exception is a decision recorded before the extraction ledger existed: it has no record of its roots, so its receipt is matched by path against the roots indexed now.
 
+A decision it does not index is reported under one of these labels:
+
+- **skipped (roots removed or retired)**: every root the decision archived from has been removed or retired; its rows stay as they were
 - **no receipt**: the decision records no receipt location (`--no-receipt`, receipts off for that run, or a receipt whose write never completed)
 - **unreachable**: a receipt was recorded, but its root is gone or offline or the file is missing; retried on the next run
 - **malformed**: the receipt fails an integrity check (bad TOML, a decision id that doesn't match); skipped
-
-The extraction ledger records, for each decision, the roots its files were archived from. Reindex
-rebuilds that record only for those roots, and only while they are indexed. A decision whose roots
-have all been removed or retired is counted under **skipped (roots removed or retired)**, and its
-record is unchanged. A root added later is never recorded as the origin of an earlier decision's
-files, whether its path is the removed root's path or a directory above or below it. A decision
-recorded before the extraction ledger existed has no record of its roots, so its receipt is matched
-by path against the roots indexed now.
 
 ```
 $ canon ledger reindex

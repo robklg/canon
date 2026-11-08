@@ -127,19 +127,18 @@ The machine-readable half, `version = 1`:
 - `zone` — the time zone the book's prose dates and directory name are in, the same
   text the retirement decision records ([the time zone a decision
   uses](../concepts/decisions.md#the-time-zone-a-decision-uses)).
-- `[identity]` — path, `root_id` (the root's number in the index that bound the book; a
-  retirement of the same root, at the same path and on the same day, after its release
-  was declined or stopped, replaces the book at the same name that carries it), role,
-  comment, suspension, `first_indexed` (when the earliest
+- `[identity]` — path, `root_id` (the root's number in the index that bound the book;
+  that index never gives one number to two roots), role, comment, suspension,
+  `first_indexed` (when the earliest
   remaining source was first indexed), last scan, `compiled_at`, the user's reason,
   `decision_id` (the id the trail and the index use for the retirement that wrote this
   book; absent when the retirement ran with recording
   off: omitted, never guessed), and the Canon version that wrote the book.
 - `[account]` — the resolution account in counts: the story so far (archived files
   and bytes with the moved/copied split, deleted, unexplained missing) and the
-  standing at binding (`archived_standing`, meaning a file chosen from here and still
-  present — named by an archiving receipt, or, where a decision left none, by the
-  directory it drew from; `covered`, `excluded`, `contentless`, `unresolved`). Bytes and
+  standing at binding (`archived_standing`, the files still here that an `apply` chose:
+  named in its receipt or, where it left no receipt, under a directory it archived from;
+  `covered`, `excluded`, `contentless`, `unresolved`). Bytes and
   derived totals are omitted, never guessed, when the record cannot support them.
 - `[posture]` — `scan_verified` or `on_faith` (with the reason: suspended,
   unreachable, or never scanned) and the last scan time.

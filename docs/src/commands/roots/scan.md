@@ -2,7 +2,7 @@
 
 Index directories or single files into a [root](../../concepts/roots.md): a directory is walked, and a named file is scanned on its own. By default new and changed files are hashed.
 
-A root's role is set when it is added; to change it, remove the root and re-add it with the new role. The re-added root starts a new story. The earlier root's decisions stay readable with `canon trail --global --all` or by date, not by place, and its notes and facts go with the removal.
+A root's role is set when it is added. To change it, remove the root and add it again with the new role; [Removing Roots](roots.md#removing-roots) says what happens to the earlier root's records.
 
 ## When to run scan
 
